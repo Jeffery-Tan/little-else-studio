@@ -28,6 +28,9 @@ IGNORED_DIRECTORY_NAMES = {
     "__pycache__",
     "node_modules",
 }
+# Root-only local state and scratch paths registered in .gitignore.
+# A nested source directory named "tmp" must still be validated.
+LOCAL_ROOT_DIRECTORY_NAMES = {".local", ".workbuddy", "tmp"}
 
 
 def iter_project_text_files(root: Path):
@@ -35,6 +38,8 @@ def iter_project_text_files(root: Path):
         if not path.is_file():
             continue
         relative_parts = path.relative_to(root).parts
+        if len(relative_parts) > 1 and relative_parts[0] in LOCAL_ROOT_DIRECTORY_NAMES:
+            continue
         if any(part in IGNORED_DIRECTORY_NAMES for part in relative_parts):
             continue
         if path.suffix.lower() in HUMAN_READABLE_SUFFIXES | MACHINE_READABLE_SUFFIXES:
@@ -96,4 +101,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
