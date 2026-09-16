@@ -1,0 +1,507 @@
+"""HTTP surface, driven with a scripted model. No network, no spend."""
+from __future__ import annotations
+
+import json
+import threading
+
+import pytest
+from fastapi.testclient import TestClient
+
+from fakes import ScriptedModel, final_turn, tool_turn
+from studio.config import Pricing, Settings
+from studio.models import STAGES
+from studio.server import build_app
+from studio.store import Store
+
+RUN = "lunch-bag-01"
+
+
+def settings_for(tmp_path, **over):
+    base = dict(
+        data_root=tmp_path,
+        base_url="https://example.invalid/anthropic",
+        budget_limit_usd=10.0,
+        pricing=Pricing(source="test", input_usd_per_mtok=1.0, output_usd_per_mtok=2.0,
+                        as_of="2026-09-17"),
+        max_tool_rounds=6,
+    )
+    base.update(over)
+    return Settings(**base)
+
+
+@pytest.fixture()
+def client(tmp_path):
+    settings = settings_for(tmp_path)
+    app = build_app(settings, client_factory=lambda: ScriptedModel([final_turn("你好。")]))
+    return TestClient(app)
+
+
+def make_run(client):
+    res = client.post("/api/runs", json={
+        "run_id": RUN, "title": "保温袋 15 秒", "brief": "给上班族带饭的保温袋。",
+    })
+    assert res.status_code == 200, res.text
+    return res.json()
+
+
+def stream_events(res) -> list[dict]:
+    return [
+        json.loads(line[6:])
+        for line in res.text.splitlines()
+        if line.startswith("data: ")
+    ]
+
+
+# ------------------------------------------------------------------- read -- #
+
+
+def test_index_and_static_assets_are_served(client):
+    index = client.get("/")
+    assert index.status_code == 200
+    assert "US 视频制片室" in index.text
+    assert client.get("/static/app.js").status_code == 200
+    assert client.get("/static/style.css").status_code == 200
+
+
+def test_state_exposes_the_pipeline_and_the_budget(client):
+    make_run(client)
+    data = client.get(f"/api/runs/{RUN}/state").json()
+    assert [s["stage"] for s in data["stages"]] == list(STAGES)
+    assert data["next_stage"] == "intake"
+    assert data["budget"]["limit_usd"] == 10.0
+    assert "not the provider's bill" in data["budget"]["pricing"]["note"]
+    gated = {p["stage"]: p["gated"] for p in data["pipeline"]}
+    assert gated == {"intake": False, "direction": True,
+                     "material_plan": False, "writing": True}
+
+
+def test_unknown_run_is_404(client):
+    assert client.get("/api/runs/nope/state").status_code == 404
+
+
+def test_a_second_run_with_the_same_id_is_refused(client):
+    make_run(client)
+    res = client.post("/api/runs", json={"run_id": RUN, "title": "x", "brief": "y"})
+    assert res.status_code == 400
+
+
+# -------------------------------------------------------------- approvals -- #
+
+
+@pytest.fixture()
+def client_factory(tmp_path):
+    """A client whose app can swap the scripted model between calls."""
+    box = {}
+
+    def factory():
+        return box["model"]
+
+    app = build_app(settings_for(tmp_path), client_factory=factory)
+    box["app"] = app
+    box["http"] = TestClient(app)
+    box["tmp_path"] = tmp_path
+    return box
+
+
+def drive_intake_and_direction(box):
+    http = box["http"]
+    make_run(http)
+    box["model"] = ScriptedModel([
+        tool_turn("t1", "write_stage", {
+            "stage": "intake", "content": "需求正文", "summary": "需求整理",
+        }),
+        tool_turn("t2", "dispatch", {"stage": "direction", "brief": "出两个方向"}),
+        tool_turn("t3", "submit_stage", {"content": "方向正文", "summary": "两个方向"}),
+        final_turn("导演：已提交。"),
+        final_turn("intake 和 direction 都好了，等审核。"),
+    ])
+    res = http.post(f"/api/runs/{RUN}/message", json={"text": "做个保温袋视频"})
+    assert res.status_code == 200
+    events = stream_events(res)
+    assert events[-1]["type"] == "done"
+
+
+def test_approval_requires_a_nonce_issued_for_that_stage(client_factory):
+    box = client_factory
+    drive_intake_and_direction(box)
+    http = box["http"]
+
+    # No nonce at all.
+    res = http.post(f"/api/runs/{RUN}/decision", json={
+        "stage": "direction", "nonce": "", "decision": "approved",
+    })
+    assert res.status_code == 400
+    assert "not valid" in res.json()["detail"]
+
+    # A nonce minted for the other gated stage.
+    other = http.post(f"/api/runs/{RUN}/nonce?stage=writing").json()["nonce"]
+    res = http.post(f"/api/runs/{RUN}/decision", json={
+        "stage": "direction", "nonce": other, "decision": "approved",
+    })
+    assert res.status_code == 400
+
+    assert http.get(f"/api/runs/{RUN}/state").json()["stages"][1]["approval"] is None
+
+
+def test_approval_requires_a_passing_review_or_a_named_override(client_factory):
+    box = client_factory
+    drive_intake_and_direction(box)
+    http = box["http"]
+
+    nonce = http.post(f"/api/runs/{RUN}/nonce?stage=direction").json()["nonce"]
+    res = http.post(f"/api/runs/{RUN}/decision", json={
+        "stage": "direction", "nonce": nonce, "decision": "approved",
+    })
+    assert res.status_code == 400
+    assert "override" in res.json()["detail"]
+
+    nonce = http.post(f"/api/runs/{RUN}/nonce?stage=direction").json()["nonce"]
+    res = http.post(f"/api/runs/{RUN}/decision", json={
+        "stage": "direction", "nonce": nonce, "decision": "approved",
+        "override_reason": "我自己读过，可以上",
+    })
+    assert res.status_code == 200
+    assert res.json()["decision"] == "approved_override"
+
+    # And the gate is now open.
+    state = http.get(f"/api/runs/{RUN}/state").json()
+    direction = state["stages"][1]
+    assert direction["status"] == "approved"
+    assert state["next_stage"] == "material_plan"
+
+
+def test_a_nonce_cannot_be_spent_twice(client_factory):
+    box = client_factory
+    drive_intake_and_direction(box)
+    http = box["http"]
+
+    nonce = http.post(f"/api/runs/{RUN}/nonce?stage=direction").json()["nonce"]
+    first = http.post(f"/api/runs/{RUN}/decision", json={
+        "stage": "direction", "nonce": nonce, "decision": "returned", "note": "再看看",
+    })
+    assert first.status_code == 200
+    second = http.post(f"/api/runs/{RUN}/decision", json={
+        "stage": "direction", "nonce": nonce, "decision": "approved",
+        "override_reason": "same nonce again",
+    })
+    assert second.status_code == 400
+
+
+def test_an_ungated_stage_has_no_nonce(client_factory):
+    box = client_factory
+    http = box["http"]
+    make_run(http)
+    assert http.post(f"/api/runs/{RUN}/nonce?stage=intake").status_code == 400
+
+
+# ----------------------------------------------------------- conversation -- #
+
+
+def test_message_streams_tool_activity_then_a_final_answer(client_factory):
+    box = client_factory
+    http = box["http"]
+    make_run(http)
+    box["model"] = ScriptedModel([
+        tool_turn("t1", "read_project_state", {}),
+        final_turn("现在什么都没有，先聊需求。"),
+    ])
+    res = http.post(f"/api/runs/{RUN}/message", json={"text": "现在什么情况"})
+    events = stream_events(res)
+
+    kinds = [e["type"] for e in events]
+    assert "agent_tool" in kinds
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["text"] == "现在什么都没有，先聊需求。"
+    assert "read_project_state" in done["tools"]
+
+    chat = http.get(f"/api/runs/{RUN}/chat").json()
+    assert chat[0]["role"] == "user"
+    assert chat[-1]["text"] == "现在什么都没有，先聊需求。"
+
+
+def test_a_model_failure_surfaces_as_an_error_event_not_a_hang(client_factory):
+    box = client_factory
+    http = box["http"]
+    make_run(http)
+
+    class Broken:
+        def complete(self, **kwargs):
+            raise RuntimeError("endpoint unreachable")
+
+    box["model"] = Broken()
+    res = http.post(f"/api/runs/{RUN}/message", json={"text": "在吗"})
+    events = stream_events(res)
+    assert events[-1]["type"] == "error"
+    assert "endpoint unreachable" in events[-1]["message"]
+
+    # The failure was recorded on the ledger as a failed call.
+    rows = http.get(f"/api/runs/{RUN}/ledger").json()["rows"]
+    assert rows and rows[0]["ok"] is False
+
+
+def test_budget_exhaustion_blocks_before_any_request(client_factory):
+    box = client_factory
+    http = box["http"]
+    make_run(http)
+
+    # Push spend past the cap by hand, then talk.
+    store = Store(box["tmp_path"])
+    from studio.ledger import Ledger
+    ledger = Ledger(store, settings_for(box["tmp_path"], budget_limit_usd=0.001))
+    ledger.record(RUN, role="director", stage="direction", model="deepseek-flash",
+                  input_tokens=10_000_000, output_tokens=0)
+
+    box["model"] = ScriptedModel([final_turn("不该被调用")])
+    res = http.post(f"/api/runs/{RUN}/message", json={"text": "继续"})
+    events = stream_events(res)
+    assert events[-1]["type"] == "blocked"
+    assert "cap" in events[-1]["message"]
+
+
+def test_a_second_message_is_refused_while_one_is_still_running(client_factory):
+    """One turn at a time per run.
+
+    ``Store.append_event`` numbers a record by reading the whole log and adding
+    one, and ``POST /message`` runs the turn on a bare daemon thread. Two turns
+    interleaving there write duplicate ``seq`` values, and
+    ``Pipeline._attempts`` rebuilds attempt state by scanning that log for
+    ``{stage}#{number}`` — so the duplicates corrupt state rather than merely
+    looking untidy.
+
+    The first turn is held open by a model that blocks, which is the only way to
+    get two requests genuinely in flight at once.
+    """
+    box = client_factory
+    http = box["http"]
+    make_run(http)
+
+    started, release = threading.Event(), threading.Event()
+
+    class SlowModel(ScriptedModel):
+        def complete(self, **kwargs):
+            started.set()
+            release.wait(timeout=5)
+            return super().complete(**kwargs)
+
+    box["model"] = SlowModel([final_turn("好。")])
+    first: dict = {}
+
+    def send_first():
+        first["res"] = http.post(f"/api/runs/{RUN}/message", json={"text": "第一句"})
+
+    thread = threading.Thread(target=send_first)
+    thread.start()
+    try:
+        assert started.wait(timeout=5), "the first turn should have started"
+
+        second = http.post(f"/api/runs/{RUN}/message", json={"text": "第二句"})
+        assert second.status_code == 409, "a concurrent turn must be refused"
+        assert "还没跑完" in second.json()["detail"]
+    finally:
+        release.set()
+        thread.join(timeout=10)
+
+    assert first["res"].status_code == 200
+    assert first["res"].text, "the refused request must not have disturbed the first"
+
+    # And the guard releases: a message sent after the turn ends is accepted.
+    box["model"] = ScriptedModel([final_turn("好。")])
+    third = http.post(f"/api/runs/{RUN}/message", json={"text": "第三句"})
+    assert third.status_code == 200
+
+
+def test_artifact_endpoint_returns_content_and_fingerprint_check(client_factory):
+    box = client_factory
+    drive_intake_and_direction(box)
+    http = box["http"]
+
+    listed = http.get(f"/api/runs/{RUN}/artifacts?stage=direction").json()
+    assert [a["version"] for a in listed] == [1]
+
+    data = http.get(f"/api/runs/{RUN}/artifacts/direction/1").json()
+    assert data["content"] == "方向正文"
+    assert data["integrity_ok"] is True
+    assert data["author_role"] == "director"
+
+    assert http.get(f"/api/runs/{RUN}/artifacts/direction/9").status_code == 404
+
+
+def test_the_reader_endpoint_names_the_stage_and_author_in_his_words(client_factory):
+    """The reader must not print ``director`` or ``direction-v1`` at him.
+
+    The wording lives in ``vocabulary``; this checks it actually reaches the two
+    endpoints the reader draws from, rather than only the timeline.
+    """
+    box = client_factory
+    drive_intake_and_direction(box)
+    http = box["http"]
+
+    listed = http.get(f"/api/runs/{RUN}/artifacts?stage=direction").json()
+    assert listed[0]["version_label"] == "第 1 版"
+
+    data = http.get(f"/api/runs/{RUN}/artifacts/direction/1").json()
+    assert data["stage_label"] == "创意方向"
+    assert data["numbered"] == "②创意方向"
+    assert data["author"] == "导演"
+    assert data["author_role"] == "director", "the raw role still travels for the ledger"
+
+
+def test_the_timeline_endpoint_returns_turns_a_rail_and_the_cost(client_factory):
+    box = client_factory
+    drive_intake_and_direction(box)
+    http = box["http"]
+
+    out = http.get(f"/api/runs/{RUN}/timeline").json()
+    assert [s["stage"] for s in out["rail"]] == list(STAGES)
+    assert out["turns"], "the message he sent produced a turn"
+    assert out["turns"][0]["user"]["text"] == "做个保温袋视频"
+    assert [i["stage"] for i in out["turns"][0]["items"] if i["kind"] == "artifact"] == [
+        "intake", "direction",
+    ]
+    assert out["spend"]["calls"] > 0, "the header figure comes from the ledger"
+    assert "$0.00" not in out["spend_sentence"] or "估算" in out["spend_sentence"]
+
+
+def test_the_timeline_is_read_only(client_factory):
+    """It is a view. Nothing that reaches it may change the run."""
+    box = client_factory
+    drive_intake_and_direction(box)
+    http = box["http"]
+
+    before = http.get(f"/api/runs/{RUN}/state").json()
+    http.get(f"/api/runs/{RUN}/timeline")
+    assert http.get(f"/api/runs/{RUN}/state").json() == before
+
+
+# --------------------------------------------------------------------------- #
+# Materials — the third write entry point
+#
+# The upload is the only route in this app that stores a file the browser sent,
+# so what is checked here is mostly what it refuses.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_materials_list_is_empty_before_anything_is_dropped_in(client):
+    make_run(client)
+    assert client.get(f"/api/runs/{RUN}/materials").json() == []
+
+
+def test_uploading_a_photo_puts_it_on_the_shelf(client, tmp_path):
+    make_run(client)
+
+    res = client.post(
+        f"/api/runs/{RUN}/materials",
+        files={"file": ("shot.jpg", b"jpegbytes", "image/jpeg")},
+    )
+
+    assert res.status_code == 200, res.text
+    assert res.json()["kind"] == "image"
+    landed = Store(tmp_path).run_dir(RUN) / "materials" / "shot.jpg"
+    assert landed.read_bytes() == b"jpegbytes"
+    assert [m["name"] for m in client.get(f"/api/runs/{RUN}/materials").json()] == ["shot.jpg"]
+
+
+def test_uploading_does_not_change_the_run(client, tmp_path):
+    """What makes this a third *entry point* rather than a third *gate*.
+
+    It writes a file and nothing else: no event is appended, so no derived
+    state can move because of it, and no artifact appears.
+    """
+    make_run(client)
+    store = Store(tmp_path)
+    events_before = len(store.read_events(RUN))
+    artifacts_before = len(store.list_artifacts(RUN))
+
+    client.post(f"/api/runs/{RUN}/materials",
+                files={"file": ("shot.jpg", b"x", "image/jpeg")})
+
+    assert len(store.read_events(RUN)) == events_before
+    assert len(store.list_artifacts(RUN)) == artifacts_before
+
+
+def test_a_served_photo_is_rendered_inline(client):
+    make_run(client)
+    client.post(f"/api/runs/{RUN}/materials",
+                files={"file": ("shot.png", b"\x89PNG\r\n", "image/png")})
+
+    res = client.get(f"/api/runs/{RUN}/materials/shot.png")
+
+    assert res.status_code == 200
+    assert res.content == b"\x89PNG\r\n"
+    assert res.headers["content-type"].startswith("image/png")
+    # No content-disposition, so clicking a photo shows it instead of saving it.
+    assert "content-disposition" not in res.headers
+
+
+def test_a_video_is_served_as_a_video(client):
+    make_run(client)
+    client.post(f"/api/runs/{RUN}/materials",
+                files={"file": ("clip.mp4", b"\x00\x00\x00\x18ftyp", "video/mp4")})
+
+    res = client.get(f"/api/runs/{RUN}/materials/clip.mp4")
+
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("video/mp4")
+
+
+def test_a_missing_material_is_a_404(client):
+    make_run(client)
+    assert client.get(f"/api/runs/{RUN}/materials/nope.jpg").status_code == 404
+
+
+@pytest.mark.parametrize(
+    "name", ["..%2Frun.json", "..%5Crun.json", "%2E%2E%2Frun.json", "run.json"]
+)
+def test_a_traversal_in_the_url_never_serves_something_else(client, tmp_path, name):
+    """This URL is the one string in the app that arrives from a browser."""
+    make_run(client)
+    (Store(tmp_path).run_dir(RUN) / "materials").mkdir(parents=True, exist_ok=True)
+
+    res = client.get(f"/api/runs/{RUN}/materials/{name}")
+
+    assert res.status_code == 404
+    # run.json sits one level up and holds the brief; it must not come back.
+    assert "给上班族带饭".encode() not in res.content
+
+
+def test_upload_refuses_a_bad_name_over_http(client):
+    make_run(client)
+    res = client.post(f"/api/runs/{RUN}/materials",
+                      files={"file": ("../escape.jpg", b"x", "image/jpeg")})
+    assert res.status_code == 400
+    assert "文件名不能用" in res.json()["detail"]
+
+
+def test_upload_refuses_a_format_it_could_not_show(client):
+    make_run(client)
+    res = client.post(f"/api/runs/{RUN}/materials",
+                      files={"file": ("notes.txt", b"x", "text/plain")})
+    assert res.status_code == 400
+    assert "只收图片和视频" in res.json()["detail"]
+
+
+def test_upload_refuses_to_overwrite_over_http(client):
+    make_run(client)
+    for body in (b"first", b"second"):
+        res = client.post(f"/api/runs/{RUN}/materials",
+                          files={"file": ("shot.jpg", body, "image/jpeg")})
+    assert res.status_code == 400
+    assert "同名" in res.json()["detail"]
+
+
+def test_a_chinese_filename_survives_upload_and_download(client):
+    """His product photos are named like this."""
+    make_run(client)
+    client.post(f"/api/runs/{RUN}/materials",
+                files={"file": ("多功能包 01.png", b"png", "image/png")})
+
+    listed = client.get(f"/api/runs/{RUN}/materials").json()[0]
+    res = client.get(listed["url"])
+
+    assert listed["name"] == "多功能包 01.png"
+    assert res.status_code == 200 and res.content == b"png"
+
+
+def test_materials_need_a_real_run(client):
+    assert client.get("/api/runs/no-such-run/materials").status_code == 404

@@ -1,0 +1,4 @@
+# Additional packages in the local studio venv; not a full production tool install.
+# The venv is created with --system-site-packages, so httpx / fastapi / uvicorn /
+# pydantic / PyYAML resolve from the existing interpreter. Only what is missing here.
+pytest==9.1.1

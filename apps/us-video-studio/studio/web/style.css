@@ -1,0 +1,1322 @@
+/* US video studio — conversation-first, dark.
+ *
+ * LAYOUT is the argument this file has always made: one column of conversation,
+ * a fixed composer at the bottom, everything else reachable from a card in the
+ * stream. No sidebar of equal weight, because a non-programmer cannot tell which
+ * of four panels he is supposed to act on. That part is unchanged.
+ *
+ * THE SURFACE is what changed, and every number in it was measured off a real
+ * video tool rather than guessed — InvokeAI (#16181d / #22252b / 8px),
+ * ComfyUI (#171718 / #262729), StableSwarmUI (#161616 / #27272a, 14px),
+ * elah (#06070a / #121722), Timeline Studio (#07090d, 13px). See the plan's
+ * token table. Six for six: the working tools are dark, tight, and flat. The
+ * earlier UI was white at 16px with a 12px radius, which reads as a document
+ * manager — correct for prose, wrong for the thing around the prose.
+ *
+ * The one size decision worth stating plainly, because it reverses an earlier
+ * one. That file said: "Sizes are in rem and the base is 16px on purpose — the
+ * earlier UI used 12.5px monospace for the artifact body, which made his own
+ * deliverable look like source code." That was right about the document and
+ * wrong about the chrome. So there are two sizes now, and they are named:
+ *
+ *   --fs-chrome   13.5px  labels, rail, chips, time codes, ledger numbers
+ *   --fs-prose    15px    the documents the agents write (`.doc`)
+ *
+ * Font sizes here are in px, spacing is in rem. The mixed units are deliberate:
+ * px for type means "this number is a decision", rem for space means "this
+ * scales with the page". A rem font size silently moves when the root does.
+ *
+ * Colour: ONE saturated accent, spent only on the primary action. Everything
+ * else is greyscale plus four semantic hues, each of which is a low-alpha tint
+ * rather than a pastel fill — a pale yellow block on a dark page is a lamp, and
+ * four of them are four lamps.
+ *
+ * Surfaces carry the hierarchy, not borders. A card is a lighter panel on a
+ * darker page; a hairline appears only where two panels of the same tone meet.
+ * That is the difference between a tool and a form.
+ */
+
+:root {
+  /* Three depths, and nothing else is allowed to invent a fourth. */
+  --deep: #101216;     /* the page behind everything */
+  --bg: #16181d;       /* the app surface */
+  --raised: #22252b;   /* panels: cards, tiles, inputs */
+  --raised-2: #2b2f36; /* a panel on a panel: card headers, hover */
+  --line: #2e3138;     /* a hairline, only between peers */
+  --line-soft: #24272d;
+
+  --ink: #e6e8ee;
+  --ink-soft: #a2a8b6;
+  --ink-faint: #6f7684;
+
+  --accent: #4d8dff;
+  --accent-ink: #06121f;
+
+  --good: #4ade80;
+  --bad: #ff7b72;
+  --wait: #f0b429;
+  --gen: #b39dff;
+
+  --radius: 8px;
+  --radius-sm: 5px;
+
+  /* 120–180ms with Chakra's curve, which is the curve InvokeAI uses. Long
+     enough to read as movement, short enough that it is never in the way. */
+  --t: 140ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  --fs-chrome: 13.5px;
+  --fs-prose: 15px;
+  --mono: Consolas, "Cascadia Mono", ui-monospace, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--ink);
+  font: var(--fs-chrome) / 1.55 "Noto Sans SC", "Segoe UI", "Microsoft YaHei",
+    system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  scrollbar-color: #3a3e46 transparent;
+}
+
+button, input, textarea, select {
+  font: inherit;
+  color: inherit;
+}
+
+button { cursor: pointer; }
+
+button:disabled { cursor: default; opacity: 0.45; }
+
+.muted { color: var(--ink-faint); }
+
+::selection { background: rgba(77, 141, 255, 0.3); }
+
+/* A focus ring that is visible on dark and never removed. It is the only
+   accessibility guarantee in the app that costs nothing to keep. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ------------------------------------------------------------------ top -- */
+
+.top {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.55rem 1.15rem;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--deep);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.top .left,
+.top .right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.top .right { margin-left: auto; }
+
+#run-select {
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--raised);
+  font-weight: 500;
+  max-width: 16rem;
+  transition: border-color var(--t);
+}
+
+#run-select:hover { border-color: var(--ink-faint); }
+
+.rail {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+
+.step {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.28rem 0.6rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: var(--fs-chrome);
+  white-space: nowrap;
+  transition: background var(--t), color var(--t);
+}
+
+.step:hover { background: var(--raised); color: var(--ink-soft); }
+
+/* The icon is an inline SVG now. Stroke follows `currentColor`, so the state
+   rules below colour the shape by colouring the button. */
+.step .mark {
+  display: inline-flex;
+  align-items: center;
+  /* A fixed box, so a step whose icon is missing does not shift the rail. */
+  width: 15px;
+  height: 15px;
+}
+
+.step .mark svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.step.done { color: var(--ink-soft); }
+.step.done .mark { color: var(--good); }
+
+.step.active {
+  color: var(--ink);
+  background: var(--raised);
+}
+
+.step.active .mark { color: var(--wait); }
+
+/* The step that is waiting on him. This is the only thing in the rail allowed a
+   strong colour, because it is the only one that is a request. */
+.step.active.needs {
+  background: rgba(240, 180, 41, 0.14);
+  color: var(--wait);
+  box-shadow: inset 0 0 0 1px rgba(240, 180, 41, 0.35);
+}
+
+.step.active.needs .mark { color: var(--wait); }
+
+.step.stale .mark { color: var(--bad); }
+
+/* Every step is clickable, including one that has not started: it answers
+   «why is it empty» rather than doing nothing. */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--raised);
+  color: var(--ink-soft);
+  font-size: var(--fs-chrome);
+  white-space: nowrap;
+  transition: background var(--t), border-color var(--t), color var(--t);
+}
+
+.chip:hover { border-color: var(--ink-faint); color: var(--ink); }
+
+.chip[aria-expanded="true"] {
+  background: var(--raised-2);
+  border-color: var(--ink-faint);
+  color: var(--ink);
+}
+
+/* --------------------------------------------------------- spend panel -- */
+
+.spend-panel {
+  padding: 0.8rem 1.15rem;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--deep);
+  font-size: var(--fs-chrome);
+}
+
+.spend-panel[hidden] { display: none; }
+
+.spend-line { margin-bottom: 0.2rem; }
+
+.spend-note {
+  color: var(--ink-faint);
+  font-size: 12.5px;
+  margin-top: 0.35rem;
+  max-width: 46rem;
+}
+
+/* ------------------------------------------------------------- shelf -- */
+
+/* The run's real files. Sits directly under the header, above the questions,
+   because it and the questions strip are the same kind of thing: what this run
+   still needs. Files land here by being copied into runs/<id>/materials/ or
+   dropped on this panel. */
+
+.materials {
+  padding: 0.75rem 1.15rem 0.9rem;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--deep);
+  transition: background var(--t);
+}
+
+.materials[hidden] { display: none; }
+
+.materials.dropping {
+  background: rgba(77, 141, 255, 0.1);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.materials-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.6rem;
+}
+
+.materials-count { font-weight: 600; }
+
+.materials-hint { color: var(--ink-faint); font-size: 12.5px; }
+
+.materials-head .ghost { margin-left: auto; }
+
+.materials-empty {
+  margin: 0.2rem 0 0;
+  color: var(--ink-faint);
+  max-width: 46rem;
+}
+
+/* A contact sheet, not a list of attachments: squares, no card behind them,
+   the picture is the thing. `auto-fill` rather than `auto-fit` so one lonely
+   file keeps its size instead of stretching to fill the row. */
+.materials-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 0.6rem;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.tile-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1;
+  border-radius: var(--radius);
+  background: var(--raised);
+  overflow: hidden;
+  position: relative;
+  transition: background var(--t), transform var(--t);
+}
+
+.tile:hover .tile-thumb { background: var(--raised-2); transform: translateY(-1px); }
+
+.tile-thumb img,
+.tile-thumb video {
+  width: 100%;
+  height: 100%;
+  /* `contain`, not `cover`: this is a shelf of evidence, and a product photo
+     cropped to a square hides the thing it is evidence of. */
+  object-fit: contain;
+}
+
+.tile-thumb.is-video { cursor: zoom-in; }
+
+.tile-nope { color: var(--ink-faint); font-size: 1.4rem; }
+
+.tile.unusable { cursor: default; opacity: 0.55; }
+
+.tile-name {
+  font-size: 12px;
+  color: var(--ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tile-meta { font-size: 11.5px; color: var(--ink-faint); }
+
+/* ------------------------------------------------------------- media -- */
+
+/* `wireMedia` fills a slot whose name the payload gave us. Two ways to fail and
+   both look like something he can read: the file is not on the shelf, or it is
+   there and the browser could not draw it. */
+
+[data-media] { position: relative; }
+
+.media-missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0.4rem;
+  font-size: 12px;
+  color: var(--wait);
+  background: rgba(240, 180, 41, 0.09);
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
+}
+
+.vcard-media.missing,
+.tl-thumb.missing { background: rgba(240, 180, 41, 0.09); }
+
+/* The play badge on a video cover. The browser drew the frame; this says it
+   moves, so nobody has to guess whether a still image is a video. */
+.media-play {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(2px);
+}
+
+.media-play::after {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 5.5px;
+  border-left: 6px solid #fff;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+}
+
+/* ---------------------------------------------------------- timeline -- */
+
+/* The storyboard strip: one bar per shot, as wide as the shot is long.
+ *
+ * This is the whole reason the writing stage looks like a video tool instead of
+ * a document. "15 seconds, five shots" is a sentence you have to read; five bars
+ * whose widths total 15 seconds is a fact you can see, and the one thing a shot
+ * list exists to answer — does this fill the time, and where is the slow part.
+ */
+
+.timeline { margin-top: 1.1rem; }
+
+.tl-strip {
+  display: flex;
+  gap: 3px;
+  min-height: 62px;
+}
+
+.tl-seg {
+  position: relative;
+  min-width: 0;
+  flex-basis: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 1px;
+  padding: 0.4rem 0.5rem;
+  border-radius: var(--radius-sm);
+  background: var(--raised);
+  overflow: hidden;
+  transition: background var(--t);
+}
+
+.tl-seg:hover { background: var(--raised-2); }
+
+/* A shot with no stated length is drawn the average of the shots that have one,
+   and marked. The strip must never claim a precision the payload lacks. */
+.tl-seg.unknown {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line);
+  background-image: repeating-linear-gradient(
+    135deg, transparent 0 5px, rgba(255, 255, 255, 0.045) 5px 10px
+  );
+}
+
+/* The reference frame fills the bar and is dimmed: it is context for the time
+   code and the label, not a picture to look at. Clicking it opens the viewer. */
+.tl-thumb {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.tl-thumb img,
+.tl-thumb video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.42;
+}
+
+.tl-seg:hover .tl-thumb img { opacity: 0.6; }
+
+.tl-tc {
+  position: relative;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-soft);
+}
+
+.tl-label {
+  position: relative;
+  font-size: 12px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tl-foot {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  margin-top: 0.4rem;
+  font-size: 12.5px;
+  color: var(--ink-faint);
+}
+
+.tl-total { color: var(--ink-soft); font-family: var(--mono); }
+
+.tl-hint { margin-left: auto; }
+
+/* --------------------------------------------------------- the stream -- */
+
+.stream {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1.5rem 1.15rem 2rem;
+  scroll-behavior: smooth;
+}
+
+.turn {
+  max-width: 46rem;
+  margin: 0 auto 1.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.msg { display: flex; flex-direction: column; gap: 0.2rem; }
+
+.msg .who {
+  font-size: 12.5px;
+  color: var(--ink-faint);
+}
+
+.msg .body { white-space: pre-wrap; }
+
+.msg.user .body {
+  align-self: flex-start;
+  background: var(--raised);
+  border-radius: var(--radius);
+  padding: 0.55rem 0.85rem;
+  max-width: 40rem;
+}
+
+/* Assistant prose. The role agents write real documents, so this has to read
+   like a document and not like a log — which is why it keeps 15px while the
+   chrome above it dropped. */
+.msg.assistant .body {
+  max-width: 44rem;
+  font-size: var(--fs-prose);
+  line-height: 1.65;
+}
+
+.msg.assistant .body > :first-child { margin-top: 0; }
+.msg.assistant .body > :last-child { margin-bottom: 0; }
+.msg.assistant .body h1 { font-size: 1.25rem; }
+.msg.assistant .body h2 { font-size: 1.1rem; }
+.msg.assistant .body h3 { font-size: 1rem; }
+.msg.assistant .body h1,
+.msg.assistant .body h2,
+.msg.assistant .body h3 { margin: 1.1rem 0 0.5rem; line-height: 1.4; }
+.msg.assistant .body p { margin: 0.6rem 0; }
+.msg.assistant .body ul,
+.msg.assistant .body ol { margin: 0.5rem 0; padding-left: 1.4rem; }
+.msg.assistant .body li { margin: 0.2rem 0; }
+.msg.assistant .body blockquote {
+  margin: 0.8rem 0;
+  padding: 0.1rem 0 0.1rem 0.9rem;
+  border-left: 2px solid var(--line);
+  color: var(--ink-soft);
+}
+.msg.assistant .body code {
+  background: var(--raised);
+  border-radius: 4px;
+  padding: 0.05rem 0.3rem;
+  font-family: var(--mono);
+  font-size: 0.88em;
+}
+.msg.assistant .body pre {
+  background: var(--deep);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+  overflow-x: auto;
+}
+.msg.assistant .body pre code { background: none; padding: 0; }
+.msg.assistant .body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.8rem 0;
+  font-size: 13.5px;
+}
+.msg.assistant .body th,
+.msg.assistant .body td {
+  border-bottom: 1px solid var(--line-soft);
+  padding: 0.35rem 0.6rem;
+  text-align: left;
+}
+.msg.assistant .body th { background: var(--raised); }
+.msg.assistant .body hr { border: 0; border-top: 1px solid var(--line); margin: 1.2rem 0; }
+.msg.assistant .body a { color: var(--accent); }
+
+/* ------------------------------------------------------------- notes -- */
+
+.note {
+  color: var(--ink-faint);
+  font-size: 12.5px;
+  padding-left: 0.1rem;
+}
+
+/* ------------------------------------------------------------- cards -- */
+
+/* A card is a raised panel, not a bordered box. No hairline, because the tone
+   difference already says where it ends. */
+.card {
+  border-radius: var(--radius);
+  background: var(--raised);
+  padding: 0.9rem 1rem;
+}
+
+.card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.card-title { font-weight: 600; }
+
+.card-by { color: var(--ink-faint); font-size: 12.5px; }
+
+.card-summary { margin: 0.5rem 0 0; color: var(--ink-soft); font-size: 13.5px; }
+
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.8rem;
+}
+
+/* ------------------------------------------------------------ review -- */
+
+.review {
+  margin-top: 0.7rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.review.pass { background: rgba(74, 222, 128, 0.1); color: var(--good); }
+.review.return { background: rgba(255, 123, 114, 0.1); color: var(--bad); }
+.review.none { background: var(--deep); color: var(--ink-faint); }
+
+.review summary { cursor: pointer; margin-top: 0.4rem; }
+
+.finding { display: flex; gap: 0.5rem; margin: 0.4rem 0; }
+
+.finding-kind {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  background: rgba(255, 255, 255, 0.07);
+  border-radius: 4px;
+  padding: 0.05rem 0.35rem;
+  align-self: flex-start;
+}
+
+.finding-text { flex: 1; }
+
+/* ----------------------------------------------------------- decide -- */
+
+/* The one card that is a request. It gets the accent's edge and nothing else —
+   no fill, because a filled card reads as already-decided. */
+.card.decide {
+  box-shadow: inset 3px 0 0 var(--wait);
+}
+
+.decide-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--wait);
+}
+
+.decide-mark { font-size: 0.7rem; }
+
+.decide-headline {
+  margin: 0.5rem 0 0.25rem;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.decide-body { margin: 0; color: var(--ink-soft); font-size: 13.5px; }
+
+.card.decide details { margin-top: 0.7rem; font-size: 13px; }
+.card.decide summary { cursor: pointer; color: var(--ink-soft); }
+
+.reason {
+  flex: 1 1 16rem;
+  min-width: 12rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--deep);
+  transition: border-color var(--t);
+}
+
+.reason:hover { border-color: var(--ink-faint); }
+
+/* ---------------------------------------------------------- buttons -- */
+
+.primary, .ghost, .good, .bad {
+  border-radius: var(--radius-sm);
+  padding: 0.42rem 0.9rem;
+  border: 1px solid transparent;
+  font-weight: 500;
+  transition: background var(--t), border-color var(--t), color var(--t);
+}
+
+/* The one saturated control in the app. Everything else is grey, so this is the
+   thing his eye lands on — which is what makes it a primary action. */
+.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+.primary:hover:not(:disabled) { background: #6ba0ff; }
+
+.ghost { background: transparent; border-color: var(--line); color: var(--ink-soft); }
+.ghost:hover:not(:disabled) { border-color: var(--ink-faint); color: var(--ink); background: var(--raised-2); }
+
+.good { background: rgba(74, 222, 128, 0.14); color: var(--good); border-color: rgba(74, 222, 128, 0.4); }
+.good:hover:not(:disabled) { background: rgba(74, 222, 128, 0.22); }
+
+.bad { background: transparent; border-color: rgba(255, 123, 114, 0.4); color: var(--bad); }
+.bad:hover:not(:disabled) { background: rgba(255, 123, 114, 0.12); }
+
+.small { padding: 0.3rem 0.7rem; font-size: 13px; }
+
+/* -------------------------------------------------------- live turn -- */
+
+.turn.live .progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  max-width: 44rem;
+}
+
+.progress-line {
+  color: var(--ink-soft);
+  font-size: 13px;
+  padding-left: 0.1rem;
+}
+
+.progress-line.working { color: var(--ink-faint); font-style: italic; }
+.progress-line.fail { color: var(--bad); }
+.progress-line.raw {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+/* --------------------------------------------------- machine detail -- */
+
+.machine {
+  border-top: 1px solid var(--line-soft);
+  padding-top: 0.4rem;
+  font-size: 12.5px;
+  color: var(--ink-faint);
+}
+
+.machine summary { cursor: pointer; }
+
+.machine-list { padding: 0.4rem 0 0 0.2rem; }
+
+.machine-row {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+/* ---------------------------------------------------------- composer -- */
+
+.composer {
+  border-top: 1px solid var(--line-soft);
+  background: var(--deep);
+  padding: 0.7rem 1.15rem 0.55rem;
+  position: sticky;
+  bottom: 0;
+}
+
+.composer-inner {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.6rem;
+  max-width: 46rem;
+  margin: 0 auto;
+}
+
+#chat-input {
+  flex: 1;
+  resize: none;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--raised);
+  max-height: 12rem;
+  line-height: 1.55;
+  transition: border-color var(--t);
+}
+
+#chat-input::placeholder { color: var(--ink-faint); }
+
+#chat-input:hover { border-color: var(--ink-faint); }
+#chat-input:focus { outline: none; border-color: var(--accent); }
+
+#send { padding: 0.55rem 1.4rem; }
+
+.composer-hint {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  max-width: 46rem;
+  margin: 0.35rem auto 0;
+  font-size: 12.5px;
+  color: var(--ink-faint);
+}
+
+/* ----------------------------------------------------------- reader -- */
+
+.reader,
+.viewer {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 7, 10, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 1rem;
+  z-index: 50;
+  animation: fade var(--t);
+}
+
+.reader[hidden],
+.viewer[hidden] { display: none; }
+
+@keyframes fade { from { opacity: 0; } }
+
+.reader-box {
+  background: var(--bg);
+  border-radius: var(--radius);
+  width: min(52rem, 100%);
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+}
+
+.reader-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1.15rem;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.reader-head h2 { margin: 0; font-size: 15px; }
+
+.reader-sub { color: var(--ink-faint); font-size: 12.5px; margin-top: 0.15rem; }
+
+.reader-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.versions { display: flex; gap: 0.3rem; }
+
+.versions button {
+  padding: 0.22rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  transition: background var(--t), color var(--t);
+}
+
+.versions button:hover { background: var(--raised); color: var(--ink); }
+
+.versions button.active { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+
+.reader-body {
+  padding: 1.15rem;
+  overflow-y: auto;
+}
+
+.reader-body h3 {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 1.4rem 0 0.3rem;
+}
+.reader-body h3:first-child { margin-top: 0; }
+
+/* The document proper. 15px and a 1.65 line height: this is the thing he is
+   reading, and it is allowed to look like prose. */
+.doc { font-size: var(--fs-prose); line-height: 1.65; }
+.doc > :first-child { margin-top: 0; }
+.doc h1 { font-size: 1.3rem; }
+.doc h2 { font-size: 1.12rem; }
+.doc h3 { font-size: 1rem; color: var(--ink); text-transform: none; letter-spacing: 0; }
+.doc h1, .doc h2 { margin: 1.4rem 0 0.5rem; }
+.doc p { margin: 0.7rem 0; }
+.doc ul, .doc ol { padding-left: 1.5rem; }
+.doc li { margin: 0.25rem 0; }
+.doc table { border-collapse: collapse; width: 100%; margin: 0.9rem 0; font-size: 13.5px; }
+.doc th, .doc td { border-bottom: 1px solid var(--line-soft); padding: 0.4rem 0.65rem; text-align: left; }
+.doc th { background: var(--raised); }
+.doc blockquote {
+  margin: 0.9rem 0;
+  padding: 0.1rem 0 0.1rem 1rem;
+  border-left: 2px solid var(--line);
+  color: var(--ink-soft);
+}
+.doc code {
+  background: var(--raised);
+  border-radius: 4px;
+  padding: 0.05rem 0.3rem;
+  font-family: var(--mono);
+  font-size: 0.88em;
+}
+.doc pre {
+  background: var(--deep);
+  border-radius: var(--radius);
+  padding: 0.8rem;
+  overflow-x: auto;
+}
+.doc pre code { background: none; padding: 0; }
+.doc hr { border: 0; border-top: 1px solid var(--line); margin: 1.3rem 0; }
+.doc a { color: var(--accent); }
+
+ul.plain { padding-left: 1.5rem; }
+ul.plain li { margin: 0.25rem 0; }
+
+/* ------------------------------------------------------------ viewer -- */
+
+/* One material, big. Clicking a photo must not take him off the screen he is
+   already reading — the same reason the artifact reader is an overlay. */
+
+.viewer-box {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  width: min(64rem, 100%);
+  max-height: 100%;
+}
+
+.viewer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+}
+
+.viewer-head span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+}
+
+.viewer-body img,
+.viewer-body video {
+  max-width: 100%;
+  max-height: calc(100vh - 8rem);
+  border-radius: var(--radius);
+  background: var(--deep);
+  object-fit: contain;
+}
+
+/* ---------------------------------------------------------- dialogs -- */
+
+dialog {
+  border: 0;
+  border-radius: var(--radius);
+  padding: 0;
+  width: min(34rem, calc(100vw - 2rem));
+  background: var(--bg);
+  color: var(--ink);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+}
+
+dialog::backdrop { background: rgba(6, 7, 10, 0.72); }
+
+dialog form { padding: 1.2rem; }
+
+dialog h2 { margin: 0 0 0.35rem; font-size: 15px; }
+
+dialog p { margin: 0 0 1rem; font-size: 13px; }
+
+dialog label {
+  display: block;
+  margin-bottom: 0.9rem;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-soft);
+}
+
+dialog input,
+dialog textarea {
+  display: block;
+  width: 100%;
+  margin-top: 0.3rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--raised);
+  color: var(--ink);
+  font-weight: 400;
+  resize: vertical;
+  transition: border-color var(--t);
+}
+
+dialog input:focus,
+dialog textarea:focus { outline: none; border-color: var(--accent); }
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+/* ------------------------------------------------------------- misc -- */
+
+.empty-state {
+  max-width: 34rem;
+  margin: 3rem auto;
+  text-align: center;
+  color: var(--ink-soft);
+}
+
+.empty-state h2 { font-size: 1.15rem; color: var(--ink); margin-bottom: 0.4rem; }
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 6rem;
+  transform: translate(-50%, 1rem);
+  background: var(--raised-2);
+  color: var(--ink);
+  padding: 0.55rem 1rem;
+  border-radius: var(--radius);
+  font-size: 13px;
+  max-width: 30rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t), transform var(--t);
+  z-index: 60;
+}
+
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.error {
+  background: rgba(255, 123, 114, 0.16);
+  color: #ffb4ae;
+  box-shadow: inset 0 0 0 1px rgba(255, 123, 114, 0.5), 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+/* ---------------------------------------------------------------- blocks -- */
+
+/* One renderer per block type, no per-stage rules. The server decides that a
+   stage is a comparison of three options or a board of shots; this file only
+   knows how wide a grid of cards should be and what a status chip looks like,
+   so adding a stage needs no CSS. */
+
+.blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 1.4rem;
+  margin-top: 1rem;
+}
+
+.blk-title {
+  margin: 0 0 0.6rem;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.blk-text { margin: 0; color: var(--ink-soft); font-size: 13.5px; }
+
+.blk-sub { margin: 0.8rem 0 0.3rem; font-size: 13px; color: var(--ink-soft); }
+
+.blk-legend { margin: 0.5rem 0 0; font-size: 12.5px; color: var(--ink-faint); }
+
+.blk-none {
+  margin: 0.6rem 0 0;
+  padding: 0.65rem 0.9rem;
+  background: transparent;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+/* A failed or waiting step gets a colour, because "nothing here" is not always
+   the same situation. */
+.blk-none.failed {
+  border-color: rgba(255, 123, 114, 0.45);
+  color: var(--bad);
+  background: rgba(255, 123, 114, 0.08);
+}
+.blk-none.waiting { border-color: var(--line); }
+
+.blk-list { margin: 0; padding-left: 1.1rem; font-size: 13.5px; }
+.blk-list li { margin-bottom: 0.35rem; }
+.blk-item { color: var(--ink); }
+.blk-note { display: block; color: var(--ink-faint); font-size: 12.5px; }
+
+/* ---- table ---- */
+
+.tbl {
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--deep);
+}
+
+.tbl-row {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.tbl-row:last-child { border-bottom: none; }
+
+.tbl-row.head {
+  background: var(--raised);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  font-weight: 600;
+}
+
+.tbl-cell {
+  padding: 0.5rem 0.75rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tbl-cell.center { text-align: center; }
+
+/* The matrix sets its own column tracks inline, from the number of options it
+   was given: the first column holds a sentence and the rest hold one glyph. */
+.tbl.matrix .tbl-row { grid-auto-flow: row; }
+.tbl.matrix .hit { color: var(--bad); font-weight: 700; }
+.tbl.matrix .miss { color: var(--ink-faint); }
+
+/* ---- cards inside a document ---- */
+
+.cardgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 0.75rem;
+}
+
+/* No border, and the picture bleeds to the rounded edges — the shape ComfyUI's
+   template cards use, and the reason a photo reads as the subject of the card
+   rather than an illustration beside some text. */
+.vcard {
+  border-radius: var(--radius);
+  background: var(--deep);
+  overflow: hidden;
+}
+
+.vcard-body { padding: 0.7rem 0.85rem 0.85rem; }
+
+.vcard-media {
+  aspect-ratio: 4 / 3;
+  background: var(--raised);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.vcard-media img,
+.vcard-media video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.vcard-media.is-video { cursor: zoom-in; }
+
+.vcard-top {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.vcard-head { font-weight: 600; }
+
+/* The recommendation the director named, and the shots that cannot be made.
+   Both are decoration over the prose, never a substitute for it. */
+.vcard.chosen { box-shadow: inset 3px 0 0 var(--accent); }
+.vcard.blocked { box-shadow: inset 3px 0 0 var(--bad); }
+
+.vf-label {
+  font-size: 11.5px;
+  color: var(--ink-faint);
+  margin-top: 0.5rem;
+}
+
+.vf-value { font-size: 13.5px; overflow-wrap: anywhere; }
+
+/* ---- status labels ----
+   Not `.chip`: that class is the header's spend button, and sharing it made a
+   label rule resize a control. A status is also not a button — nothing here is
+   clickable, so it gets no hover and no pointer. */
+
+.status {
+  display: inline-block;
+  padding: 0.05rem 0.5rem;
+  border-radius: 999px;
+  font-size: 11.5px;
+  border: 1px solid var(--line);
+  background: var(--raised);
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+
+.status.ok { background: rgba(74, 222, 128, 0.12); border-color: rgba(74, 222, 128, 0.4); color: var(--good); }
+.status.bad { background: rgba(255, 123, 114, 0.12); border-color: rgba(255, 123, 114, 0.4); color: var(--bad); }
+.status.warn { background: rgba(240, 180, 41, 0.12); border-color: rgba(240, 180, 41, 0.4); color: var(--wait); }
+.status.gen { background: rgba(179, 157, 255, 0.12); border-color: rgba(179, 157, 255, 0.4); color: var(--gen); }
+/* An unrecognised status keeps its own words and no colour: colouring it would
+   present the model's invention as a classification this app made. */
+.status.unknown { border-style: dashed; }
+
+.blk-callout { background: var(--deep); border-radius: var(--radius); padding: 0.8rem 0.95rem; }
+.blk-callout .blk-title { color: var(--accent); }
+
+.card-questions {
+  margin-top: 0.9rem;
+  font-size: 12.5px;
+  color: var(--wait);
+}
+
+/* --------------------------------------------------------- the questions -- */
+
+.questions {
+  border-bottom: 1px solid var(--line-soft);
+  background: rgba(240, 180, 41, 0.07);
+}
+
+.questions[hidden] { display: none; }
+
+.questions-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.5rem 1.15rem;
+  background: none;
+  border: none;
+  text-align: left;
+  color: var(--wait);
+  font-weight: 600;
+  transition: background var(--t);
+}
+
+.questions-bar:hover { background: rgba(240, 180, 41, 0.08); }
+
+.questions-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.2rem;
+  height: 1.2rem;
+  border-radius: 999px;
+  background: var(--wait);
+  color: var(--deep);
+  font-size: 12px;
+}
+
+.questions-where { font-weight: 400; color: var(--ink-soft); font-size: 12.5px; }
+.questions-caret { margin-left: auto; font-weight: 400; font-size: 12.5px; color: var(--ink-faint); }
+
+.questions-list {
+  padding: 0 1.15rem 0.9rem 1.15rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.questions-list[hidden] { display: none; }
+
+.q {
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.8rem;
+}
+
+.q-where { font-size: 11.5px; color: var(--ink-faint); }
+.q-text { margin-top: 0.15rem; font-size: 13.5px; }
+.q-blocks { margin-top: 0.25rem; font-size: 12.5px; color: var(--wait); }
+
+/* ------------------------------------------------- the price on the card -- */
+
+.decide-next {
+  margin-top: 0.9rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--line-soft);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+
+.decide-next-what { color: var(--ink); }
+.decide-next-cost { color: var(--ink-faint); margin-top: 0.15rem; }

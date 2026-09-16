@@ -1,0 +1,733 @@
+"""The structure a document has, beyond being prose.
+
+Why this exists: the artifacts were always structured documents that the screen
+flattened into a Markdown blob. ``direction-v2`` carries three options across
+seven attributes, a dependency matrix and seven open questions — all of it
+present, none of it visible without opening a reader and scrolling. The research
+note on MoneyPrinterTurbo describes the same failure from the other end: its
+backend records ``failure = {"failed_stage": ..., "error": ...}`` and its frontend
+never reads ``failed_stage``. Data present, interface discards it.
+
+This is **not** a new mechanism. ``evidence`` and ``limitations`` have been
+model-authored ``list[str]`` on every artifact since the first run; this extends
+that arrangement to fields whose shape depends on the stage.
+
+Two rules, and they are the whole point of the module:
+
+* **Structure is optional and never load-bearing.** A stage that cannot produce
+  it still succeeds. ``normalize`` drops what it cannot understand and returns
+  what is left, including ``{}``. Nothing here raises. A malformed payload must
+  cost a *rendering*, never an attempt the director already paid for.
+* **Degrade visibly, not silently.** Every dropped item is counted and reported
+  back, so the pipeline can record how often the model fails to produce the
+  shape it was asked for. Silent coercion would make a broken prompt look like a
+  working one.
+
+The shapes mirror what ``agents/roles.py`` already instructs each role to write.
+They are not invented here — the director was always asked for 主张 / 给谁看 /
+前3秒钩子 / 放弃什么 / 证据强度 / 执行难度 / 素材依赖, and the writer for
+时码 / 画面 / 台词 / 声音 / 时长. This module only gives those existing
+requirements a type so the screen can lay them out.
+
+It lives in Python rather than JavaScript for the same reason ``vocabulary.py``
+does: one copy, testable, and the same on the live stream as on reload.
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Any
+
+#: Longest a single prose cell may be before it is truncated. Generous — this is
+#: a guard against a runaway payload, not an editorial limit.
+MAX_CELL = 4000
+#: Most rows kept per list field. A model that emits 400 shots has misunderstood
+#: something, and the sidecar should not grow to match.
+MAX_ROWS = 200
+
+
+@dataclass(frozen=True)
+class Field:
+    """One key of a stage's payload.
+
+    ``kind`` is one of:
+
+    * ``"text"`` — a single string.
+    * ``"texts"`` — a list of strings.
+    * ``"rows"`` — a list of objects, each keeping exactly ``columns``.
+    """
+
+    name: str
+    kind: str
+    columns: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Shape:
+    stage: str
+    fields: tuple[Field, ...]
+
+    def field(self, name: str) -> Field | None:
+        return next((f for f in self.fields if f.name == name), None)
+
+
+# --------------------------------------------------------------------------- #
+# The shapes
+# --------------------------------------------------------------------------- #
+
+#: What each stage's structure looks like, keyed by stage name.
+#:
+#: ``open_questions`` is on every stage and is the one field the interface leans
+#: on hardest: it is what turns "the document says it could not decide X" into a
+#: question put to the person who can. It was always being written — intake
+#: lists four blanks in ``limitations`` and direction lists seven at the end —
+#: and was never once collected into something addressed to him.
+SHAPES: dict[str, Shape] = {
+    "intake": Shape("intake", (
+        # §3 采购事实表: what is already true and sourced.
+        Field("facts", "rows", ("label", "value", "source")),
+        # §4 硬约束: rules that must survive every downstream stage.
+        Field("constraints", "texts"),
+        Field("open_questions", "rows", ("question", "blocks")),
+    )),
+    "direction": Shape("direction", (
+        # A/B/C × the seven attributes roles.py already asks the director for.
+        Field("options", "rows", (
+            "key", "claim", "audience_moment", "hook",
+            "gives_up", "evidence_strength", "difficulty", "asset_needs",
+        )),
+        Field("recommended", "text"),
+        Field("recommended_because", "text"),
+        # The two premises the recommendation rests on. Kept apart from the
+        # reason because they are what has to be checked first, and a reader
+        # skimming the reason will not find them.
+        Field("prerequisites", "texts"),
+        # ①实拍官方图 / ②目标观众 / ③主推SKU × each option. A grid, not a
+        # paragraph: this was prose listing which option died on which blank.
+        Field("dependency_matrix", "rows", ("need", "options")),
+        Field("open_questions", "rows", ("question", "blocks")),
+    )),
+    "material_plan": Shape("material_plan", (
+        # One row per shot, carrying its availability. `status` is one of the
+        # five the role is told to use — see `MATERIAL_STATUSES`. `file` is a
+        # filename in `runs/<id>/materials/`; it is the one field the role
+        # cannot invent, which is why it has a read tool (`list_materials`) and
+        # a visible failure when the name matches nothing.
+        Field("items", "rows", ("shot", "purpose", "status", "note", "file")),
+        Field("gaps", "rows", ("gap", "consequence")),
+        Field("open_questions", "rows", ("question", "blocks")),
+    )),
+    "writing": Shape("writing", (
+        # One row per timed shot. `duration` is an assumption, and the role is
+        # told to say so; it stays a string so "约 3 秒" survives as written.
+        # `file` names the material this shot would use, when one exists.
+        Field("segments", "rows", ("tc", "picture", "line", "sound", "duration", "file")),
+        Field("total_duration", "text"),
+        Field("assumptions", "texts"),
+        Field("open_questions", "rows", ("question", "blocks")),
+    )),
+}
+
+#: The five states a material row may be in. Not enforced — an unrecognised
+#: status is kept verbatim and rendered as-is, because silently reassigning it
+#: would be more misleading than showing what the model actually wrote.
+MATERIAL_STATUSES: tuple[str, ...] = (
+    "已有", "需要拍", "需要生成", "无法获得", "不确定",
+)
+
+#: Statuses that mean "this shot cannot be made". The interface groups these
+#: separately; a plan whose unfilmable shots are scattered through it reads as
+#: more complete than it is.
+MATERIAL_BLOCKED: tuple[str, ...] = ("无法获得", "不确定")
+
+
+# --------------------------------------------------------------------------- #
+# How each shape is explained to the role that must produce it
+# --------------------------------------------------------------------------- #
+
+#: Kept beside the shapes so the two cannot drift — a test asserts every stage
+#: has one. Written as instructions to a person rather than as a field list,
+#: because the model reads this once and has to act on it.
+BRIEF: dict[str, str] = {
+    "intake": """\
+- `facts`：已经确认的事实，一条一行。`label` 是什么事实，`value` 是内容，
+  `source` 是你从哪看到的（「Jeffery 本轮原话」「上文 intake」「我算的」）。
+  **没有出处的不要写进来。**
+- `constraints`：硬约束，一条一条。下游每个阶段都要遵守的规矩。
+- `open_questions`：你没能确认、只能他来定的事。""",
+
+    "direction": """\
+- `options`：一个方案一行。`key` 用 A/B/C。`claim` 主张一句话。
+  `audience_moment` 给谁看、在什么场景下被看到。`hook` 前 3 秒钩子。
+  `gives_up` 这个方案放弃了什么。`evidence_strength` 证据强度。
+  `difficulty` 执行难度。`asset_needs` 素材依赖。
+- `recommended` / `recommended_because`：你推荐哪个，为什么。
+- `prerequisites`：**推荐成立的前提**，一条一行。写具体、写可验证的——
+  这几条只要有一条不成立，你的推荐就不成立。
+- `dependency_matrix`：一个未决的空白一行（比如「实拍官方图」「目标观众」
+  「主推 SKU」），`options` 写成 `{"A": true, "B": false, "C": true}`——
+  这个空白不解决的话，哪些方案站不住。""",
+
+    "material_plan": """\
+- `items`：一个镜头或一段一行。`shot` 是什么画面，`purpose` 它证明或传达什么，
+  `status` 五选一（已有 / 需要拍 / 需要生成 / 无法获得 / 不确定），`note` 补充。
+  **不确定就写不确定，不要往「已有」上靠。**
+  `file`：**这个镜头用 `materials/` 里的哪个文件**，必须先调 `list_materials`
+  看有什么，然后**逐字照抄**文件名。没有对应素材就别填，在 `note` 里写缺什么。
+  编一个文件名会在界面上显示成「文件不在」，比空着更糟。
+- `gaps`：`gap` 缺什么，`consequence` 会导致什么后果。""",
+
+    "writing": """\
+- `segments`：一段一行。`tc` 时码，`picture` 画面（拍什么/显示什么），
+  `line` 台词或字幕原文，`sound` 声音，`duration` 时长。
+  `duration` 是假设就写成假设的样子（「约 3 秒」）。
+  `file`：这一段用 `materials/` 里的哪个文件，**先调 `list_materials` 再照抄
+  文件名**；没有就先别填——这一段还没到能配画面的地步。
+  `tc` 请写成 `0:00–0:03` 这样的区间，界面按它画时间条的长度。
+- `total_duration`：总时长，要和各段对得上。
+- `assumptions`：你在时长、可执行性上做的假设，一条一行。""",
+}
+
+
+def brief(stage: str) -> str:
+    """The structure instruction appended to the system prompt of ``stage``'s role.
+
+    Returns ``""`` for a stage with no shape, so adding a stage without one
+    degrades to prose rather than breaking its prompt.
+    """
+    text = BRIEF.get(stage)
+    if not text:
+        return ""
+    return (
+        "# 除了正文，再交一份排好版的\n\n"
+        "正文照写。另外用 `submit_stage` / `write_stage` 的 `structured` 字段交一份"
+        "**同一份东西的另一种排法**，让工作台能把它排成表格或板子，而不是一篇文章。\n\n"
+        f"{text}\n"
+        "- `open_questions`：**每个阶段都要有。** 你没能定下来的事，一条一行，"
+        "`question` 是问题本身，`blocks` 是它卡住了什么。这些会被收进「等你拍板」的清单，"
+        "直接送到 Jeffery 面前——这是它唯一的去处，别只写在 limitations 里。\n\n"
+        "两条要求：**它和正文说的必须是同一件事**，不是第二份结论；"
+        "**没话说的字段就留空**，格式不合法会被丢掉、不会让你的提交失败，"
+        "但那一块就不会显示。"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Normalising
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """What survived, and what did not.
+
+    ``dropped`` counts individual cells and rows discarded. The pipeline records
+    it as an event so that a prompt quietly failing to produce its shape is
+    visible in the log rather than only in a screen that looks emptier than it
+    should.
+    """
+
+    data: dict[str, Any]
+    dropped: int
+
+    def __bool__(self) -> bool:
+        return bool(self.data)
+
+
+def _text(value: Any) -> str:
+    """A cell, or empty. Only strings are accepted.
+
+    ``str()`` on an int or a dict would store something that renders as
+    ``{'a': 1}`` in a table cell — technically not a crash, actually garbage.
+    """
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:MAX_CELL]
+
+
+def _texts(value: Any) -> tuple[list[str], int]:
+    if value is None:
+        return [], 0
+    if not isinstance(value, list):
+        return [], 1
+    kept = [t for t in (_text(v) for v in value) if t]
+    dropped = len(value) - len(kept)
+    if len(kept) > MAX_ROWS:
+        # Counted, not silently sliced. A cap that drops rows without saying so
+        # is the same failure this module exists to avoid.
+        dropped += len(kept) - MAX_ROWS
+        kept = kept[:MAX_ROWS]
+    return kept, dropped
+
+
+def _rows(value: Any, columns: tuple[str, ...]) -> tuple[list[dict[str, str]], int]:
+    """Rows of exactly ``columns``. A row with nothing in it is not a row.
+
+    Models routinely emit the right shape with one extra key, or drop a column
+    they had nothing to say about. Keeping the columns we asked for and ignoring
+    the rest is the difference between a usable table and no table.
+    """
+    if value is None:
+        return [], 0
+    if not isinstance(value, list):
+        return [], 1
+
+    kept: list[dict[str, str]] = []
+    dropped = 0
+    for item in value:
+        if not isinstance(item, dict):
+            dropped += 1
+            continue
+        row = {}
+        for column in columns:
+            cell = item.get(column)
+            if column == "options" and isinstance(cell, dict):
+                # The dependency matrix's option map: {"A": true, "B": false}.
+                # Kept as a mapping of truthy/falsy, which is what a grid of
+                # ticks needs; a nested table would be a layout decision made
+                # in the wrong layer.
+                row[column] = {str(k)[:32]: bool(v) for k, v in list(cell.items())[:12]}
+                continue
+            row[column] = _text(cell)
+        if any(v for v in row.values()):
+            kept.append(row)
+        else:
+            dropped += 1
+    if len(kept) > MAX_ROWS:
+        dropped += len(kept) - MAX_ROWS
+        kept = kept[:MAX_ROWS]
+    return kept, dropped
+
+
+def normalize(stage: str, payload: Any) -> Outcome:
+    """Coerce ``payload`` to ``stage``'s shape, dropping what does not fit.
+
+    Never raises, and never returns a partial shape that would render as a
+    half-built table: a field is present only if something survived in it.
+
+    An unknown stage returns empty — a stage added to the pipeline without a
+    shape here degrades to prose rather than breaking the run that produced it.
+    """
+    shape = SHAPES.get(stage)
+    if shape is None or not isinstance(payload, dict):
+        return Outcome({}, 1 if payload else 0)
+
+    data: dict[str, Any] = {}
+    dropped = 0
+    for field in shape.fields:
+        raw = payload.get(field.name)
+        if field.kind == "text":
+            value = _text(raw)
+            if value:
+                data[field.name] = value
+        elif field.kind == "texts":
+            values, lost = _texts(raw)
+            dropped += lost
+            if values:
+                data[field.name] = values
+        else:
+            values, lost = _rows(raw, field.columns)
+            dropped += lost
+            if values:
+                data[field.name] = values
+    return Outcome(data, dropped)
+
+
+# --------------------------------------------------------------------------- #
+# What the interface needs to know
+# --------------------------------------------------------------------------- #
+
+
+def open_questions(structured: dict[str, Any], stage: str) -> list[dict[str, str]]:
+    """This stage's unanswered questions, tagged with where they came from.
+
+    Read from the payload rather than from ``limitations``, because
+    ``limitations`` is the model explaining itself and reads as a disclaimer.
+    The same facts routed through a field called ``open_questions`` are a
+    request addressed to the only person who can answer them.
+    """
+    rows = (structured or {}).get("open_questions") or []
+    return [
+        {"stage": stage, "question": r.get("question", ""), "blocks": r.get("blocks", "")}
+        for r in rows
+        if isinstance(r, dict) and r.get("question")
+    ]
+
+
+def blocked_material(structured: dict[str, Any]) -> list[dict[str, str]]:
+    """The material rows that cannot be filmed, in the order they were listed."""
+    return [
+        r for r in (structured or {}).get("items") or []
+        if isinstance(r, dict) and r.get("status") in MATERIAL_BLOCKED
+    ]
+
+
+
+
+# --------------------------------------------------------------------------- #
+# The view model
+# --------------------------------------------------------------------------- #
+
+#: Wire key -> the words on screen. One table for every stage rather than labels
+#: carried in ``Column``, because the same key means the same thing wherever it
+#: appears (``status`` is 状态 on a material row and nowhere else) and because
+#: the normaliser's column tuples stay plain strings. A test asserts every
+#: column of every shape has an entry here, so a new field cannot ship as a
+#: blank header.
+LABEL: dict[str, str] = {
+    "label": "项目",
+    "value": "内容",
+    "source": "出处",
+    "question": "问题",
+    "blocks": "卡住了什么",
+    "key": "方案",
+    "claim": "主张",
+    "audience_moment": "给谁看、什么场景",
+    "hook": "前 3 秒",
+    "gives_up": "放弃了什么",
+    "evidence_strength": "证据强度",
+    "difficulty": "执行难度",
+    "asset_needs": "素材依赖",
+    "shot": "画面",
+    "purpose": "证明什么",
+    "status": "状态",
+    "note": "备注",
+    "gap": "缺什么",
+    "consequence": "会导致什么",
+    "tc": "时码",
+    "picture": "画面",
+    "line": "台词",
+    "sound": "声音",
+    "duration": "时长",
+    "need": "空白",
+}
+
+#: Status -> how it should read before anyone reads the word.
+#:
+#: The tone names are this module's, not the stylesheet's: a status the model
+#: invented is not mapped to a colour, it is left as ``unknown`` and shown
+#: verbatim, which is the honest outcome — see ``MATERIAL_STATUSES``.
+STATUS_TONE: dict[str, str] = {
+    "已有": "ok",
+    "需要拍": "todo",
+    "需要生成": "gen",
+    "无法获得": "bad",
+    "不确定": "warn",
+}
+
+#: Option keys are A/B/C. Used only to decide which card gets the highlight.
+_OPTION_KEY = re.compile(r"[A-D]")
+
+#: Option letters named immediately after 「推荐」. The director writes prose, so
+#: the letter it recommends has to be read out of a sentence that also names the
+#: ones it did not choose — 「推荐 B，因为 A 的前提还没确认」 mentions both.
+_RECOMMENDED = re.compile(r"推荐[^A-Da-d]{0,6}([A-Da-d])")
+
+#: ``(field name, column)`` pairs that are structural rather than prose, so they
+#: have no label to render. Named as pairs rather than bare column names so an
+#: unrelated field called ``options`` cannot inherit the exemption.
+STRUCTURAL_COLUMNS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("dependency_matrix", "options"),
+        # A filename is drawn as a picture or not at all — a `素材: O1CN01.jpg`
+        # row beside the picture it names is the same fact printed twice.
+        ("items", "file"),
+        ("segments", "file"),
+    }
+)
+
+
+def label(key: str) -> str:
+    """The display name for a wire key, or the key itself.
+
+    Falling back to the key rather than raising keeps an unmapped column
+    readable; the coverage test is what stops that from shipping.
+    """
+    return LABEL.get(key, key)
+
+
+def _fields(row: dict[str, Any], keys: tuple[str, ...]) -> list[dict[str, str]]:
+    """The non-empty columns of one row, labelled, in the order given."""
+    return [
+        {"label": label(k), "value": str(row.get(k) or "")}
+        for k in keys
+        if row.get(k)
+    ]
+
+
+def _chip(status: str) -> dict[str, str]:
+    return {"text": status, "tone": STATUS_TONE.get(status, "unknown")}
+
+
+def _mentioned(text: str) -> set[str]:
+    """The option letters named in a sentence like 「推荐 B」."""
+    return set(_OPTION_KEY.findall((text or "").upper()))
+
+
+def _chosen(recommended: str) -> str:
+    """The option the recommendation names, or "" when it is not clear.
+
+    Tries the 「推荐 X」 shape first, because that is how the field is written and
+    because a sentence that also explains itself names the other options too.
+    Falls back to a single unambiguous letter, and gives up otherwise: the
+    highlight is decoration, and a wrong one is worse than none — what the
+    director wrote is rendered verbatim in the callout beside it.
+    """
+    match = _RECOMMENDED.search(recommended or "")
+    if match:
+        return match.group(1).upper()
+    letters = _mentioned(recommended)
+    return next(iter(letters)) if len(letters) == 1 else ""
+
+
+def _intake(data: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    if data.get("facts"):
+        blocks.append(
+            {
+                "type": "table",
+                "title": "已经确认的事实",
+                "columns": [label("label"), label("value"), label("source")],
+                "rows": [
+                    [r.get("label", ""), r.get("value", ""), r.get("source", "")]
+                    for r in data["facts"]
+                ],
+            }
+        )
+    if data.get("constraints"):
+        blocks.append(
+            {
+                "type": "list",
+                "title": "硬约束",
+                "items": [{"text": t} for t in data["constraints"]],
+            }
+        )
+    return blocks
+
+
+def _direction(data: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    options = data.get("options") or []
+
+    if options:
+        # The highlight is decoration. What the director actually wrote about
+        # which option it recommends is rendered as a callout below, in its own
+        # words, and that is the authoritative statement — a highlight that
+        # disagreed with the prose would be the screen lying.
+        chosen = _chosen(data.get("recommended", ""))
+        blocks.append(
+            {
+                "type": "cards",
+                "title": f"{len(options)} 个方向，摊开比",
+                "cards": [
+                    {
+                        "head": o.get("key", ""),
+                        "emphasis": "chosen" if o.get("key", "").upper() == chosen else "",
+                        "fields": _fields(
+                            o,
+                            (
+                                "claim", "audience_moment", "hook", "gives_up",
+                                "evidence_strength", "difficulty", "asset_needs",
+                            ),
+                        ),
+                    }
+                    for o in options
+                ],
+            }
+        )
+
+    if data.get("recommended") or data.get("recommended_because"):
+        # The title is fixed and the fields are quoted, rather than concatenated.
+        # The brief asks for a bare letter here, but a director that writes the
+        # whole recommendation into `recommended` produced 「推荐 推荐 B，因为…」.
+        # Quoting both fields verbatim cannot double anything.
+        blocks.append(
+            {
+                "type": "callout",
+                "title": "推荐",
+                "text": " —— ".join(
+                    p for p in (data.get("recommended", ""), data.get("recommended_because", "")) if p
+                ),
+                "items_title": "这个推荐要成立，先得确认：",
+                "items": [{"text": t} for t in data.get("prerequisites") or []],
+            }
+        )
+
+    if data.get("dependency_matrix"):
+        keys = [o.get("key", "") for o in options] or sorted(
+            {k for r in data["dependency_matrix"] for k in (r.get("options") or {})}
+        )
+        blocks.append(
+            {
+                "type": "matrix",
+                "title": "这几个空白不解决，哪些方向站不住",
+                "columns": keys,
+                # ``true`` means "dies on this blank" — see the brief for
+                # `dependency_matrix`. Drawn as a marked cell, not a tick.
+                "rows": [
+                    {
+                        "label": r.get("need", ""),
+                        "cells": [bool((r.get("options") or {}).get(k)) for k in keys],
+                    }
+                    for r in data["dependency_matrix"]
+                ],
+            }
+        )
+    return blocks
+
+
+def _material(data: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    items = data.get("items") or []
+
+    if items:
+        blocked = blocked_material(data)
+        title = f"{len(items)} 个镜头"
+        if blocked:
+            title += f"，其中 {len(blocked)} 个做不出来"
+        blocks.append(
+            {
+                "type": "cards",
+                "title": title,
+                "cards": [
+                    {
+                        "head": r.get("shot", ""),
+                        "chip": _chip(r.get("status", "")) if r.get("status") else None,
+                        "emphasis": "blocked" if r.get("status") in MATERIAL_BLOCKED else "",
+                        "fields": _fields(r, ("purpose", "note")),
+                        # A filename, not a URL: this module knows nothing about
+                        # the data root or the run id, and the screen is the layer
+                        # that can also find out whether the file is really there.
+                        "media": r.get("file", ""),
+                    }
+                    for r in items
+                ],
+            }
+        )
+
+    if data.get("gaps"):
+        blocks.append(
+            {
+                "type": "list",
+                "title": "缺口",
+                "items": [
+                    {"text": r.get("gap", ""), "note": r.get("consequence", "")}
+                    for r in data["gaps"]
+                ],
+            }
+        )
+    return blocks
+
+
+#: A timecode range as the writer produces it: `0:03–0:07`. Either dash, because
+#: a model writes an en dash when it is being careful and a hyphen when it is not.
+_TC_RANGE = re.compile(r"(\d+):(\d+)\s*[–\-—~]\s*(\d+):(\d+)")
+_FIRST_NUMBER = re.compile(r"(\d+(?:\.\d+)?)")
+
+#: Lines that mean "nothing is said here". Printed as a bar label they would
+#: read as words the voice-over actually speaks.
+_NO_LINE = frozenset({"（无台词）", "(无台词)", "无台词", "无", "—", "-", ""})
+
+
+def _seconds(tc: str, duration: str) -> float | None:
+    """How long one shot is, or None when nothing says.
+
+    The timecode is preferred over ``duration``: it is what the rest of the shot
+    list is aligned to, whereas ``duration`` is prose ("约 3 秒"). None rather
+    than 0, so the screen can tell "no length given" from "no length" — a bar of
+    width zero would drop the shot out of the strip without saying so.
+    """
+    match = _TC_RANGE.search(tc or "")
+    if match:
+        start = int(match.group(1)) * 60 + int(match.group(2))
+        end = int(match.group(3)) * 60 + int(match.group(4))
+        if end > start:
+            return float(end - start)
+    match = _FIRST_NUMBER.search(duration or "")
+    if match and float(match.group(1)) > 0:
+        return float(match.group(1))
+    return None
+
+
+def _strip_segment(row: dict[str, Any]) -> dict[str, Any]:
+    """One bar of the storyboard strip.
+
+    Carries the whole line and picture rather than a shortened label: the bar
+    clips with CSS, because how much fits is a question about the screen and not
+    about the shot list.
+    """
+    line = row.get("line", "")
+    return {
+        "tc": row.get("tc", ""),
+        "seconds": _seconds(row.get("tc", ""), row.get("duration", "")),
+        "label": row.get("picture", "") if line in _NO_LINE else line,
+        "media": row.get("file", ""),
+    }
+
+
+def _writing(data: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    if data.get("total_duration"):
+        blocks.append({"type": "text", "title": "总时长", "text": data["total_duration"]})
+    segments = data.get("segments") or []
+    if segments:
+        # The strip comes first and the per-shot cards second on purpose. The
+        # strip answers "does this fill 15 seconds, and where is the slow part"
+        # without reading a word — which is the question a shot list exists to
+        # answer, and the one a wall of text is worst at.
+        blocks.append(
+            {
+                "type": "timeline",
+                "title": f"分镜（{len(segments)} 段）",
+                "total": data.get("total_duration", ""),
+                "segments": [_strip_segment(s) for s in segments],
+            }
+        )
+        blocks.append(
+            {
+                "type": "cards",
+                "title": "逐段",
+                "cards": [
+                    {
+                        "head": s.get("tc", ""),
+                        "fields": _fields(s, ("picture", "line", "sound", "duration")),
+                        "media": s.get("file", ""),
+                    }
+                    for s in segments
+                ],
+            }
+        )
+    if data.get("assumptions"):
+        blocks.append(
+            {
+                "type": "list",
+                "title": "这份脚本做了哪些假设",
+                "items": [{"text": t} for t in data["assumptions"]],
+            }
+        )
+    return blocks
+
+
+_VIEW = {
+    "intake": _intake,
+    "direction": _direction,
+    "material_plan": _material,
+    "writing": _writing,
+}
+
+
+def view(stage: str, structured: dict[str, Any]) -> list[dict[str, Any]]:
+    """A stage's structure as blocks the screen can draw, in reading order.
+
+    Blocks rather than the raw payload, for the same reason ``vocabulary.py``
+    returns sentences rather than field names: the frontend then holds one
+    generic renderer and no idea what a 素材板 or a 分镜条 is. Stage knowledge
+    stays here, where the shapes are, and there is one copy of it.
+
+    Empty payload returns ``[]``, and the card falls back to the prose it has
+    always shown. A stage with no builder does the same.
+    """
+    if not structured:
+        return []
+    build = _VIEW.get(stage)
+    return build(structured) if build else []

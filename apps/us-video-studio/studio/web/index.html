@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>US 视频制片室</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="left">
+    <select id="run-select" aria-label="选择项目"></select>
+    <button id="new-run" class="ghost" title="新建项目">＋ 新项目</button>
+  </div>
+
+  <nav class="rail" id="rail" aria-label="进度"></nav>
+
+  <div class="right">
+    <button id="materials-toggle" class="chip" aria-expanded="false"
+            aria-controls="materials">素材</button>
+    <button id="spend" class="chip" title="点开看明细">—</button>
+  </div>
+</header>
+
+<div id="spend-panel" class="spend-panel" hidden></div>
+
+<!-- The shelf: what this run really has on disk. Files land here by being copied
+     into runs/<id>/materials/ or dropped on this panel. It sits next to the
+     questions strip because both answer "what is this run still waiting on" —
+     one from him, one from the folder. -->
+<div id="materials" class="materials" hidden>
+  <div class="materials-head">
+    <span id="materials-count" class="materials-count">还没有素材</span>
+    <span class="materials-hint">把图片或视频拖到这里，或直接放进 runs/&lt;id&gt;/materials/</span>
+    <button id="materials-close" class="ghost small">收起</button>
+  </div>
+  <div id="materials-grid" class="materials-grid"></div>
+</div>
+
+<!-- What the run is waiting on him for. The strip is always shown when there is
+     anything in it; only the list under it collapses, so unanswered questions
+     cannot be hidden by a collapsed control. -->
+<div id="questions" class="questions" hidden>
+  <button id="questions-toggle" class="questions-bar" aria-expanded="false"
+          aria-controls="questions-list">
+    <span class="questions-mark">?</span>
+    <span id="questions-count">0 个问题等你回答</span>
+    <span id="questions-where" class="questions-where"></span>
+    <span id="questions-caret" class="questions-caret">展开</span>
+  </button>
+  <div id="questions-list" class="questions-list" hidden></div>
+</div>
+
+<main id="stream" class="stream" aria-live="polite"></main>
+
+<footer class="composer">
+  <div class="composer-inner">
+    <textarea id="chat-input" rows="1"
+      placeholder="说你要做什么。不确定就直接问它现在什么情况。"></textarea>
+    <button id="send" class="primary">发送</button>
+  </div>
+  <div class="composer-hint">
+    <span>Enter 发送，Shift+Enter 换行</span>
+    <button id="detail-toggle" class="ghost small">显示机器细节</button>
+  </div>
+</footer>
+
+<!-- Full-document reader -->
+<div id="reader" class="reader" hidden>
+  <div class="reader-box" role="dialog" aria-modal="true">
+    <div class="reader-head">
+      <div>
+        <h2 id="reader-title">—</h2>
+        <div class="reader-sub" id="reader-sub"></div>
+      </div>
+      <div class="reader-actions">
+        <div class="versions" id="reader-versions"></div>
+        <button id="reader-close" class="ghost">关闭</button>
+      </div>
+    </div>
+    <div class="reader-body" id="reader-body"></div>
+  </div>
+</div>
+
+<!-- One material, big. Clicking a photo must not take him off the screen he is
+     already reading — the same reason the artifact reader is an overlay. -->
+<div id="viewer" class="viewer" hidden>
+  <div class="viewer-box" role="dialog" aria-modal="true">
+    <div class="viewer-head">
+      <span id="viewer-name">—</span>
+      <button id="viewer-close" class="ghost small">关闭</button>
+    </div>
+    <div id="viewer-body" class="viewer-body"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<!-- md.js first: blocks.js uses its `escapeHtml`, and app.js uses both. -->
+<script src="/static/md.js"></script>
+<script src="/static/blocks.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

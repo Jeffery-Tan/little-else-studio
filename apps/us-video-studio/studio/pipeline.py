@@ -1,0 +1,637 @@
+"""The stage state machine.
+
+State is *derived* from the append-only event log plus the artifact sidecars,
+never stored as a mutable blob. Two consequences worth stating plainly:
+
+* Nothing is ever deleted or overwritten to express a change of mind. A
+  revision is a new version; an invalidation is a recomputed fact.
+* Staleness cannot drift out of sync with the data, because it is recomputed
+  from fingerprints every time it is asked for.
+
+Four rules are enforced here rather than in prompts:
+
+1. **Prerequisites.** A stage cannot start until every upstream stage is
+   complete. "Complete" means: has an artifact, the file still matches its
+   fingerprint, it is not stale, and — if the stage is gated — it is approved.
+2. **A rejected attempt is dead.** Its token cannot submit afterwards.
+3. **An approval binds to one fingerprint.** Revise the artifact and the old
+   approval no longer counts, with no code path that "carries it forward".
+4. **An approval needs a valid unconsumed nonce**, which the server only ever
+   hands to the browser. No agent tool can reach this method with a nonce.
+"""
+from __future__ import annotations
+
+import secrets
+from dataclasses import dataclass, field, replace
+from typing import Any
+
+from .models import (
+    Approval,
+    Artifact,
+    Attempt,
+    PipelineError,
+    Review,
+    Run,
+    STAGE_SPEC,
+    STAGES,
+    utcnow,
+)
+from .store import Store, sha256_text
+from .structured import normalize
+
+
+@dataclass(frozen=True)
+class StageState:
+    stage: str
+    status: str
+    latest: Artifact | None = None
+    stale: bool = False
+    stale_reason: str = ""
+    integrity_ok: bool = True
+    review: Review | None = None
+    approval: Approval | None = None
+    open_attempt: Attempt | None = None
+    last_rejection: str = ""
+    can_start: bool = False
+    can_submit: bool = False
+    can_review: bool = False
+    can_approve: bool = False
+    blocked_reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stage": self.stage,
+            "status": self.status,
+            "latest": self.latest.to_dict() if self.latest else None,
+            "stale": self.stale,
+            "stale_reason": self.stale_reason,
+            "integrity_ok": self.integrity_ok,
+            "review": self.review.to_dict() if self.review else None,
+            "approval": self.approval.to_dict() if self.approval else None,
+            "open_attempt": self.open_attempt.to_dict() if self.open_attempt else None,
+            "last_rejection": self.last_rejection,
+            "can_start": self.can_start,
+            "can_submit": self.can_submit,
+            "can_review": self.can_review,
+            "can_approve": self.can_approve,
+            "blocked_reason": self.blocked_reason,
+        }
+
+
+@dataclass(frozen=True)
+class RunState:
+    run: Run
+    stages: dict[str, StageState] = field(default_factory=dict)
+    next_stage: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run": self.run.to_dict(),
+            "stages": [self.stages[s].to_dict() for s in STAGES],
+            "next_stage": self.next_stage,
+        }
+
+
+class Pipeline:
+    def __init__(self, store: Store):
+        self.store = store
+
+    # ----------------------------------------------------------- derivation --
+
+    def _attempts(self, run_id: str, stage: str) -> list[Attempt]:
+        """Rebuild every attempt for a stage from the event log, in order."""
+        order: list[str] = []
+        by_key: dict[str, Attempt] = {}
+        for ev in self.store.read_events(run_id):
+            if ev.get("stage") != stage:
+                continue
+            kind = ev.get("kind")
+            key = f"{stage}#{ev.get('number')}"
+            if kind == "attempt_started":
+                attempt = Attempt(
+                    stage=stage,
+                    number=ev["number"],
+                    role=ev["role"],
+                    token=ev["token"],
+                    started_at=ev["at"],
+                    inputs=dict(ev.get("inputs") or {}),
+                )
+                by_key[attempt.key] = attempt
+                order.append(attempt.key)
+            elif kind == "attempt_submitted" and key in by_key:
+                by_key[key] = replace(by_key[key], status="submitted", submitted_at=ev["at"])
+            elif kind == "attempt_rejected" and key in by_key:
+                by_key[key] = replace(
+                    by_key[key], status="rejected", reason=ev.get("reason", "")
+                )
+        return [by_key[k] for k in order]
+
+    def stage_state(self, run_id: str, stage: str, _memo: dict | None = None) -> StageState:
+        if stage not in STAGE_SPEC:
+            raise PipelineError("pipeline", f"unknown stage: {stage!r}")
+        memo = {} if _memo is None else _memo
+        if stage in memo:
+            return memo[stage]
+
+        spec = STAGE_SPEC[stage]
+        artifacts = self.store.list_artifacts(run_id, stage)
+        latest = artifacts[-1] if artifacts else None
+
+        # --- upstream fingerprints and staleness --------------------------- #
+        upstream: dict[str, str] = {}
+        reasons: list[str] = []
+        upstream_ready = True
+        for up in spec.requires:
+            up_state = self.stage_state(run_id, up, memo)
+            if up_state.latest is None or up_state.stale or not up_state.integrity_ok:
+                upstream_ready = False
+                if up_state.latest is None:
+                    reasons.append(f"{up} has no work yet")
+                elif up_state.stale:
+                    reasons.append(f"upstream {up} is itself stale")
+                else:
+                    reasons.append(f"upstream {up} failed its fingerprint check")
+                continue
+            upstream[up] = up_state.latest.sha256
+
+        stale = False
+        stale_reason = ""
+        if latest is not None and spec.requires:
+            for up, sha in upstream.items():
+                if latest.inputs.get(up) != sha:
+                    stale = True
+                    was = latest.inputs.get(up, "")
+                    old_v = next(
+                        (a.version for a in self.store.list_artifacts(run_id, up) if a.sha256 == was),
+                        None,
+                    )
+                    new_v = next(
+                        a.version
+                        for a in self.store.list_artifacts(run_id, up)
+                        if a.sha256 == sha
+                    )
+                    stale_reason = (
+                        f"{up}-v{old_v or '?'} was replaced by {up}-v{new_v}; "
+                        f"{stage}-v{latest.version} was written against the older one"
+                    )
+                    break
+            if not stale and any(
+                self.stage_state(run_id, up, memo).stale for up in spec.requires
+            ):
+                stale = True
+                stale_reason = "an upstream stage was invalidated"
+
+        integrity_ok = True
+        if latest is not None:
+            integrity_ok = self.store.verify_artifact(run_id, stage, latest.version)
+
+        # --- review and approval, bound to the exact fingerprint ----------- #
+        review = None
+        approval = None
+        if latest is not None:
+            for r in reversed(self.store.list_reviews(run_id, stage)):
+                if r.artifact_sha256 == latest.sha256:
+                    review = r
+                    break
+            for a in reversed(self.store.list_approvals(run_id, stage)):
+                if a.artifact_sha256 == latest.sha256:
+                    approval = a
+                    break
+
+        approved = approval is not None and approval.decision.startswith("approved")
+        complete = (
+            latest is not None
+            and not stale
+            and integrity_ok
+            and (approved or not spec.gated)
+        )
+        attempts = self._attempts(run_id, stage)
+        open_attempt = next((a for a in attempts if a.status == "open"), None)
+        last_rejection = next(
+            (a.reason or "" for a in reversed(attempts) if a.status == "rejected"), ""
+        )
+
+        # --- what is allowed right now ------------------------------------- #
+        blocked = ""
+        can_start = False
+        if not upstream_ready:
+            blocked = "; ".join(reasons)
+        elif open_attempt is not None:
+            blocked = f"{stage}#{open_attempt.number} is already open — submit or reject it first"
+        else:
+            # An open attempt is fine to leave behind only if it was rejected;
+            # otherwise the guard above catches it.
+            can_start = True
+
+        can_submit = open_attempt is not None
+        if open_attempt is not None and not upstream_ready:
+            can_submit = False
+            blocked = "; ".join(reasons)
+
+        can_review = (
+            spec.gated
+            and latest is not None
+            and not stale
+            and integrity_ok
+            and (review is None or review.artifact_sha256 != latest.sha256)
+        )
+        # Both verdicts reach him, not only ``pass``.
+        #
+        # The gate exists so that approval is *his click* rather than an agent's;
+        # it does not exist to give the reviewer a veto he cannot lift. The
+        # reviewer is a same-model agent sitting on the same side of the table as
+        # the producers, and on the first real run it returned a direction that
+        # carried four substantive findings — a decision worth seeing, not a
+        # dead end. Requiring ``pass`` here made ``record_approval``'s override
+        # branch unreachable from the interface: the card that would have offered
+        # it was never drawn, so the only way to override was to hand-craft an
+        # HTTP request.
+        #
+        # Approving past a ``return`` is *not* free — ``record_approval`` refuses
+        # it without an explicit ``override_reason`` and records
+        # ``approved_override`` instead of ``approved``, so it stays legible in
+        # the history as the deliberate decision it is.
+        #
+        # ``review is not None`` still holds: with no review recorded there is
+        # nothing on screen to weigh, and approving the unreviewed thing is a
+        # different feature.
+        can_approve = (
+            spec.gated
+            and latest is not None
+            and not stale
+            and integrity_ok
+            and not approved
+            and review is not None
+        )
+
+        if not spec.gated:
+            status = "empty"
+            if latest is not None:
+                status = "stale" if stale else "done"
+        else:
+            if latest is None:
+                status = "empty"
+            elif stale:
+                status = "stale"
+            elif approved:
+                status = "approved"
+            elif review is not None and review.verdict == "return":
+                status = "returned"
+            elif review is not None:
+                status = "reviewed"
+            else:
+                status = "awaiting_review"
+
+        state = StageState(
+            stage=stage,
+            status=status,
+            latest=latest,
+            stale=stale,
+            stale_reason=stale_reason,
+            integrity_ok=integrity_ok,
+            review=review,
+            approval=approval,
+            open_attempt=open_attempt,
+            last_rejection=last_rejection,
+            can_start=can_start,
+            can_submit=can_submit,
+            can_review=can_review,
+            can_approve=can_approve,
+            blocked_reason=blocked,
+        )
+        memo[stage] = state
+        # ``complete`` is used by dependents; stash it alongside.
+        memo[f"__complete__{stage}"] = complete
+        return state
+
+    def is_complete(self, run_id: str, stage: str, memo: dict | None = None) -> bool:
+        """Has this stage produced something a downstream stage may build on?"""
+        own_memo = memo if memo is not None else {}
+        self.stage_state(run_id, stage, own_memo)
+        return bool(own_memo.get(f"__complete__{stage}"))
+
+    def state(self, run_id: str) -> RunState:
+        run = self.store.read_run(run_id)
+        memo: dict = {}
+        stages = {s: self.stage_state(run_id, s, memo) for s in STAGES}
+        nxt = next((s for s in STAGES if not memo.get(f"__complete__{s}")), None)
+        return RunState(run=run, stages=stages, next_stage=nxt)
+
+    # -------------------------------------------------------------- actions --
+
+    def require_prerequisites(self, run_id: str, stage: str) -> dict[str, str]:
+        spec = STAGE_SPEC[stage]
+        memo: dict = {}
+        inputs: dict[str, str] = {}
+        for up in spec.requires:
+            self.stage_state(run_id, up, memo)
+            if not memo.get(f"__complete__{up}"):
+                up_state = memo[up]
+                why = up_state.stale_reason or up_state.blocked_reason or "not complete"
+                raise PipelineError(
+                    "prereq",
+                    f"{stage} cannot proceed: upstream {up} is not complete ({why})",
+                )
+            inputs[up] = memo[up].latest.sha256
+        return inputs
+
+    def start_attempt(self, run_id: str, stage: str, *, actor: str = "user") -> Attempt:
+        spec = STAGE_SPEC[stage]
+        self.store.read_run(run_id)  # existence check
+        inputs = self.require_prerequisites(run_id, stage)
+
+        current = self.stage_state(run_id, stage)
+        if current.open_attempt is not None:
+            raise PipelineError(
+                "attempt",
+                f"{stage}#{current.open_attempt.number} is already open; "
+                f"submit or reject it before starting another",
+            )
+
+        attempts = self._attempts(run_id, stage)
+        number = (max((a.number for a in attempts), default=0)) + 1
+        token = secrets.token_urlsafe(24)
+        attempt = Attempt(
+            stage=stage,
+            number=number,
+            role=spec.owner_role,
+            token=token,
+            started_at=utcnow(),
+            inputs=inputs,
+        )
+        self.store.append_event(
+            run_id,
+            "attempt_started",
+            stage=stage,
+            number=number,
+            role=spec.owner_role,
+            token=token,
+            inputs=inputs,
+            actor=actor,
+        )
+        return attempt
+
+    def submit(
+        self,
+        run_id: str,
+        stage: str,
+        token: str,
+        *,
+        content: str,
+        summary: str,
+        evidence: list[str] | None = None,
+        limitations: list[str] | None = None,
+        structured: dict[str, Any] | None = None,
+        actor: str = "agent",
+    ) -> Artifact:
+        """Turn an open attempt into an immutable artifact version."""
+        spec = STAGE_SPEC[stage]
+        attempts = self._attempts(run_id, stage)
+        attempt = next((a for a in attempts if a.token == token), None)
+        if attempt is None:
+            raise PipelineError("attempt", f"no attempt for {stage} carries this token")
+        if attempt.status == "rejected":
+            raise PipelineError(
+                "attempt",
+                f"{stage}#{attempt.number} was rejected and cannot submit late results",
+            )
+        if attempt.status != "open":
+            raise PipelineError("attempt", f"{stage}#{attempt.number} is already {attempt.status}")
+
+        # Re-check upstream *now*: it may have moved while this attempt was in
+        # flight. Completeness is not enough — the work must have been briefed
+        # on the versions that are current at submit time.
+        inputs = self.require_prerequisites(run_id, stage)
+        for up, sha in inputs.items():
+            if attempt.inputs.get(up) != sha:
+                was_v = next(
+                    (a.version for a in self.store.list_artifacts(run_id, up)
+                     if a.sha256 == attempt.inputs.get(up)),
+                    None,
+                )
+                now_v = next(
+                    (a.version for a in self.store.list_artifacts(run_id, up) if a.sha256 == sha),
+                    None,
+                )
+                raise PipelineError(
+                    "stale_attempt",
+                    f"{up} moved from v{was_v or '?'} to v{now_v or '?'} after "
+                    f"{stage}#{attempt.number} was briefed. This work was done against the "
+                    f"older version; start a new attempt so it is written against the current one.",
+                )
+
+        version = self.store.next_version(run_id, stage)
+        # Coerced here rather than in the store: the shape is stage semantics,
+        # and normalising is what makes a bad payload cost a rendering instead
+        # of an attempt. `normalize` never raises; see `studio/structured.py`.
+        shape = normalize(stage, structured or {})
+        artifact = self.store.write_artifact(
+            run_id,
+            stage,
+            version,
+            content,
+            summary=summary,
+            author_role=attempt.role,
+            attempt=attempt.key,
+            evidence=evidence or [],
+            limitations=limitations or [],
+            inputs=inputs,
+            structured=shape.data,
+        )
+        self.store.append_event(
+            run_id,
+            "attempt_submitted",
+            stage=stage,
+            number=attempt.number,
+            artifact=f"{stage}-v{version}",
+            sha256=artifact.sha256,
+            actor=actor,
+        )
+        if structured and shape.dropped:
+            # Recorded, not swallowed. A prompt that is quietly failing to
+            # produce its shape should be visible in the log, because the only
+            # other symptom is a screen that looks emptier than it should.
+            self.store.append_event(
+                run_id,
+                "structure_dropped",
+                stage=stage,
+                artifact=f"{stage}-v{version}",
+                dropped=shape.dropped,
+                at=utcnow(),
+            )
+        return artifact
+
+    def reject(self, run_id: str, stage: str, token: str, reason: str) -> None:
+        if not reason.strip():
+            raise PipelineError("attempt", "rejection needs a specific reason")
+        attempts = self._attempts(run_id, stage)
+        attempt = next((a for a in attempts if a.token == token), None)
+        if attempt is None:
+            raise PipelineError("attempt", f"no attempt for {stage} carries this token")
+        if attempt.status != "open":
+            raise PipelineError("attempt", f"{stage}#{attempt.number} is already {attempt.status}")
+        self.store.append_event(
+            run_id,
+            "attempt_rejected",
+            stage=stage,
+            number=attempt.number,
+            reason=reason.strip(),
+        )
+
+    def record_review(
+        self,
+        run_id: str,
+        stage: str,
+        *,
+        verdict: str,
+        findings: list[dict[str, Any]],
+    ) -> Review:
+        """Record the reviewer's verdict on the *current* artifact fingerprint."""
+        if verdict not in ("pass", "return"):
+            raise PipelineError("review", f"verdict must be 'pass' or 'return', got {verdict!r}")
+        spec = STAGE_SPEC[stage]
+        if not spec.gated:
+            raise PipelineError("review", f"{stage} has no review gate in v1")
+        state = self.stage_state(run_id, stage)
+        if state.latest is None:
+            raise PipelineError("review", f"{stage} has nothing to review")
+        if state.stale:
+            raise PipelineError(
+                "review", f"{stage}-v{state.latest.version} is stale and must be redone: {state.stale_reason}"
+            )
+        if not state.integrity_ok:
+            raise PipelineError(
+                "review", f"{stage}-v{state.latest.version} fails its fingerprint check"
+            )
+        if verdict == "return" and not findings:
+            raise PipelineError("review", "a return needs at least one specific finding")
+
+        review = Review(
+            stage=stage,
+            artifact_sha256=state.latest.sha256,
+            verdict=verdict,
+            reviewer="reviewer",
+            findings=findings,
+            created_at=utcnow(),
+        )
+        self.store.write_review(run_id, review)
+        self.store.append_event(
+            run_id,
+            "review_recorded",
+            stage=stage,
+            artifact=f"{stage}-v{state.latest.version}",
+            verdict=verdict,
+            findings=len(findings),
+        )
+        return review
+
+    # ------------------------------------------------------------ approvals --
+
+    def issue_nonce(self, run_id: str, stage: str) -> str:
+        """Mint a single-use approval nonce. The server hands it only to the UI.
+
+        Only ``sha256(nonce)`` is written down. The plaintext lives in the HTTP
+        response and the browser, so an agent able to read the run directory
+        still cannot forge a click. The audit trail records *that* a nonce was
+        issued for a stage, and which one was spent, without recording a value
+        that could be replayed.
+        """
+        if not STAGE_SPEC[stage].gated:
+            raise PipelineError("approval", f"{stage} is not a gated stage")
+        nonce = secrets.token_urlsafe(24)
+        self.store.append_event(
+            run_id, "nonce_issued", stage=stage, nonce_sha256=sha256_text(nonce)
+        )
+        return nonce
+
+    def _nonce_usable(self, run_id: str, stage: str, nonce: str) -> bool:
+        digest = sha256_text(nonce or "")
+        issued = False
+        for ev in self.store.read_events(run_id):
+            if ev.get("kind") != "nonce_issued":
+                continue
+            if ev.get("nonce_sha256") != digest:
+                continue
+            if ev.get("stage") != stage:
+                return False
+            issued = True
+        if not issued:
+            return False
+        return not any(
+            a.nonce_sha256 == digest for a in self.store.list_approvals(run_id, stage)
+        )
+
+    def record_approval(
+        self,
+        run_id: str,
+        stage: str,
+        *,
+        nonce: str,
+        decision: str,
+        note: str = "",
+        override_reason: str = "",
+    ) -> Approval:
+        """Record a user decision. Only the server calls this, only after a click.
+
+        A pass review on the current fingerprint is required. If Jeffery wants to
+        go against a reviewer's ``return``, that is allowed but must be *named* —
+        the override is recorded in the approval row and shows up in the history.
+        """
+        spec = STAGE_SPEC[stage]
+        if not spec.gated:
+            raise PipelineError("approval", f"{stage} is not a gated stage")
+        if decision not in ("approved", "returned"):
+            raise PipelineError("approval", f"unknown decision: {decision!r}")
+        if not self._nonce_usable(run_id, stage, nonce):
+            raise PipelineError(
+                "approval",
+                "this approval link is not valid, is for another stage, or was already used. "
+                "Reload the page to get a fresh one.",
+            )
+
+        state = self.stage_state(run_id, stage)
+        if state.latest is None:
+            raise PipelineError("approval", f"{stage} has nothing to approve")
+        if state.stale:
+            raise PipelineError(
+                "approval",
+                f"{stage}-v{state.latest.version} is stale: {state.stale_reason}. "
+                f"Redo it before approving.",
+            )
+        if not state.integrity_ok:
+            raise PipelineError(
+                "approval",
+                f"{stage}-v{state.latest.version} fails its fingerprint check; "
+                f"the file changed after it was written",
+            )
+
+        recorded = decision
+        if decision == "approved":
+            passed = state.review is not None and state.review.verdict == "pass"
+            if not passed:
+                if not override_reason.strip():
+                    raise PipelineError(
+                        "approval",
+                        "no passing review on the current version. Approving anyway requires "
+                        "an explicit override reason, which is recorded.",
+                    )
+                recorded = "approved_override"
+                note = (note + f"\n[override] {override_reason.strip()}").strip()
+
+        approval = Approval(
+            stage=stage,
+            artifact_sha256=state.latest.sha256,
+            decision=recorded,
+            note=note.strip(),
+            decided_at=utcnow(),
+            nonce_sha256=sha256_text(nonce),
+        )
+        self.store.append_approval(run_id, approval)
+        self.store.append_event(
+            run_id,
+            "stage_decided",
+            stage=stage,
+            artifact=f"{stage}-v{state.latest.version}",
+            decision=recorded,
+        )
+        return approval
