@@ -54,6 +54,9 @@ class DecisionIn(BaseModel):
     decision: str
     note: str = ""
     override_reason: str = ""
+    expected_artifact_sha256: str = Field(min_length=64, max_length=64)
+    expected_version: int = Field(ge=1)
+    selected_option_id: str | None = None
 
 
 def _read_capped(file: Any, limit: int = materials.MAX_UPLOAD_BYTES) -> bytes:
@@ -102,8 +105,8 @@ def build_app(
             return client_factory()
         # Read at call time so a rotated credential is picked up on restart
         # without the value ever passing through persisted state.
-        base_url, token = credentials()
-        return AnthropicCompatClient(base_url, token, max_tokens=settings.max_tokens)
+        _, token = credentials()
+        return AnthropicCompatClient(settings.base_url, token, max_tokens=settings.max_tokens)
 
     def require_run(run_id: str) -> None:
         if not valid_run_id(run_id):
@@ -153,7 +156,8 @@ def build_app(
         out["spend"] = totals.to_dict()
         out["budget"] = {
             "limit_usd": settings.budget_limit_usd,
-            "remaining_usd": round(ledger.remaining_usd(), 4),
+            "remaining_usd": ledger.remaining_usd(),
+            "limit_mode": "soft_threshold",
             "pricing": ledger.price_note(),
         }
         out["pipeline"] = [
@@ -205,7 +209,7 @@ def build_app(
     def read_ledger(run_id: str) -> dict[str, Any]:
         require_run(run_id)
         return {
-            "rows": [r.to_dict() for r in store.read_ledger(run_id)],
+            "rows": [r.to_dict() for r in ledger.entries(run_id)],
             "totals": ledger.totals(run_id).to_dict(),
             "pricing": ledger.price_note(),
         }
@@ -273,7 +277,8 @@ def build_app(
     # -------------------------------------------------------------- approvals --
 
     @app.post("/api/runs/{run_id}/nonce")
-    def issue_nonce(run_id: str, stage: str) -> dict[str, str]:
+    def issue_nonce(run_id: str, stage: str, expected_artifact_sha256: str,
+                    expected_version: int) -> dict[str, str]:
         """Mint the nonce that makes a click a click.
 
         Returned to this caller and nowhere else. Nothing writes it to disk.
@@ -282,25 +287,35 @@ def build_app(
         if stage not in STAGE_SPEC or not STAGE_SPEC[stage].gated:
             raise HTTPException(400, f"{stage} is not a gated stage")
         try:
-            nonce = pipeline.issue_nonce(run_id, stage)
+            with _in_flight_lock:
+                if run_id in _in_flight:
+                    raise HTTPException(409, "当前制作仍在运行，请等这一轮结束后确认。")
+                nonce = pipeline.issue_nonce(run_id, stage,
+                    expected_artifact_sha256=expected_artifact_sha256,
+                    expected_version=expected_version)
         except PipelineError as exc:
-            raise HTTPException(400, str(exc)) from exc
+            raise HTTPException(409, str(exc)) from exc
         return {"stage": stage, "nonce": nonce}
 
     @app.post("/api/runs/{run_id}/decision")
     def decide(run_id: str, payload: DecisionIn) -> dict[str, Any]:
         require_run(run_id)
+        if payload.stage not in STAGE_SPEC:
+            raise HTTPException(400, "unknown stage")
         try:
-            approval = pipeline.record_approval(
-                run_id,
-                payload.stage,
-                nonce=payload.nonce,
-                decision=payload.decision,
-                note=payload.note,
-                override_reason=payload.override_reason,
-            )
+            with _in_flight_lock:
+                if run_id in _in_flight:
+                    raise HTTPException(409, "当前制作仍在运行，请等这一轮结束后确认。")
+                approval = pipeline.record_approval(
+                    run_id, payload.stage, nonce=payload.nonce,
+                    decision=payload.decision, note=payload.note,
+                    override_reason=payload.override_reason,
+                    expected_artifact_sha256=payload.expected_artifact_sha256,
+                    expected_version=payload.expected_version,
+                    selected_option_id=payload.selected_option_id,
+                )
         except PipelineError as exc:
-            raise HTTPException(400, str(exc)) from exc
+            raise HTTPException(409, str(exc)) from exc
         return approval.to_dict()
 
     # ------------------------------------------------------------ conversation --

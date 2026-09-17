@@ -362,6 +362,17 @@ def blocked_material(structured: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
+def direction_options(structured: dict[str, Any]) -> list[dict[str, Any]]:
+    """Actual choices stay selectable even without a readable recommendation."""
+    options = (structured or {}).get("options") or []
+    chosen = _chosen((structured or {}).get("recommended", ""))
+    keys = [str(r.get("key") or "").strip() for r in options
+            if isinstance(r, dict) and str(r.get("key") or "").strip()]
+    if len(set(keys)) != len(keys):
+        return []
+    return [{"key": k, "recommended": k.upper() == chosen} for k in keys]
+
+
 
 
 # --------------------------------------------------------------------------- #

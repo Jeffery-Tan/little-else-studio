@@ -1,19 +1,31 @@
-/* US video studio — the conversation, and the two things only a person can do.
+/* US video studio — the stages, and the two things only a person can do.
  *
- * The screen is a conversation. Everything else — who was dispatched, what a
- * review said, what it cost — appears as a card in that conversation, because
- * that is how the work actually happened.
+ * The screen is four stages. Pick one on the rail and you get that stage and
+ * nothing else: what is waiting on you, the document, what the reviewer said,
+ * and the questions it left open — answerable where they are written.
+ *
+ * It used to be one conversation, oldest first, with every artifact ever written
+ * stacked above whatever was actually waiting. After a full run the thing he had
+ * to click on sat more than eight screens down, behind four documents he had
+ * already read. The unit of work here is a stage, not a message, so the page is
+ * built out of stages and the conversation is demoted to a band he can open.
+ *
+ * The band is not decoration and not a leftover: reading one document closely
+ * and following what happened over time are two different needs, and every tool
+ * measured keeps both views side by side. What changed is which one owns the
+ * screen.
  *
  * The UI has exactly two write paths that change the run: sending a message and
  * deciding a gate. It cannot dispatch work, cannot submit a stage, cannot write
- * a review. The approval nonce is fetched on demand and held in memory only.
+ * a review. The approval nonce is fetched for the displayed version and retained with its local retry draft.
  * The third write path — dropping a file on the materials shelf — puts a file in
- * a folder and touches no state at all; see `studio/materials.py`.
+ * a folder without creating stage artifacts; changed bytes invalidate dependent work.
  *
  * No framework and no build step: this runs from a folder on one machine.
  * The wording ("人话") is NOT here — it comes from the server's vocabulary, so
  * the live stream and a reloaded page say the same thing. Icons are, because a
- * shape is not a sentence.
+ * shape is not a sentence. The stage panel's markup is not here either; it is
+ * `stage.js`, which returns a string and is therefore testable without a browser.
  */
 "use strict";
 
@@ -44,15 +56,31 @@ const state = {
   runId: null,
   timeline: null,
   rail: [],
+  // Which stage owns the screen. Everything the page shows is drawn from this
+  // one field, so it is also the thing the rail's buttons change.
+  activeStage: null,
   // The run's shelf, as the server last reported it. Held here rather than
   // looked up per picture because the same list answers two questions — what is
   // on the shelf, and whether a file an artifact named is really there.
   materials: [],
   busy: false,
+  decisionBusy: false,
+  refreshSerial: 0,
   machineDetail: false,
-  questionsOpen: false,
   materialsOpen: false,
+  // The conversation band. Collapsed by default, because the point of this
+  // screen is the stage; forced open while a turn runs, because work in flight
+  // is not something he should be able to hide from himself.
+  conversationOpen: false,
   atBottom: true,
+  // Answers he has written on the question rows but not sent yet, keyed by the
+  // question they answer. Local to the browser and to one artifact version —
+  // see `answerKey` in stage.js. Nothing here has reached the server.
+  draft: {},
+  // draft key -> the input on screen showing it, so undoing a draft can empty
+  // the box without rebuilding the list he may be typing in. Only ever holds
+  // inputs that are on screen, which is now one stage's worth.
+  draftInputs: new Map(),
 };
 
 /* ------------------------------------------------------------------ api -- */
@@ -118,22 +146,37 @@ async function loadRuns() {
 
 async function selectRun(runId) {
   state.runId = runId;
-  $("stream").innerHTML = "";
+  // A different run is a different set of stages; the stage that owned the
+  // screen before has no claim on it.
+  state.activeStage = null;
+  $("stage").innerHTML = "";
+  // Before the first render, so the question rows come back carrying whatever he
+  // had written and not sent.
+  loadDraft();
   await refreshTimeline();
 }
 
 async function refreshTimeline() {
   if (!state.runId) return;
-  const tl = await api(`/api/runs/${state.runId}/timeline`);
+  const runId = state.runId, serial = ++state.refreshSerial;
+  const tl = await api(`/api/runs/${runId}/timeline`);
+  if (state.runId !== runId || serial !== state.refreshSerial) return;
   state.timeline = tl;
-  // Set before anything is drawn: `wireMedia` runs while the stream is being
+  // Set before anything is drawn: `wireMedia` runs while the pane is being
   // built, and it resolves filenames against this list.
   state.materials = tl.materials || [];
+  // The rail first: it decides which stage is on screen, and everything below
+  // is drawn for that stage.
   renderRail(tl.rail);
-  renderQuestions(tl);
+  // Pruning runs against every question the run has, never against the stage on
+  // screen — see `pruneDrafts`. Before the pane, so a dropped answer is not
+  // drawn one last time.
+  pruneDrafts(tl);
+  renderPane();
+  renderConversation(tl);
+  renderDraft();
   renderSpend(tl);
   renderMaterials();
-  renderStream(tl);
 }
 
 /* --------------------------------------------------------------- header -- */
@@ -142,22 +185,111 @@ function renderRail(rail) {
   const host = $("rail");
   host.innerHTML = "";
   state.rail = rail;
+
+  // Which stage owns the screen. Kept if it still exists, so a refresh does not
+  // yank him off the stage he was reading; chosen otherwise.
+  if (!state.activeStage || !rail.some((s) => s.stage === state.activeStage)) {
+    state.activeStage = defaultStage(rail, state.timeline || {});
+  }
+
   for (const step of rail) {
-    const node = box("button", `step ${step.state}` + (step.needs_you ? " needs" : ""));
+    const here = step.stage === state.activeStage;
+    const node = box(
+      "button",
+      `step ${step.state}` + (step.needs_you ? " needs" : "") + (here ? " here" : "")
+    );
+    if (here) node.setAttribute("aria-current", "true");
     // The icon comes from the state; the server's `mark` is a character chosen
     // for a text-only rail and is kept only as the fallback for a state this
     // file has not been taught.
     node.innerHTML =
       `<span class="mark">${ICON[step.state] || escapeHtml(step.mark)}</span>` +
       `<span class="name">${escapeHtml(step.label)}</span>`;
+    // How many things this stage could not settle and is waiting on him for.
+    // The strip that used to hold them has no replacement: they are in the
+    // stage they belong to now, and this is the signpost that says which.
+    const n = (step.questions || []).length;
+    if (n) node.appendChild(box("span", "q-count", String(n)));
+
     // The four situations, in his words. It used to say 「还没有内容」 for all of
     // them, which was wrong for three: an attempt that failed and a document
     // that came out empty need different things from him than a step nobody has
     // started.
-    node.title = step.blank.text;
-    node.onclick = () => openStage(step.stage);
+    node.title = [step.blank.text, n ? `${n} 个问题等你回答` : ""].filter(Boolean).join(" · ");
+    node.onclick = () => selectStage(step.stage);
     host.appendChild(node);
   }
+}
+
+/* Which stage to open when there is no good reason to open a different one.
+ *
+ * The thing waiting on him outranks everything — that is the whole point of
+ * moving off a conversation, where finding it cost eight screens of scrolling.
+ * Then the stage that is next to run. Then the furthest stage that has something
+ * in it, because that is what he most recently got back.
+ *
+ * Note this is *narrower* than the measured norm: GitLab, Gitea, Forgejo and
+ * Phorge all land on a wide "everything I am involved in" default and make you
+ * switch to "what needs me". That is right when one person has thirty open
+ * items. Here there is at most one thing waiting at a time.
+ */
+function defaultStage(rail, tl) {
+  const pending = tl.pending;
+  if (pending && rail.some((s) => s.stage === pending.stage)) return pending.stage;
+
+  const active = rail.find((s) => s.state === "active");
+  if (active) return active.stage;
+
+  const withDoc = rail.filter((s) => s.has_doc);
+  if (withDoc.length) return withDoc[withDoc.length - 1].stage;
+
+  return rail.length ? rail[0].stage : null;
+}
+
+function selectStage(stage) {
+  if (!stage || stage === state.activeStage) return;
+  state.activeStage = stage;
+  renderRail(state.rail);
+  renderPane();
+}
+
+/* ------------------------------------------------------------ the stage -- */
+
+function renderPane() {
+  const host = $("stage");
+  const step = (state.rail || []).find((s) => s.stage === state.activeStage);
+  if (!step) {
+    host.innerHTML = "";
+    return;
+  }
+  const tl = state.timeline || {};
+
+  // Scroll is put back where he left it. Every refresh used to jump the stream
+  // to the bottom, which is half of what 「翻来翻去」 meant: a stage that updated
+  // under him moved the text out from beneath his eyes.
+  const kept = host.scrollTop;
+  host.innerHTML = stageHtml(step, {
+    // Every question the run has. `stageHtml` keeps the ones belonging to this
+    // stage — the rule lives there so it has one home and one test.
+    questions: tl.questions || [],
+    // `stageHtml` draws the gate only when it names this stage.
+    pending: tl.pending || null,
+    drafts: state.draft,
+  });
+  wireGate(host);
+  for (const button of host.querySelectorAll('[data-act="read"]')) {
+    button.onclick = () => openReader(button.dataset.stage, Number(button.dataset.version))
+      .catch(err => toast(`原文暂时无法打开：${err.message || err}`));
+  }
+  // The answer boxes come and go with the stage, so they are bound here rather
+  // than once at load. Only the pane's boxes are in the map — the tray keeps
+  // drafts for stages that are not on screen, and reaches their inputs by a key
+  // that is deliberately absent from it.
+  wireAnswers(host);
+  // After the pane exists, not per block: a picture an artifact names is only
+  // resolvable once `state.materials` is loaded.
+  wireMedia(host);
+  host.scrollTop = kept;
 }
 
 /* ---------------------------------------------------------- the questions -- */
@@ -165,57 +297,208 @@ function renderRail(rail) {
 /* The one part of the page that is a request rather than a record.
  *
  * Every stage writes what it could not settle; until now those went into the
- * document's `limitations` as a disclaimer he scrolled past. They are collected
- * here and stay until the stage is rewritten without them — there is no dismiss
- * button, because a question he has not answered is still open whether or not he
- * has read it.
+ * document's `limitations` as a disclaimer he scrolled past. They stay until the
+ * stage is rewritten without them — there is no dismiss button, because a
+ * question he has not answered is still open whether or not he has read it.
  *
- * The strip itself is never hidden, only the list under it: a count of zero
- * means nothing is waiting, and a count of nine that he has collapsed still says
- * nine.
+ * They are not collected anywhere. A question lives in the stage that asked it,
+ * drawn by `stage.js` under that stage's document, and the rail carries a count
+ * so he can see from anywhere that a stage is holding some. The strip that used
+ * to hold all of them across the top is gone: answers belong next to the
+ * document that raised them, and a strip twenty rows tall had no height limit.
  */
 
-function renderQuestions(tl) {
-  const strip = $("questions");
-  const list = $("questions-list");
-  const questions = tl.questions || [];
-  list.innerHTML = "";
+/* Drafts: what he has written on a question row but not sent.
+ *
+ * Answers accumulate rather than firing one at a time, for two reasons that
+ * point the same way. Sending after the first answer would start an agent turn
+ * against a brief he is still filling in; and every message is an agent turn, so
+ * answering four questions one at a time buys four turns' worth of tokens for
+ * one turn's worth of work.
+ *
+ * Kept in the browser, keyed by the artifact version the question came from —
+ * see `image-review.js` in the old Backlot pilot, which solved the same problem
+ * with a manifest hash. A reworked stage produces new questions, and an answer
+ * written against the old ones must not ride onto the new version: it would name
+ * a question that no longer exists, and the orchestrator would take it at face
+ * value.
+ *
+ * The key itself is `answerKey`, in `stage.js` — see there for why it is not
+ * defined in this file.
+ */
 
-  if (!questions.length) {
-    strip.hidden = true;
-    return;
+function loadDraft() {
+  state.draft = {};
+  try {
+    const raw = localStorage.getItem(`studio-draft:${state.runId}`);
+    const parsed = raw ? JSON.parse(raw) : null;
+    // Anything that is not the shape we wrote is discarded rather than merged:
+    // a half-parsed draft is worse than none, because it would send under a
+    // question it may not belong to.
+    if (parsed && typeof parsed === "object") {
+      for (const [key, value] of Object.entries(parsed)) {
+        if (value && typeof value.text === "string") state.draft[key] = value;
+      }
+    }
+  } catch (err) {
+    state.draft = {};
   }
-  strip.hidden = false;
-
-  const byStage = new Map();
-  for (const q of questions) {
-    if (!byStage.has(q.numbered)) byStage.set(q.numbered, []);
-    byStage.get(q.numbered).push(q);
-  }
-
-  $("questions-count").textContent = `${questions.length} 个问题等你回答`;
-  $("questions-where").textContent = [...byStage.keys()].join(" · ");
-
-  for (const q of questions) {
-    const item = box("div", "q");
-    item.appendChild(box("div", "q-where", q.numbered));
-    item.appendChild(box("div", "q-text", q.question));
-    if (q.blocks) item.appendChild(box("div", "q-blocks", `卡住了：${q.blocks}`));
-    list.appendChild(item);
-  }
-  list.hidden = !state.questionsOpen;
-  $("questions-toggle").setAttribute("aria-expanded", String(state.questionsOpen));
 }
 
-$("questions-toggle").onclick = () => {
-  state.questionsOpen = !state.questionsOpen;
-  $("questions-list").hidden = !state.questionsOpen;
-  $("questions-toggle").setAttribute("aria-expanded", String(state.questionsOpen));
-  $("questions-caret").textContent = state.questionsOpen ? "收起" : "展开";
-};
+function saveDraft() {
+  try {
+    localStorage.setItem(`studio-draft:${state.runId}`, JSON.stringify(state.draft));
+  } catch (err) {
+    // A browser that refuses storage costs him the draft, not the screen.
+  }
+}
+
+/* Keyed, not given the question.
+ *
+ * The input that calls this carries its draft key in an attribute and nothing
+ * else — the question is looked up by it. The alternative was to load the
+ * question onto the element as more attributes, which is the same lookup written
+ * out by hand and one more place for the two to disagree about which question a
+ * box belongs to.
+ */
+function setDraft(key, text) {
+  const q = questionByKey(key);
+  if (!q) return;
+  if (text.trim()) {
+    state.draft[key] = {
+      text,
+      question: q.question,
+      prefix: q.send_prefix || "",
+      stage: q.stage,
+      version: q.version,
+    };
+  } else {
+    delete state.draft[key];
+  }
+  saveDraft();
+  // Only the tray is redrawn. Redrawing the question list here would rebuild the
+  // input he is typing into and take the caret with it.
+  renderDraft();
+}
+
+function draftItems() {
+  return Object.entries(state.draft)
+    .map(([key, value]) => ({ key, ...value }))
+    .filter((it) => it.text.trim());
+}
+
+/* The tray, and the one message the drafts become.
+ *
+ * The header is the server's (`answers_header`) and each line's lead-in is the
+ * server's (`send_prefix`) — this composes, it does not write sentences. Sent
+ * through the same `send()` every typed message goes through: there is still
+ * exactly one way to talk to the agent, and the endpoints did not change.
+ */
+function composeDraft() {
+  const items = draftItems();
+  if (!items.length) return "";
+  const lines = items.map((it) => `${it.prefix}${it.text.trim()}`);
+  if (lines.length === 1) return lines[0];
+  const header = String((state.timeline || {}).answers_header || "").replace(
+    "{n}",
+    String(lines.length)
+  );
+  const numbered = lines.map((line, i) => `${i + 1}. ${line}`);
+  return header ? [header, ...numbered].join("\n") : numbered.join("\n");
+}
+
+function renderDraft() {
+  const host = $("draft");
+  const items = draftItems();
+  host.innerHTML = "";
+  if (!items.length) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+
+  const head = box("div", "draft-head");
+  head.append(
+    box("span", "draft-count", `${items.length} 条待发`),
+    box("span", "draft-note", "一起发出去，主 Agent 一次看到全部")
+  );
+  host.appendChild(head);
+
+  for (const it of items) {
+    const row = box("div", "draft-row");
+    row.appendChild(box("span", "draft-q", it.question));
+    row.appendChild(box("span", "draft-a", it.text.trim()));
+    const undo = box("button", "ghost small", "撤销");
+    undo.type = "button";
+    undo.onclick = () => {
+      delete state.draft[it.key];
+      saveDraft();
+      // The row's own input has to be emptied too — otherwise the text is gone
+      // from the tray and still sitting in the box. Held by reference rather
+      // than looked up, so the list is never rebuilt here: rebuilding it would
+      // take the caret out of whatever else he is typing in.
+      //
+      // Missing is normal and not a problem: the box is only on screen when its
+      // stage is the one being shown, and the tray is global. Undoing an answer
+      // written in another stage drops the draft and has no box to clear.
+      const input = state.draftInputs.get(it.key);
+      if (input) input.value = "";
+      renderDraft();
+    };
+    row.appendChild(undo);
+    host.appendChild(row);
+  }
+
+  const sendBtn = box("button", "primary small", "发送");
+  sendBtn.type = "button";
+  sendBtn.disabled = state.busy;
+  sendBtn.onclick = () => {
+    const text = composeDraft();
+    if (!text || state.busy) return;
+    state.draft = {};
+    saveDraft();
+    renderDraft();
+    // Cleared by rebuilding the pane, which is safe here: he is clicking a
+    // button, not typing.
+    renderPane();
+    send(text);
+  };
+  host.appendChild(sendBtn);
+}
+
+/* Drop drafts whose question no longer exists.
+ *
+ * A draft is an answer to one question in one version of one stage. When the
+ * stage is rewritten the question goes with it, and an answer left behind would
+ * name something that is no longer there — and the orchestrator would take it at
+ * face value.
+ *
+ * THE SET IS EVERY QUESTION THE RUN HAS, NOT THE STAGE ON SCREEN. That is the
+ * one thing this move could quietly break: the pane now draws a single stage, so
+ * "the questions currently drawn" is a strict subset, and pruning against it
+ * would delete every answer he had written in the other three stages the first
+ * time he clicked a rail step.
+ */
+function pruneDrafts(tl) {
+  const questions = tl.questions || [];
+  const live = new Set(questions.map(answerKey));
+  let dropped = false;
+  for (const key of Object.keys(state.draft)) {
+    if (!live.has(key)) {
+      delete state.draft[key];
+      dropped = true;
+    }
+  }
+  if (dropped) saveDraft();
+}
+
+function questionByKey(key) {
+  return ((state.timeline || {}).questions || []).find((q) => answerKey(q) === key) || null;
+}
 
 function renderSpend(tl) {
-  $("spend").textContent = tl.spend_sentence;
+  $("spend").textContent = "用量与费用";
+  $("spend").title = tl.spend_sentence;
   const panel = $("spend-panel");
   const p = tl.budget.pricing;
   panel.innerHTML = "";
@@ -478,33 +761,46 @@ for (const type of ["dragover", "drop"]) {
 
 $("materials-toggle").onclick = () => toggleMaterials();
 $("materials-close").onclick = () => toggleMaterials(false);
+$("conversation-toggle").onclick = () => setConversationOpen(!state.conversationOpen);
 $("viewer-close").onclick = closeViewer;
 $("viewer").addEventListener("click", (e) => {
   if (e.target === $("viewer")) closeViewer();
 });
 
-/* ----------------------------------------------------------- the stream -- */
+/* ------------------------------------------------------ the conversation -- */
 
-function renderStream(tl) {
-  const host = $("stream");
+/* What happened, in order, in a band he can open.
+ *
+ * Demoted, not deleted. Reading one document closely and following the run over
+ * time are two different needs, and every tool measured keeps both views side by
+ * side — Gerrit's Comments tab, Phorge's grouped summary, GitLab's pending list,
+ * Gitea's review blocks in the thread. Only one of them can own the screen, and
+ * the stage owns it because that is where the thing waiting on him is.
+ *
+ * An artifact is one line here, not a card. The document itself is in its stage,
+ * laid out, one rail click away; drawing it a second time inside a band 30% of a
+ * screen tall would give the same document two places to be read and two places
+ * to disagree. The review goes the same way — it is next to the version it is
+ * about, which is the only place it means anything.
+ */
+function renderConversation(tl) {
+  const host = $("conversation-body");
   host.innerHTML = "";
-
-  if (!tl.turns.length) {
-    const empty = box("div", "empty-state");
-    empty.append(
-      box("h2", null, "还没有开始"),
-      box("p", null, "在下面直接说你要做什么。主 Agent 会先跟你把需求问清楚，再决定派谁去做。")
-    );
-    host.appendChild(empty);
-    return;
-  }
+  $("conversation-count").textContent = tl.turns.length
+    ? `${tl.turns.length} 轮`
+    : "还没有对话";
+  setConversationOpen(state.conversationOpen);
 
   for (const turn of tl.turns) host.appendChild(renderTurn(turn));
-  // After the whole stream exists, not per card: a picture an artifact names is
-  // only resolvable once `state.materials` is loaded, and doing it here means
-  // one walk instead of one per card.
-  wireMedia(host);
   if (state.atBottom) host.scrollTop = host.scrollHeight;
+}
+
+function setConversationOpen(open) {
+  state.conversationOpen = open;
+  $("conversation-body").hidden = !open;
+  $("conversation").classList.toggle("open", open);
+  $("conversation-toggle").setAttribute("aria-expanded", String(open));
+  $("conversation-caret").textContent = open ? "收起" : "展开";
 }
 
 function renderTurn(turn) {
@@ -520,9 +816,9 @@ function renderTurn(turn) {
 
   for (const item of turn.items) {
     if (item.kind === "note") wrap.appendChild(renderNote(item));
-    else if (item.kind === "artifact") wrap.appendChild(renderArtifact(item));
+    else if (item.kind === "artifact") wrap.appendChild(renderArtifactLine(item));
     else if (item.kind === "approval") wrap.appendChild(renderApproval(item));
-    else if (item.kind === "decision_request") wrap.appendChild(renderDecision(item));
+    else if (item.kind === "decision_request") wrap.appendChild(renderPendingLine(item));
   }
 
   if (turn.reply) {
@@ -544,62 +840,42 @@ function renderNote(item) {
   return box("div", "note", item.text);
 }
 
-function renderArtifact(item) {
-  const card = box("div", "card artifact");
-  const head = box("div", "card-head");
-  head.append(
-    box("span", "card-title", `${item.numbered} · ${item.version_label}`),
-    box("span", "card-by", `${item.author}交回`)
-  );
-  card.appendChild(head);
-  if (item.summary) card.appendChild(box("p", "card-summary", item.summary));
+/* One artifact, as one line.
+ *
+ * The summary is here and the document is not. A line long enough to hold a
+ * whole summary is a line the CSS truncates, which is the point: the band is for
+ * finding the moment, and 「去看」 is how you go read it.
+ */
+function renderArtifactLine(item) {
+  const line = box("div", "line artifact");
+  line.appendChild(box("span", "line-what", `${item.numbered} · ${item.version_label}`));
+  const by = box("span", "line-by");
+  by.textContent = item.summary ? `${item.author}交回：${item.summary}` : `${item.author}交回`;
+  line.appendChild(by);
+  line.appendChild(goToStage(item.stage));
+  return line;
+}
 
-  // The document itself, laid out, in the stream where he is already looking.
-  // It used to be a summary and a button: the three options, the attributes, the
-  // dependency matrix and the seven open questions were all in the file and none
-  // of them were on the screen without opening a reader and scrolling.
-  if (item.blocks && item.blocks.length) {
-    card.appendChild(blocksElement(item.blocks));
-  } else {
-    // The model produced no shape for this stage, so there is nothing to lay
-    // out. Said out loud rather than left as a suspiciously empty card: a blank
-    // panel and a panel that failed to load look identical otherwise.
-    card.appendChild(box("p", "blk-none", "这一版没有可排版的内容，打开原文看正文。"));
-  }
+/* Something is waiting on him, and it is the only request in the history.
+ *
+ * The offer is repeated here rather than left to the rail: this is the line he
+ * is looking at when he opens the band to find out where the run got to, and a
+ * signpost that only exists in the navigation is a signpost he has to already
+ * know to look for.
+ */
+function renderPendingLine(item) {
+  const line = box("div", "line pending");
+  line.appendChild(box("span", "line-what", "在等你决定"));
+  line.appendChild(box("span", "line-by", `「${item.stage_label}」`));
+  line.appendChild(goToStage(item.stage));
+  return line;
+}
 
-  if (item.questions && item.questions.length) {
-    card.appendChild(
-      box("div", "card-questions",
-        `这一份里还有 ${item.questions.length} 个问题等你回答，在顶部清单里。`)
-    );
-  }
-
-  if (item.review) {
-    const r = item.review;
-    const line = box("div", `review ${r.verdict === "pass" ? "pass" : "return"}`);
-    line.append(box("span", "review-say", r.sentence));
-    if (r.findings.length) {
-      const more = document.createElement("details");
-      more.appendChild(box("summary", null, `看这 ${r.findings.length} 条意见`));
-      for (const f of r.findings) {
-        const fNode = box("div", "finding");
-        if (f.kind) fNode.appendChild(box("span", "finding-kind", f.kind));
-        fNode.appendChild(box("span", "finding-text", f.issue));
-        more.appendChild(fNode);
-      }
-      line.appendChild(more);
-    }
-    card.appendChild(line);
-  } else {
-    card.appendChild(box("div", "review none", "这一版还没有审核过。"));
-  }
-
-  const actions = box("div", "card-actions");
-  const read = box("button", "ghost small", "看原文");
-  read.onclick = () => openReader(item.stage, item.version);
-  actions.appendChild(read);
-  card.appendChild(actions);
-  return card;
+function goToStage(stage) {
+  const go = box("button", "ghost small", "去看");
+  go.type = "button";
+  go.onclick = () => selectStage(stage);
+  return go;
 }
 
 function renderApproval(item) {
@@ -609,77 +885,96 @@ function renderApproval(item) {
   return card;
 }
 
-function renderDecision(item) {
-  const card = box("div", "card decide");
-
-  const head = box("div", "decide-head");
-  head.append(box("span", "decide-mark", "●"), box("span", null, "现在等你决定"));
-  card.appendChild(head);
-
-  card.appendChild(box("p", "decide-headline", item.headline));
-  card.appendChild(box("p", "decide-body", item.body));
-
-  if (item.findings.length) {
-    const more = document.createElement("details");
-    more.appendChild(box("summary", null, `审核提的 ${item.findings.length} 点`));
-    for (const f of item.findings) {
-      const fNode = box("div", "finding");
-      if (f.kind) fNode.appendChild(box("span", "finding-kind", f.kind));
-      fNode.appendChild(box("span", "finding-text", f.issue));
-      more.appendChild(fNode);
-    }
-    card.appendChild(more);
+/* What a click in the gate panel does.
+ *
+ * The markup is `stage.js`'s; the effects are here, and that split is the same
+ * one `blocks.js` uses when it emits `data-media` and stops. Nothing in the
+ * panel knows what a `decide` is, and this file never composes a sentence about
+ * one — the gate's headline, its option labels and the reason each option would
+ * record all arrive written.
+ */
+function wireGate(host) {
+  const gate = host.querySelector(".gate");
+  if (!gate) return;
+  const reason = gate.querySelector(".reason");
+  const key = `studio-decision:${state.runId}:${gate.dataset.stage}:${gate.dataset.sha}`;
+  const status = gate.querySelector(".gate-feedback");
+  let draft = { note: "", option: null, nonce: null };
+  try { draft = { ...draft, ...JSON.parse(localStorage.getItem(key) || "{}") }; } catch {}
+  reason.value = draft.note || "";
+  for (const radio of gate.querySelectorAll('input[name="direction-choice"]')) {
+    radio.checked = radio.value === draft.option;
+    radio.onchange = () => { draft.option = radio.value; draft.nonce = null; save(); };
   }
-
-  const actions = box("div", "card-actions");
-  const read = box("button", "ghost small", "看原文");
-  read.onclick = () => openReader(item.stage, item.version);
-  actions.appendChild(read);
-
-  const reason = box("input", "reason");
-  reason.placeholder = "写一句为什么（会记下来）";
-
-  const approve = box("button", "good small", item.passed ? "通过" : "明知有问题仍然通过");
-  const reject = box("button", "bad small", "退回重做");
-
-  approve.onclick = () => {
-    if (item.passed) return decide(item.stage, "approved", "");
-    // Approving against the reviewer needs a stated reason, and the field only
-    // appears once he has actually asked to do it — otherwise the form reads as
-    // if a reason were required for the normal path too.
-    if (reason.hidden) {
-      reason.hidden = false;
-      approve.textContent = "确认通过";
-      reason.focus();
-      return;
+  function save() {
+    draft.note = reason.value;
+    try { localStorage.setItem(key, JSON.stringify(draft)); status.textContent = "草稿已保存 · 尚未提交"; }
+    catch { status.textContent = "草稿仅暂存在此页，浏览器存储不可用。"; }
+  }
+  reason.oninput = () => { draft.nonce = null; save(); };
+  if (draft.note || draft.option) status.textContent = "已恢复此版本的草稿 · 尚未提交";
+  for (const btn of gate.querySelectorAll('[data-act]')) btn.onclick = async () => {
+    if (state.busy || state.decisionBusy || gate.dataset.saving === "1") return;
+    const decision = btn.dataset.act === "reject" ? "returned" : "approved";
+    const note = reason.value.trim();
+    if ((decision === "returned" || gate.dataset.passed !== "1") && !note) {
+      status.textContent = "请写明需要调整的地方，或覆盖审核的具体理由。"; reason.focus(); return;
     }
-    if (!reason.value.trim()) {
-      toast("要写明理由才能这样通过。", true);
-      return;
+    if (decision === "approved" && gate.querySelector('input[name="direction-choice"]') && !draft.option) {
+      status.textContent = "请先选择一个方向；推荐不代表已选。"; return;
     }
-    decide(item.stage, "approved", reason.value.trim());
+    const runId = state.runId;
+    state.decisionBusy = true;
+    $("run-select").disabled = true; $("send").disabled = true;
+    gate.dataset.saving = "1";
+    for (const control of gate.querySelectorAll('button,input,textarea')) control.disabled = true;
+    const shown = { stage: gate.dataset.stage, expected_version: Number(gate.dataset.version), expected_artifact_sha256: gate.dataset.sha };
+    save(); status.textContent = "正在保存…";
+    try {
+      if (!draft.nonce || draft.decision !== decision) {
+        const query = new URLSearchParams(shown);
+        draft.nonce = (await api(`/api/runs/${runId}/nonce?${query}`, { method: "POST" })).nonce;
+        draft.decision = decision; save();
+      }
+      await api(`/api/runs/${runId}/decision`, {method:"POST",body:JSON.stringify({
+        ...shown, nonce:draft.nonce, decision, note,
+        override_reason: decision === "approved" && gate.dataset.passed !== "1" ? note : "",
+        selected_option_id: decision === "approved" ? draft.option : null,
+      })});
+      try { localStorage.removeItem(key); } catch {}
+      toast(decision === "approved" ? "采用决定已保存，后续可在对话中继续。" : "调整意见已保存。");
+      await refreshTimeline();
+    } catch (err) {
+      const message = String(err.message || err);
+      const explanation = message.includes("version_conflict") ? "这份方案已更新，当前页面不能批准新版本。" : message.includes("in progress") ? "正在生成内容，请完成后再决定。" : message;
+      status.textContent = `${explanation} 草稿仍保留；请载入最新状态后重新阅读。`;
+      if (!gate.querySelector('.gate-reload')) {
+        const reload = box('button','ghost small gate-reload','载入最新状态');
+        reload.onclick = () => refreshTimeline(); gate.appendChild(reload);
+      }
+    } finally {
+      state.decisionBusy = false;
+      $("run-select").disabled = state.busy; $("send").disabled = state.busy;
+      gate.dataset.saving = "0";
+      for (const control of gate.querySelectorAll('button,input,textarea')) control.disabled = false;
+    }
   };
-  reject.onclick = () => decide(item.stage, "returned", reason.hidden ? "" : reason.value.trim());
+}
 
-  reason.hidden = true;
-  actions.append(reason, approve, reject);
-  card.appendChild(actions);
-
-  // The price of what this click opens, printed on the card that asks for the
-  // click — the way Higgsfield prints the cost on its Generate button. Read from
-  // the ledger, said as a past measurement: it is the last time this step ran,
-  // not a forecast.
-  if (item.next_cost_sentence) {
-    const next = box("div", "decide-next");
-    if (item.next_stage_label) {
-      next.appendChild(
-        box("div", "decide-next-what", `通过之后，轮到「${item.next_stage_label}」（${item.next_owner}）`)
-      );
-    }
-    next.appendChild(box("div", "decide-next-cost", item.next_cost_sentence));
-    card.appendChild(next);
+/* The answer boxes in the pane.
+ *
+ * Held by reference so the tray can empty the right one when a draft is undone
+ * without rebuilding the list he may be typing in. Only the boxes on screen are
+ * in the map — one stage's worth — and the tray handles a miss by doing nothing
+ * to a box that is not there.
+ */
+function wireAnswers(host) {
+  state.draftInputs = new Map();
+  for (const input of host.querySelectorAll("[data-draft-key]")) {
+    const key = input.getAttribute("data-draft-key");
+    state.draftInputs.set(key, input);
+    input.oninput = () => setDraft(key, input.value);
   }
-  return card;
 }
 
 function renderMachineDetail(detail) {
@@ -715,25 +1010,6 @@ async function openReader(stage, version) {
   readerState = { stage, version };
   $("reader").hidden = false;
   await loadReader();
-}
-
-/** A rail step. A step with nothing in it says why rather than doing nothing. */
-async function openStage(stage) {
-  const step = (state.rail || []).find((s) => s.stage === stage);
-  if (!step) return;
-
-  if (!step.has_doc) {
-    readerState = { stage, version: null };
-    $("reader").hidden = false;
-    $("reader-title").textContent = `${step.number}${step.label}`;
-    $("reader-sub").textContent = "";
-    $("reader-versions").innerHTML = "";
-    const body = $("reader-body");
-    body.innerHTML = "";
-    body.appendChild(box("p", `blk-none ${step.blank.state}`, step.blank.text));
-    return;
-  }
-  await openReader(stage, step.version);
 }
 
 async function loadReader() {
@@ -825,23 +1101,10 @@ document.addEventListener("keydown", (e) => {
 /* ------------------------------------------------------------ decisions -- */
 
 async function decide(stage, decision, reason) {
-  try {
-    const { nonce } = await api(`/api/runs/${state.runId}/nonce?stage=${stage}`, { method: "POST" });
-    await api(`/api/runs/${state.runId}/decision`, {
-      method: "POST",
-      body: JSON.stringify({
-        stage,
-        nonce,
-        decision,
-        note: decision === "returned" ? reason : "",
-        override_reason: decision === "approved" ? reason : "",
-      }),
-    });
-    toast(decision === "approved" ? "已通过。" : "已退回。");
-    await refreshTimeline();
-  } catch (err) {
-    toast(String(err.message || err), true);
-  }
+  // Decisions are made in the stage panel against its displayed version.
+  state.activeStage = stage;
+  renderPane();
+  toast("请在当前阶段的决策区选择并提交，意见会绑定正在展示的版本。");
 }
 
 /* ----------------------------------------------------------------- chat -- */
@@ -861,26 +1124,39 @@ function liveTurn(userText) {
   reply.hidden = true;
   wrap.appendChild(reply);
 
-  $("stream").appendChild(wrap);
+  $("conversation-body").appendChild(wrap);
   scrollDown();
   return { progress, reply, body };
 }
 
+/* Scrolling belongs to the band now, and only to the band.
+ *
+ * The pane does not follow anything: it holds one stage, and a stage that
+ * rewrites itself under him must not move the text he is reading. A turn
+ * starting while he is scrolled up in the transcript does not yank him to the
+ * bottom either — `state.atBottom` is set by his own scrolling, and only a send
+ * (where he is asking for the reply) forces it back down.
+ */
 function scrollDown() {
-  const host = $("stream");
+  const host = $("conversation-body");
   if (state.atBottom) host.scrollTop = host.scrollHeight;
 }
 
-$("stream").addEventListener("scroll", () => {
-  const host = $("stream");
+$("conversation-body").addEventListener("scroll", () => {
+  const host = $("conversation-body");
   state.atBottom = host.scrollHeight - host.scrollTop - host.clientHeight < 60;
 });
 
 async function send(text) {
-  if (state.busy || !state.runId) return;
+  if (state.busy || state.decisionBusy || !state.runId) return;
   state.busy = true;
   state.atBottom = true;
   $("send").disabled = true;
+
+  // Work he just asked for must not run inside a folded band. Opening it here
+  // rather than leaving it to him is the one place the band forces itself open;
+  // `renderConversation` does not re-close it, so it stays open afterwards.
+  setConversationOpen(true);
 
   const live = liveTurn(text);
   live.progress.appendChild(box("div", "progress-line working", "主 Agent 正在处理…"));
@@ -1052,7 +1328,7 @@ $("run-select").onchange = (e) => selectRun(e.target.value);
   try {
     await loadRuns();
     if (state.runId) await selectRun(state.runId);
-    else $("stream").appendChild(box("p", "empty-state", "还没有项目。点右上角「＋ 新项目」开始。"));
+    else $("stage").appendChild(box("p", "empty-state", "还没有项目。点右上角「＋ 新项目」开始。"));
   } catch (err) {
     toast(String(err.message || err), true);
   }

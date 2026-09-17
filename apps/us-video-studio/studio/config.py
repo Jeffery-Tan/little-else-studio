@@ -14,6 +14,7 @@ switching a role is a config edit, not a code change.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,17 +38,9 @@ ROLES = ("orchestrator", "director", "material", "writer", "reviewer")
 #: Development-period cap, in estimated USD. Jeffery set this on 2026-09-17.
 DEFAULT_BUDGET_LIMIT_USD = 10.0
 
-#: The cap that is actually enforceable today.
-#:
-#: A USD cap can only stop spending if the price is known, and DeepSeek's rate
-#: card has not been confirmed — so ``DEFAULT_PRICING`` carries zero rates and
-#: the USD figure is a report, not a brake. Token counts *are* reported by the
-#: API, so they are the limit that can be enforced right now.
-#:
-#: 2,000,000 tokens for the whole development period. At any plausible rate for
-#: this endpoint that is comfortably inside $10, so hitting it means something
-#: has gone wrong rather than that the budget was spent as intended. Once the
-#: real rate card is filled in, ``budget_limit_usd`` takes over.
+#: Development token soft limit. It stops NEW calls after the recorded total
+#: reaches this threshold; an in-flight call can overshoot it. This is not proof
+#: of staying below $10: unverified rates leave dollar spend unknown.
 DEFAULT_BUDGET_LIMIT_TOKENS = 2_000_000
 
 
@@ -60,24 +53,34 @@ class Pricing:
     """
 
     source: str
-    input_usd_per_mtok: float
-    output_usd_per_mtok: float
+    input_usd_per_mtok: float | None
+    output_usd_per_mtok: float | None
     as_of: str
 
-    def estimate_usd(self, input_tokens: int, output_tokens: int) -> float:
+    @property
+    def known(self) -> bool:
+        return (self.input_usd_per_mtok is not None and self.output_usd_per_mtok is not None
+                and all(math.isfinite(rate) and rate >= 0 for rate in (
+                    self.input_usd_per_mtok, self.output_usd_per_mtok))
+                and (self.input_usd_per_mtok > 0 or self.output_usd_per_mtok > 0)
+                and "placeholder" not in self.source.lower())
+
+    def estimate_usd(self, input_tokens: int, output_tokens: int) -> float | None:
+        if not self.known:
+            return None
         return (
             input_tokens * self.input_usd_per_mtok / 1_000_000
             + output_tokens * self.output_usd_per_mtok / 1_000_000
         )
 
 
-#: Placeholder rate card. It is deliberately *not* presented as DeepSeek's
+#: Unknown rate card. It is deliberately *not* presented as DeepSeek's
 #: real pricing; every ledger row carries ``source`` so the number is auditable.
 #: Replace once the real DeepSeek rate card is confirmed.
 DEFAULT_PRICING = Pricing(
     source="unverified-placeholder: DeepSeek public rate card not confirmed",
-    input_usd_per_mtok=0.0,
-    output_usd_per_mtok=0.0,
+    input_usd_per_mtok=None,
+    output_usd_per_mtok=None,
     as_of="2026-09-17",
 )
 
@@ -100,7 +103,7 @@ class Settings:
     @property
     def usd_cap_is_enforceable(self) -> bool:
         """A zero rate card means the dollar figure cannot stop anything."""
-        return self.pricing.input_usd_per_mtok > 0 or self.pricing.output_usd_per_mtok > 0
+        return self.pricing.known
 
 
 def _read_json(path: Path) -> dict:
@@ -137,19 +140,23 @@ def load_settings(data_root: Path | str | None = None) -> Settings:
         model_by_role[role] = model
 
     pricing_raw = raw.get("pricing") or {}
+    def rate(name):
+        value = pricing_raw.get(name, getattr(DEFAULT_PRICING, name))
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be a finite non-negative number or null")
+        return float(value)
+
     pricing = Pricing(
         source=pricing_raw.get("source", DEFAULT_PRICING.source),
-        input_usd_per_mtok=float(
-            pricing_raw.get("input_usd_per_mtok", DEFAULT_PRICING.input_usd_per_mtok)
-        ),
-        output_usd_per_mtok=float(
-            pricing_raw.get("output_usd_per_mtok", DEFAULT_PRICING.output_usd_per_mtok)
-        ),
+        input_usd_per_mtok=rate("input_usd_per_mtok"),
+        output_usd_per_mtok=rate("output_usd_per_mtok"),
         as_of=pricing_raw.get("as_of", DEFAULT_PRICING.as_of),
     )
 
     limit = raw.get("budget_limit_usd", DEFAULT_BUDGET_LIMIT_USD)
-    if not isinstance(limit, (int, float)) or isinstance(limit, bool) or limit < 0:
+    if not isinstance(limit, (int, float)) or isinstance(limit, bool) or not math.isfinite(limit) or limit < 0:
         raise ValueError("budget_limit_usd must be a non-negative number")
 
     token_limit = raw.get("budget_limit_tokens", DEFAULT_BUDGET_LIMIT_TOKENS)

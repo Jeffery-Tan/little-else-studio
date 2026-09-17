@@ -27,10 +27,30 @@ artifacts on disk, both reviews recorded, the first gate approved, and the
 writing gate sitting open with a `return` on it — so the override path is on
 screen too.
 
+A SECOND RUN sits one step earlier than that: ② is written and its review
+passed, and his click has not happened. That is the only state where the gate
+card grows the option buttons, so the in-place controls cannot be judged
+without it.
+
+A THIRD RUN is finished: all four stages written, both gates approved, nothing
+waiting on him at all. That is the most common state a run is in — he spends
+most of a run not being asked anything — and until it exists in here it is the
+one state nobody can look at. It is also the only one where the rail has no
+`needs` step and the page therefore has to be legible without an amber band
+telling him where to look.
+
+Three runs rather than one, because the three states draw three different pages
+and no one of them can stand in for another:
+
+    preview-layout-01      ④ 的门禁开着（审核退回）— override 路径在这里
+    preview-direction-01   ② 的门禁开着（审核通过）— 选项按钮在这里
+    preview-done-01        四个阶段都完成、两个门都批过 — 没有任何东西在等你
+
     python scripts/seed_preview.py [data-root]
 """
 from __future__ import annotations
 
+import copy
 import shutil
 import sys
 from pathlib import Path
@@ -71,7 +91,7 @@ ROOT = Path(
 )
 
 if ROOT.exists():
-    shutil.rmtree(ROOT)
+    raise SystemExit(f"Refusing to replace existing preview data: {ROOT}; choose a new directory")
 ROOT.mkdir(parents=True)
 
 # The shelf, filled by hand — the first of the two ways in, before the run
@@ -232,7 +252,7 @@ pipeline.record_review(
 )
 
 nonce = pipeline.issue_nonce(RUN, "direction")
-pipeline.record_approval(RUN, "direction", nonce=nonce, decision="approved")
+pipeline.record_approval(RUN, "direction", nonce=nonce, decision="approved", selected_option_id="B")
 
 store.append_chat(RUN, "user", "就 B 走。素材那边你看着办。")
 store.append_chat(RUN, "assistant", "好。让素材统筹把 B 需要的镜头排出来。")
@@ -358,6 +378,236 @@ for role, stage, tokens in [
         estimated_usd=tokens / 1_000_000 * 0.28, pricing_source="预览用的假价目表",
     ))
 
+# ------------------------------------------- run 2: the ② gate still open --
+#
+# ② is written and the review passed; his click has not happened. This is the
+# only state in which `_pending_action` fills in `options`, so it is the only
+# way to look at the option buttons without paying for a run.
+#
+# Written as its own run rather than by rolling run 1 back: run 1 is the state
+# *after* the click and is the only place the override wording appears. Neither
+# run can stand in for the other. The two documents below are the same payloads
+# run 1 uses — deep-copied so a future edit to one run cannot silently change
+# the other's fixture.
+
+RUN_TWO = "preview-direction-01"
+SHELF_TWO = ROOT / "runs" / RUN_TWO / "materials"
+SHELF_TWO.mkdir(parents=True)
+for name in SHOTS:
+    shutil.copy2(PRODUCT / name, SHELF_TWO / name)
+
+store.create_run(RUN_TWO, "保温午餐包 15 秒（②门禁预览）",
+                 "给已采购的保温午餐包做一条 15 秒短视频，投 TikTok Shop 美国线。")
+
+for role, text in [
+    ("user", "先把方向出了，我看完再定。"),
+    ("assistant", "好，让导出去出三条。出来我把三个选项放在门禁卡上给你点。"),
+]:
+    store.append_chat(RUN_TWO, role, text)
+
+attempt = pipeline.start_attempt(RUN_TWO, "intake")
+pipeline.submit(
+    RUN_TWO, "intake", attempt.token,
+    content=(
+        "# intake — 保温午餐包 15 秒（US 线）\n\n"
+        "## 1. 你说的\n\n"
+        "给已经采购的保温午餐包做一条 15 秒的短视频，投 TikTok Shop 美国线。\n\n"
+        "## 2. 未确认（我没有替你填）\n\n"
+        "目标观众、主推 SKU、可售日期、素材情况——四件事没答。\n"
+    ),
+    summary="把你说的话整理成需求记录，四件事没答，单独标出来了。",
+    evidence=["三个颜色、两个容量档、90 件——来自你的消息"],
+    limitations=["可售日期、目标观众、主推 SKU、素材情况均未确认"],
+    structured=copy.deepcopy(intake),
+)
+
+store.append_chat(RUN_TWO, "assistant", "需求整理完了，四件事没答。接着让导出去出方向。")
+
+attempt = pipeline.start_attempt(RUN_TWO, "direction")
+pipeline.submit(
+    RUN_TWO, "direction", attempt.token,
+    content=(
+        "# direction — 午餐包 15 秒（US 线）\n\n"
+        "## 三条选项\n\n"
+        "A 外观即理由 / B 两个容量档的二选一 / C 零物料下限测试。\n\n"
+        "## 推荐：B\n\n理由、代价与两个必须成立的前提见结构化视图。\n\n"
+        "## 未决问题\n\n六条，见结构化视图。\n"
+    ),
+    summary="三个方向摊开比，推荐 B，附两个必须成立的前提和六个没解决的问题。",
+    evidence=["90 件采购（15L 三色各 10、25L 三色各 20），来自 intake"],
+    limitations=["容量是不是真实纠结点，零证据", "有没有官方产品图未确认"],
+    structured=copy.deepcopy(direction),
+)
+
+# A pass, so the card offers the choice. A `return` here would suppress the
+# option buttons on purpose — the gate then asks whether the document stands at
+# all — and run 1 already covers what that card looks like.
+pipeline.record_review(
+    RUN_TWO, "direction", verdict="pass",
+    findings=[
+        {"kind": "unverified", "issue": "B 的素材可行性依赖两个未验证条件：两档官方图拿不拿得到、纯静态图 + 信息卡能不能撑起 15 秒。"},
+        {"kind": "gap", "issue": "三条的成功判据都不可在现阶段验证——没有转化数据。"},
+    ],
+)
+
+# No `record_approval` call, and none is missing: the click is his, and this run
+# exists precisely because it has not happened.
+
+store.append_chat(RUN_TWO, "assistant",
+                  "三条方向好了，审核通过。三个选项我放在门禁卡上了——点一个我就往下派。")
+
+for role, stage, tokens in [
+    ("orchestrator", "intake", 46_120),
+    ("intake", "intake", 11_800),
+    ("director", "direction", 39_240),
+    ("reviewer", "direction", 24_905),
+]:
+    store.append_ledger(RUN_TWO, LedgerEntry(
+        at="2026-09-17T12:00:00Z", run_id=RUN_TWO, role=role, stage=stage,
+        model="deepseek-flash", input_tokens=tokens, output_tokens=0,
+        estimated_usd=tokens / 1_000_000 * 0.28, pricing_source="预览用的假价目表",
+    ))
+
+# ---------------------------------------- run 3: nothing is waiting on him --
+#
+# The state a run spends most of its life in, and the one the rail has no amber
+# step for. Same four documents as run 1, with the ④ gate approved as well — so
+# the difference between this run and run 1 is exactly one click, which is the
+# point.
+
+RUN_THREE = "preview-done-01"
+SHELF_THREE = ROOT / "runs" / RUN_THREE / "materials"
+SHELF_THREE.mkdir(parents=True)
+for name in SHOTS:
+    shutil.copy2(PRODUCT / name, SHELF_THREE / name)
+
+store.create_run(RUN_THREE, "保温午餐包 15 秒（全部完成）",
+                 "给已采购的保温午餐包做一条 15 秒短视频，投 TikTok Shop 美国线。")
+
+for role, text in [
+    ("user", "给已经采购的保温午餐包做一条 15 秒的短视频，投 TikTok Shop 美国线。"),
+    ("assistant", "好，我先让需求整理把你说的话整理成需求记录，没答的单独标出来。"),
+]:
+    store.append_chat(RUN_THREE, role, text)
+
+attempt = pipeline.start_attempt(RUN_THREE, "intake")
+pipeline.submit(
+    RUN_THREE, "intake", attempt.token,
+    content=(
+        "# intake — 保温午餐包 15 秒（US 线）\n\n"
+        "## 1. 你说的\n\n"
+        "给已经采购的保温午餐包做一条 15 秒的短视频，投 TikTok Shop 美国线。\n\n"
+        "## 2. 未确认（我没有替你填）\n\n"
+        "目标观众、主推 SKU、可售日期、素材情况——四件事没答。\n"
+    ),
+    summary="把你说的话整理成需求记录，四件事没答，单独标出来了。",
+    evidence=["三个颜色、两个容量档、90 件——来自你的消息"],
+    limitations=["可售日期、目标观众、主推 SKU、素材情况均未确认"],
+    structured=copy.deepcopy(intake),
+)
+
+store.append_chat(RUN_THREE, "assistant", "需求整理完了，四件事没答。接着让导出去出方向。")
+
+attempt = pipeline.start_attempt(RUN_THREE, "direction")
+pipeline.submit(
+    RUN_THREE, "direction", attempt.token,
+    content=(
+        "# direction — 午餐包 15 秒（US 线）\n\n"
+        "## 三条选项\n\n"
+        "A 外观即理由 / B 两个容量档的二选一 / C 零物料下限测试。\n\n"
+        "## 推荐：B\n\n理由、代价与两个必须成立的前提见结构化视图。\n"
+    ),
+    summary="三个方向摊开比，推荐 B，附两个必须成立的前提和六个没解决的问题。",
+    evidence=["90 件采购（15L 三色各 10、25L 三色各 20），来自 intake"],
+    limitations=["容量是不是真实纠结点，零证据", "有没有官方产品图未确认"],
+    structured=copy.deepcopy(direction),
+)
+
+pipeline.record_review(
+    RUN_THREE, "direction", verdict="pass",
+    findings=[
+        {"kind": "unverified", "issue": "B 的素材可行性依赖两个未验证条件：两档官方图拿不拿得到、纯静态图 + 信息卡能不能撑起 15 秒。"},
+        {"kind": "gap", "issue": "三条的成功判据都不可在现阶段验证——没有转化数据。"},
+    ],
+)
+
+nonce = pipeline.issue_nonce(RUN_THREE, "direction")
+pipeline.record_approval(RUN_THREE, "direction", nonce=nonce, decision="approved", selected_option_id="B")
+
+store.append_chat(RUN_THREE, "user", "就 B 走。素材那边你看着办。")
+store.append_chat(RUN_THREE, "assistant", "好。让素材统筹把 B 需要的镜头排出来。")
+
+attempt = pipeline.start_attempt(RUN_THREE, "material_plan")
+pipeline.submit(
+    RUN_THREE, "material_plan", attempt.token,
+    content=(
+        "# material_plan — B 方案（US 线）\n\n"
+        "## 素材清单\n\n六个镜头：四个用目录里已有的官方图，两个目录里没有。\n\n"
+        "## 缺口\n\n剖面与真人场景没有物料，全片因此没有保温证据。\n"
+    ),
+    summary="六个镜头，四个用目录里已有的官方图，两个没有；没有保温证据。",
+    evidence=["镜头清单对应 direction 的 B 方案", "四个镜头的 file 取自 runs/<id>/materials/ 的实际文件名"],
+    limitations=["剖面与真人场景没有物料，保温只能靠文案声称"],
+    structured=copy.deepcopy(material),
+)
+
+store.append_chat(RUN_THREE, "assistant", "素材排完了：六个镜头，四个用目录里现成的官方图，两个没有。接着写脚本。")
+
+attempt = pipeline.start_attempt(RUN_THREE, "writing")
+pipeline.submit(
+    RUN_THREE, "writing", attempt.token,
+    content=(
+        "# writing — B 方案 15 秒\n\n"
+        "## 分镜\n\n五段，总时长 15 秒。\n\n"
+        "## 假设\n\n两档官方图拿得到、可以拍实拍、不拆包。\n"
+    ),
+    summary="五段分镜铺满 15 秒，开场只给大小差、不喊卖点。",
+    evidence=["镜头结构对应 material_plan 的六个镜头"],
+    limitations=["收尾用的细节图在目录里找不到同名文件，可能拿不到", "全片没有保温证据"],
+    structured=copy.deepcopy(writing),
+)
+
+# A pass here, unlike run 1's return. Run 1 exists to show what an open gate
+# looks like when the reviewer refused the document; this one exists to show
+# what the page looks like when there is nothing to decide at all, so both
+# gates have to be shut.
+pipeline.record_review(
+    RUN_THREE, "writing", verdict="pass",
+    findings=[
+        {"kind": "gap", "issue": "全片不出现保温证据，但产品叫「保温午餐包」。观众看完不知道它保不保温。"},
+        {"kind": "unverified", "issue": "0:13–0:15 挂的那张收尾图，文件名在素材目录里找不到。要么名字写错了，要么图根本不在。"},
+    ],
+)
+
+nonce = pipeline.issue_nonce(RUN_THREE, "writing")
+pipeline.record_approval(
+    RUN_THREE, "writing", nonce=nonce, decision="approved",
+    note="收尾图那张我确认过目录里没有，先按现在这条走，图我回头补。",
+)
+
+store.append_chat(RUN_THREE, "user", "就这样，脚本收了。")
+store.append_chat(RUN_THREE, "assistant",
+                  "四个阶段都定了，两个门你都批过了。这条链路走完，没有下一步在等你。")
+
+for role, stage, tokens in [
+    ("orchestrator", "intake", 48_365),
+    ("intake", "intake", 12_400),
+    ("director", "direction", 37_790),
+    ("reviewer", "direction", 26_253),
+    ("material", "material_plan", 41_820),
+    ("writer", "writing", 52_610),
+    ("reviewer", "writing", 28_140),
+]:
+    store.append_ledger(RUN_THREE, LedgerEntry(
+        at="2026-09-17T12:00:00Z", run_id=RUN_THREE, role=role, stage=stage,
+        model="deepseek-flash", input_tokens=tokens, output_tokens=0,
+        estimated_usd=tokens / 1_000_000 * 0.28, pricing_source="预览用的假价目表",
+    ))
+
 print("seeded:", ROOT)
-print("run   :", RUN)
+print("run 1 :", RUN)
 print("state : ①②③④ 都已产出，①的门禁已通过，④的门禁开着（审核退回）")
+print("run 2 :", RUN_TWO)
+print("state : ①② 已产出，②的门禁开着（审核通过）—— 选项按钮在这里")
+print("run 3 :", RUN_THREE)
+print("state : ①②③④ 都已产出，两个门都批过 —— 没有任何东西在等你")

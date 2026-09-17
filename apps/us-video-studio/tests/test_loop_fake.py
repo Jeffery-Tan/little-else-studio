@@ -11,6 +11,7 @@ import pytest
 from fakes import final_turn, sse, ScriptedModel, text_stream, tool_stream, tool_turn
 from studio.agents.client import (
     LoopResult,
+    ModelError,
     ToolCall,
     Turn,
     Usage,
@@ -54,6 +55,8 @@ def test_thinking_deltas_are_kept_separate_from_the_answer():
         {"type": "content_block_delta", "index": 1,
          "delta": {"type": "text_delta", "text": "the answer"}},
         {"type": "content_block_stop", "index": 1},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 12}},
+        {"type": "message_stop"},
     )
     turn = _parse_stream(lines, "deepseek-flash")
     assert turn.thinking == "weighing options"
@@ -75,8 +78,8 @@ def test_parses_a_tool_call_split_across_fragments():
 
 
 def test_unparsable_tool_input_is_flagged_not_treated_as_empty_args():
-    turn = _parse_stream(tool_stream("toolu_2", "submit_stage", "{not json"), "deepseek-flash")
-    assert "__unparsable_input__" in turn.tool_calls[0].input
+    with pytest.raises(ModelError, match="incomplete tool input"):
+        _parse_stream(tool_stream("toolu_2", "submit_stage", "{not json"), "deepseek-flash")
 
 
 def test_unknown_event_fields_are_ignored_rather_than_crashing():
@@ -174,24 +177,21 @@ def test_a_failing_tool_becomes_an_error_result_and_is_logged():
     assert "prereq" in block["content"]
 
 
-def test_unparsable_input_reaches_the_executor_as_an_error():
-    """A truncated tool call must fail loudly rather than run with empty args."""
-    model = ScriptedModel([
-        _parse_stream(tool_stream("t1", "submit_stage", "{broken"), "deepseek-flash"),
-        final_turn("stopping"),
-    ])
+def test_unparsable_input_never_reaches_the_executor():
+    """An invalid tool message is not an executable assistant turn."""
+    class InvalidToolModel:
+        def complete(self, **kwargs):
+            return _parse_stream(tool_stream("t1", "submit_stage", "{broken"), "deepseek-flash")
 
-    def execute(name, args):
-        if "__unparsable_input__" in args:
-            raise ValueError("tool input did not parse as JSON")
-        return "should not get here"
-
-    result = run_agent_loop(
-        model, model="deepseek-flash", system="s", messages=[{"role": "user", "content": "go"}],
-        tools=[{"name": "submit_stage"}], execute_tool=execute,
-    )
-    assert result.tool_log[0]["ok"] is False
-    assert "did not parse" in result.tool_log[0]["result"]
+    executed = []
+    with pytest.raises(ModelError, match="incomplete tool input"):
+        run_agent_loop(
+            InvalidToolModel(), model="deepseek-flash", system="s",
+            messages=[{"role": "user", "content": "go"}],
+            tools=[{"name": "submit_stage"}],
+            execute_tool=lambda name, args: executed.append((name, args)),
+        )
+    assert executed == []
 
 
 def test_a_truncated_turn_is_continued_rather_than_thrown_away():

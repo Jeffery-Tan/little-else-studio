@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from fakes import ScriptedModel, final_turn, tool_turn
 from studio.config import Pricing, Settings
 from studio.models import STAGES
+from studio.pipeline import Pipeline
 from studio.server import build_app
 from studio.store import Store
 
@@ -103,7 +104,7 @@ def client_factory(tmp_path):
     return box
 
 
-def drive_intake_and_direction(box):
+def drive_intake_and_direction(box, structured=None):
     http = box["http"]
     make_run(http)
     box["model"] = ScriptedModel([
@@ -111,7 +112,9 @@ def drive_intake_and_direction(box):
             "stage": "intake", "content": "需求正文", "summary": "需求整理",
         }),
         tool_turn("t2", "dispatch", {"stage": "direction", "brief": "出两个方向"}),
-        tool_turn("t3", "submit_stage", {"content": "方向正文", "summary": "两个方向"}),
+        tool_turn("t3", "submit_stage", {
+            "content": "方向正文", "summary": "两个方向", "structured": structured,
+        }),
         final_turn("导演：已提交。"),
         final_turn("intake 和 direction 都好了，等审核。"),
     ])
@@ -121,6 +124,18 @@ def drive_intake_and_direction(box):
     assert events[-1]["type"] == "done"
 
 
+def shown(http, stage="direction"):
+    latest = next(s for s in http.get(f"/api/runs/{RUN}/state").json()["stages"]
+                  if s["stage"] == stage)["latest"]
+    return {"expected_artifact_sha256": latest["sha256"], "expected_version": latest["version"]}
+
+
+def nonce_for(http):
+    response = http.post(f"/api/runs/{RUN}/nonce", params={"stage": "direction", **shown(http)})
+    assert response.status_code == 200, response.text
+    return response.json()["nonce"]
+
+
 def test_approval_requires_a_nonce_issued_for_that_stage(client_factory):
     box = client_factory
     drive_intake_and_direction(box)
@@ -128,17 +143,17 @@ def test_approval_requires_a_nonce_issued_for_that_stage(client_factory):
 
     # No nonce at all.
     res = http.post(f"/api/runs/{RUN}/decision", json={
-        "stage": "direction", "nonce": "", "decision": "approved",
+        **shown(http), "stage": "direction", "nonce": "", "decision": "approved",
     })
-    assert res.status_code == 400
+    assert res.status_code == 409
     assert "not valid" in res.json()["detail"]
 
     # A nonce minted for the other gated stage.
-    other = http.post(f"/api/runs/{RUN}/nonce?stage=writing").json()["nonce"]
+    other = nonce_for(http)
     res = http.post(f"/api/runs/{RUN}/decision", json={
-        "stage": "direction", "nonce": other, "decision": "approved",
+        **shown(http), "stage": "writing", "nonce": other, "decision": "approved",
     })
-    assert res.status_code == 400
+    assert res.status_code == 409
 
     assert http.get(f"/api/runs/{RUN}/state").json()["stages"][1]["approval"] is None
 
@@ -148,16 +163,16 @@ def test_approval_requires_a_passing_review_or_a_named_override(client_factory):
     drive_intake_and_direction(box)
     http = box["http"]
 
-    nonce = http.post(f"/api/runs/{RUN}/nonce?stage=direction").json()["nonce"]
+    nonce = nonce_for(http)
     res = http.post(f"/api/runs/{RUN}/decision", json={
-        "stage": "direction", "nonce": nonce, "decision": "approved",
+        **shown(http), "stage": "direction", "nonce": nonce, "decision": "approved",
     })
-    assert res.status_code == 400
+    assert res.status_code == 409
     assert "override" in res.json()["detail"]
 
-    nonce = http.post(f"/api/runs/{RUN}/nonce?stage=direction").json()["nonce"]
+    nonce = nonce_for(http)
     res = http.post(f"/api/runs/{RUN}/decision", json={
-        "stage": "direction", "nonce": nonce, "decision": "approved",
+        **shown(http), "stage": "direction", "nonce": nonce, "decision": "approved",
         "override_reason": "我自己读过，可以上",
     })
     assert res.status_code == 200
@@ -175,23 +190,104 @@ def test_a_nonce_cannot_be_spent_twice(client_factory):
     drive_intake_and_direction(box)
     http = box["http"]
 
-    nonce = http.post(f"/api/runs/{RUN}/nonce?stage=direction").json()["nonce"]
+    nonce = nonce_for(http)
     first = http.post(f"/api/runs/{RUN}/decision", json={
-        "stage": "direction", "nonce": nonce, "decision": "returned", "note": "再看看",
+        **shown(http), "stage": "direction", "nonce": nonce, "decision": "returned", "note": "再看看",
     })
     assert first.status_code == 200
     second = http.post(f"/api/runs/{RUN}/decision", json={
-        "stage": "direction", "nonce": nonce, "decision": "approved",
+        **shown(http), "stage": "direction", "nonce": nonce, "decision": "approved",
         "override_reason": "same nonce again",
     })
-    assert second.status_code == 400
+    assert second.status_code == 409
+
+
+def test_a_return_with_no_note_is_refused_by_the_route(client_factory):
+    """The rule reaches the screen as a 400, not only as a Python exception.
+
+    The screen asks for the note first (see `wireGate` in app.js), but a stale
+    page or a replayed request goes straight to the route — so the route is
+    where the rule has to hold, and this is the test that says it does. A note
+    of spaces is not a note: that is what gets typed into a required field when
+    the field is the only thing in the way.
+    """
+    box = client_factory
+    drive_intake_and_direction(box)
+    http = box["http"]
+
+    for note in ("", "   "):
+        nonce = nonce_for(http)
+        res = http.post(f"/api/runs/{RUN}/decision", json={
+            **shown(http), "stage": "direction", "nonce": nonce, "decision": "returned", "note": note,
+        })
+        assert res.status_code == 409, f"{note!r} should not be an acceptable return"
+        assert "note" in res.json()["detail"]
+
+    nonce = nonce_for(http)
+    ok = http.post(f"/api/runs/{RUN}/decision", json={
+        **shown(http), "stage": "direction", "nonce": nonce, "decision": "returned",
+        "note": "开场缺了容量对比",
+    })
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["note"] == "开场缺了容量对比"
 
 
 def test_an_ungated_stage_has_no_nonce(client_factory):
     box = client_factory
     http = box["http"]
     make_run(http)
-    assert http.post(f"/api/runs/{RUN}/nonce?stage=intake").status_code == 400
+    assert http.post(f"/api/runs/{RUN}/nonce", params={"stage": "intake", "expected_artifact_sha256": "0" * 64, "expected_version": 1}).status_code == 400
+
+
+#: ② the shape the gate card grows buttons from: three options, one recommended.
+DIRECTION_PAYLOAD = {
+    "options": [
+        {"key": "A", "claim": "通勤路上八秒看懂"},
+        {"key": "B", "claim": "办公室午饭场景"},
+        {"key": "C", "claim": "容量实测"},
+    ],
+    "recommended": "推荐 B",
+}
+
+
+def test_the_note_the_gate_card_offers_is_the_decision_the_route_records(client_factory):
+    """②'s button and the approval row, held together end to end.
+
+    The note is read off the timeline the screen draws and posted back verbatim.
+    The card and the decision route are different layers, so a note the card
+    offers but the route refuses would be a button that silently does nothing —
+    the only way to catch that is to run both ends against each other.
+    """
+    box = client_factory
+    drive_intake_and_direction(box, structured=DIRECTION_PAYLOAD)
+    http = box["http"]
+    # The review is its own agent turn with its own scripted model; recording
+    # the verdict directly is what `request_review` ends up doing, and it keeps
+    # this test about the gate rather than about the reviewer.
+    Pipeline(Store(box["tmp_path"])).record_review(
+        RUN, "direction", verdict="pass", findings=[]
+    )
+
+    pending = http.get(f"/api/runs/{RUN}/timeline").json()["pending"]
+    assert pending["stage"] == "direction", "the gate is open on the stage with a choice"
+    assert [o["key"] for o in pending["options"]] == ["A", "B", "C"]
+    option = next(o for o in pending["options"] if not o["recommended"])
+
+    nonce = nonce_for(http)
+    res = http.post(f"/api/runs/{RUN}/decision", json={
+        **shown(http), "stage": "direction", "nonce": nonce,
+        "decision": "approved", "selected_option_id": option["key"],
+    })
+    assert res.status_code == 200, res.text
+    assert res.json()["decision"] == "approved"
+    state = http.get(f"/api/runs/{RUN}/state").json()
+    assert state["stages"][1]["approval"]["selected_option_id"] == option["key"]
+    assert state["next_stage"] == "material_plan"
+
+    # And the choice is legible afterwards, on the record he scrolls past.
+    turns = http.get(f"/api/runs/{RUN}/timeline").json()["turns"]
+    approvals = [i for t in turns for i in t["items"] if i["kind"] == "approval"]
+    assert option["key"] in approvals[-1]["sentence"]
 
 
 # ----------------------------------------------------------- conversation -- #
@@ -505,3 +601,40 @@ def test_a_chinese_filename_survives_upload_and_download(client):
 
 def test_materials_need_a_real_run(client):
     assert client.get("/api/runs/no-such-run/materials").status_code == 404
+
+
+def test_decision_routes_require_the_displayed_version(client_factory):
+    box = client_factory
+    drive_intake_and_direction(box)
+    http = box["http"]
+    assert http.post(f"/api/runs/{RUN}/nonce?stage=direction").status_code == 422
+    assert http.post(f"/api/runs/{RUN}/decision", json={
+        "stage": "direction", "nonce": "missing", "decision": "approved",
+    }).status_code == 422
+    expected = shown(http)
+    nonce = nonce_for(http)
+    pipeline = Pipeline(Store(box["tmp_path"]))
+    attempt = pipeline.start_attempt(RUN, "direction")
+    pipeline.submit(RUN, "direction", attempt.token, content="new version", summary="new")
+    res = http.post(f"/api/runs/{RUN}/decision", json={
+        **expected, "stage": "direction", "nonce": nonce, "decision": "approved",
+        "override_reason": "read the old version",
+    })
+    assert res.status_code == 409
+    assert "version_conflict" in res.text
+    assert not pipeline.store.list_approvals(RUN, "direction")
+
+
+def test_configured_endpoint_is_used_for_actual_client_construction(tmp_path, monkeypatch):
+    import studio.server as server
+    seen = []
+    monkeypatch.setattr(server, "credentials", lambda: ("https://ignored.invalid", "test-only"))
+    def client(base_url, token, **kwargs):
+        seen.append(base_url)
+        return ScriptedModel([final_turn("done")])
+    monkeypatch.setattr(server, "AnthropicCompatClient", client)
+    http = TestClient(build_app(settings_for(tmp_path)))
+    make_run(http)
+    res = http.post(f"/api/runs/{RUN}/message", json={"text": "test"})
+    assert stream_events(res)[-1]["type"] == "done"
+    assert seen == ["https://example.invalid/anthropic"]

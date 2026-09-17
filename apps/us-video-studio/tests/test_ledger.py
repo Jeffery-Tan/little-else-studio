@@ -140,7 +140,9 @@ def test_a_zero_rate_card_is_reported_as_not_enforceable(tmp_path):
     # Even after a large spend, the USD cap does not fire — and says so.
     ledger.record(RUN, role="director", stage="direction", model="deepseek-flash",
                   input_tokens=5_000_000, output_tokens=0)
-    assert ledger.spent_usd(RUN) == 0.0
+    assert ledger.spent_usd(RUN) is None
+    assert ledger.totals(RUN).unknown_cost_calls == 1
+    assert ledger.totals(RUN).known_estimated_usd == 0.0
     assert settings.usd_cap_is_enforceable is False
 
 

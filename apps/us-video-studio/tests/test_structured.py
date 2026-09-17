@@ -164,7 +164,7 @@ def test_an_overlong_cell_is_truncated_rather_than_refused():
     assert len(out.data["constraints"][0]) == s.MAX_CELL
 
 
-# ------------------------------------------------- the two interface helpers -- #
+# ------------------------------------------------- the three interface helpers -- #
 
 
 def test_open_questions_come_back_tagged_with_their_stage():
@@ -207,6 +207,66 @@ def test_an_unrecognised_material_status_is_kept_verbatim():
     out = s.normalize("material_plan", {"items": [{"shot": "x", "status": "待定"}]})
     assert out.data["items"][0]["status"] == "待定"
     assert s.blocked_material(out.data) == [], "but it is not one of the blocked ones"
+
+
+def _direction(recommended, keys=("A", "B", "C")):
+    return s.normalize("direction", {
+        "options": [{"key": k, "claim": f"{k} 的主张"} for k in keys],
+        "recommended": recommended,
+    }).data
+
+
+def test_direction_options_come_back_in_the_order_they_were_written():
+    """What the gate card draws its buttons from.
+
+    The order is the document's order: the option he reads first on the card is
+    the option whose button is first, so the two cannot be read as disagreeing
+    about which one is which.
+    """
+    found = s.direction_options(_direction("推荐 B"))
+    assert [(o["key"], o["recommended"]) for o in found] == [
+        ("A", False), ("B", True), ("C", False),
+    ]
+
+
+def test_one_option_is_not_a_choice():
+    """「就按 A 走」 beside nothing else is the plain 通过 button with a worse name."""
+    assert s.direction_options(_direction("推荐 A", keys=("A",))) == [{"key": "A", "recommended": True}]
+
+
+def test_an_unreadable_recommendation_leaves_no_option_to_single_out():
+    """Same give-up as the highlight, for the same reason — see ``_chosen``.
+
+    「A 和 B 都行」 names both, so no button can claim the director's backing.
+    """
+    assert all(not o["recommended"] for o in s.direction_options(_direction("A 和 B 都行，看你想要哪个")))
+    assert len(s.direction_options(_direction(""))) == 3
+
+
+def test_a_recommendation_naming_an_option_that_was_never_laid_out_is_ignored():
+    """The buttons and the recorded reason both quote the recommendation.
+
+    If it names something not on the card, the reason for the rework would read
+    「导演推荐的是 」 — a blank where an author should be.
+    """
+    out = s.normalize("direction", {
+        "options": [{"key": "A", "claim": "x"}, {"key": "B", "claim": "y"}],
+        "recommended": "推荐 C",
+    })
+    assert s.direction_options(out.data) == [{"key": "A", "recommended": False}, {"key": "B", "recommended": False}]
+
+
+def test_an_option_with_no_key_does_not_become_a_blank_button():
+    out = s.normalize("direction", {
+        "options": [{"key": "A", "claim": "x"}, {"key": "B", "claim": "y"}, {"claim": "z"}],
+        "recommended": "推荐 A",
+    })
+    assert [o["key"] for o in s.direction_options(out.data)] == ["A", "B"]
+
+
+def test_an_empty_direction_payload_offers_nothing():
+    assert s.direction_options({}) == []
+    assert s.direction_options(None) == []
 
 
 # ---------------------------------------------------------- the view model -- #

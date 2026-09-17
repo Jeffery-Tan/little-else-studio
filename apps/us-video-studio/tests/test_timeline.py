@@ -15,6 +15,7 @@ import pytest
 import studio.ledger
 import studio.pipeline
 import studio.store
+from studio import vocabulary as v
 from studio.config import Pricing, Settings
 from studio.ledger import Ledger
 from studio.pipeline import Pipeline
@@ -70,9 +71,10 @@ def write_intake(pipeline, text="需求：保温袋，15 秒短视频。"):
     return pipeline.submit(RUN, "intake", attempt.token, content=text, summary="intake 整理完毕")
 
 
-def write_direction(pipeline, text="# 三条方向\n\n- A\n- B", summary="三个方向"):
+def write_direction(pipeline, text="# 三条方向\n\n- A\n- B", summary="三个方向", structured=None):
     attempt = pipeline.start_attempt(RUN, "direction")
-    return pipeline.submit(RUN, "direction", attempt.token, content=text, summary=summary)
+    return pipeline.submit(RUN, "direction", attempt.token, content=text, summary=summary,
+                           structured=structured)
 
 
 def timeline(store, pipeline, ledger):
@@ -275,6 +277,114 @@ def test_a_returned_stage_asks_him_in_its_own_words(env):
     assert "仍然通过" in pending["body"]
     assert "理由" in pending["body"], "the cost of the override is stated up front"
     assert [f["issue"] for f in pending["findings"]] == ["主推 SKU 没定"]
+
+
+#: Three options with a readable recommendation — the document shape ② is
+#: supposed to produce. `write_direction`'s default text has none.
+THREE_WAY = {
+    "options": [
+        {"key": "A", "claim": "通勤路上八秒看懂"},
+        {"key": "B", "claim": "办公室午饭场景"},
+        {"key": "C", "claim": "容量实测"},
+    ],
+    "recommended": "推荐 B",
+}
+
+
+def test_the_gate_card_offers_the_options_the_document_actually_lays_out(env):
+    """② is a choice, so its gate asks *which one*, not yes-or-no.
+
+    The buttons are built from the same payload the cards are drawn from, so a
+    button cannot name an option the document does not contain. What is asserted
+    is what he reads: one button keeps the director's pick, the others send it
+    back, and the card says which is which instead of leaving it to memory.
+    """
+    store, pipeline, ledger = env
+    store.append_chat(RUN, "user", "出个方向。")
+    write_intake(pipeline)
+    write_direction(pipeline, structured=THREE_WAY)
+    pipeline.record_review(RUN, "direction", verdict="pass", findings=[])
+
+    pending = timeline(store, pipeline, ledger)["pending"]
+    assert pending["stage"] == "direction"
+    assert [o["key"] for o in pending["options"]] == ["A", "B", "C"]
+    assert [o["recommended"] for o in pending["options"]] == [False, True, False]
+    assert pending["options"][1]["label"] == v.option_button_label("B", True)
+    assert pending["options_hint"], "without the hint the two clicks are a rule to remember"
+
+
+def test_a_button_that_is_not_the_recommendation_says_what_it_will_record(env):
+    """The reason is written into the approval row, so it is visible before he clicks.
+
+    He is about to send work back; the note that gets recorded should be the
+    one he can read on the button rather than a surprise in the history.
+    """
+    store, pipeline, ledger = env
+    store.append_chat(RUN, "user", "出个方向。")
+    write_intake(pipeline)
+    write_direction(pipeline, structured=THREE_WAY)
+    pipeline.record_review(RUN, "direction", verdict="pass", findings=[])
+
+    pending = timeline(store, pipeline, ledger)["pending"]
+    other = next(o for o in pending["options"] if o["key"] == "A")
+    assert "return_note" not in other
+    assert other["label"] == "方向 A"
+
+    # The recommended button approves; it never returns. A note on it could
+    # only read 「改用 B（导演推荐的是 B）」, so it carries none.
+    keep = next(o for o in pending["options"] if o["recommended"])
+    assert "return_note" not in keep
+
+
+def test_a_rejected_document_offers_no_options(env):
+    """Offering 「改用 A」 on a document the reviewer just rejected would be the
+    screen routing around the review. The question there is whether the document
+    stands at all, and that answer stays 退回重做 or an explicit override.
+    """
+    store, pipeline, ledger = env
+    store.append_chat(RUN, "user", "出个方向。")
+    write_intake(pipeline)
+    write_direction(pipeline, structured=THREE_WAY)
+    pipeline.record_review(
+        RUN, "direction", verdict="return", findings=[{"kind": "gap", "issue": "主推 SKU 没定"}]
+    )
+
+    pending = timeline(store, pipeline, ledger)["pending"]
+    assert pending["passed"] is False
+    assert len(pending["options"]) == 3
+    assert pending["options_hint"]
+    assert pending["passed"] is False
+
+
+def test_a_document_with_no_readable_recommendation_offers_no_options(env):
+    """「A 和 B 都行」 is not a recommendation, so there is nothing to go with."""
+    store, pipeline, ledger = env
+    store.append_chat(RUN, "user", "出个方向。")
+    write_intake(pipeline)
+    write_direction(pipeline, structured={
+        "options": THREE_WAY["options"],
+        "recommended": "A 和 B 都行，看你想要哪个",
+    })
+    pipeline.record_review(RUN, "direction", verdict="pass", findings=[])
+
+    pending = timeline(store, pipeline, ledger)["pending"]
+    assert len(pending["options"]) == 3
+    assert pending["options_hint"]
+    assert pending["passed"] is True
+    assert all(not o["recommended"] for o in pending["options"])
+
+
+def test_a_gate_on_a_stage_without_a_choice_keeps_its_plain_buttons(env):
+    """Every pending card carries the key; only ② ever puts anything in it."""
+    store, pipeline, ledger = env
+    store.append_chat(RUN, "user", "出个方向。")
+    write_intake(pipeline)
+    write_direction(pipeline)
+    pipeline.record_review(RUN, "direction", verdict="pass", findings=[])
+
+    pending = timeline(store, pipeline, ledger)["pending"]
+    assert "options" in pending, "the screen reads this key unconditionally"
+    assert pending["options"] == []
 
 
 def test_a_returned_version_still_reaches_him_as_a_card(env):

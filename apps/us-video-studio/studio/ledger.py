@@ -1,23 +1,24 @@
-"""Cost ledger.
+"""Append-only per-attempt intent and settlement journal.
 
-The one thing this module refuses to do is pretend a dollar figure is a fact.
-
-* ``input_tokens`` / ``output_tokens`` come from the API response. They are facts.
-* ``estimated_usd`` is computed from a ``Pricing`` record and is always stored
-  next to ``pricing_source``, so any reader can see which rate card produced it.
-
-The spend cap is checked *before* a call is made. That is the only moment the
-cap can actually prevent spending; after a call returns the money is already
-gone.
+Limits stop new calls after a recorded threshold; they are soft limits, not a
+reservation or a guaranteed maximum bill. Incomplete usage blocks new calls
+until explicit reconciliation against provider evidence.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+import threading
+import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .config import Settings
 from .models import BudgetExceeded, LedgerEntry, utcnow
 from .store import Store
+
+_JOURNAL_LOCK = threading.RLock()
+_ACTIVE_CALL = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -25,15 +26,31 @@ class Totals:
     calls: int
     input_tokens: int
     output_tokens: int
-    estimated_usd: float
+    estimated_usd: float | None
+    known_estimated_usd: float = 0.0
+    unknown_calls: int = 0
+    unknown_cost_calls: int = 0
+    pending_calls: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "calls": self.calls,
-            "input_tokens": self.input_tokens,
+            "calls": self.calls, "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
-            "estimated_usd": round(self.estimated_usd, 6),
+            "estimated_usd": round(self.estimated_usd, 6) if self.estimated_usd is not None else None,
+            "known_estimated_usd": round(self.known_estimated_usd, 6),
+            "unknown_calls": self.unknown_calls, "unknown_cost_calls": self.unknown_cost_calls,
+            "pending_calls": self.pending_calls,
         }
+
+
+def _totals(rows: list[LedgerEntry]) -> Totals:
+    unknown = sum(r.usage_status != "known" or r.call_status == "pending" for r in rows)
+    unknown_cost = sum(r.estimated_usd is None for r in rows)
+    known_cost = sum(r.estimated_usd or 0.0 for r in rows)
+    return Totals(len(rows), sum(r.input_tokens or 0 for r in rows),
+                  sum(r.output_tokens or 0 for r in rows),
+                  None if unknown_cost else known_cost, known_cost, unknown, unknown_cost,
+                  sum(r.call_status == "pending" for r in rows))
 
 
 class Ledger:
@@ -41,171 +58,214 @@ class Ledger:
         self.store = store
         self.settings = settings
 
-    # ---------------------------------------------------------------- write --
+    @contextmanager
+    def call_guard(self):
+        """OS lease for a live request, released automatically on process exit.
 
-    def record(
-        self,
-        run_id: str,
-        *,
-        role: str,
-        stage: str,
-        model: str,
-        input_tokens: int,
-        output_tokens: int,
-        stop_reason: str = "",
-        request_id: str = "",
-        ok: bool = True,
-        error: str = "",
-    ) -> LedgerEntry:
-        pricing = self.settings.pricing
-        entry = LedgerEntry(
-            at=utcnow(),
-            run_id=run_id,
-            role=role,
-            stage=stage,
-            model=model,
-            input_tokens=int(input_tokens),
-            output_tokens=int(output_tokens),
-            estimated_usd=pricing.estimate_usd(int(input_tokens), int(output_tokens)),
-            pricing_source=pricing.source,
-            stop_reason=stop_reason,
-            request_id=request_id,
-            ok=ok,
-            error=error,
-        )
+        Reconciliation uses the same lease, so it cannot clear an intent while
+        its original HTTP request is still running.
+        """
+        if not _ACTIVE_CALL.acquire(blocking=False):
+            raise BudgetExceeded("a model call is still active; wait for it to stop before spending or reconciling")
+        handle = None
+        acquired = False
+        try:
+            self.settings.data_root.mkdir(parents=True, exist_ok=True)
+            handle = open(self.settings.data_root / ".model-call.lock", "a+b")
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except OSError as exc:
+                raise BudgetExceeded("another process has an active model call; stop or await it before reconciliation") from exc
+            yield
+        finally:
+            if handle is not None:
+                if acquired:
+                    handle.seek(0)
+                    if os.name == "nt":
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                handle.close()
+            _ACTIVE_CALL.release()
+
+    @contextmanager
+    def _locked(self):
+        # OS lock is released on process death. The durable pending journal row
+        # survives, so restarting cannot silently repeat an interrupted call.
+        with _JOURNAL_LOCK:
+            root = self.settings.data_root
+            root.mkdir(parents=True, exist_ok=True)
+            with open(root / ".ledger.lock", "a+b") as handle:
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"0")
+                    handle.flush()
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    handle.seek(0)
+                    if os.name == "nt":
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def _append(self, run_id: str, entry: LedgerEntry):
         self.store.append_ledger(run_id, entry)
+        with open(self.store.run_dir(run_id) / "ledger.jsonl", "ab") as handle:
+            os.fsync(handle.fileno())
+
+    def entries(self, run_id: str | None = None) -> list[LedgerEntry]:
+        """Effective calls, collapsing journal revisions without counting twice.
+
+        Legacy failed calls have no trustworthy zero-token measurement. Their
+        stable synthetic IDs let an operator reconcile them without rewriting.
+        """
+        if run_id is None:
+            return [r for run in self.store.list_runs() for r in self.entries(run.run_id)]
+        effective: dict[str, LedgerEntry] = {}
+        for index, row in enumerate(self.store.read_ledger(run_id)):
+            key = row.call_id or f"legacy-{index + 1}"
+            usage_status = row.usage_status
+            if usage_status == "legacy":
+                usage_status = "known" if row.ok and row.input_tokens is not None and row.output_tokens is not None else "unknown"
+            cost = row.estimated_usd
+            if usage_status != "known" or "placeholder" in row.pricing_source.lower() or (
+                row.usage_status == "legacy" and cost == 0 and (row.input_tokens or row.output_tokens)
+            ):
+                cost = None
+            effective[key] = replace(row, call_id=key, usage_status=usage_status, estimated_usd=cost)
+        return list(effective.values())
+
+    def record(self, run_id: str, *, role: str, stage: str, model: str,
+               input_tokens: int | None, output_tokens: int | None,
+               stop_reason: str = "", request_id: str = "", ok: bool = True,
+               error: str = "", usage_status: str | None = None,
+               call_id: str = "", call_status: str = "settled",
+               resolution_note: str = "") -> LedgerEntry:
+        for value in (input_tokens, output_tokens):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                raise ValueError("token counts must be non-negative whole numbers or null")
+        status = usage_status or ("known" if ok and input_tokens is not None and output_tokens is not None else "unknown")
+        if status not in {"known", "partial", "unknown"}:
+            raise ValueError("invalid usage_status")
+        if status == "known" and (input_tokens is None or output_tokens is None):
+            raise ValueError("known usage requires both counts")
+        cost = self.settings.pricing.estimate_usd(input_tokens, output_tokens) if status == "known" else None
+        entry = LedgerEntry(at=utcnow(), run_id=run_id, role=role, stage=stage, model=model,
+                            input_tokens=input_tokens, output_tokens=output_tokens,
+                            estimated_usd=cost, pricing_source=self.settings.pricing.source,
+                            stop_reason=stop_reason, request_id=request_id, ok=ok, error=error,
+                            usage_status=status, call_id=call_id, call_status=call_status,
+                            resolution_note=resolution_note)
+        self._append(run_id, entry)
         return entry
 
-    # ----------------------------------------------------------------- read --
+    def begin_call(self, run_id: str, *, role: str, stage: str, model: str) -> str:
+        with self._locked():
+            self.store.read_run(run_id)
+            self.ensure_within_budget()
+            call_id = str(uuid.uuid4())
+            self.record(run_id, role=role, stage=stage, model=model, input_tokens=None,
+                        output_tokens=None, ok=False, usage_status="unknown",
+                        call_id=call_id, call_status="pending")
+            return call_id
+
+    def settle_call(self, run_id: str, call_id: str, *, input_tokens: int | None,
+                    output_tokens: int | None, usage_status: str, ok: bool,
+                    stop_reason: str = "", error: str = "") -> LedgerEntry:
+        with self._locked():
+            row = next((r for r in self.entries(run_id) if r.call_id == call_id), None)
+            if row is None or row.call_status != "pending":
+                raise ValueError("call has no unsettled intent")
+            return self.record(run_id, role=row.role, stage=row.stage, model=row.model,
+                               input_tokens=input_tokens, output_tokens=output_tokens,
+                               usage_status=usage_status, call_id=call_id, ok=ok,
+                               stop_reason=stop_reason, error=error)
+
+    def reconcile(self, run_id: str, call_id: str, *, input_tokens: int,
+                  output_tokens: int, evidence_note: str) -> LedgerEntry:
+        """Explicit local operator action; counts must come from provider evidence.
+
+        This records accounting only. It never retries a request or turns a
+        failed role execution into a successful creative artifact.
+        """
+        if not isinstance(evidence_note, str) or not evidence_note.strip():
+            raise ValueError("provider evidence note is required")
+        with self.call_guard(), self._locked():
+            row = next((r for r in self.entries(run_id) if r.call_id == call_id), None)
+            if row is None or row.usage_status == "known":
+                raise ValueError("call is not awaiting reconciliation")
+            return self.record(run_id, role=row.role, stage=row.stage, model=row.model,
+                               input_tokens=input_tokens, output_tokens=output_tokens,
+                               usage_status="known", call_id=call_id, call_status="reconciled",
+                               ok=False, stop_reason=row.stop_reason, error=row.error,
+                               resolution_note=evidence_note.strip())
 
     def totals(self, run_id: str | None = None) -> Totals:
-        """Totals for one run, or across every run when ``run_id`` is None."""
-        if run_id is not None:
-            rows = self.store.read_ledger(run_id)
-        else:
-            rows = [
-                row
-                for run in self.store.list_runs()
-                for row in self.store.read_ledger(run.run_id)
-            ]
-        return Totals(
-            calls=len(rows),
-            input_tokens=sum(r.input_tokens for r in rows),
-            output_tokens=sum(r.output_tokens for r in rows),
-            estimated_usd=sum(r.estimated_usd for r in rows),
-        )
+        return _totals(self.entries(run_id))
 
-    def spent_usd(self, run_id: str | None = None) -> float:
+    def spent_usd(self, run_id: str | None = None) -> float | None:
         return self.totals(run_id).estimated_usd
 
-    def remaining_usd(self, run_id: str | None = None) -> float:
-        return max(0.0, self.settings.budget_limit_usd - self.spent_usd(run_id))
+    def remaining_usd(self, run_id: str | None = None) -> float | None:
+        spent = self.spent_usd(run_id)
+        return max(0.0, self.settings.budget_limit_usd - spent) if spent is not None and self.settings.pricing.known else None
 
-    def remaining_tokens(self) -> int:
+    def remaining_tokens(self) -> int | None:
         totals = self.totals()
+        if totals.unknown_calls:
+            return None
         return max(0, self.settings.budget_limit_tokens - totals.input_tokens - totals.output_tokens)
 
     def last_stage_cost(self, role: str, stage: str) -> dict[str, Any] | None:
-        """What this role's work on this stage cost the last time it ran.
-
-        Across every run, not just this one: a run that has not reached a stage
-        yet is exactly the case where the figure is wanted, and the only runs
-        that have the figure are older ones.
-
-        Returns ``None`` when it has never run, rather than zero or an estimate.
-        The number goes on a button he is about to press, and an invented one
-        there is worse than a missing one — "还没做过这一步" is a true sentence,
-        "预计 0 token" is not.
-
-        A "group" is one run's calls as that role on that stage, which is one
-        dispatch in practice. A stage redone within the same run merges into one
-        group, so the figure is roughly right rather than exact, and it is
-        presented as a past measurement rather than a prediction.
-        """
         groups: dict[str, list[LedgerEntry]] = {}
-        for run in self.store.list_runs():
-            for row in self.store.read_ledger(run.run_id):
-                if row.role == role and row.stage == stage:
-                    groups.setdefault(run.run_id, []).append(row)
+        for row in self.entries():
+            if row.role == role and row.stage == stage:
+                groups.setdefault(row.run_id, []).append(row)
         if not groups:
             return None
-
-        # Newest group by its last call, not by dict order — the run list carries
-        # no promise about ordering.
         run_id, rows = max(groups.items(), key=lambda kv: max(r.at for r in kv[1]))
-        rows.sort(key=lambda r: r.at)
-        totals = Totals(
-            calls=len(rows),
-            input_tokens=sum(r.input_tokens for r in rows),
-            output_tokens=sum(r.output_tokens for r in rows),
-            estimated_usd=sum(r.estimated_usd for r in rows),
-        )
-        return {
-            "role": role,
-            "stage": stage,
-            "run_id": run_id,
-            "at": rows[-1].at,
-            "calls": totals.calls,
-            "tokens": totals.input_tokens + totals.output_tokens,
-            "estimated_usd": round(totals.estimated_usd, 6),
-            "usd_is_real": self.settings.usd_cap_is_enforceable,
-        }
+        totals = _totals(rows)
+        return {"role": role, "stage": stage, "run_id": run_id, "at": max(r.at for r in rows),
+                **totals.to_dict(), "tokens": totals.input_tokens + totals.output_tokens,
+                "usd_is_real": False}
 
     def price_note(self) -> dict[str, Any]:
-        """What to show in the UI so the dollar number is never read as a bill."""
         pricing = self.settings.pricing
         enforceable = self.settings.usd_cap_is_enforceable
         note = "USD figures are estimates from this rate card, not the provider's bill."
         if not enforceable:
-            note += (
-                " This rate card has zero rates, so the USD cap cannot stop anything yet; "
-                "the token cap is what is actually enforced."
-            )
-        return {
-            "source": pricing.source,
-            "as_of": pricing.as_of,
-            "input_usd_per_mtok": pricing.input_usd_per_mtok,
-            "output_usd_per_mtok": pricing.output_usd_per_mtok,
-            "usd_cap_enforceable": enforceable,
-            "note": note,
-        }
-
-    # --------------------------------------------------------------- budget --
+            note += " Unverified rates mean the USD cap cannot stop anything yet; dollar totals remain unknown."
+        note += " Limits stop new calls after recorded totals reach them; an in-flight call may exceed the limit. Unknown usage blocks new calls until reconciled."
+        return {"source": pricing.source, "as_of": pricing.as_of,
+                "input_usd_per_mtok": pricing.input_usd_per_mtok if pricing.known else None,
+                "output_usd_per_mtok": pricing.output_usd_per_mtok if pricing.known else None,
+                "usd_cap_enforceable": enforceable, "limit_kind": "soft", "note": note}
 
     def ensure_within_budget(self) -> None:
-        """Raise before a call if a development cap has been reached.
-
-        Both caps are **totals across every run**, not per-run allowances: $10 was
-        set as a development budget, and it would mean nothing if a new run reset
-        it.
-
-        The token cap is the one that actually bites. It is checked always; the
-        USD cap is checked only when the rate card has non-zero rates, because a
-        zero rate card would make it a limit that can never be reached — a fake
-        brake is worse than no brake, since it looks like protection.
-
-        Counting the in-flight call is impossible — tokens are unknown until the
-        response arrives — so the rule is: once a total is at or above its cap,
-        no new call starts. The last call before the cap may overshoot it.
-        """
         totals = self.totals()
+        if totals.unknown_calls:
+            raise BudgetExceeded(f"{totals.unknown_calls} model call(s) have unknown, partial or pending usage; reconcile provider evidence before any new call.")
         tokens = totals.input_tokens + totals.output_tokens
-        token_limit = self.settings.budget_limit_tokens
-        if tokens >= token_limit:
-            raise BudgetExceeded(
-                f"{tokens} tokens have been used across all runs, at or above the cap of "
-                f"{token_limit}; refusing to start another model call. Raise "
-                f"budget_limit_tokens in config.json to continue."
-            )
-
-        if not self.settings.usd_cap_is_enforceable:
-            return
-
-        spent = totals.estimated_usd
-        limit = self.settings.budget_limit_usd
-        if spent >= limit:
-            raise BudgetExceeded(
-                f"estimated spend across all runs is {spent:.4f} USD, at or above the "
-                f"cap of {limit:.2f} USD; refusing to start another model call. "
-                f"Raise budget_limit_usd in config.json to continue."
-            )
+        if tokens >= self.settings.budget_limit_tokens:
+            raise BudgetExceeded(f"{tokens} tokens reached the soft cap of {self.settings.budget_limit_tokens}; refusing a new call.")
+        if self.settings.usd_cap_is_enforceable and totals.known_estimated_usd >= self.settings.budget_limit_usd:
+            raise BudgetExceeded(f"estimated known spend reached the soft cap of {self.settings.budget_limit_usd:.2f} USD; refusing a new call.")

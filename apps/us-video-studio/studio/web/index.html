@@ -4,11 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>US 视频制片室</title>
+<meta name="theme-color" content="#11120f">
+<link rel="icon" type="image/svg+xml" href="/static/studio-mark.svg">
 <link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/cinema.css">
 </head>
 <body>
 
+<a class="skip-link" href="#stage">跳到当前阶段</a>
 <header class="top">
+  <div class="studio-brand" aria-label="Little Else 视频制片室">
+    <img src="/static/studio-mark.svg" alt="" width="30" height="30">
+    <div><strong>LITTLE ELSE</strong><span>视频制片室 <i>/</i> US</span></div>
+  </div>
   <div class="left">
     <select id="run-select" aria-label="选择项目"></select>
     <button id="new-run" class="ghost" title="新建项目">＋ 新项目</button>
@@ -26,38 +34,51 @@
 <div id="spend-panel" class="spend-panel" hidden></div>
 
 <!-- The shelf: what this run really has on disk. Files land here by being copied
-     into runs/<id>/materials/ or dropped on this panel. It sits next to the
-     questions strip because both answer "what is this run still waiting on" —
-     one from him, one from the folder. -->
+     into runs/<id>/materials/ or dropped on this panel. It sits at the top of the
+     page because it answers "what does this run actually have" — a question about
+     the whole run, the way the stage below is a question about one stage. -->
 <div id="materials" class="materials" hidden>
   <div class="materials-head">
     <span id="materials-count" class="materials-count">还没有素材</span>
-    <span class="materials-hint">把图片或视频拖到这里，或直接放进 runs/&lt;id&gt;/materials/</span>
+    <span class="materials-hint">拖入图片或视频，整理这个项目的素材</span>
     <button id="materials-close" class="ghost small">收起</button>
   </div>
   <div id="materials-grid" class="materials-grid"></div>
 </div>
 
-<!-- What the run is waiting on him for. The strip is always shown when there is
-     anything in it; only the list under it collapses, so unanswered questions
-     cannot be hidden by a collapsed control. -->
-<div id="questions" class="questions" hidden>
-  <button id="questions-toggle" class="questions-bar" aria-expanded="false"
-          aria-controls="questions-list">
-    <span class="questions-mark">?</span>
-    <span id="questions-count">0 个问题等你回答</span>
-    <span id="questions-where" class="questions-where"></span>
-    <span id="questions-caret" class="questions-caret">展开</span>
-  </button>
-  <div id="questions-list" class="questions-list" hidden></div>
-</div>
+<!-- The one stage he is looking at. Everything below the rail is drawn from
+     whichever stage the rail has selected: what is waiting on him, the document,
+     the review, the questions it could not settle.
 
-<main id="stream" class="stream" aria-live="polite"></main>
+     Not `aria-live`: switching stages replaces all of this, and a screen reader
+     announcing the whole panel every time he clicks a rail step is noise. The
+     live region is the conversation band, which is where things actually arrive. -->
+<main id="stage" class="stage" tabindex="-1"></main>
 
 <footer class="composer">
+  <!-- What happened, in order, folded away. Demoted rather than deleted: reading
+       one document closely and following the run over time are two needs, and the
+       stage owns the screen because that is where the thing waiting on him is.
+       It forces itself open when a turn starts — see `send` in app.js. -->
+  <div id="conversation" class="conversation">
+    <button id="conversation-toggle" class="conversation-bar" aria-expanded="false"
+            aria-controls="conversation-body">
+      <span class="conversation-mark">≡</span>
+      <span>对话</span>
+      <span id="conversation-count" class="conversation-count">还没有对话</span>
+      <span id="conversation-caret" class="conversation-caret">展开</span>
+    </button>
+    <div id="conversation-body" class="conversation-body" aria-live="polite" hidden></div>
+  </div>
+
+  <!-- Answers drafted on the question rows, before they are sent. It sits above
+       the composer because it is the same act — saying something to the agent —
+       only composed from the boxes instead of typed from scratch. Global on
+       purpose: answers from four stages become one message, one agent turn. -->
+  <div id="draft" class="draft" hidden></div>
   <div class="composer-inner">
     <textarea id="chat-input" rows="1"
-      placeholder="说你要做什么。不确定就直接问它现在什么情况。"></textarea>
+      aria-label="与制片 Agent 对话" placeholder="告诉制片 Agent，你想调整或继续什么…"></textarea>
     <button id="send" class="primary">发送</button>
   </div>
   <div class="composer-hint">
@@ -97,9 +118,13 @@
 
 <div id="toast" class="toast"></div>
 
-<!-- md.js first: blocks.js uses its `escapeHtml`, and app.js uses both. -->
+<!-- Load order is a dependency chain, each link the same kind: md.js first,
+     because blocks.js and stage.js both call its `escapeHtml`; then blocks.js,
+     because stage.js draws a document through `blocksHtml`; then stage.js, whose
+     `stageHtml` and `answerKey` are what app.js calls and stores drafts by. -->
 <script src="/static/md.js"></script>
 <script src="/static/blocks.js"></script>
+<script src="/static/stage.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

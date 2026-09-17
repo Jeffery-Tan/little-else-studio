@@ -124,7 +124,10 @@ _TOOLS: tuple[Tool, ...] = (
         name="list_materials",
         description=(
             "List what is actually in this run's materials folder — the real photos and "
-            "clips, by exact filename, with which are usable. Call this before writing any "
+            "clips, by exact filename and SHA256, plus byte-matched imported observation "
+            "records with observer, method and coverage. Listing is existence_only: it "
+            "does not send pixels, frames or audio to the model and cannot establish "
+            "visual product facts. Unavailable reference discovery is explicit. Call this before writing any "
             "`file` field: those filenames are not guessable, and one that names nothing "
             "shows on screen as 「文件不在」. An empty folder is a real answer, not a failure."
         ),

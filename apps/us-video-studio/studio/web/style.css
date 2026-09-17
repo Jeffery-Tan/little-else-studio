@@ -1,9 +1,16 @@
-/* US video studio — conversation-first, dark.
+/* US video studio — stage-first, dark.
  *
- * LAYOUT is the argument this file has always made: one column of conversation,
- * a fixed composer at the bottom, everything else reachable from a card in the
- * stream. No sidebar of equal weight, because a non-programmer cannot tell which
- * of four panels he is supposed to act on. That part is unchanged.
+ * LAYOUT was one column of conversation with a fixed composer at the bottom.
+ * It is now four stages: the rail picks one, the pane below it is that stage,
+ * and the conversation is a band above the composer that is folded until he
+ * opens it. The reason is measured rather than aesthetic — after a full run the
+ * decision card sat more than eight screens down a stream of documents he had
+ * already read, and the unit of work here is a stage, not a message.
+ *
+ * Still one column, and still no sidebar of equal weight: a non-programmer
+ * cannot tell which of four panels he is supposed to act on, and two panels of
+ * equal weight is exactly that problem. The rail is navigation, the pane is the
+ * page, and there is only ever one pane.
  *
  * THE SURFACE is what changed, and every number in it was measured off a real
  * video tool rather than guessed — InvokeAI (#16181d / #22252b / 8px),
@@ -208,6 +215,39 @@ button:disabled { cursor: default; opacity: 0.45; }
 
 .step.stale .mark { color: var(--bad); }
 
+/* The step whose pane is on screen. A different question from `.active`, which
+   says the stage is *in progress* — the rail has to be able to say both at once,
+   and the one he navigated to is not always the one that is running.
+ *
+ * A ring rather than a fill, so it composes with `.needs` instead of fighting it:
+ * a stage that is both open and waiting keeps its amber, and the ring is what
+ * says which pane the amber belongs to. */
+.step.here {
+  color: var(--ink);
+  background: var(--raised);
+  box-shadow: inset 0 0 0 1px var(--ink-faint);
+}
+
+.step.here.needs { color: var(--wait); }
+
+/* How many things this stage could not settle and is waiting on him for. A
+   count, not a dot — 「2」 says there is something to do and how much of it. The
+   strip that used to hold all of them has no replacement, so this is now the
+   only signpost from anywhere on the page to a question in another stage. */
+.step .q-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  background: var(--wait);
+  color: var(--deep);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 /* Every step is clickable, including one that has not started: it answers
    «why is it empty» rather than doing nothing. */
 
@@ -255,10 +295,10 @@ button:disabled { cursor: default; opacity: 0.45; }
 
 /* ------------------------------------------------------------- shelf -- */
 
-/* The run's real files. Sits directly under the header, above the questions,
-   because it and the questions strip are the same kind of thing: what this run
-   still needs. Files land here by being copied into runs/<id>/materials/ or
-   dropped on this panel. */
+/* The run's real files. Sits directly under the header and is hidden until it is
+   asked for, because it is about the whole run and the pane below is about one
+   stage. Files land here by being copied into runs/<id>/materials/ or dropped on
+   this panel. */
 
 .materials {
   padding: 0.75rem 1.15rem 0.9rem;
@@ -490,14 +530,152 @@ button:disabled { cursor: default; opacity: 0.45; }
 
 .tl-hint { margin-left: auto; }
 
-/* --------------------------------------------------------- the stream -- */
+/* ---------------------------------------------------------- the stage -- */
 
-.stream {
+/* One stage, and it owns the page: this is the element that scrolls.
+ *
+ * `min-height: 0` is load-bearing. A flex child will not shrink below its
+ * content without it, so the pane would push the composer off the bottom of the
+ * window instead of scrolling inside itself — the failure the old question strip
+ * had, where a tall list grew the page rather than the list.
+ *
+ * `scroll-behavior: smooth` is deliberately NOT here. The pane is redrawn on
+ * every refresh, and restoring `scrollTop` through a smooth scroll animates a
+ * jump he did not ask for — a stage that moves under him is half of what
+ * 「翻来翻去」 meant.
+ *
+ * Horizontal padding only. Vertical padding on a scroll container makes a
+ * `top: 0` sticky child jump by that amount the moment it sticks. */
+.stage {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 1.5rem 1.15rem 2rem;
-  scroll-behavior: smooth;
+  padding: 0 1.15rem;
 }
+
+.pane {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 1.15rem 0 2rem;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Spacing between the pane's bands, as a margin rather than a flex `gap`, so a
+   pinned gate has no gap above it for the document to show through. */
+.pane > * + * { margin-top: 0.9rem; }
+
+/* Which version this is, who wrote it, when. The header of the document, and the
+   one place 「看原文」 lives — the overlay is still the reader for the raw text. */
+.pane-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.pane-title { font-weight: 600; }
+
+.pane-by { color: var(--ink-faint); font-size: 12.5px; }
+
+.pane-head .ghost { margin-left: auto; }
+
+.pane-summary {
+  margin: 0 0 0.9rem;
+  color: var(--ink-soft);
+  font-size: 13.5px;
+}
+
+/* Nothing written yet, or nothing usable. `stage_blank` already decided which
+   of six situations this is and worded it in his language; the job here is only
+   to make them *look* different, because 「等审核」 and 「上一版过期了」 need
+   different things from him and identical grey boxes say neither.
+ *
+ * Colour is the second signal, never the only one — the sentence is always
+ * there and always says which situation it is. */
+.pane-blank {
+  padding: 1.1rem 1rem;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  color: var(--ink-faint);
+  text-align: center;
+}
+
+/* Someone is working on it. Not a warning and not a failure — the one blank
+   state where the right thing to do is nothing. */
+.pane-blank.running,
+.pane-blank.reviewing { color: var(--ink-soft); }
+
+/* Blocked on an upstream stage. */
+.pane-blank.waiting { color: var(--wait); border-color: rgba(240, 180, 41, 0.3); }
+
+/* The last attempt died, or came back empty. */
+.pane-blank.failed { color: var(--bad); border-color: rgba(255, 123, 114, 0.3); }
+
+/* Written against something that no longer holds. */
+.pane-blank.stale { color: var(--wait); border-color: rgba(240, 180, 41, 0.3); }
+
+/* `todo` keeps the neutral grey above — it is the one situation that needs
+   nothing said about it beyond 「还没开始」. */
+
+/* The two reasons the document below may not be trustworthy: an upstream stage
+   was invalidated, or the file no longer matches its own fingerprint.
+ *
+ * Both used to be printed only in the overlay reader. The pane is where he reads
+ * now, so if these are not said here, nothing on the screen says them. */
+.pane-warn {
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.pane-warn.stale { background: rgba(240, 180, 41, 0.12); color: var(--wait); }
+.pane-warn.integrity { background: rgba(255, 123, 114, 0.12); color: var(--bad); }
+
+/* Both warnings can be true at once — a stale version whose file was also
+   edited — and two full-width strips 0.9rem apart reads as two unrelated
+   things. They are one document's problem, so they sit together. */
+.pane-warn + .pane-warn { margin-top: 0.4rem; }
+
+/* ---------------------------------------------------------- the review -- */
+
+/* What the reviewer said about this exact version. Not a badge: a `pass` that
+   carried four findings reads as a bare pass the moment the sentence is dropped,
+   so the sentence and the findings always travel together. */
+.pane-review {
+  padding: 0.6rem 0.8rem;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.pane-review.pass { background: rgba(74, 222, 128, 0.1); color: var(--good); }
+.pane-review.return { background: rgba(255, 123, 114, 0.1); color: var(--bad); }
+
+.pane-review summary { cursor: pointer; margin-top: 0.4rem; }
+
+/* ---------------------------------------------------------- the asking -- */
+
+/* What this stage could not settle, answerable where it is written. The old path
+   was: read the question here, scroll to the composer, and type enough of the
+   question back that the agent could tell which one he meant. */
+.pane-ask {
+  border: 1px solid rgba(240, 180, 41, 0.28);
+  border-radius: var(--radius);
+  padding: 0.75rem 0.85rem;
+  background: rgba(240, 180, 41, 0.05);
+}
+
+.ask-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  color: var(--wait);
+  font-weight: 600;
+  margin-bottom: 0.6rem;
+}
+
+.ask-note { color: var(--ink-faint); font-weight: 400; font-size: 12.5px; }
 
 .turn {
   max-width: 46rem;
@@ -620,20 +798,11 @@ button:disabled { cursor: default; opacity: 0.45; }
   margin-top: 0.8rem;
 }
 
-/* ------------------------------------------------------------ review -- */
+.opt { background: transparent; border-color: var(--line); color: var(--ink-soft); }
+.opt:hover:not(:disabled) { border-color: var(--ink-faint); color: var(--ink); background: var(--raised-2); }
 
-.review {
-  margin-top: 0.7rem;
-  padding: 0.55rem 0.75rem;
-  border-radius: var(--radius-sm);
-  font-size: 13px;
-}
-
-.review.pass { background: rgba(74, 222, 128, 0.1); color: var(--good); }
-.review.return { background: rgba(255, 123, 114, 0.1); color: var(--bad); }
-.review.none { background: var(--deep); color: var(--ink-faint); }
-
-.review summary { cursor: pointer; margin-top: 0.4rem; }
+.opt.rec { background: rgba(74, 222, 128, 0.14); color: var(--good); border-color: rgba(74, 222, 128, 0.4); }
+.opt.rec:hover:not(:disabled) { background: rgba(74, 222, 128, 0.22); }
 
 .finding { display: flex; gap: 0.5rem; margin: 0.4rem 0; }
 
@@ -649,15 +818,34 @@ button:disabled { cursor: default; opacity: 0.45; }
 
 .finding-text { flex: 1; }
 
-/* ----------------------------------------------------------- decide -- */
+/* ------------------------------------------------------------ the gate -- */
 
-/* The one card that is a request. It gets the accent's edge and nothing else —
-   no fill, because a filled card reads as already-decided. */
-.card.decide {
-  box-shadow: inset 3px 0 0 var(--wait);
+/* Pinned, because it is the one thing on the page that is a request: a decision
+   he has scrolled past is a decision he has not been asked for.
+ *
+ * Deliberately NOT a card. In the conversation it was a `.card` with a 3px inset
+ * stripe, which made the thing waiting on him a near-twin of the four documents
+ * above it — measured, the two rules differed in exactly one declaration
+ * (`box-shadow`). Nothing else on this page is a filled amber-bordered band, and
+ * that is the point.
+ *
+ * Square top corners on purpose: it sticks flush to the top of the scrollport,
+ * and a rounded corner there is a hole the document shows through as it scrolls
+ * underneath. */
+.gate {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--deep);
+  border: 1px solid rgba(240, 180, 41, 0.4);
+  border-left: 3px solid var(--wait);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  padding: 0.7rem 0.9rem 0.85rem;
+  /* The document passing under it, rather than a line drawn between two peers. */
+  box-shadow: 0 12px 24px -16px rgba(0, 0, 0, 0.95);
 }
 
-.decide-head {
+.gate-head {
   display: flex;
   align-items: center;
   gap: 0.45rem;
@@ -666,18 +854,56 @@ button:disabled { cursor: default; opacity: 0.45; }
   color: var(--wait);
 }
 
-.decide-mark { font-size: 0.7rem; }
+.gate-mark { font-size: 0.7rem; }
 
-.decide-headline {
-  margin: 0.5rem 0 0.25rem;
-  font-size: 15px;
+/* A size up from the chrome, because this is the headline of the page while it
+   is on screen — the one sentence he has to read before clicking. */
+.gate-headline {
+  margin: 0.45rem 0 0.2rem;
+  font-size: 16px;
   font-weight: 600;
+  line-height: 1.45;
 }
 
-.decide-body { margin: 0; color: var(--ink-soft); font-size: 13.5px; }
+.gate-body { margin: 0; color: var(--ink-soft); font-size: 13.5px; }
 
-.card.decide details { margin-top: 0.7rem; font-size: 13px; }
-.card.decide summary { cursor: pointer; color: var(--ink-soft); }
+.gate details { margin-top: 0.6rem; font-size: 13px; }
+.gate summary { cursor: pointer; color: var(--ink-soft); }
+
+/* The options a document lays out, as the buttons that answer it. The
+   recommended one carries the green the recommended direction already carries,
+   so the document and the button agree about which is which; the rest stay grey
+   — they are real choices, not errors. */
+.gate-hint { margin-top: 0.7rem; font-size: 12.5px; color: var(--ink-faint); }
+
+.gate-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.5rem;
+}
+
+.gate-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.8rem;
+}
+
+/* The price of what a click opens, on the control that asks for the click.
+   Read out of the ledger and said as a past measurement: it is what this step
+   cost last time, not a forecast. */
+.gate-next {
+  margin-top: 0.7rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--line-soft);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+
+.gate-next-what { color: var(--ink); }
+.gate-next-cost { color: var(--ink-faint); margin-top: 0.15rem; }
 
 .reason {
   flex: 1 1 16rem;
@@ -693,7 +919,7 @@ button:disabled { cursor: default; opacity: 0.45; }
 
 /* ---------------------------------------------------------- buttons -- */
 
-.primary, .ghost, .good, .bad {
+.primary, .ghost, .good, .bad, .opt {
   border-radius: var(--radius-sm);
   padding: 0.42rem 0.9rem;
   border: 1px solid transparent;
@@ -763,14 +989,117 @@ button:disabled { cursor: default; opacity: 0.45; }
   line-height: 1.7;
 }
 
+/* ------------------------------------------------------ the conversation -- */
+
+/* What happened, in order, folded to a strip.
+ *
+ * Demoted rather than deleted. Reading one document closely and following the
+ * run over time are two different needs, and every tool measured keeps both
+ * views side by side — Gerrit's Comments tab, Phorge's grouped summary, GitLab's
+ * pending-comment list. Only one of them can own the screen, and the stage owns
+ * it because that is where the thing waiting on him is.
+ *
+ * 40px collapsed. The measured precedent is Gitea's `.diff-detail-box` at
+ * `height: 41px` (repo.css:782-793) and Forgejo's at 44px — a strip that stays
+ * put and costs almost nothing until it is wanted. The number is set as a
+ * `min-height` rather than derived from padding, so it does not drift with the
+ * font. */
+/* No fill of its own while collapsed: the strip sits on the composer's surface,
+   which is what makes it read as a seam rather than as another panel. Opening it
+   gives the transcript a lighter surface behind it. */
+.conversation { border-top: 1px solid var(--line-soft); }
+
+.conversation-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  max-width: 46rem;
+  margin: 0 auto;
+  min-height: 40px;
+  padding: 0.4rem 0.6rem;
+  background: none;
+  border: none;
+  text-align: left;
+  color: var(--ink-soft);
+  font-size: var(--fs-chrome);
+  transition: background var(--t), color var(--t);
+}
+
+.conversation-bar:hover { background: var(--raised); color: var(--ink); }
+
+.conversation-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.2rem;
+  height: 1.2rem;
+  border-radius: var(--radius-sm);
+  background: var(--raised);
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+
+.conversation-count { color: var(--ink-faint); font-size: 12.5px; }
+.conversation-caret { margin-left: auto; color: var(--ink-faint); font-size: 12.5px; }
+
+.conversation-body {
+  /* A floor and a ceiling, because a bare percentage is wrong at both ends: on a
+     short window 30vh is a sliver, and on a tall one it eats the pane. The
+     measured reference (n8n) is 30% default with min 160 / max 75% — the default
+     is taken, and the ceiling is not, because 75% of a 900px window leaves the
+     pane 48px tall. */
+  height: 30vh;
+  min-height: 140px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 0.6rem 1.15rem 0.9rem;
+  border-top: 1px solid var(--line-soft);
+  background: var(--bg);
+}
+
+.conversation-body[hidden] { display: none; }
+
+/* Inside a scrolling band, the last turn's bottom margin is dead space. */
+.conversation-body .turn:last-child { margin-bottom: 0; }
+
+/* One artifact, as one line. The summary is here and the document is not: a line
+   long enough to hold a whole summary is a line the CSS truncates, which is the
+   point. The band is for finding the moment; 「去看」 is how you go read it. */
+.line {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.35rem 0;
+  font-size: 13px;
+}
+
+.line-what { flex: none; color: var(--ink); font-weight: 600; }
+
+.line-by {
+  flex: 1;
+  min-width: 0;
+  color: var(--ink-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.line .ghost { flex: none; }
+
+.line.pending .line-what { color: var(--wait); }
+
 /* ---------------------------------------------------------- composer -- */
 
+/* The composer is pinned by the flex column, not by `position: sticky` — the
+   pane above it takes `flex: 1` and scrolls, so there is nothing for it to stick
+   over. `flex: none` is what keeps it from being the item that gets squeezed
+   when the band opens: the stage absorbs that, because the stage can scroll. */
 .composer {
+  flex: none;
   border-top: 1px solid var(--line-soft);
   background: var(--deep);
   padding: 0.7rem 1.15rem 0.55rem;
-  position: sticky;
-  bottom: 0;
 }
 
 .composer-inner {
@@ -799,6 +1128,45 @@ button:disabled { cursor: default; opacity: 0.45; }
 #chat-input:focus { outline: none; border-color: var(--accent); }
 
 #send { padding: 0.55rem 1.4rem; }
+
+/* Answers drafted on the question rows, waiting to go out as one message.
+   Above the composer rather than floating over the pane: it is the same act
+   as typing, so it belongs to the same part of the page, and a thing that
+   disappears on scroll is a thing he cannot check before sending. */
+.draft {
+  max-width: 46rem;
+  margin: 0 auto 0.6rem;
+  padding: 0.55rem 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  font-size: var(--fs-chrome);
+}
+
+.draft[hidden] { display: none; }
+
+.draft-head { display: flex; align-items: baseline; gap: 0.6rem; margin-bottom: 0.35rem; }
+.draft-count { color: var(--accent); font-weight: 600; }
+.draft-note { color: var(--ink-faint); font-size: 12.5px; }
+
+.draft-row {
+  display: grid;
+  grid-template-columns: minmax(5rem, 1fr) minmax(6rem, 2fr) auto;
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 0.22rem 0;
+}
+
+.draft-q {
+  color: var(--ink-faint);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.draft-a { color: var(--ink); }
+.draft > .primary { display: block; margin: 0.5rem 0 0 auto; }
 
 .composer-hint {
   display: flex;
@@ -1105,15 +1473,6 @@ dialog textarea:focus { outline: none; border-color: var(--accent); }
   font-size: 13px;
 }
 
-/* A failed or waiting step gets a colour, because "nothing here" is not always
-   the same situation. */
-.blk-none.failed {
-  border-color: rgba(255, 123, 114, 0.45);
-  color: var(--bad);
-  background: rgba(255, 123, 114, 0.08);
-}
-.blk-none.waiting { border-color: var(--line); }
-
 .blk-list { margin: 0; padding-left: 1.1rem; font-size: 13.5px; }
 .blk-list li { margin-bottom: 0.35rem; }
 .blk-item { color: var(--ink); }
@@ -1243,60 +1602,11 @@ dialog textarea:focus { outline: none; border-color: var(--accent); }
 .blk-callout { background: var(--deep); border-radius: var(--radius); padding: 0.8rem 0.95rem; }
 .blk-callout .blk-title { color: var(--accent); }
 
-.card-questions {
-  margin-top: 0.9rem;
-  font-size: 12.5px;
-  color: var(--wait);
-}
+/* ----------------------------------------------------------- one question -- */
 
-/* --------------------------------------------------------- the questions -- */
-
-.questions {
-  border-bottom: 1px solid var(--line-soft);
-  background: rgba(240, 180, 41, 0.07);
-}
-
-.questions[hidden] { display: none; }
-
-.questions-bar {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  width: 100%;
-  padding: 0.5rem 1.15rem;
-  background: none;
-  border: none;
-  text-align: left;
-  color: var(--wait);
-  font-weight: 600;
-  transition: background var(--t);
-}
-
-.questions-bar:hover { background: rgba(240, 180, 41, 0.08); }
-
-.questions-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.2rem;
-  height: 1.2rem;
-  border-radius: 999px;
-  background: var(--wait);
-  color: var(--deep);
-  font-size: 12px;
-}
-
-.questions-where { font-weight: 400; color: var(--ink-soft); font-size: 12.5px; }
-.questions-caret { margin-left: auto; font-weight: 400; font-size: 12.5px; color: var(--ink-faint); }
-
-.questions-list {
-  padding: 0 1.15rem 0.9rem 1.15rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-}
-
-.questions-list[hidden] { display: none; }
+/* Drawn inside the pane, under the document that raised it. There is no `.q`
+   outside `.pane-ask` any more: the strip that held every question across the
+   top of the page is gone, and a question now lives in the stage it came from. */
 
 .q {
   background: var(--bg);
@@ -1304,19 +1614,70 @@ dialog textarea:focus { outline: none; border-color: var(--accent); }
   padding: 0.6rem 0.8rem;
 }
 
-.q-where { font-size: 11.5px; color: var(--ink-faint); }
-.q-text { margin-top: 0.15rem; font-size: 13.5px; }
+.q + .q { margin-top: 0.55rem; }
+
+.q-text { font-size: 13.5px; }
 .q-blocks { margin-top: 0.25rem; font-size: 12.5px; color: var(--wait); }
 
-/* ------------------------------------------------- the price on the card -- */
-
-.decide-next {
-  margin-top: 0.9rem;
-  padding-top: 0.7rem;
-  border-top: 1px solid var(--line-soft);
-  font-size: 12.5px;
-  color: var(--ink-soft);
+/* Answering where the question is. The old path was: read the question here,
+   scroll to the composer, and type enough of the question back that the agent
+   could tell which one he meant. */
+.q-answer {
+  margin-top: 0.45rem;
+  width: 100%;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--raised);
+  color: var(--ink);
+  font-size: var(--fs-chrome);
+  transition: border-color var(--t);
 }
 
-.decide-next-what { color: var(--ink); }
-.decide-next-cost { color: var(--ink-faint); margin-top: 0.15rem; }
+.q-answer::placeholder { color: var(--ink-faint); }
+.q-answer:hover { border-color: var(--ink-faint); }
+/* `:focus-visible`, not `:focus`, and the outline is left alone — `#chat-input`
+   below turns its ring off, which is the one thing this file promised not to
+   do. A field you answer eleven of in a row is exactly where losing the caret
+   matters. */
+.q-answer:focus-visible { border-color: var(--accent); }
+
+/* Reading and decisions share a workspace; decisions never cover the document. */
+.top .left,.top .right {min-width:0;max-width:100%;}
+.top .right {flex-shrink:1;}
+#spend {white-space:normal;max-width:100%;overflow-wrap:anywhere;}
+.pane {max-width:1160px;}
+.pane.has-gate {display:grid;grid-template-columns:minmax(0,1fr) 278px;column-gap:28px;align-items:start;}
+.pane.has-gate > * {grid-column:1;min-width:0;}
+.pane.has-gate > .gate {grid-column:2;grid-row:1 / span 30;position:sticky;top:18px;margin:0;max-height:calc(100dvh - 230px);overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:18px;box-shadow:none;}
+.decision-jump {display:none;}
+.gate-options {display:flex;flex-direction:column;gap:8px;margin:18px 0 14px;padding:0;border:0;}
+.gate-options legend {font-size:12px;color:var(--ink-soft);margin-bottom:9px;}
+.gate-choice {display:flex;align-items:center;gap:9px;padding:12px;border:1px solid var(--line);border-radius:6px;cursor:pointer;}
+.gate-choice:has(input:checked) {border-color:var(--accent);background:var(--raised);}
+.gate-choice input {accent-color:var(--accent);}.gate-choice span {flex:1;display:flex;justify-content:space-between;gap:12px;}
+.gate-choice small {color:var(--ink-soft);font-size:11px;}
+.gate-note-label {display:block;font-size:12px;margin-top:16px;}
+.gate .reason {display:block;min-width:0;width:100%;resize:vertical;margin-top:8px;font:inherit;line-height:1.6;padding:10px;max-height:230px;}
+.gate-feedback,.gate-limit {font-size:11px;line-height:1.7;color:var(--ink-soft);overflow-wrap:anywhere;}
+.gate-actions {display:flex;flex-direction:column;align-items:stretch;gap:8px;margin-top:12px;}
+.gate-next {font-size:11px;line-height:1.8;}.gate-next summary {cursor:pointer;}
+.gate button:disabled {opacity:.5;cursor:wait;}
+.pane .vcards {grid-template-columns:repeat(auto-fit,minmax(210px,1fr));}
+.composer-inner,.composer-hint,.conversation {max-width:1160px;}
+@media(max-width:1050px) {
+  .pane.has-gate {display:flex;flex-direction:column;}
+  .pane.has-gate > * {width:100%;}
+  .pane.has-gate > .gate {position:static;order:50;max-height:none;margin-top:24px;}
+  .decision-jump {display:block;font-size:12px;margin-bottom:12px;}
+}
+@media(max-width:600px) {
+  .top {gap:8px;padding:10px 12px;}.top .left {width:100%;}#run-select {flex:1;min-width:0;max-width:calc(100% - 85px);}
+  .rail {flex-wrap:nowrap;overflow-x:auto;width:100%;padding-bottom:4px;}.step {flex-shrink:0;}
+  .top .right {margin-left:0;}.stage {padding-left:14px;padding-right:14px;}.pane {padding-top:16px;}
+  .vcols,.vcards {grid-template-columns:1fr!important;}.composer {padding-left:14px;padding-right:14px;}
+  .pane .vtable {max-width:100%;overflow-x:auto;}.doc {overflow-wrap:anywhere;}.pane-by {overflow-wrap:anywhere;}
+}
+
+.decision-jump {color:var(--ink-soft); text-underline-offset:4px; padding:8px 0;}
+.pane-decision {padding:12px 16px; border-left:3px solid var(--green, #61c999); background:rgba(97,201,153,.06); line-height:1.7;}

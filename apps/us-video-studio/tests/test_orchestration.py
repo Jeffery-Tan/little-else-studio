@@ -93,7 +93,7 @@ def test_reviewer_reads_the_target_and_its_upstream_only():
         "intake", "direction", "material_plan", "writing"
     )
     assert readable_stages("director") == ("intake",)
-    assert readable_stages("writer") == ("direction", "material_plan")
+    assert readable_stages("writer") == ("intake", "direction", "material_plan")
 
 
 # --------------------------------------------------------------- dispatch -- #
@@ -121,7 +121,7 @@ def test_dispatch_runs_the_role_in_its_own_context(env, tmp_path):
     assert artifact.author_role == "director"
     assert artifact.evidence == ["intake 里说到上班族"]
     assert artifact.limitations == ["没有商品实拍图"]
-    assert set(artifact.inputs) == {"intake"}
+    assert set(artifact.inputs) == {"intake", "evidence:snapshot"}
 
     # The sub-agent saw the upstream artifact, and its tool list is its own.
     request = model.calls[0]
@@ -220,7 +220,8 @@ def test_every_round_of_a_sub_agent_is_on_the_ledger(env, tmp_path):
         "direction", "出方向"
     )
 
-    rows = store.read_ledger(RUN)
+    rows = ledger.entries(RUN)
+    assert len(store.read_ledger(RUN)) == 6
     assert len(rows) == 3
     assert {r.role for r in rows} == {"director"}
     assert all(r.pricing_source == "test" for r in rows)
@@ -526,8 +527,8 @@ def test_reading_state_returns_spend_not_just_the_stage_board(env, tmp_path):
     # What the model saw in round 2, after the tool ran.
     second = model.requests_text()
     assert "成本" in second
-    assert "开发期累计已花" in second
-    assert "token 数才是事实" in second
+    assert "开发期累计估算" in second
+    assert "已知" in second and "用量待核实" in second
 
 
 def test_second_turn_carries_the_first_turn_and_reanchors_to_user(env, tmp_path):
@@ -734,7 +735,9 @@ def test_failure_records_never_go_back_to_the_model(env, tmp_path):
         orch.send("第一次")
     assert [c["role"] for c in store.read_chat(RUN)] == ["user", "system"]
 
-    # A second turn now has a 'system' record behind it and must not forward it.
+    ledger.reconcile(RUN, ledger.entries(RUN)[0].call_id, input_tokens=0,
+                     output_tokens=0, evidence_note="Synthetic provider fixture confirms zero usage")
+    # A reconciled second turn must not forward the system record.
     model = ScriptedModel([final_turn("第二次回复。")])
     orch2 = make_orchestrator(store, pipeline, ledger, model, tmp_path)
     orch2.send("第二次")

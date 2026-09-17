@@ -189,23 +189,24 @@ class Orchestrator:
         the agent never has to say it cannot see the number.
         """
         spend = self.ledger.totals()
+        run_spend = self.ledger.totals(self.run_id)
         limit = self.settings.budget_limit_usd
         tokens = f"{spend.input_tokens} 输入 / {spend.output_tokens} 输出 token"
         return "\n".join(
             [
                 "# 成本（实时）",
                 "",
-                f"开发期累计已花：约 {spend.estimated_usd:.4f} 美元"
-                f"（{tokens}，{spend.calls} 次调用）。",
+                (f"开发期累计估算：{spend.estimated_usd:.4f} 美元" if spend.estimated_usd is not None else "开发期金额未知")
+                + f"（已知 {tokens}，{spend.calls} 次调用；{spend.unknown_calls} 次用量待核实）。",
                 "累计数包含本项目里所有角色的调用，不只是你自己的；"
                 "派工和送审产生的调用也算在里面。",
-                f"本次运行：约 {self.ledger.totals(self.run_id).estimated_usd:.4f} 美元。",
+                (f"本次运行估算金额：{run_spend.estimated_usd:.4f} 美元。" if run_spend.estimated_usd is not None else "本次运行金额未知，需先核实用量。"),
                 f"开发期总额度 {limit:.2f} 美元，跨所有运行共享。",
-                "美元是按价目表估算的，不是账单；token 数才是事实。",
+                "美元按价目表估算，不是账单；用量含未核实部分时只展示已知小计。上限为软阈值，不保证最后一笔不超额。",
                 *(
                     [
                         f"价目表未确认（{self.settings.pricing.source}），"
-                        "所以美元上限目前停不住任何东西，真正生效的是 token 上限。"
+                        "所以美元阈值无法判断；token 软阈值仅阻止累计已达到阈值后的新调用。"
                     ]
                     if not self.settings.usd_cap_is_enforceable
                     else []

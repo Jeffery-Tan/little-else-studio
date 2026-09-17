@@ -135,13 +135,10 @@ class Artifact:
     attempt: str
     created_at: str
     inputs: dict[str, str] = field(default_factory=dict)
-    #: The stage's own shape — options, a dependency matrix, material rows —
-    #: normalised by ``structured.normalize``. Optional and additive: an empty
-    #: dict means the model did not produce the shape and the interface falls
-    #: back to prose. Persisted in the sidecar, so it is **not covered by
-    #: `sha256`**, which digests the Markdown body alone — the same standing as
-    #: `evidence` and `limitations`.
+    #: Structured presentation. artifact-v2 fingerprints cover this alongside
+    #: body and dependencies; body-v1 is retained solely for legacy replay.
     structured: dict[str, Any] = field(default_factory=dict)
+    digest_algorithm: str = "body-v1"
 
     @property
     def key(self) -> str:
@@ -161,6 +158,7 @@ class Artifact:
             "created_at": self.created_at,
             "inputs": dict(self.inputs),
             "structured": dict(self.structured),
+            "digest_algorithm": self.digest_algorithm,
         }
 
 
@@ -174,10 +172,12 @@ class Review:
     reviewer: str
     findings: list[dict[str, Any]]
     created_at: str
+    artifact_version: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "stage": self.stage,
+            "artifact_version": self.artifact_version,
             "artifact_sha256": self.artifact_sha256,
             "verdict": self.verdict,
             "reviewer": self.reviewer,
@@ -202,6 +202,8 @@ class Approval:
     note: str
     decided_at: str
     nonce_sha256: str
+    selected_option_id: str | None = None
+    artifact_version: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -211,6 +213,8 @@ class Approval:
             "note": self.note,
             "decided_at": self.decided_at,
             "nonce_sha256": self.nonce_sha256,
+            "selected_option_id": self.selected_option_id,
+            "artifact_version": self.artifact_version,
         }
 
 
@@ -227,14 +231,18 @@ class LedgerEntry:
     role: str
     stage: str
     model: str
-    input_tokens: int
-    output_tokens: int
-    estimated_usd: float
+    input_tokens: int | None
+    output_tokens: int | None
+    estimated_usd: float | None
     pricing_source: str
     stop_reason: str = ""
     request_id: str = ""
     ok: bool = True
     error: str = ""
+    usage_status: str = "legacy"
+    call_status: str = "settled"
+    call_id: str = ""
+    resolution_note: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -245,7 +253,11 @@ class LedgerEntry:
             "model": self.model,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
-            "estimated_usd": round(self.estimated_usd, 6),
+            "estimated_usd": round(self.estimated_usd, 6) if self.estimated_usd is not None else None,
+            "usage_status": self.usage_status,
+            "call_status": self.call_status,
+            "call_id": self.call_id,
+            "resolution_note": self.resolution_note,
             "pricing_source": self.pricing_source,
             "stop_reason": self.stop_reason,
             "request_id": self.request_id,

@@ -33,21 +33,22 @@ ANTHROPIC_VERSION = "2023-06-01"
 #: document-writing role mid-sentence — observed on 2026-09-17, costing a
 #: director attempt its whole turn.
 DEFAULT_MAX_TOKENS = 16384
-#: Statuses worth one retry: the request never produced tokens, so nothing was billed.
-RETRYABLE = {429, 500, 502, 503, 504}
 
 
 class ModelError(RuntimeError):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, *, usage=None):
         super().__init__(f"model endpoint returned {status}: {message}")
         self.status = status
         self.message = message
+        self.usage = usage or Usage(None, None)
+        self.usage_status = "partial" if any(v is not None for v in (
+            self.usage.input_tokens, self.usage.output_tokens)) else "unknown"
 
 
 @dataclass
 class Usage:
-    input_tokens: int = 0
-    output_tokens: int = 0
+    input_tokens: int | None = 0
+    output_tokens: int | None = 0
 
 
 @dataclass
@@ -146,134 +147,150 @@ class AnthropicCompatClient:
         url = f"{self.base_url}/v1/messages"
         payload = self._payload(model, system, messages, tools)
 
-        last: Exception | None = None
-        for attempt in (1, 2):
-            try:
-                with httpx.Client(timeout=self.timeout) as client:
-                    with client.stream("POST", url, headers=self._headers(), json=payload) as resp:
-                        if resp.status_code != 200:
-                            body = resp.read().decode("utf-8", errors="replace")[:600]
-                            if resp.status_code in RETRYABLE and attempt == 1:
-                                last = ModelError(resp.status_code, body)
-                                continue
-                            raise ModelError(resp.status_code, body)
-                        return _parse_stream(resp.iter_lines(), model)
-            except httpx.TransportError as exc:
-                # Connection-level failure: safe to retry, no tokens produced.
-                last = ModelError(0, f"{type(exc).__name__}: {exc}")
-                if attempt == 1:
-                    continue
-                raise last from exc
-        raise last or ModelError(0, "request failed without a response")
+        # One invocation is exactly one HTTP attempt. Even connection failures
+        # cannot prove that the provider did not start work; never auto-retry.
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                with client.stream("POST", url, headers=self._headers(), json=payload) as resp:
+                    if resp.status_code != 200:
+                        # Do not persist arbitrary response bodies: gateways can
+                        # echo credentials or request content in errors.
+                        raise ModelError(resp.status_code, "request rejected; usage unconfirmed")
+                    return _parse_stream(resp.iter_lines(), model)
+        except httpx.TransportError as exc:
+            raise ModelError(0, f"transport failed ({type(exc).__name__}); usage unconfirmed") from exc
 
 
 def _parse_stream(lines: Iterable[str], model: str) -> Turn:
-    """Assemble a Turn from an SSE byte stream of ``data:`` lines."""
-    turn = Turn(model=model)
+    """Accept only a complete, closed Messages stream; preserve partial usage."""
+    turn = Turn(model=model, usage=Usage(None, None))
     blocks: dict[int, dict[str, Any]] = {}
     partial_json: dict[int, str] = {}
-    order: list[int] = []
+    opened: set[int] = set()
+    started = False
+    stopped = False
+    final_usage = False
 
-    for raw in lines:
-        line = raw.strip() if isinstance(raw, str) else raw.decode("utf-8", "replace").strip()
-        if not line or line.startswith(":"):
-            continue
-        if not line.startswith("data:"):
-            # 'event:' and other fields are redundant here; the payload's own
-            # 'type' is authoritative and is what we switch on.
-            continue
-        data = line[5:].strip()
-        if not data or data == "[DONE]":
-            continue
-        try:
-            event = json.loads(data)
-        except json.JSONDecodeError:
-            continue
+    def fail(message: str):
+        raise ModelError(200, message, usage=turn.usage)
 
-        kind = event.get("type")
-        if kind == "message_start":
-            message = event.get("message") or {}
-            turn.model = message.get("model") or model
-            usage = message.get("usage") or {}
-            turn.usage.input_tokens = int(usage.get("input_tokens") or 0)
-            turn.usage.output_tokens = int(usage.get("output_tokens") or 0)
-        elif kind == "content_block_start":
-            idx = int(event.get("index", len(order)))
-            block = dict(event.get("content_block") or {})
-            blocks[idx] = block
-            order.append(idx)
-            if block.get("type") == "tool_use":
-                partial_json[idx] = ""
-        elif kind == "content_block_delta":
-            idx = int(event.get("index", 0))
-            delta = event.get("delta") or {}
-            dtype = delta.get("type")
-            # Deltas are accumulated into the block *and* into the flat fields.
-            # The block is what gets echoed back as the assistant message; if it
-            # stayed empty, the next request would carry blank text blocks.
-            if dtype == "text_delta":
-                text = delta.get("text") or ""
-                turn.text += text
-                blocks.setdefault(idx, {"type": "text", "text": ""})
-                blocks[idx]["text"] = blocks[idx].get("text", "") + text
-                if idx not in order:
-                    order.append(idx)
-            elif dtype == "thinking_delta":
-                thought = delta.get("thinking") or ""
-                turn.thinking += thought
-                blocks.setdefault(idx, {"type": "thinking", "thinking": ""})
-                blocks[idx]["thinking"] = blocks[idx].get("thinking", "") + thought
-                if idx not in order:
-                    order.append(idx)
-            elif dtype == "input_json_delta":
-                partial_json[idx] = partial_json.get(idx, "") + (delta.get("partial_json") or "")
-            elif dtype == "signature_delta":
-                if idx in blocks:
-                    blocks[idx]["signature"] = delta.get("signature") or ""
-        elif kind == "content_block_stop":
-            idx = int(event.get("index", 0))
-            if idx in blocks and blocks[idx].get("type") == "tool_use":
-                raw_json = partial_json.get(idx, "")
-                try:
-                    blocks[idx]["input"] = json.loads(raw_json) if raw_json.strip() else {}
-                except json.JSONDecodeError:
-                    # Keep the unparsable text so the caller can report it
-                    # rather than pretending the tool was called with {}.
-                    blocks[idx]["input"] = {}
-                    blocks[idx]["_input_error"] = raw_json[:500]
-        elif kind == "message_delta":
-            delta = event.get("delta") or {}
-            if delta.get("stop_reason"):
-                turn.stop_reason = delta["stop_reason"]
-            usage = event.get("usage") or {}
-            if usage.get("output_tokens") is not None:
-                turn.usage.output_tokens = int(usage["output_tokens"])
-            if usage.get("input_tokens") is not None:
-                turn.usage.input_tokens = int(usage["input_tokens"])
-        elif kind == "error":
-            err = event.get("error") or {}
-            raise ModelError(200, f"stream error: {err.get('type')}: {err.get('message')}")
+    def update_usage(raw):
+        for name in ("input_tokens", "output_tokens"):
+            if name in raw:
+                value = raw[name]
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    fail("invalid usage in stream")
+                setattr(turn.usage, name, value)
 
-    for idx in sorted(order):
+    try:
+        for raw in lines:
+            line = raw.strip() if isinstance(raw, str) else raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data or data == "[DONE]":
+                continue
+            try:
+                event = json.loads(data)
+            except json.JSONDecodeError:
+                fail("malformed stream event")
+            if not isinstance(event, dict):
+                fail("invalid stream event")
+            kind = event.get("type")
+            if stopped:
+                fail("stream continued after message_stop")
+            if kind == "ping":
+                continue
+            if kind == "error":
+                fail("provider reported a stream error")
+            if kind == "message_start":
+                if started:
+                    fail("duplicate message_start")
+                started = True
+                message = event.get("message") or {}
+                turn.model = message.get("model") or model
+                update_usage(message.get("usage") or {})
+                continue
+            if not started:
+                fail("stream event before message_start")
+            if kind == "content_block_start":
+                idx = event.get("index")
+                if not isinstance(idx, int) or idx in blocks:
+                    fail("invalid or duplicate content block")
+                block = dict(event.get("content_block") or {})
+                blocks[idx] = block
+                opened.add(idx)
+                if block.get("type") == "tool_use":
+                    partial_json[idx] = ""
+                elif block.get("type") == "text":
+                    turn.text += block.get("text", "")
+                elif block.get("type") == "thinking":
+                    turn.thinking += block.get("thinking", "")
+            elif kind == "content_block_delta":
+                idx = event.get("index")
+                if idx not in opened:
+                    fail("delta for unopened or closed block")
+                delta = event.get("delta") or {}
+                dtype = delta.get("type")
+                block = blocks[idx]
+                if dtype == "text_delta" and block.get("type") == "text":
+                    text = delta.get("text") or ""
+                    turn.text += text
+                    block["text"] = block.get("text", "") + text
+                elif dtype == "thinking_delta" and block.get("type") == "thinking":
+                    thought = delta.get("thinking") or ""
+                    turn.thinking += thought
+                    block["thinking"] = block.get("thinking", "") + thought
+                elif dtype == "input_json_delta" and block.get("type") == "tool_use":
+                    partial_json[idx] += delta.get("partial_json") or ""
+                elif dtype == "signature_delta" and block.get("type") == "thinking":
+                    block["signature"] = block.get("signature", "") + (delta.get("signature") or "")
+                else:
+                    fail("unsupported or mismatched content delta")
+            elif kind == "content_block_stop":
+                idx = event.get("index")
+                if idx not in opened:
+                    fail("stop for unopened block")
+                opened.remove(idx)
+                if blocks[idx].get("type") == "tool_use":
+                    raw_json = partial_json[idx]
+                    try:
+                        value = json.loads(raw_json) if raw_json.strip() else blocks[idx].get("input", {})
+                    except json.JSONDecodeError:
+                        fail("incomplete tool input")
+                    if not isinstance(value, dict):
+                        fail("tool input must be an object")
+                    blocks[idx]["input"] = value
+            elif kind == "message_delta":
+                delta = event.get("delta") or {}
+                if delta.get("stop_reason"):
+                    turn.stop_reason = delta["stop_reason"]
+                usage = event.get("usage") or {}
+                update_usage(usage)
+                final_usage = final_usage or "output_tokens" in usage
+            elif kind == "message_stop":
+                if opened or turn.stop_reason not in {"end_turn", "tool_use", "max_tokens", "stop_sequence"}:
+                    fail("incomplete message termination")
+                stopped = True
+                break
+            else:
+                fail("unsupported stream event")
+    except ModelError:
+        raise
+    except Exception as exc:
+        raise ModelError(200, f"stream interrupted ({type(exc).__name__})", usage=turn.usage) from exc
+    if not started or not stopped:
+        fail("stream ended before message_stop")
+    if not final_usage or turn.usage.input_tokens is None or turn.usage.output_tokens is None:
+        fail("complete usage missing from stream")
+    for idx in sorted(blocks):
         block = blocks[idx]
         if block.get("type") == "tool_use":
-            if "_input_error" in block:
-                turn.tool_calls.append(
-                    ToolCall(id=block.get("id", ""), name=block.get("name", ""),
-                             input={"__unparsable_input__": block["_input_error"]})
-                )
-                continue
-            turn.tool_calls.append(
-                ToolCall(
-                    id=block.get("id", ""),
-                    name=block.get("name", ""),
-                    input=dict(block.get("input") or {}),
-                )
-            )
+            turn.tool_calls.append(ToolCall(id=block.get("id", ""), name=block.get("name", ""),
+                                            input=dict(block.get("input") or {})))
         turn.raw_blocks.append(block)
-
-    if not turn.raw_blocks and turn.text:
-        turn.raw_blocks = [{"type": "text", "text": turn.text}]
+    if (turn.stop_reason == "tool_use") != bool(turn.tool_calls):
+        fail("tool calls and stop reason disagree")
     return turn
 
 

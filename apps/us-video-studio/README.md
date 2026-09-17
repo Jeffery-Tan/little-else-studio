@@ -1,353 +1,151 @@
 ﻿# US 视频制片室（us-video-studio）
 
-建立日期：2026-09-17。范围：US 视频**前期策划**；不含生成、发布与市场结论。
-本页是启动与边界入口，不承载素材采用状态——那些仍在
-[tracks/us](../../tracks/us/README.md) 与飞书 Tasks。
+US 视频前期策划的本地独立工作台：用户在应用内与主 Agent 对话，主 Agent 调配角色 Agent，独立审核 Agent 给出评审，再由用户决定方向与脚本。范围止于策划，不含图片/视频生成、发布或市场效果判断。
 
-## 为什么另起一个
+[Codex 驱动工作台](../video-workbench/README.md) 与本应用分别维护、互不写入运行状态；不自动迁移历史批准。业务采用状态仍以 [US 线路](../../tracks/us/README.md)、[午餐包当前状态](../../tracks/us/docs/lunch-video-current-state.md)及飞书 Tasks 为准。开发约束见 [CLAUDE.md](CLAUDE.md)。
 
-现有 [apps/video-workbench](../video-workbench/README.md) 跟 Codex 绑死：交接元数据
-硬编码 `execution_mode: 'codex_handoff'`，角色说明写死「The main Codex agent
-dispatches…」，画板文案写死「反馈请回到 Codex 对话」。**本应用不改它、不写回它的数据
-目录。**
+## 启动与检查
 
-Jeffery 已不再使用旧工作台（2026-09-17 明确：「只是我不想再用它」——不是它坏了）。所以
-它不是本应用的安全网，功能缺口不靠回退到旧工作台解决。
+真实运行数据默认位于仓库外 `J:/E-Business-Video-Data/us-video-studio/`，素材、台账、配置与凭据不得提交 Git。一个数据根只允许一个 Studio 写入进程；离线导入或恢复前停止该数据根的服务。
 
-本应用要做的是：在工作台内跟主 Agent 对话 → 主 Agent 调配角色 Agent → 独立审核 Agent
-把关，全程不依赖 Codex；并且领域层自己写一套有约束的 schema，而不是继承旧 checkpoint
-的自由格式（旧格式各阶段各写各的，混着一次性字段，`actor` 写的是会话路径）。
-
-## 架构
-
-```
-浏览器 (studio/web)
-   │  REST + SSE
-   ▼
-studio/server.py  FastAPI
-   │
-   ├─ pipeline.py   阶段状态机：前置校验、失效传播、门禁
-   ├─ store.py      原子写、不可变产物、history、sha256 指纹
-   ├─ ledger.py     费用台账：token 为事实，$ 为估算
-   │
-   └─ agents/orchestrator.py   主 Agent（自写循环）
-        │  tools/dispatch.py → 隔离上下文的角色 Agent
-        └─ agents/reviewer.py  独立上下文的审核 Agent（只读，无提交权）
-```
-
-阶段：`intake → direction → material_plan → writing`，其中 `direction` 与 `writing`
-后设审核关。旧 manifest 的 `layout_preview` / `ad_preview` 需要本地渲染与预演工具，
-**v1 不做**。
-
-## 运行
-
-数据根：`J:/E-Business-Video-Data/us-video-studio/`（仓库外，不进 Git）。
+以下在仓库根执行。依赖文件仅补充本机已有 Python 环境，不能当作完整生产安装清单：
 
 ```powershell
-# 首次：建隔离环境（复用本机已有依赖，只补测试依赖）
 python -m venv --system-site-packages 'J:/E-Business-Video-Data/us-video-studio/runtime-venv'
 & 'J:/E-Business-Video-Data/us-video-studio/runtime-venv/Scripts/python.exe' -m pip install -r apps/us-video-studio/requirements-local.txt
 
-# 离线测试：不联网、不调用模型
-& 'J:/E-Business-Video-Data/us-video-studio/runtime-venv/Scripts/python.exe' -m pytest apps/us-video-studio/tests -v
-
-# 前端渲染器测试：Node 直跑，不需要浏览器
+# 离线测试：不连接模型，不产生费用
+& 'J:/E-Business-Video-Data/us-video-studio/runtime-venv/Scripts/python.exe' -m pytest apps/us-video-studio/tests -q
 node --test apps/us-video-studio/tests/js/*.mjs
 
-# 启动本地服务，仅绑定本机
+# studio 是应用目录内的 Python 包，启动前切换目录
+Set-Location apps/us-video-studio
 & 'J:/E-Business-Video-Data/us-video-studio/runtime-venv/Scripts/python.exe' -m studio.server --port 4760
 ```
 
-未设开机启动，未部署公网，未配置真实凭据到仓库。
+默认仅绑定 `127.0.0.1`，访问 `http://127.0.0.1:4760/`。本应用没有公网身份验证，未配置开机启动或公网部署；不要直接暴露服务。
 
-### 预演：看图不花钱
+| 配置入口 | 含义 |
+| --- | --- |
+| `STUDIO_DATA_ROOT` | 数据根；未设时使用上述默认目录 |
+| `<data-root>/config.json` | 角色模型、端点、预算软阈值、价目表与循环限制；在 Git 外维护 |
+| `STUDIO_BASE_URL` | 无 `config.json.base_url` 时使用的端点；再回退到代码默认值 |
+| `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | 模型凭据，仅在调用时从进程环境读取；前者优先 |
 
-界面改动只能靠看。但一次真跑要 20–24 万 token 加他两次点击，改一行 CSS 不该付这个价。
-所以四个阶段可以**在另一个数据根里用假内容写出来**：
+实际请求使用 `settings.base_url`。`ANTHROPIC_BASE_URL` 不控制 Studio 服务端请求。默认角色模型为 `deepseek-flash`，可配置值与循环参数以 [config.py](studio/config.py) 为准；修改真实凭据或运行配置需遵守仓库授权边界。
+
+### 隔离界面预览
+
+预览使用手写方案、审核和台账数字；它们不是实际创意结论、用量或批准。`scripts/seed_preview.py` 会从其明确指定的本地产品目录复制素材，素材与演示文案并非同一商品；执行前先检查来源和目标。脚本仅接受不存在的新数据根，拒绝覆盖已有目录。
+
+在应用目录、专用 PowerShell 会话执行，下例目标目录必须尚不存在：
 
 ```powershell
-# 1. 造一个只用一次的 run（假内容，真结构；素材是他真实的产品文件）
-& '.../python.exe' apps/us-video-studio/scripts/seed_preview.py
-
-# 2. 起预演服务：换数据根、把凭据清空、base_url 指到一个死端口
-$env:STUDIO_DATA_ROOT='J:/E-Business-Video-Data/us-video-studio-preview'
-$env:ANTHROPIC_AUTH_TOKEN=''; $env:ANTHROPIC_API_KEY=''
-$env:STUDIO_BASE_URL='http://127.0.0.1:9/dead'
-& '.../python.exe' -m studio.server --port 4761
+& 'J:/E-Business-Video-Data/us-video-studio/runtime-venv/Scripts/python.exe' scripts/seed_preview.py 'J:/E-Business-Video-Data/us-video-studio-preview-new'
+$env:STUDIO_DATA_ROOT = 'J:/E-Business-Video-Data/us-video-studio-preview-new'
+$env:ANTHROPIC_AUTH_TOKEN = ''
+$env:ANTHROPIC_API_KEY = ''
+$env:STUDIO_BASE_URL = 'http://127.0.0.1:9/dead'
+& 'J:/E-Business-Video-Data/us-video-studio/runtime-venv/Scripts/python.exe' -m studio.server --port 4762
 ```
 
-**凭据清空是必须的，不是保险。** 预演环境必须一眼就能看出它不能真的调模型——不然"看
-一眼"和"花一次钱"的边界就模糊了。`seed_preview.py` 的模块注释写清了哪些是真的、哪些是
-手写的、以及哪一处故障是故意的。
+该会话禁用模型凭据并使用不可用的本地端点；不要在预览根添加真实端点配置。三个 fixture 分别展示方向待采用、脚本审核退回和全部完成；包含一个故意引用不存在文件的镜头，用于检查降级提示。停止服务后保留或按明确授权清理预览，不能据此删除其他运行数据。
 
-预演数据根与真实数据根是两个目录，互不触碰。预演完直接删预演那个即可。
+## 界面与工作流
 
-## 界面
+界面采用炭黑、暖灰与香槟金，阶段目录、方案编号和镜头接触表构成独立制片室视觉。主题在 [cinema.css](studio/web/cinema.css)，行为布局在 [style.css](studio/web/style.css)；使用本机字体回退，无外部字体、图片或前端框架依赖，支持窄屏和减少动态效果设置。
 
-打开 `http://127.0.0.1:4760` 就是一整页对话流，没有分栏、没有表格、没有内部术语。
+四个阶段为 `intake → direction → material_plan → writing`。需求整理呈现事实、约束和未知项；创意方向展示多个选项与推荐依据；素材计划说明可用素材与缺口；脚本呈现镜头时长、画面、台词和声音。`direction` 与 `writing` 必须经过独立审核及用户决定；本应用尚无 `layout_preview` / `ad_preview` 渲染阶段。
 
-```
-┌──────────────────────────────────────────────────┐
-│ 保温袋15秒 ▾   ✓①需求整理 ●②创意方向 ○③ ○④   已用约10万token │
-├──────────────────────────────────────────────────┤
-│ ⓘ 5 个问题等你回答   ②创意方向 · ①需求整理  展开  │
-├──────────────────────────────────────────────────┤
-│  你：这个包做条 15 秒的                            │
-│  主 Agent：好，我先让导出去出三个方向…             │
-│  ┌─ 导演交回了「创意方向」第 2 版 ──────────────┐ │
-│  │ 审核通过了，但提了 4 点要注意。              │ │
-│  │ 3 个方向，摊开比                             │ │
-│  │ ┌─A──┐ ┌─B──┐ ┌─C──┐   ← 推荐的那个高亮     │ │
-│  │ └────┘ └────┘ └────┘                        │ │
-│  │ 推荐  B —— 因为 A 的前提还没确认              │ │
-│  │ 这几个空白不解决，哪些方向站不住              │ │
-│  │ [ 看原文 ]                                   │ │
-│  └──────────────────────────────────────────────┘ │
-│  ┌─ 现在等你决定 ───────────────────────────────┐ │
-│  │ 「创意方向」写好了，审核也通过了。           │ │
-│  │ [ 通过 ] [ 退回重做 ]                        │ │
-│  │ 通过之后轮到「素材计划」（素材 Agent）        │ │
-│  │ 上次做这一步用了约 4.2 万 token（3 次调用）。 │ │
-│  └──────────────────────────────────────────────┘ │
-├──────────────────────────────────────────────────┤
-│ [ 说你要做什么…                        ] [发送]   │
-└──────────────────────────────────────────────────┘
+- 桌面阅读与决策分栏，窄屏把决策放到正文之后；原文阅读器支持版本切换，素材抽屉支持预览和上传。
+- 推荐不等于采用。用户明确选中方向再提交，批准记录保存 `selected_option_id`；后续角色读取实际选择。
+- 退回修改需要意见；覆盖审核退回需要明确理由，记录为 `approved_override`。批准仅覆盖该版策划，不授予生成、费用或发布权限。
+- 决策草稿按运行、阶段和产物摘要保存在本机浏览器。保存中阻止重复提交；冲突保留草稿，要求重新阅读最新版本。审核退回和上游失效不显示为完成。
+- 费用入口展示真实记录的已知用量与待核实项；历史阶段用量是参考记录，不是下一次费用预测。
+
+领域状态与业务措辞主要由 [vocabulary.py](studio/vocabulary.py) 提供，前端负责呈现与交互校验。审核通过时仍展示注意事项，不把 `pass` 当成内容可用保证。
+
+## 架构与版本契约
+
+```text
+浏览器 studio/web (REST + SSE)
+  → server.py
+      → pipeline.py：前置条件、尝试、审核、审批与失效传播
+      → store.py：不可变产物、事件历史、摘要与原子写入
+      → ledger.py：调用意图、结算与待核实用量
+      → agents/orchestrator.py：主 Agent 循环
+          → tools/dispatch.py：上下文隔离的角色 Agent
+          → agents/reviewer.py：独立审核上下文
 ```
 
-- **顶部步骤带**：四个阶段用中文名，图标是内联 SVG（`✓` 完成、`●` 正在做、`△` 要重做、
-  `○` 还没开始）。点一下看那一步的文档。等你的那一步是唯一带颜色的——它是这一屏里唯一
-  一个**请求**，其余都是记录。鼠标停在上面会说明**为什么**是空的——「还没轮到」「正在做」
-  「上次失败了」「做完了但是空的」是四件事，不是一个「还没有内容」。
-- **「素材 · N」**：点开是这个 run 手上真有的图片与视频。**可以直接把文件拖进去**，也可
-  以拷进 `runs/<id>/materials/`。见下面「素材」一节。
-- **待你回答**那条横条：把所有阶段里没解决的问题收在一起，每条写清楚它卡住了什么。它不
-  会自己消失——你没回答的问题，不管你读没读过都还是问题。收起只是把列表折起来，数字还在。
-- **中间对话流**：按「轮」组织——你说的一句话，加系统为这句话做的所有事，加主 Agent 的
-  回复。产物、审核结论、你的决定都是卡片。
-- **产物卡片直接摊开**上面那张结构，不是「一段摘要 + 一个按钮」。**「看原文」**才是覆盖
-  层，读整份 Markdown 正文（可切版本，带作者自述的证据与局限）。产物落在你正在看的那一
-  屏，不跳走。
-- **门禁卡上印着下一步要花多少**：数来自台账，是**上一次跑这一步的实际用量**，不是预测。
-  没跑过就说没跑过，不编一个数。
-- **「机器细节」**在输入栏右侧，默认折叠。展开后每轮显示各角色的调用次数与 token 数；
-  实时流里还会显示工具名。
-- **分镜画成时间条，不是一张表。** `writing` 的五段每段一根条，**宽度就是它的时长**。
-  「15 秒五段」是要读的一句话；五根加起来 15 秒的条是一眼看得见的事——这条片子填不填得
-  满、慢在哪一段，只有这个形状答得了。段里没有时长的画成斜纹并标出来，不假装知道。
+每份产物由 `<stage>-vN.md` 正文及 JSON sidecar 组成。`artifact-v2` 摘要绑定阶段、版本、正文、展示结构、摘要、证据、限制和依赖。结构化展示不是第二套事实；格式不可用时保留正文并记录降级，不能据此伪造可选方向或审批。
 
-### 表面层：深色、13.5px 骨架、一个强调色
+上游产物、已选方向、素材字节、外部观察或导入来源变化会使依赖产物及审核失效，保留旧版本和批准历史。素材存在只证明文件可读取，不证明模型理解了画面。历史 `body-v1` 仅可回放，继续制作必须生成并审核 `artifact-v2`，不能复制旧批准。
 
-这些数字是量出来的，不是想出来的。规划时扒了 ComfyUI / InvokeAI / StableSwarmUI /
-Remotion / Timeline Studio / elah 六个项目的截图，**六个全是深色**，基础字号落在
-13–14px，圆角 4–8px。老界面是白底 16px、12px 圆角——那是「文档管理器」的样子。
+审核只读取目标版本、必要事实与自身标准，不读取生产者的完整对话或自我背书。写作者直接获得 intake、已采用方向和素材证据。任何 Agent 工具都不能签发审批或写用户批准。
 
-`style.css` 开头写了完整理由。三条要点：
+阶段写入锁覆盖同进程中同一数据根的多实例；模型调用与费用恢复另有 OS 锁。这不构成多服务写入支持：同一数据根仍须遵守单 writer 约束。
 
-- **字号分两层**，且都是 px，因为这是决定不是比例：`--fs-chrome: 13.5px` 给标签、步骤带、
-  chip、时码、台账数字；`--fs-prose: 15px` 给 Agent 写的正文。**老界面 16px 那条注释
-  是对的**——「让产物像文章读」——只是它说的是正文，却管到了整个骨架。
-- **一个饱和的强调色**，只花在主操作（发送按钮）上，其余全是灰阶加四个低透明度语义色。
-  每个元素都争注意力，就等于哪个都不突出。状态色是**低透明度的底**，不是浅色块——深色页
-  面上四块浅黄就是四盏灯。
-- **层级靠表面深浅，不靠边框。** 卡片是「深底上的一块浅面」，只有同类表面相接处才画一根
-  发丝线。带边框的白盒子是表单，不是工具。
-- 动效 120–180ms，`cubic-bezier(0.4, 0, 0.2, 1)`（Chakra 的曲率，InvokeAI 用的那个）。
-- 字体 `Noto Sans SC`（本机已装，可变字重，离线、免费、零依赖）。
-- **深色是一次押注**，参考项目全在深色里，但这不是 Jeffery 亲口说的。翻回浅色是改一组
-  token 的事，不是重做。
-
-### 措辞在服务端，不在前端
-
-所有中文说法出在 [`studio/vocabulary.py`](studio/vocabulary.py)，前端只负责画。这条规则
-的理由是实测出来的：审核判定 `pass` 却带了 4 条实质意见，早期界面只显示「通过」，等于
-让他不看意见就点确认。措辞只有一份、且可测，才不会在实时流和刷新后的时间线之间漂移。
-两条规则写在模块开头：**说后果不说状态名**（不是 `stale`，是「上游改过了，这份要重做」），
-**不把注意事项藏在绿灯后面**。
-
-### 产物带结构
-
-每份产物是两个文件：`<stage>-vN.md` 是正文，`<stage>-vN.json` 是随附信息（指纹、证据、
-局限、输入）。sidecar 里现在多一个 `structured` 字段——**把正文里本来就有的东西写成字段**，
-界面才有可能按它的形状画，而不是拍平成一篇文章。
-
-这一步不是新机制：`evidence[]` 和 `limitations[]` 从第一次真跑起就是模型产出的字符串数组。
-`structured` 是同一个做法的延伸。
-
-| 阶段 | 结构 |
-| --- | --- |
-| ① 需求整理 | 事实表（项目 / 内容 / 出处）+ 硬约束 + 待你回答的问题 |
-| ② 创意方向 | A/B/C 对比卡 × 7 个属性；推荐项高亮 + 它成立的前提；依赖矩阵（哪个空白不解决，哪个方向站不住） |
-| ③ 素材计划 | 素材板：每项一张卡 + 状态（已有 / 需要拍 / 需要生成 / 无法获得 / 不确定）；缺口单列 |
-| ④ 脚本 | 分镜条：时码 · 画面 · 台词 · 声音 · 时长 |
-
-三条约束：
-
-- **结构是可选的，坏了不失败。** 模型没给、或校验不过，就存空，界面退回成纯文本的样子，
-  并记一条事件。**绝不因为结构坏了让一个阶段失败。**
-- **形状定在 Python 里**（[`studio/structured.py`](studio/structured.py)），前端只有一个通
-  用渲染器（[`studio/web/blocks.js`](studio/web/blocks.js)）。加一个阶段不用改 JS；改一个
-  阶段的形状只改一处。
-- **指纹只覆盖正文。** `sha256` 算的是正文那一个字符串（`store.py`），所以加字段不动指纹，
-  已有的三份 sidecar 和挂在它们上面的审核、批准、失效传播全部继续有效。代价说清楚：
-  **`structured` 不在指纹覆盖范围内**，和 `evidence` / `limitations` 同一处境。也就是说
-  指纹只证明正文没被改过，不证明排版用的字段没被改过。威胁模型没变——文件在你自己的机器
-  上，能改 sidecar 的人也能改代码。要让结构视图同样可核验是独立的一次改动（给 sidecar 加
-  第二个摘要），现在不做。
-
-审核 Agent 拿到的也是**排好版的这一份**，不是纯正文。否则它审的东西和你在屏幕上看到的不
-是一个东西。
-
-### 素材
-
-真实素材放在 `runs/<run-id>/materials/`——**直接拷进去就行**，也可以从界面拖进去。顶部
-「素材 · N」入口点开是缩略图墙，N 是能用的文件数（不能用的也列出来，灰掉并写明为什么——
-**货架和文件夹不能对不上账**）。
-
-产物里的 `file` 字段按**文件名**引用它：`material_plan` 的每个镜头、`writing` 的每段分镜
-都可以挂一张。引用了一个磁盘上不存在的文件，卡片显示**「文件不在」**而不是破图——和
-`structured` 的降级是同一条规则：**坏了不失败，退回成能看的样子并说出来。**
-
-素材 Agent 有 `list_materials` 工具，**先看目录再写文件名**。没有这个工具它会编文件名，
-而"模型说这个镜头有图"和"真有这张图"是两件事。
-
-视频不转码、不引 ffmpeg：`<video src="...#t=0.5" preload="metadata">` 让浏览器自己画
-第一帧当封面，右下角一个播放角标，点开在浮层里播。分镜时间条上挂的如果是视频，条里
-铺的就是那一帧（压暗到 42%，点一下开浮层）。
-
-上传是**第三个写入口**，但它不改状态：不写事件日志、不产生产物。三条防护写在
-[`studio/materials.py`](studio/materials.py)——扩展名白名单、**单文件 64 MB 上限**、解析
-后的绝对路径必须落在 `materials/` 之内（挡 `../../`）。文件名**保持原样入库**，不重命名、
-不覆盖同名文件，因为产物按名引用它，而产物的指纹覆盖的是正文不是图片：换掉一张图会改变
-一份已签核文档看到的东西，却不改变任何可校验的值。
-
-### 相关端点
+### HTTP 集成
 
 | 端点 | 用途 |
 | --- | --- |
-| `GET /api/runs/{id}/timeline` | 界面渲染所需的全部内容：轮、卡片、步骤带、费用、待你决定的事 |
-| `POST /api/runs/{id}/nonce?stage=` | 签发一次性审批 nonce，只有网页拿得到 |
-| `POST /api/runs/{id}/decision` | 写入你的决定，必须有有效 nonce |
-| `GET /api/runs/{id}/artifacts/{stage}/{version}` | 读整份产物，附带指纹校验结果 |
-| `GET /api/runs/{id}/materials` | 目录里有什么：文件名、类型、大小、URL |
-| `GET /api/runs/{id}/materials/{name}` | 取素材文件本身 |
-| `POST /api/runs/{id}/materials` | 上传素材（第三条写入口，不改状态） |
+| `GET/POST /api/runs` | 列出或创建运行 |
+| `GET /api/runs/{id}/state`、`/timeline` | 领域状态或界面投影；只读推导 |
+| `GET /api/runs/{id}/chat`、`/events`、`/ledger` | 对话、历史事件、按调用合并后的台账 |
+| `GET /api/runs/{id}/artifacts` | 产物列表，可按 `stage` 筛选 |
+| `GET /api/runs/{id}/artifacts/{stage}/{version}` | 指定版本正文、展示结构与完整性校验 |
+| `POST /api/runs/{id}/message` | 启动主 Agent 轮次，通过 SSE 返回进度 |
+| `POST /api/runs/{id}/nonce` | 为页面实际展示版本签发审批 nonce |
+| `POST /api/runs/{id}/decision` | 用户提交采用或退回决定 |
+| `GET/POST /api/runs/{id}/materials` | 查看素材列表或上传素材 |
+| `GET /api/runs/{id}/materials/{name}` | 读取素材文件 |
 
-`/timeline` 是**只读**的，每次请求从磁盘重新推导。改状态的入口只有两条：发消息、决定门禁。
-第三个写入口是上传素材，它只往 `materials/` 放文件，**不改状态**——见下。
+nonce 请求的查询参数必须包含 `stage`、`expected_version` 和 `expected_artifact_sha256`。决定 JSON 必须携带相同三项，加上 `nonce`、`decision`（`approved` / `returned`）；采用含选项的方向时还必须有有效 `selected_option_id`，退回填写 `note`，覆盖退回审核填写 `override_reason`。
 
-## 边界
+这些值取自用户实际阅读的产物，不得提交前偷偷读取最新版替换。服务端只落盘 nonce 摘要；相同 nonce 与相同决定重试幂等，更改选项、理由或决定则拒绝。模型轮次执行中、版本冲突或失效时返回 `409`；必填字段缺失返回 `422`，无效阶段返回 `400`。nonce 不是公网身份验证。
 
-- **不接任何付费生成 API。** v1 不存在图片/视频生成工具。
-- **审批只能来自界面点击。** 门禁阶段的通过事件带服务端签发的 nonce，只有网页能拿到；
-  任何 Agent 工具都写不了通过。
-- **审核独立是结构性的。** 审核 Agent 跑在独立上下文，只收到产物文件与它自己的评审
-  标准，拿不到生产者的对话或自评，也没有任何写入口。
-- **失效传播保守。** 上游产物指纹变化，下游阶段与既有审核全部标记过期，保留历史；
-  局部重做换准确，避免旧审核误通过。
-- 不替 Jeffery 做创意决定；不自动通过审核；不把技术成功当内容成立。
+### 素材与观察
 
-## 与现有工作台的关系
+素材位于 `runs/<id>/materials/`，可从界面上传或在服务停止时本地放入。按文件名引用，缺文件时明确提示；视频由浏览器预览，不转码。上传检查扩展名、64 MiB 单文件上限和最终路径，拒绝同名覆盖；不直接创建阶段产物或批准，但素材摘要变化会使相关依赖失效。
 
-| | video-workbench（旧，Codex） | us-video-studio（新） |
-| --- | --- | --- |
-| 主 Agent | Codex 对话 | 应用内自写循环 |
-| 驱动 | Python 适配器 + Backlot 画板 | FastAPI + 自建前端 |
-| 数据 | `workbench-pilot-v1/`、`workbench-discovery/` | `us-video-studio/` |
-| 读写关系 | 只读对照对方 | 只读对照对方 |
-| 当前状态 | 已停用 | 在用 |
+外部观察可写入运行的 `evidence/observations.json`，须绑定文件名、hash、观察层级、方法、覆盖范围、观察者、日期、发现及限制；格式与校验见 [evidence.py](studio/evidence.py)。没有有效观察时仅记 `existence_only`。模型不能通过工具写入观察以冒充自己看过素材。
 
-两边互不写入。旧工作台已停用，只作为历史对照保留。
+## 用量、费用与恢复
 
-## 成本上限：真正生效的是哪一个
+每次模型 HTTP 请求先持久化 intent，再追加 settlement；台账按 `call_id` 合并有效记录。传输不自动重试，不完整结束、畸形工具参数或缺最终用量不能记作成功。完整返回 `max_tokens` 时，角色循环可在配置限制内发起单独计费的续写；这与重发中断请求不同。
 
-**美元上限目前停不住任何东西，生效的是 token 上限。**
+未知用量或价格保留为未知，美元金额为 `null`，不能补零。已知小计、未知调用和待核实状态分别显示；任一运行存在未核实用量都会阻止该数据根继续调用模型。金额是价目表估算，不是提供方账单。
 
-`config.json` 里的价目表是零费率的占位（`pricing.source` 标着未确认）。零费率意味着
-`estimated_usd` 恒为 0，$10 这个上限永远不可能被触及——一个假装存在的刹车比没有刹车
-更糟，因为它看起来像保护。所以代码里做了两件事：`Ledger.ensure_within_budget()` 只在
-费率非零时才检查美元上限，`price_note()` 会明确报出 `usd_cap_enforceable: false`。
+默认总量软阈值为 2,000,000 token，美元软阈值为 10；仅确认有效价目表后美元阈值才可执行。上限跨该数据根所有运行累计，在调用前检查，最后一笔可能越过阈值，不保证绝不超额。
 
-现在实际拦截调用的是 `budget_limit_tokens = 2_000_000`。这是 API 回报的事实数字，不是
-估算。
-
-**2M 大约够跑 9–11 次完整四阶段。** 这个数是从实测外推的，不是猜的：已跑完的
-intake→direction 两阶段案例（26 次调用）用掉 9.6 万 token；一次完整四阶段约 17–19 万
-token（①6k + ②50k + ③38k + ④50k + 主 Agent 跨多轮的协调开销约 25k）。早先写在这里的
-「二十来个」是从**两阶段**案例外推的，把四个阶段当两个算了，已更正。
-
-两个会把估算推高的因素：④脚本输出最长，可能撞 `max_tokens = 16384` 被截断（实测里审核
-那一次的输出是 8,182 token，在旧的 8,192 上限下只差 1 个 token 就会截断）；截断一次要多
-花 1.5–2 万，截断后重做加 4 万左右。
-
-**要恢复美元上限，需要 Jeffery 给出 DeepSeek 的真实价目表**（输入/输出每百万 token
-单价与生效日期），填进 `config.json` 的 `pricing` 并把 `source` 改成真实来源。在那之前，
-界面上显示的美元数只是估算占位，不要当成账单。
-
-上限是**跨所有运行的总额**，不是每次运行重置。每次调用前检查，所以最后一个调用可能
-小幅越过上限——token 数在响应回来之前是未知的，这没法避免。
-
-## 实测到什么程度（截至 2026-09-17）
-
-离线测试 312 个（Python，1 个因缺符号链接权限而跳过）+ 47 个（前端渲染器），全部不联网、
-不花钱：
+以下命令在应用目录执行，显式指定数据根，不调用模型、不批准内容、不自动重跑。先停止对应服务；只有取得提供方用量或未受理证明才能对账，不得从部分输出猜 token。
 
 ```powershell
-& 'J:/E-Business-Video-Data/us-video-studio/runtime-venv/Scripts/python.exe' -m pytest apps/us-video-studio/tests -q
-node --test apps/us-video-studio/tests/js/*.mjs
+python -m studio.recovery --data-root <DATA_ROOT> pending
+python -m studio.recovery --data-root <DATA_ROOT> reconcile <RUN_ID> <CALL_ID> --input-tokens <N> --output-tokens <N> --evidence-note "提供方用量记录或未受理证明的出处"
+
+# 关闭崩溃遗留的指定开放尝试；不清除原稿、历史或未知费用
+python -m studio.recovery --data-root <DATA_ROOT> attempts <RUN_ID>
+python -m studio.recovery --data-root <DATA_ROOT> abandon <RUN_ID> <STAGE> --attempt-token <TOKEN_FROM_ATTEMPTS> --reason "中断核查说明" --server-stopped
 ```
 
-**对着真端点已验证：**
+恢复后由用户明确要求继续，系统不自动重复已完成步骤。
 
-- 兼容层确实说 Anthropic Messages 的 SSE 形状：`message_start → content_block_start →
-  content_block_delta(text_delta / thinking_delta / input_json_delta) → content_block_stop →
-  message_delta(stop_reason + usage) → message_stop`。
-- 多轮工具循环：模型调工具 → 执行 → 结果回灌 → 继续，直到给出答复。不是只跑通过单轮。
-- thinking block 会被原样回传（`signature` 保留），没有丢。
-- 服务重启后对话与状态从事件日志恢复，不依赖内存。
-- 走完完整链路：intake 建档 → 派工 director → 独立送审 → 退回 → 重做 → 复审通过，
-  门禁、台账、失效传播四件事在同一案例上同时成立。
+### 导入 ContentInput
 
-**仍未对着真端点验证：** 并行工具调用（一次返回多个 tool_use，离线测试覆盖了循环能处理
-这个形状，但端点上没见过）、超长上下文、prompt caching。兼容层是兼容层，不当作原生 API。
+先创建空 run，停止该数据根其他写入，再在应用目录执行：
 
-**一次真实观测（2026-09-17）：** 导演第一次派工在 `max_tokens = 8192` 上被截断，整个
-attempt 白费。已把默认上限提到 16384，并加了「截断后从断点续写一次」的续写逻辑（重放时
-丢掉没解析完的 tool_use block）。这类问题只有真跑才会暴露。
+```powershell
+python -m studio.input_import --data-root <DATA_ROOT> --run-id <RUN_ID> --path <CONTENT_INPUT_JSON> --repository-root <REPOSITORY_ROOT> --allow-root <REPOSITORY_ROOT> --allow-root <MEDIA_ROOT>
+```
 
-**同一次真实观测暴露的三个界面缺陷（已修，都补了回归测试）：**
+导入器复用仓库 [content_handoff.py](../video-workbench/openmontage/lib/content_handoff.py) 的校验，仅允许读取显式指定根目录中的来源；保留完整输入字节、事实层级、观察覆盖、未知项和来源指纹。拒绝覆盖已有 intake 或输入文件，来源改变会使依赖失效。导入是本地显式入口，不是任意文件读取 HTTP API；包中的授权字段不自动授予本应用生成、费用或发布权限。
 
-1. 审核 `pass` 带 4 条意见，界面只显示「通过」——改成通过和退回都显示意见。
-2. 用户消息在它触发的产物**之后**才落盘，所以问题被排在它导致的文档下面；预算撞上限时
-   他刚发的话会直接丢掉。落盘时机挪到循环之前。
-3. 主 Agent 第一轮整段用英文回答。已在提示词里明确要求中文（技术名词可保留原文）。
+## 验证范围与剩余工作
 
-## 已知风险
+2026-09-17 修复与视觉改造使用离线模型 fixture 和隔离浏览器验证；覆盖版本冲突、真实方向选择、台账恢复、输入来源、原文切换及桌面/1024px/390px 布局。对应审查记录见 [方案核验](../../tracks/us/docs/studio-plan-review-2026-09-17.md)。测试命令见上文，以执行结果为准。
 
-- **同模型生产 + 审核。** 导演和审核默认都是 `deepseek-flash`（Jeffery 的选择）。同模型
-  互相背书是既有研究里明确警告过的失败模式。本应用不假设审核有效——第一次真跑时审核
-  确实退回了导演的方案，指出推荐理由与文档自身承认的事实矛盾，以及一个尚不存在购买
-  漏斗的目标人群。这是 n=2 的观测，不是结论。模型按角色可配置，换 `deepseek-v4-pro`
-  是一行配置。
-- **`deepseek-flash` 的创意质量仍然未知。** 工作台的第一个真实价值可能就是把这件事
-  变得可测。
-- **审核「通过」不等于内容可用。** 通过只意味着它在自己声明的范围内自洽。画面、音效、
-  费用、以及是否值得做，都不在它的判定范围内。
-- **主 Agent 会把自己这一轮做了多少事说错。** 实测：它读到的 token 数字是准的（台账
-  逐条对得上），但它把上一轮的派工与送审算进了「本轮我自己发的 8 次调用」——那一轮它
-  只发了 2 次。**台账数字可信，Agent 关于自己行为的叙述不可信。** 已在成本块里写明
-  「累计数包含所有角色」，缩小这种误读的空间，但不能消除。
-- **审核说「退回」，他仍然可以放行——只需写一句理由。** 这是**故意**的：审核是同一个
-  模型、坐在生产方那一侧，它的 `return` 不该是一张他只能靠手工构造 HTTP 请求才能推翻的
-  否决票。所以退回的阶段照样出现待办卡，按钮上写的是「明知有问题仍然通过」，理由必填，
-  记成 `approved_override` 而不是 `approved`。**牙齿在理由里，不在按钮的缺席里。**
-  代价是真的：一句话就能越过审核，而那句话没人复核。见 `studio/timeline.py` 的
-  `_pending_action`、`tests/test_orchestration.py::test_a_returned_review_still_leaves_him_the_last_word`。
-- **老运行的时间线仍然是乱的。** 用户消息先落盘这个修复只对之后产生的运行生效。
-  `smoke-lunch-bag-01` 里有一轮的用户消息是空的、时间戳也晚于它触发的产物，所以那一轮
-  会显示成一个没有提问内容的轮次。那是一次性机构验证案例，不修。
+更早的兼容端点探索不能代替本轮传输与审批修改后的完整实端点验收。尚未完成：独立搜索/参考发现、直接视觉与声画理解、修改后的真实端点完整流程验收，以及真实运行数据切换验收。外部观察导入是过渡入口。
 
-## 本次运行的案例
-
-`smoke-lunch-bag-01`（在 `runs/` 下）：用 [tracks/us](../../tracks/us/README.md) 里的真实
-商品事实建的**机构验证案例**，不是编出来的填充数据，但也不是一条真要投的片子。它证明
-的是流程跑得通，不是内容能用。真实案例请另起 run。
+同模型生产与审核的创意质量仍需独立评估；审核通过、离线测试通过、渲染成功均不能证明内容可用或市场有效。本应用没有图片/视频生成工具，不把策划批准扩展为制作授权。

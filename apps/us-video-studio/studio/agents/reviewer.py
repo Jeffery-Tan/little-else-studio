@@ -88,6 +88,9 @@ def run_review(
     if state.latest is None:
         outcome.error = f"{stage} has nothing to review yet"
         return outcome
+    if state.latest.digest_algorithm != "artifact-v2":
+        outcome.error = "历史版本只有正文指纹；请先产生包含展示字段与依据的新版本，再审核"
+        return outcome
     if state.stale:
         outcome.error = f"{stage}-v{state.latest.version} 已过期：{state.stale_reason}"
         return outcome
@@ -101,6 +104,10 @@ def run_review(
         return outcome
 
     workspace = Workspace(store, pipeline, run_id, "reviewer", target_stage=stage)
+    versions = {name: store.latest_artifact(run_id, name).version
+                for name in (stage, *pipeline.upstream_stages(stage))
+                if store.latest_artifact(run_id, name) is not None}
+    versions[stage] = state.latest.version
     run = store.read_run(run_id)
     budgeted = BudgetedClient(
         client, ledger, run_id=run_id, role="reviewer", stage=stage
@@ -110,14 +117,19 @@ def run_review(
 
     def execute(name: str, args: dict[str, Any]) -> str:
         if name == "read_artifact":
-            return workspace.render_artifact(args["stage"], args.get("version"))
+            requested_stage = args["stage"]
+            if args.get("version") not in (None, versions.get(requested_stage)):
+                raise ToolError("review is bound to the initial artifact versions")
+            return workspace.render_artifact(requested_stage, versions.get(requested_stage))
         if name == "list_materials":
             return workspace.render_materials()
         if name == "finish_review":
             verdict = args.get("verdict")
             findings = args.get("findings") or []
             review = pipeline.record_review(
-                run_id, stage, verdict=verdict, findings=findings
+                run_id, stage, verdict=verdict, findings=findings,
+                expected_artifact_sha256=state.latest.sha256,
+                expected_version=state.latest.version,
             )
             recorded["verdict"] = review.verdict
             recorded["findings"] = review.findings
@@ -128,7 +140,12 @@ def run_review(
             )
         raise ToolError(f"reviewer has no tool named {name!r}")
 
-    seed = _seed(workspace, stage, run)
+    seed = _seed(workspace, stage, run, versions=versions)
+    current = pipeline.stage_state(run_id, stage)
+    if (current.latest is None or current.latest.sha256 != state.latest.sha256
+            or current.latest.version != state.latest.version or current.stale or not current.integrity_ok):
+        outcome.error = "审核输入已经变化，请读取当前版本后重新审核"
+        return outcome
 
     try:
         result = run_agent_loop(
@@ -177,23 +194,28 @@ def run_review(
     return outcome
 
 
-def _seed(workspace: Workspace, stage: str, run) -> str:
+def _seed(workspace: Workspace, stage: str, run, *, versions: dict[str, int] | None = None) -> str:
+    versions = versions or {}
     parts = [
         "# 判定对象",
         "",
         f"阶段 {stage} 的当前版本如下。你要审的就是这一版。",
         "",
-        workspace.render_artifact(stage),
+        workspace.render_artifact(stage, versions.get(stage)),
         "",
     ]
-    upstream = [s for s in STAGE_SPEC[stage].requires if s in workspace.readable]
+    # render_context includes the full pinned intake plus the actual selection;
+    # don't pay to send that same fact document twice in one request.
+    upstream = [s for s in workspace.pipeline.upstream_stages(stage)
+                if s in workspace.readable and s != "intake"]
     for up in upstream:
         parts += [
             f"# 上游产物 {up}（用于核对依据，不是判定对象）",
             "",
-            workspace.render_artifact(up),
+            workspace.render_artifact(up, versions.get(up)),
             "",
         ]
+    parts += [workspace.render_context(stage, versions=versions), ""]
     parts += [
         "# 怎么判",
         "",

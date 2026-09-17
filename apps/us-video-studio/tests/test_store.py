@@ -62,7 +62,8 @@ def test_fingerprint_matches_then_detects_tampering(store):
         "r1", "direction", 1, "body", summary="s",
         author_role="director", attempt="direction#1", inputs={"intake": "abc"},
     )
-    assert artifact.sha256 == sha256_text("body")
+    assert artifact.digest_algorithm == "artifact-v2"
+    assert artifact.sha256 != sha256_text("body")
     assert store.verify_artifact("r1", "direction", 1) is True
 
     path = store.run_dir("r1") / "artifacts" / "direction-v1.md"

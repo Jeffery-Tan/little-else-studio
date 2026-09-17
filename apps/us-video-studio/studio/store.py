@@ -20,6 +20,8 @@ import hashlib
 import json
 import os
 import shutil
+import threading
+from functools import wraps
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -37,9 +39,41 @@ from .models import (
     valid_run_id,
 )
 
+_RUN_LOCKS: dict[str, Any] = {}
+_RUN_LOCKS_GUARD = threading.Lock()
+
+
+def serialized_run(method):
+    """Serialize read/check/write transitions in the local single-process service.
+
+    Shared by Store and Pipeline instances pointing at the same run. This is
+    intentionally not a claim of cross-process or distributed coordination.
+    """
+    @wraps(method)
+    def guarded(self, run_id, *args, **kwargs):
+        store = getattr(self, "store", self)
+        with store.run_lock(run_id):
+            return method(self, run_id, *args, **kwargs)
+    return guarded
+
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def artifact_digest(content: str, *, stage: str, version: int, summary: str,
+                    evidence: list[str], limitations: list[str],
+                    inputs: dict[str, str], structured: dict[str, Any]) -> str:
+    """Bind everything reviewed or displayed, including the exact version.
+
+    Metadata such as creation time and author does not affect creative content.
+    Existing body-v1 records are never rewritten or silently upgraded.
+    """
+    return sha256_text(json.dumps({
+        "algorithm": "artifact-v2", "stage": stage, "version": version,
+        "content": content, "summary": summary, "evidence": evidence,
+        "limitations": limitations, "inputs": inputs, "structured": structured,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False))
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -89,6 +123,11 @@ class Store:
     def __init__(self, data_root: Path | str):
         self.root = Path(data_root)
         (self.root / "runs").mkdir(parents=True, exist_ok=True)
+
+    def run_lock(self, run_id: str):
+        key = os.path.normcase(str(self.run_dir(run_id).resolve()))
+        with _RUN_LOCKS_GUARD:
+            return _RUN_LOCKS.setdefault(key, threading.RLock())
 
     # ---------------------------------------------------------------- runs --
 
@@ -152,6 +191,7 @@ class Store:
         base = self.run_dir(run_id) / "artifacts"
         return base / f"{stage}-v{version}.md", base / f"{stage}-v{version}.json"
 
+    @serialized_run
     def write_artifact(
         self,
         run_id: str,
@@ -183,11 +223,17 @@ class Store:
                 f"write the next version instead",
             )
 
+        evidence = [str(e) for e in evidence]
+        limitations = [str(x) for x in limitations]
         artifact = Artifact(
             stage=stage,
             version=version,
             filename=md_path.name,
-            sha256=sha256_text(content),
+            sha256=artifact_digest(content, stage=stage, version=version,
+                                   summary=summary.strip(), evidence=evidence,
+                                   limitations=limitations, inputs=dict(inputs or {}),
+                                   structured=dict(structured or {})),
+            digest_algorithm="artifact-v2",
             summary=summary.strip(),
             evidence=[str(e) for e in evidence],
             limitations=[str(x) for x in limitations],
@@ -216,7 +262,9 @@ class Store:
         md_path, _ = self._artifact_paths(run_id, stage, version)
         if not md_path.is_file():
             raise PipelineError("store", f"no such artifact: {stage}-v{version}")
-        return md_path.read_text(encoding="utf-8")
+        # Digest the stored text exactly; universal-newline translation would
+        # make a legitimate CRLF artifact fail its own fingerprint.
+        return md_path.read_bytes().decode("utf-8")
 
     def read_artifact(self, run_id: str, stage: str, version: int) -> Artifact:
         _, meta_path = self._artifact_paths(run_id, stage, version)
@@ -231,7 +279,16 @@ class Store:
         review and approval that pointed at the recorded fingerprint.
         """
         artifact = self.read_artifact(run_id, stage, version)
-        current = sha256_text(self.read_artifact_text(run_id, stage, version))
+        content = self.read_artifact_text(run_id, stage, version)
+        if artifact.digest_algorithm == "body-v1":
+            current = sha256_text(content)
+        elif artifact.digest_algorithm == "artifact-v2":
+            current = artifact_digest(content, stage=artifact.stage, version=artifact.version,
+                                      summary=artifact.summary, evidence=artifact.evidence,
+                                      limitations=artifact.limitations, inputs=artifact.inputs,
+                                      structured=artifact.structured)
+        else:
+            return False
         return current == artifact.sha256
 
     def list_artifacts(self, run_id: str, stage: str | None = None) -> list[Artifact]:

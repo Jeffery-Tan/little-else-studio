@@ -25,7 +25,7 @@ from . import vocabulary as v
 from .pipeline import Pipeline
 from .materials import list_materials
 from .store import Store
-from .structured import open_questions, view
+from .structured import direction_options, open_questions, view
 
 #: Sort tiebreak when a note and a card share a timestamp: the note announced the
 #: work, so it goes above the work.
@@ -47,7 +47,7 @@ def build_timeline(
     artifacts = store.list_artifacts(run_id)
     reviews = store.list_reviews(run_id)
     approvals = store.list_approvals(run_id)
-    rows = store.read_ledger(run_id)
+    rows = ledger.entries(run_id)
 
     items = _collect_items(events, artifacts, reviews, approvals, chat)
     turns = _group_into_turns(chat, items, events, rows)
@@ -72,17 +72,22 @@ def build_timeline(
         # the cards, which are a record of what happened; this is the only part
         # of the page that is a request.
         "questions": v.build_questions(state["stages"]),
+        # How drafted answers are joined into the one message they are sent as.
+        # Carried, not hard-coded in the screen, for the same reason every other
+        # sentence is: see `vocabulary.ANSWERS_HEADER`.
+        "answers_header": v.ANSWERS_HEADER,
         "pending": pending,
         "spend": mine.to_dict(),
         "budget": {
             "limit_usd": ledger.settings.budget_limit_usd,
-            "remaining_usd": round(ledger.remaining_usd(), 4),
+            "remaining_usd": ledger.remaining_usd(),
+            "limit_mode": "soft_threshold",
             "pricing": pricing,
         },
         "spend_sentence": v.spend_sentence(mine, pricing["usd_cap_enforceable"]),
         "all_runs_sentence": (
-            f"开发期一共用了：{v.human_tokens(everything.input_tokens + everything.output_tokens)}"
-            f" token · {everything.calls} 次调用（跨所有项目）"
+            f"开发期已知用量：{v.human_tokens(everything.input_tokens + everything.output_tokens)}"
+            f" token · {everything.calls} 次调用 · {everything.unknown_calls} 次用量待核实（跨所有项目）"
         ),
         # The shelf rides along with the timeline rather than being fetched
         # separately, because the screen needs it to answer a question the
@@ -159,20 +164,12 @@ def _collect_items(
                 # The consequence, said on the card rather than left in the
                 # document: this stage asked something it could not answer.
                 "questions": open_questions(a.structured, a.stage),
+                # One shape for a review, shared with the rail's step: this card
+                # and the stage panel are looking at the same review, and two
+                # assemblies of it is how one of them loses the sentence.
                 "review": None
                 if review is None
-                else {
-                    "verdict": review.verdict,
-                    "sentence": v.review_sentence(review.verdict, review.findings),
-                    "findings": [
-                        {
-                            "kind": f.get("kind", ""),
-                            "stage": f.get("stage", ""),
-                            "issue": f.get("issue", ""),
-                        }
-                        for f in review.findings
-                    ],
-                },
+                else v.review_view(review.verdict, review.findings),
             }
         )
 
@@ -184,7 +181,7 @@ def _collect_items(
                 "stage": ap.stage,
                 "stage_label": v.stage_label(ap.stage),
                 "decision": ap.decision,
-                "sentence": v.approval_sentence(ap.decision, ap.note),
+                "sentence": v.approval_sentence(ap.decision, ap.note) + (f" 已选方向 {ap.selected_option_id}。" if ap.selected_option_id else ""),
             }
         )
 
@@ -318,16 +315,16 @@ def _detail(rows: list[Any], events: list[dict[str, Any]]) -> dict[str, Any]:
                      "input_tokens": 0, "output_tokens": 0, "rounds": 0}
         )
         agg["calls"] += 1
-        agg["input_tokens"] += r.input_tokens
-        agg["output_tokens"] += r.output_tokens
+        agg["input_tokens"] += r.input_tokens or 0
+        agg["output_tokens"] += r.output_tokens or 0
     for role, n in rounds.items():
         if role in by_role:
             by_role[role]["rounds"] = n
 
     return {
         "calls": len(rows),
-        "input_tokens": sum(r.input_tokens for r in rows),
-        "output_tokens": sum(r.output_tokens for r in rows),
+        "input_tokens": sum(r.input_tokens or 0 for r in rows),
+        "output_tokens": sum(r.output_tokens or 0 for r in rows),
         "roles": sorted(by_role.values(), key=lambda a: -a["calls"]),
     }
 
@@ -385,12 +382,21 @@ def _pending_action(state: dict[str, Any], ledger: Any) -> dict[str, Any] | None
             next_owner = v.role_label(v.owner_role(nxt))
             cost = v.cost_sentence(ledger.last_stage_cost(v.owner_role(nxt), nxt))
 
+        # Recommendation is advisory. Every actual option is selectable, while
+        # an override still requires its explicit reason in the approval API.
+        options = []
+        if stage == "direction":
+            options = [{"key": o["key"], "recommended": o["recommended"],
+                        "label": v.option_button_label(o["key"], o["recommended"])}
+                       for o in direction_options(latest.get("structured") or {})]
+
         return {
             "kind": "decision_request",
             "at": latest.get("created_at", utcnow()),
             "stage": stage,
             "stage_label": v.stage_label(stage),
             "version": latest.get("version"),
+            "artifact_sha256": latest.get("sha256"),
             "passed": passed,
             "headline": head,
             "body": body,
@@ -400,5 +406,7 @@ def _pending_action(state: dict[str, Any], ledger: Any) -> dict[str, Any] | None
             "next_stage_label": next_stage_label,
             "next_owner": next_owner,
             "next_cost_sentence": cost,
+            "options": options,
+            "options_hint": v.GATE_OPTION_HINT if options else "",
         }
     return None

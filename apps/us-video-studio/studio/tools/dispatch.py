@@ -238,9 +238,11 @@ class Dispatcher:
             f"# 你要交付的阶段：{stage}",
             "",
         ]
-        for up in STAGE_SPEC[stage].requires:
-            if up in workspace.readable:
-                parts += [f"## 上游产物 {up}", "", workspace.render_artifact(up), ""]
+        parts += [workspace.render_context(stage), ""]
+        for up in workspace.readable:
+            if up in ("intake", stage):
+                continue
+            parts += [f"## 上游产物 {up}", "", workspace.render_artifact(up), ""]
         parts += [
             "# 怎么做",
             "",

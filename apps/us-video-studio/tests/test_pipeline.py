@@ -136,9 +136,10 @@ def test_nonce_is_single_use(pipe):
     review_pass(pipe, "direction")
 
     nonce = pipe.issue_nonce(RUN, "direction")
-    pipe.record_approval(RUN, "direction", nonce=nonce, decision="approved")
+    first = pipe.record_approval(RUN, "direction", nonce=nonce, decision="approved")
+    assert pipe.record_approval(RUN, "direction", nonce=nonce, decision="approved") == first
     with pytest.raises(PipelineError):
-        pipe.record_approval(RUN, "direction", nonce=nonce, decision="approved")
+        pipe.record_approval(RUN, "direction", nonce=nonce, decision="returned", note="different decision")
 
 
 def test_nonce_is_bound_to_its_stage(pipe):
@@ -183,6 +184,37 @@ def test_approving_without_a_pass_review_needs_a_named_override(pipe):
     approval = approve(pipe, "direction", override_reason="reviewer unavailable, I read it myself")
     assert approval.decision == "approved_override"
     assert "reviewer unavailable" in approval.note
+
+
+def test_returning_a_stage_needs_a_note_the_writer_can_act_on(pipe):
+    """The mirror of the override rule next door, and the same kind of rule.
+
+    A return goes to the agent that wrote the document, which acts on this text
+    and nothing else. An empty one leaves it to guess or to redo the work
+    unchanged — a wrong fix or a wasted turn, both of them paid for. Gitea and
+    Forgejo refuse this server-side for the same reason.
+    """
+    submit_intake(pipe)
+    submit_direction(pipe)
+    review_pass(pipe, "direction")
+
+    nonce = pipe.issue_nonce(RUN, "direction")
+    with pytest.raises(PipelineError) as err:
+        pipe.record_approval(RUN, "direction", nonce=nonce, decision="returned")
+    assert "note" in str(err.value)
+
+    # Whitespace is not a note either — a space is what a required field gets
+    # typed into when the field is the only thing in the way.
+    nonce = pipe.issue_nonce(RUN, "direction")
+    with pytest.raises(PipelineError):
+        pipe.record_approval(RUN, "direction", nonce=nonce, decision="returned", note="   ")
+
+    nonce = pipe.issue_nonce(RUN, "direction")
+    approval = pipe.record_approval(
+        RUN, "direction", nonce=nonce, decision="returned", note="开场缺了容量对比"
+    )
+    assert approval.decision == "returned"
+    assert approval.note == "开场缺了容量对比"
 
 
 def test_a_returning_review_does_not_open_the_gate(pipe):

@@ -132,12 +132,83 @@ def _review_count_sentence(verdict: str, n: int) -> str:
     return "审核把它退回了。"
 
 
+def review_view(verdict: str, findings: list[dict[str, Any]]) -> dict[str, Any]:
+    """One review, in the shape a card draws it.
+
+    Two places draw a review — the artifact card in the conversation and the
+    stage panel — and they are looking at the same review through different
+    objects: the timeline holds a ``Review``, the rail holds its ``to_dict()``.
+    Assembling the shape twice is how one of them ends up showing the verdict
+    without the sentence that qualifies it, which is exactly the failure
+    ``review_sentence`` exists to prevent.
+    """
+    return {
+        "verdict": verdict,
+        "sentence": review_sentence(verdict, findings),
+        "findings": [
+            {
+                "kind": f.get("kind", ""),
+                "stage": f.get("stage", ""),
+                "issue": f.get("issue", ""),
+            }
+            for f in findings
+        ],
+    }
+
+
 def approval_sentence(decision: str, note: str = "") -> str:
     if decision == "approved_override":
         return f"你在审核没通过的情况下批准了它。理由：{note}" if note else "你在审核没通过的情况下批准了它。"
     if decision == "approved":
         return "你批准了这一版。"
     return "你把它退回了。" + (f" 理由：{note}" if note else "")
+
+
+# --------------------------------------------------------------------------- #
+# Acting on the screen instead of typing about it
+# --------------------------------------------------------------------------- #
+#
+# Two shapes, and the difference has to be legible on the control itself rather
+# than remembered: answering a question accumulates and is sent in one message;
+# picking a direction is a gate decision and takes effect on the click.
+#
+# The wording lives here for the same reason every other sentence does — there is
+# one copy, and it is testable. The screen substitutes and draws, nothing else.
+
+
+#: How several drafted answers are joined into the one message they become.
+#: ``{n}`` is the count. One answer is sent as itself, with no header — a lead-in
+#: that says "1 个问题" is a sentence about nothing.
+ANSWERS_HEADER = "一次回答 {n} 个问题："
+
+
+def answer_prefix(question: str) -> str:
+    """What goes in front of a drafted answer.
+
+    The question is quoted into it because the message arrives as prose: without
+    it the orchestrator has to match the answer back to a question by guessing,
+    and a wrong guess is a stage built on the wrong fact.
+    """
+    return f"回答「{question}」："
+
+
+def option_button_label(key: str, recommended: bool) -> str:
+    """The option buttons on a gate card — short; the hint underneath explains."""
+    return f"方向 {key}" + ("（推荐）" if recommended else "")
+
+
+#: The legend on a gate card that has options. Without it the two behaviours are
+#: a rule he has to remember, which is the failure this whole control risks.
+GATE_OPTION_HINT = "选择方向后提交采用决定；需要修改时另行填写意见退回。"
+
+
+def option_return_note(key: str, recommended_key: str) -> str:
+    """The reason recorded when he overrides the director's recommendation.
+
+    Written into the approval row, so the rework is traceable to a stated choice
+    rather than to an unexplained return.
+    """
+    return f"改用 {key}（导演推荐的是 {recommended_key}）"
 
 
 def rejection_sentence(role: str, stage: str, reason: str = "") -> str:
@@ -223,8 +294,10 @@ def cost_sentence(cost: dict[str, Any] | None) -> str:
     if cost is None:
         return "这一步还从没跑过，花多少说不上来。"
     line = f"上次做这一步用了约 {human_tokens(cost['tokens'])} token（{cost['calls']} 次调用）"
-    if cost.get("usd_is_real"):
+    if cost.get("usd_is_real") and cost.get("estimated_usd") is not None:
         line += f"，约 ${cost['estimated_usd']:.2f}（估算）"
+    if cost.get("unknown_calls", 0):
+        line += "，另有未核实用量；以上仅为已知部分"
     return line + "。"
 
 
@@ -392,9 +465,11 @@ def spend_sentence(spend: Any, usd_enforceable: bool) -> str:
     """
     tokens = spend.input_tokens + spend.output_tokens
     line = f"已用约 {human_tokens(tokens)} token · {spend.calls} 次调用"
-    if usd_enforceable:
+    if getattr(spend, "unknown_calls", 0):
+        line = f"已知用量约 {human_tokens(tokens)} token · {spend.calls} 次调用 · {spend.unknown_calls} 次用量待核实"
+    if usd_enforceable and spend.estimated_usd is not None:
         return f"{line} · 约 ${spend.estimated_usd:.2f}（估算）"
-    return f"{line} · 花多少钱还没法算（价目表未确认）"
+    return f"{line} · 金额待核实（调用用量不完整）" if usd_enforceable else f"{line} · 花多少钱还没法算（价目表未确认）"
 
 
 # --------------------------------------------------------------------------- #
@@ -409,10 +484,17 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None) -> list[dic
     (●), or not started (○). A step that needs his click says so.
 
     Each step also carries everything the panel behind it draws: the blocks the
-    stage's document was laid out into, and the questions it left open. Carried
-    here rather than fetched per click because the timeline already has it all in
-    memory, and a second request per step would only create a way for the rail
-    and the panel to disagree.
+    stage's document was laid out into, the questions it left open, and the
+    review of that exact version. Carried here rather than fetched per click
+    because the timeline already has it all in memory, and a second request per
+    step would only create a way for the rail and the panel to disagree.
+
+    The review and the fingerprint warning ride along for the same reason. The
+    panel is now the place a document is read, so a signal that only the overlay
+    reader used to print — 「这份文件保存后被改动过」 — would otherwise quietly
+    stop being shown anywhere. ``st["review"]`` is bound to ``latest.sha256``
+    (see ``Pipeline.stage_state``), so it always describes the version named by
+    ``version`` on this same step; it can never be a verdict on an older draft.
     """
     from .structured import view
 
@@ -420,11 +502,18 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None) -> list[dic
     for st in stages:
         stage = st["stage"]
         has_doc = st.get("latest") is not None
-        if st.get("approval"):
-            mark, state = "✓", "done"
-        elif st.get("stale"):
+        if st.get("stale") or not st.get("integrity_ok", True):
             mark, state = "!", "stale"
-        elif has_doc and st.get("status") in ("reviewed", "awaiting_review"):
+        elif (st.get("approval") or {}).get("decision") in ("approved", "approved_override"):
+            mark, state = "✓", "done"
+        # `returned` belongs here and used to be missing, which marked a stage
+        # the reviewer had just sent back as ✓ done. That was survivable while
+        # the rail was decoration and the gate card was somewhere in the stream;
+        # it is not survivable now that the rail is the navigation and the only
+        # signpost to a stage that is waiting on him. A returned document is
+        # mid-flight, not finished — the status `pipeline.stage_state` derives
+        # for it is the same "not settled" the other two mean.
+        elif has_doc and st.get("status") in ("reviewed", "awaiting_review", "returned"):
             mark, state = "●", "active"
         elif has_doc:
             mark, state = "✓", "done"
@@ -433,7 +522,9 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None) -> list[dic
         else:
             mark, state = "○", "todo"
 
-        structured = (st.get("latest") or {}).get("structured") or {}
+        latest = st.get("latest") or {}
+        review = st.get("review") or {}
+        structured = latest.get("structured") or {}
         blank = stage_blank(stage, st)
         rail.append(
             {
@@ -443,8 +534,24 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None) -> list[dic
                 "mark": mark,
                 "state": state,
                 "has_doc": has_doc,
-                "version": (st.get("latest") or {}).get("version"),
-                "version_label": version_label((st.get("latest") or {}).get("version")),
+                "version": latest.get("version"),
+                "version_label": version_label(latest.get("version")),
+                # Who wrote it and when, so the panel does not have to join
+                # against `turns[].items` to find the card it already holds.
+                "summary": latest.get("summary", ""),
+                "decision_sentence": (approval_sentence(st["approval"]["decision"], st["approval"].get("note", "")) + (f" 已选方向 {st["approval"]["selected_option_id"]}。" if st["approval"].get("selected_option_id") else "")) if st.get("approval") else "",
+                "author": role_label(latest.get("author_role", "")),
+                "created_at": latest.get("created_at", ""),
+                # Two reasons the document on screen may not be trustworthy. A
+                # stale stage still has a document — the rail marks it "!" — and
+                # this is the sentence that says so where he is actually reading.
+                "integrity_ok": bool(st.get("integrity_ok", True)),
+                "integrity_sentence": (integrity_sentence(stage) if not st.get("integrity_ok", True) else
+                    "历史版本仅供查看；继续工作需重新生成并审核新版本。" if latest and latest.get("digest_algorithm", "body-v1") != "artifact-v2" else ""),
+                "stale": bool(st.get("stale")),
+                "stale_sentence": stale_sentence(stage, st.get("stale_reason", ""))
+                if st.get("stale")
+                else "",
                 "needs_you": bool(st.get("can_approve")),
                 "blank": blank,
                 "blocks": view(stage, structured),
@@ -453,6 +560,9 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None) -> list[dic
                     for q in (structured.get("open_questions") or [])
                     if isinstance(q, dict) and q.get("question")
                 ],
+                "review": None
+                if not review.get("verdict")
+                else review_view(review["verdict"], review.get("findings") or []),
             }
         )
     return rail
@@ -481,6 +591,10 @@ def build_questions(stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "question": row["question"],
                     "blocks": row.get("blocks", ""),
                     "version": (st.get("latest") or {}).get("version"),
+                    # What the answer he types here turns into. Built server-side
+                    # and carried with the question so the screen never composes
+                    # a sentence of its own — see `answer_prefix`.
+                    "send_prefix": answer_prefix(row["question"]),
                 }
             )
     return out
