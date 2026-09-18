@@ -52,9 +52,18 @@ def validate_text_file(path: Path) -> list[str]:
     has_utf8_bom = raw.startswith(codecs.BOM_UTF8)
     errors: list[str] = []
 
-    if suffix in HUMAN_READABLE_SUFFIXES and not has_utf8_bom:
+    # Codex parses frontmatter from the first line without stripping U+FEFF.
+    # Only project skill entrypoints are machine-readable Markdown; their
+    # references and every other Markdown document keep the Windows BOM rule.
+    skill_manifest = (
+        path.name == "SKILL.md"
+        and path.parent.parent.name == "skills"
+        and path.parent.parent.parent.name == ".agents"
+    )
+
+    if suffix in HUMAN_READABLE_SUFFIXES and not skill_manifest and not has_utf8_bom:
         errors.append("human-readable Markdown/CSV must use UTF-8 with BOM")
-    if suffix in MACHINE_READABLE_SUFFIXES and has_utf8_bom:
+    if (suffix in MACHINE_READABLE_SUFFIXES or skill_manifest) and has_utf8_bom:
         errors.append("machine-readable source/config must use UTF-8 without BOM")
 
     encoding = "utf-8-sig" if has_utf8_bom else "utf-8"
