@@ -188,6 +188,10 @@ class Store:
     # ----------------------------------------------------------- artifacts --
 
     def _artifact_paths(self, run_id: str, stage: str, version: int) -> tuple[Path, Path]:
+        if not isinstance(stage, str) or stage not in STAGES:
+            raise PipelineError("store", "unknown artifact stage")
+        if type(version) is not int or version < 1:
+            raise PipelineError("store", "artifact version must be a positive integer")
         base = self.run_dir(run_id) / "artifacts"
         return base / f"{stage}-v{version}.md", base / f"{stage}-v{version}.json"
 
@@ -270,7 +274,10 @@ class Store:
         _, meta_path = self._artifact_paths(run_id, stage, version)
         if not meta_path.is_file():
             raise PipelineError("store", f"no such artifact record: {stage}-v{version}")
-        return Artifact(**json.loads(meta_path.read_text(encoding="utf-8")))
+        record = Artifact(**json.loads(meta_path.read_text(encoding="utf-8")))
+        if record.stage != stage or type(record.version) is not int or record.version != version:
+            raise PipelineError("store", "artifact metadata does not match requested stage/version")
+        return record
 
     def verify_artifact(self, run_id: str, stage: str, version: int) -> bool:
         """Recompute the fingerprint from the file on disk.

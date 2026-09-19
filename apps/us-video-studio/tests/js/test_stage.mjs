@@ -23,8 +23,9 @@ const require = createRequire(import.meta.url);
  * In Node they are module-scoped, so the two dependencies are restored here —
  * deliberately, rather than by copying them, so these tests exercise the same
  * functions the page uses. */
-const { escapeHtml } = require("../../studio/web/md.js");
+const { escapeHtml, renderMarkdown } = require("../../studio/web/md.js");
 globalThis.escapeHtml = escapeHtml;
+globalThis.renderMarkdown = renderMarkdown;
 const { blocksHtml } = require("../../studio/web/blocks.js");
 globalThis.blocksHtml = blocksHtml;
 
@@ -330,10 +331,108 @@ test("the laid-out document is drawn through the block renderer", () => {
   assert.ok(html.includes("pane-summary"));
 });
 
-test("a version with no shape falls back to the text rather than a blank panel", () => {
+test("a version with no shape shows an honest loading state and keeps the original reader", () => {
   const html = stageHtml(step({ blocks: [] }), {});
-  assert.ok(html.includes("这一版没有可排版的内容"));
+  assert.ok(html.includes("正在加载这一版正文"));
+  assert.ok(!html.includes("没有可排版的内容"));
   assert.ok(html.includes('data-act="read"'), "and offers the text");
+});
+
+test("the exact prose artifact is safely readable without structured blocks", () => {
+  const body = "# 一份完整的创意\n\n**原文的具体主张**\n\n<script>alert(1)</script>";
+  const html = stageHtml(step({blocks:[], artifact_sha256:'a'.repeat(64)}), {
+    artifactBody:{stage:'direction', version:2, status:'loaded', text:body, sha256:'a'.repeat(64)},
+  });
+  assert.ok(html.includes(`<article class="artifact-prose">${renderMarkdown(body)}</article>`));
+  assert.ok(html.includes('<strong>原文的具体主张</strong>'));
+  assert.ok(!html.includes('<script'));
+  assert.ok(!html.includes('正在加载这一版正文'));
+});
+
+test("a late body response never appears under another stage or version", () => {
+  for (const identity of [{stage:'writing',version:2}, {stage:'direction',version:1}]) {
+    const html = stageHtml(step(), {artifactBody:{...identity,status:'loaded',text:'OLD_BODY_DO_NOT_SHOW'}});
+    assert.ok(!html.includes('OLD_BODY_DO_NOT_SHOW'));
+    assert.ok(html.includes('正在加载这一版正文'));
+  }
+});
+
+test("a mismatched fingerprint keeps body hidden and offers a version-bound retry", () => {
+  const html = stageHtml(step({artifact_sha256:'b'.repeat(64)}), {
+    artifactBody:{stage:'direction',version:2,status:'loaded',text:'CHANGED_BODY',sha256:'a'.repeat(64)},
+  });
+  assert.ok(!html.includes('CHANGED_BODY'));
+  assert.ok(html.includes('正文暂时没有加载成功'));
+  assert.match(html, /data-act="retry-body" data-stage="direction" data-version="2"/);
+});
+
+test("a loading response does not need to already know the artifact fingerprint", () => {
+  const html = stageHtml(step({artifact_sha256:'b'.repeat(64)}), {
+    artifactBody:{stage:'direction',version:2,status:'loading'},
+  });
+  assert.ok(html.includes('正在加载这一版正文'));
+  assert.ok(!html.includes('正文暂时没有加载成功'));
+});
+
+test("load errors and truly empty body both have an explicit recovery path", () => {
+  for (const status of ['error','loaded']) {
+    const html = stageHtml(step(), {artifactBody:{stage:'direction',version:2,status,text:''}});
+    assert.ok(html.includes(status === 'error' ? '正文暂时没有加载成功' : '这一版正文为空'));
+    assert.match(html, /data-act="retry-body" data-stage="direction" data-version="2"/);
+    assert.match(html, /data-act="read" data-stage="direction" data-version="2"/);
+  }
+});
+
+test("long summaries default to a literal excerpt with the full original inside closed details", () => {
+  const summary = '这是原作者的摘要，不能重新编造。'.repeat(20) + '<img src=x onerror="alert(1)">';
+  const html = stageHtml(step({summary}), {});
+  const details = html.match(/<details class="pane-summary summary-expand">([\s\S]*?)<\/details>/);
+  assert.ok(details, 'collapsed by default, no open attribute');
+  assert.ok(details[1].includes(escapeHtml(Array.from(summary).slice(0,120).join(''))+'…'));
+  assert.ok(details[1].includes(`<p class="pane-summary-full">${escapeHtml(summary)}</p>`));
+  assert.ok(!html.includes('<img'));
+  const short = stageHtml(step({summary:'保留短摘要原文'}), {});
+  assert.ok(short.includes('<p class="pane-summary">保留短摘要原文</p>'));
+});
+
+test("human stage heading and version date keep runtime details behind a disclosure", () => {
+  const html = stageHtml(step(), {});
+  assert.ok(html.includes('<h1>创意方向</h1>'));
+  assert.ok(html.includes('比较创意主张'));
+  assert.ok(!html.includes('DIRECTION'));
+  assert.ok(!html.includes('②'));
+  assert.ok(html.includes('版本 2'));
+  assert.ok(html.includes('9月17日'));
+  const details = html.match(/<details class="pane-version-details">([\s\S]*?)<\/details>/);
+  assert.ok(details);
+  assert.ok(details[1].includes('创作者：导演'));
+  assert.ok(details[1].includes('2026-09-17T04:05:06'));
+  assert.match(html, /data-act="read" data-stage="direction" data-version="2"/);
+});
+
+test("review findings use human labels and retain every concrete risk", () => {
+  const html = stageHtml(step({review:{verdict:'return',sentence:'尚未通过审核',findings:[
+    {kind:'content',issue:'缺少明确主张'}, {kind:'feasibility',issue:'动作无法完成'},
+    {kind:'evidence',issue:'商品事实没有依据'}, {kind:'unverified',issue:'音效仍未验证'},
+  ]}}), {});
+  for (const text of ['内容','可执行性','证据','尚未验证','缺少明确主张','动作无法完成','商品事实没有依据','音效仍未验证']) {
+    assert.ok(html.includes(text));
+  }
+  assert.ok(!html.includes('>feasibility<'));
+  assert.ok(!html.includes('>unverified<'));
+});
+
+test("reading comes before approval without changing the exact gate binding", () => {
+  const hash = 'e'.repeat(64);
+  const html = stageHtml(step({artifact_sha256:hash}), {
+    artifactBody:{stage:'direction',version:2,status:'loaded',text:'原文要先读',sha256:hash},
+    pending:pending({artifact_sha256:hash,passed:false,options:threeOptions}),
+  });
+  assert.ok(html.indexOf('class="artifact-prose"') < html.indexOf('id="stage-decision"'));
+  assert.match(html, new RegExp(`data-stage="direction" data-version="2" data-sha="${hash}" data-passed="0"`));
+  assert.ok(html.includes('明确覆盖审核并通过'));
+  assert.equal((html.match(/type="radio"/g)||[]).length,3);
+  assert.ok(!/\bchecked\b/.test(html));
 });
 
 test("no stage at all renders as nothing", () => {

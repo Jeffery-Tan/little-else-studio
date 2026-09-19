@@ -1,0 +1,46 @@
+/* Model-service setup: connection, read-only verification, casting, then save. */
+.connection-dialog { width: min(960px, 95vw); max-height: 91dvh; overflow-y: auto; }
+.connection-dialog h3 { margin: 30px 0 12px; font-size: 17px; }
+.connection-dialog .connection-heading h2 { margin: 0; font-size: 27px; letter-spacing: -.035em; }
+.connection-steps { list-style: none; counter-reset: setup; display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 24px 0 16px; padding: 0; }
+.connection-steps li { display: flex; align-items: center; gap: 8px; color: var(--ink-soft, #bebec8); font-size: 12px; }
+.connection-steps li::before { counter-increment: setup; content: counter(setup); display: grid; place-items: center; width: 23px; height: 23px; border: 1px solid #4b4b57; border-radius: 50%; color: #eeeef4; font-size: 11px; }
+.connection-privacy { padding: 12px 15px; border: 1px solid #383842; border-radius: 9px; font-size: 12px; line-height: 1.7; color: #b8b8c5; }
+.connection-capabilities { margin-top: 22px; padding: 17px 19px; background: #24242b; border-radius: 12px; }
+.connection-capabilities > strong { font-size: 14px; }
+.connection-capabilities p { font-size: 12px; line-height: 1.8; margin: 8px 0 0; }
+.connection-team-summary { padding: 12px 15px; border-left: 2px solid #b6bb8a; color: #d0d1bd; font-size: 12px; line-height: 1.8; }
+.connection-readiness { margin-left: auto; color: #c5c6b7; font-size: 11px; line-height: 1.6; }
+.role-cost-note { display: block; margin-top: 7px; color: #c8c8b2; font-size: 11px !important; line-height: 1.7; overflow-wrap: anywhere; }
+.connection-dialog .role-price-link { justify-self: start; padding: 4px 0; min-height: 32px; font-size: 11px; text-align: left; }
+.connection-dialog .connection-card { padding: 20px; margin: 14px 0; background: #1c1c23; }
+.connection-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+.connection-card-heading > strong { font-size: 12px; font-weight: 500; color: #a8a8b8; }
+.connection-key { margin-top: 17px; }
+.connection-key input { font-family: ui-monospace, monospace; }
+.connection-check { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 15px; align-items: center; margin: 18px 0 8px; padding: 16px; background: #23232d; border: 1px solid #404050; border-radius: 10px; }
+.connection-check > .muted { grid-column: 1 / -1; margin: 0; font-size: 11px; line-height: 1.65; }
+.connection-verification { margin: 0; font-size: 12px; line-height: 1.65; color: #bbbcca; overflow-wrap: anywhere; }
+.connection-verification.verified { color: #97d9ad; }
+.connection-verification.error, .connection-dialog .connection-error { color: #ffb3ae; }
+.connection-dialog [hidden] { display: none !important; }
+.connection-dialog .connection-advanced { border-top: 1px solid #383843; padding-top: 13px; }
+.connection-dialog .connection-advanced summary { cursor: pointer; color: #bbbcca; }
+.connection-dialog .pricing-list { margin-top: 10px; }
+.connection-dialog .role-row { grid-template-columns: minmax(100px, .65fr) minmax(0, 1fr) minmax(0, 1.2fr); align-items: start; }
+.connection-dialog .role-identity { padding-top: 22px; }
+.role-model-note { color: #a5a5b5; font-size: 11px !important; line-height: 1.6; }
+.role-model-input > input, .role-model-input > select { width: 100%; }
+.connection-save-note { margin: 24px 0 8px; font-size: 12px; line-height: 1.7; color: #aaaabb; }
+.connection-dialog .dialog-actions { margin-top: 20px; position: sticky; bottom: -1px; padding: 14px 0 4px; background: var(--panel, #1a1a20); }
+.connection-dialog button:disabled { cursor: not-allowed; opacity: .48; }
+@media (max-width: 650px) {
+  .connection-dialog { width: 96vw; padding: 20px 16px; }
+  .connection-steps { gap: 10px 15px; }
+  .connection-dialog .connection-card { padding: 16px; }
+  .connection-card-heading { flex-wrap: wrap; }
+  .connection-readiness { margin-left: 0; }
+  .connection-check { grid-template-columns: 1fr; }
+  .connection-dialog .role-row { grid-template-columns: 1fr; }
+  .connection-dialog .role-identity { padding-top: 0; }
+}

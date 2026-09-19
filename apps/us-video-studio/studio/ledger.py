@@ -7,13 +7,14 @@ until explicit reconciliation against provider evidence.
 from __future__ import annotations
 
 import os
+import math
 import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any
 
-from .config import Settings
+from .config import Pricing, Settings
 from .models import BudgetExceeded, LedgerEntry, utcnow
 from .store import Store
 
@@ -159,7 +160,9 @@ class Ledger:
                stop_reason: str = "", request_id: str = "", ok: bool = True,
                error: str = "", usage_status: str | None = None,
                call_id: str = "", call_status: str = "settled",
-               resolution_note: str = "") -> LedgerEntry:
+               resolution_note: str = "", pricing: Pricing | None = None,
+               provider: str | None = None, connection_id: str | None = None,
+               actual_model: str = "") -> LedgerEntry:
         for value in (input_tokens, output_tokens):
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
                 raise ValueError("token counts must be non-negative whole numbers or null")
@@ -168,10 +171,16 @@ class Ledger:
             raise ValueError("invalid usage_status")
         if status == "known" and (input_tokens is None or output_tokens is None):
             raise ValueError("known usage requires both counts")
-        cost = self.settings.pricing.estimate_usd(input_tokens, output_tokens) if status == "known" else None
+        pricing = pricing or self.settings.pricing_for(role, model)
+        cost = pricing.estimate_usd(input_tokens, output_tokens) if status == "known" else None
         entry = LedgerEntry(at=utcnow(), run_id=run_id, role=role, stage=stage, model=model,
                             input_tokens=input_tokens, output_tokens=output_tokens,
-                            estimated_usd=cost, pricing_source=self.settings.pricing.source,
+                            estimated_usd=cost, pricing_source=pricing.source,
+                            provider=provider if provider is not None else self.settings.provider_by_role.get(role, 'legacy'),
+                            connection_id=connection_id if connection_id is not None else self.settings.connection_by_role.get(role, ''),
+                            pricing_as_of=pricing.as_of, input_usd_per_mtok=pricing.input_usd_per_mtok,
+                            output_usd_per_mtok=pricing.output_usd_per_mtok,
+                            actual_model=actual_model,
                             stop_reason=stop_reason, request_id=request_id, ok=ok, error=error,
                             usage_status=status, call_id=call_id, call_status=call_status,
                             resolution_note=resolution_note)
@@ -190,7 +199,7 @@ class Ledger:
 
     def settle_call(self, run_id: str, call_id: str, *, input_tokens: int | None,
                     output_tokens: int | None, usage_status: str, ok: bool,
-                    stop_reason: str = "", error: str = "") -> LedgerEntry:
+                    stop_reason: str = "", error: str = "", actual_model: str = "") -> LedgerEntry:
         with self._locked():
             row = next((r for r in self.entries(run_id) if r.call_id == call_id), None)
             if row is None or row.call_status != "pending":
@@ -198,7 +207,13 @@ class Ledger:
             return self.record(run_id, role=row.role, stage=row.stage, model=row.model,
                                input_tokens=input_tokens, output_tokens=output_tokens,
                                usage_status=usage_status, call_id=call_id, ok=ok,
-                               stop_reason=stop_reason, error=error)
+                               stop_reason=stop_reason, error=error,
+                               pricing=self._row_pricing(row), provider=row.provider, connection_id=row.connection_id,
+                               actual_model=actual_model)
+
+    @staticmethod
+    def _row_pricing(row):
+        return Pricing(row.pricing_source, row.input_usd_per_mtok, row.output_usd_per_mtok, row.pricing_as_of)
 
     def reconcile(self, run_id: str, call_id: str, *, input_tokens: int,
                   output_tokens: int, evidence_note: str) -> LedgerEntry:
@@ -213,11 +228,61 @@ class Ledger:
             row = next((r for r in self.entries(run_id) if r.call_id == call_id), None)
             if row is None or row.usage_status == "known":
                 raise ValueError("call is not awaiting reconciliation")
+            if row.usage_unit != 'tokens':
+                raise ValueError('图片或视频用量须在制作记录中核对，不能填写为 Tokens。')
             return self.record(run_id, role=row.role, stage=row.stage, model=row.model,
                                input_tokens=input_tokens, output_tokens=output_tokens,
                                usage_status="known", call_id=call_id, call_status="reconciled",
                                ok=False, stop_reason=row.stop_reason, error=row.error,
-                               resolution_note=evidence_note.strip())
+                               resolution_note=evidence_note.strip(), pricing=self._row_pricing(row),
+                               provider=row.provider, connection_id=row.connection_id, actual_model=row.actual_model)
+
+    def begin_media_call(self, run_id, *, model, provider, usage_unit, call_id=None):
+        """Same journal and budget guard; media never invents token measurements."""
+        if usage_unit not in {'images', 'video_seconds'}:
+            raise ValueError('invalid media unit')
+        with self._locked():
+            self.ensure_within_budget()
+            self.store.read_run(run_id)
+            call_id = call_id or str(uuid.uuid4())
+            if any(r.call_id == call_id for r in self.entries(run_id)):
+                raise ValueError('media intent already exists')
+            row = LedgerEntry(at=utcnow(), run_id=run_id, role='material',
+                stage='image_generation' if usage_unit == 'images' else 'video_generation',
+                model=model, provider=provider, input_tokens=None, output_tokens=None,
+                estimated_usd=None, pricing_source='media: estimate is not the provider bill',
+                usage_status='unknown', call_status='pending', call_id=call_id,
+                usage_unit=usage_unit, ok=False)
+            self._append(run_id, row)
+            return call_id
+
+    def settle_media_call(self, run_id, call_id, *, quantity, ok, estimated_cny=None,
+                          request_id='', note='', pricing_source='media: price unknown',
+                          input_tokens=None, output_tokens=None, actual_model=''):
+        for count in (input_tokens, output_tokens):
+            if count is not None and (type(count) is not int or count < 0):
+                raise ValueError('invalid measured token count')
+        for value in (quantity, estimated_cny):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                                      or not math.isfinite(value) or value < 0):
+                raise ValueError('media usage and cost must be finite nonnegative values or null')
+        with self._locked():
+            row = next((r for r in self.entries(run_id) if r.call_id == call_id), None)
+            if row is None or row.usage_unit == 'tokens':
+                raise ValueError('no media intent')
+            if row.usage_status == 'known':
+                if row.usage_quantity == quantity and row.ok == ok:
+                    return row
+                raise ValueError('media call already settled')
+            row = replace(row, at=utcnow(), usage_quantity=quantity,
+                usage_status='known' if quantity is not None else 'unknown',
+                call_status='settled', ok=ok, estimated_cny=estimated_cny if quantity is not None else None,
+                request_id=request_id or row.request_id, resolution_note=note, pricing_source=pricing_source,
+                input_tokens=input_tokens if input_tokens is not None else row.input_tokens,
+                output_tokens=output_tokens if output_tokens is not None else row.output_tokens,
+                actual_model=actual_model or row.actual_model)
+            self._append(run_id, row)
+            return row
 
     def totals(self, run_id: str | None = None) -> Totals:
         return _totals(self.entries(run_id))
@@ -227,7 +292,7 @@ class Ledger:
 
     def remaining_usd(self, run_id: str | None = None) -> float | None:
         spent = self.spent_usd(run_id)
-        return max(0.0, self.settings.budget_limit_usd - spent) if spent is not None and self.settings.pricing.known else None
+        return max(0.0, self.settings.budget_limit_usd - spent) if spent is not None and self.settings.usd_cap_is_enforceable else None
 
     def remaining_tokens(self) -> int | None:
         totals = self.totals()
@@ -255,9 +320,14 @@ class Ledger:
         if not enforceable:
             note += " Unverified rates mean the USD cap cannot stop anything yet; dollar totals remain unknown."
         note += " Limits stop new calls after recorded totals reach them; an in-flight call may exceed the limit. Unknown usage blocks new calls until reconciled."
-        return {"source": pricing.source, "as_of": pricing.as_of,
-                "input_usd_per_mtok": pricing.input_usd_per_mtok if pricing.known else None,
-                "output_usd_per_mtok": pricing.output_usd_per_mtok if pricing.known else None,
+        routes = {role: {'connection': cid, 'provider': self.settings.provider_by_role[role],
+                        'model': self.settings.model_for(role),
+                        'source': self.settings.pricing_for(role, self.settings.model_for(role)).source}
+                  for role, cid in self.settings.connection_by_role.items()}
+        return {"source": 'per-connection/model rate cards; unknown routes remain null' if routes else pricing.source,
+                "as_of": '' if routes else pricing.as_of, 'routes': routes,
+                "input_usd_per_mtok": pricing.input_usd_per_mtok if pricing.known and not routes else None,
+                "output_usd_per_mtok": pricing.output_usd_per_mtok if pricing.known and not routes else None,
                 "usd_cap_enforceable": enforceable, "limit_kind": "soft", "note": note}
 
     def ensure_within_budget(self) -> None:
@@ -267,5 +337,5 @@ class Ledger:
         tokens = totals.input_tokens + totals.output_tokens
         if tokens >= self.settings.budget_limit_tokens:
             raise BudgetExceeded(f"{tokens} tokens reached the soft cap of {self.settings.budget_limit_tokens}; refusing a new call.")
-        if self.settings.usd_cap_is_enforceable and totals.known_estimated_usd >= self.settings.budget_limit_usd:
+        if totals.known_estimated_usd >= self.settings.budget_limit_usd:
             raise BudgetExceeded(f"estimated known spend reached the soft cap of {self.settings.budget_limit_usd:.2f} USD; refusing a new call.")

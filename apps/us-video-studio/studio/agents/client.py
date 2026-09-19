@@ -36,13 +36,24 @@ DEFAULT_MAX_TOKENS = 16384
 
 
 class ModelError(RuntimeError):
-    def __init__(self, status: int, message: str, *, usage=None):
+    def __init__(self, status: int, message: str, *, usage=None, provider_invoked: bool | None = None):
         super().__init__(f"model endpoint returned {status}: {message}")
         self.status = status
         self.message = message
-        self.usage = usage or Usage(None, None)
-        self.usage_status = "partial" if any(v is not None for v in (
-            self.usage.input_tokens, self.usage.output_tokens)) else "unknown"
+        self.provider_invoked = provider_invoked
+        # Only a transport that has not sent a model request may assert this.
+        # HTTP errors/disconnects keep the default unknown invocation state.
+        self.usage = Usage(0, 0) if provider_invoked is False else (usage or Usage(None, None))
+        self.usage_status = ('known' if provider_invoked is False else
+            ('partial' if any(v is not None for v in (self.usage.input_tokens, self.usage.output_tokens)) else 'unknown'))
+
+
+class JobCancelled(RuntimeError):
+    """Cancellation observed at a safe model/tool boundary, never an API failure."""
+
+
+class SafePreflightError(RuntimeError):
+    """Non-retryable connection setup failure with safe user-facing text."""
 
 
 @dataclass
@@ -105,7 +116,8 @@ class AnthropicCompatClient:
     ):
         if not token:
             raise RuntimeError("no credential supplied to the model client")
-        self.base_url = base_url.rstrip("/")
+        from ..connections import validate_base_url
+        self.base_url = validate_base_url(base_url)
         self._token = token
         self.max_tokens = max_tokens
         self.timeout = timeout
@@ -144,13 +156,13 @@ class AnthropicCompatClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> Turn:
-        url = f"{self.base_url}/v1/messages"
+        url = self.base_url + ('/messages' if self.base_url.endswith('/v1') else '/v1/messages')
         payload = self._payload(model, system, messages, tools)
 
         # One invocation is exactly one HTTP attempt. Even connection failures
         # cannot prove that the provider did not start work; never auto-retry.
         try:
-            with httpx.Client(timeout=self.timeout) as client:
+            with httpx.Client(timeout=self.timeout, follow_redirects=False, trust_env=False) as client:
                 with client.stream("POST", url, headers=self._headers(), json=payload) as resp:
                     if resp.status_code != 200:
                         # Do not persist arbitrary response bodies: gateways can
@@ -320,6 +332,7 @@ def run_agent_loop(
     max_continuations: int = 1,
     on_turn: Callable[[Turn], None] | None = None,
     on_tool: Callable[[dict[str, Any]], None] | None = None,
+    check_cancel: Callable[[], None] | None = None,
 ) -> LoopResult:
     """Drive a tool-use conversation to completion.
 
@@ -341,6 +354,8 @@ def run_agent_loop(
     continuations_left = max_continuations
 
     for round_index in range(1, max_rounds + 1):
+        if check_cancel is not None:
+            check_cancel()
         turn = client.complete(model=model, system=system, messages=convo, tools=tools)
         if on_turn is not None:
             on_turn(turn)
@@ -378,10 +393,12 @@ def run_agent_loop(
 
         results: list[dict[str, Any]] = []
         for call in turn.tool_calls:
+            if check_cancel is not None:
+                check_cancel()
             try:
                 output = execute_tool(call.name, call.input)
                 is_error = False
-            except BudgetExceeded:
+            except (BudgetExceeded, JobCancelled, SafePreflightError):
                 # Deliberately *not* converted into a tool result. Doing so
                 # handed the model the string "派工失败" and let it retry: each
                 # retry is blocked pre-flight, so no money is lost, but every

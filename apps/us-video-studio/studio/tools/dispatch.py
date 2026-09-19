@@ -16,8 +16,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..agents.budget import BudgetedClient
-from ..agents.client import ModelClient, run_agent_loop
-from ..agents.roles import OWNER, ROLES, readable_stages
+from ..agents.client import JobCancelled, ModelClient, SafePreflightError, run_agent_loop
+from ..agents.roles import OWNER, ROLES, readable_stages, creative_selection, production_allowed
 from ..config import Settings
 from ..ledger import Ledger
 from ..models import BudgetExceeded, PipelineError, STAGE_SPEC
@@ -68,6 +68,8 @@ class Dispatcher:
         ledger: Ledger,
         run_id: str,
         on_event: Callable[[dict[str, Any]], None] | None = None,
+        check_cancel: Callable[[], None] | None = None,
+        learning_service=None,
     ):
         self.store = store
         self.pipeline = pipeline
@@ -76,6 +78,11 @@ class Dispatcher:
         self.ledger = ledger
         self.run_id = run_id
         self.on_event = on_event
+        self.check_cancel = check_cancel
+        if learning_service is None:
+            from ..learning import LearningService
+            learning_service = LearningService(store)
+        self.learning = learning_service
 
     def _emit(self, event: dict[str, Any]) -> None:
         if self.on_event is not None:
@@ -97,8 +104,19 @@ class Dispatcher:
     # ------------------------------------------------------------ internal -- #
 
     def run_role(self, stage: str, role: str, brief: str) -> DispatchOutcome:
+        if self.check_cancel:
+            self.check_cancel()
         role_def = ROLES[role]
         outcome = DispatchOutcome(stage=stage, role=role)
+        selection = creative_selection(self.store, self.run_id)
+        if not production_allowed(selection):
+            raise ToolError("当前明确路由只允许读取/反馈；先明确选择 new/continue/edit 和交付格式，才能派工。")
+        context = self.learning.prepare_context(
+            self.run_id, role, **selection,
+            purpose="message" if role == "director" else "storyboard",
+        )
+        self._emit({"type": "learning_context", "role": role, "stage": stage,
+                    "snapshot_sha256": context["snapshot_sha256"], "evidence_ref": context["evidence_ref"]})
 
         try:
             attempt = self.pipeline.start_attempt(self.run_id, stage, actor="orchestrator")
@@ -129,7 +147,7 @@ class Dispatcher:
                     attempt.token,
                     content=args.get("content", ""),
                     summary=args.get("summary", ""),
-                    evidence=args.get("evidence") or [],
+                    evidence=[*(args.get("evidence") or []), context["evidence_ref"]],
                     limitations=args.get("limitations") or [],
                     # Passed through unvalidated on purpose: the pipeline
                     # normalises it, and a model that got the shape wrong must
@@ -152,13 +170,15 @@ class Dispatcher:
                 model=model,
                 system=role_def.system(
                     self.store.read_run(self.run_id),
-                    extra=self._system_extra(workspace),
+                    extra=self._system_extra(workspace) + "\n\n" + context["text"],
+                    format=selection["format"],
                 ),
                 messages=[{"role": "user", "content": seed}],
                 tools=tools_for(role),
                 execute_tool=execute,
                 max_rounds=self.settings.max_tool_rounds,
                 max_continuations=self.settings.max_continuations,
+                check_cancel=self.check_cancel,
                 on_turn=lambda t: self._emit(
                     {"type": "agent_turn", "role": role, "stage": stage,
                      "stop_reason": t.stop_reason,
@@ -168,7 +188,7 @@ class Dispatcher:
                     {"type": "agent_tool", "role": role, "stage": stage, **r}
                 ),
             )
-        except BudgetExceeded as exc:
+        except (BudgetExceeded, JobCancelled, SafePreflightError) as exc:
             # Close the attempt *before* letting this through. An open attempt
             # blocks its stage, and an exhausted budget is precisely the case
             # where he raises the cap and expects the run to carry on — so

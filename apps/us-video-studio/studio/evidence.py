@@ -42,6 +42,10 @@ def evidence_snapshot(store: Store, run_id: str) -> dict[str, Any]:
     """
     run = store.run_dir(run_id).resolve()
     base = materials_dir(store, run_id)
+    generated = {event['output']['name']: event['output']['sha256'] for event in store.read_events(run_id)
+                 if event.get('kind') == 'production_output'}
+    imported_media = {event['name']: event for event in store.read_events(run_id)
+                      if event.get('kind') == 'material_imported'}
     result: dict[str, Any] = {
         "materials": [], "manifest_sha256": None, "errors": [],
         "imported_input": None,
@@ -51,6 +55,13 @@ def evidence_snapshot(store: Store, run_id: str) -> dict[str, Any]:
         },
     }
     imported_sources = run / "evidence" / "content-input-sources.json"
+    from .project_history import evidence_binding
+    try:
+        history = evidence_binding(store, run_id)
+        if history is not None:
+            result['imported_history'] = history
+    except (ValueError, OSError) as exc:
+        result['errors'].append(str(exc))
     if imported_sources.exists():
         result["imported_input"] = _input_sources(run, imported_sources, result["errors"])
     if base.exists() and base.resolve().parent != run:
@@ -69,6 +80,18 @@ def evidence_snapshot(store: Store, run_id: str) -> dict[str, Any]:
                 "name": entry.name, "kind": kind, "bytes": path.stat().st_size,
                 "sha256": _sha(path), "observation_level": "existence_only", "observations": [],
             })
+            if entry.name in generated:
+                result['materials'][-1].update(origin='generated',
+                    origin_sha256=generated[entry.name],
+                    origin_notice='模型生成的创意素材，不是商品实拍或真实性证据。')
+            imported = imported_media.get(entry.name)
+            if imported:
+                if imported['sha256'] != result['materials'][-1]['sha256']:
+                    result['errors'].append(f'imported material bytes changed: {entry.name}')
+                result['materials'][-1].update(origin=imported['origin'], origin_sha256=imported['sha256'],
+                    label=imported['label'],
+                    origin_notice=('历史生成素材，不是商品实拍；旧图审不授予本轮生成权限。'
+                                   if imported['origin'] == 'generated' else '迁入的商家原始素材；具体尺码、真实性与观察范围仍按来源记录核对。'))
     manifest = run / "evidence" / "observations.json"
     if not manifest.exists():
         return result
@@ -111,6 +134,9 @@ def evidence_snapshot(store: Store, run_id: str) -> dict[str, Any]:
             material["observations"].append({
                 key: record[key] for key in ("level", "observer", "method", "coverage", "observed_at", "findings", "limitations")
             })
+            for key in ("purpose", "source_kind", "analysis_id", "call_id", "candidate_sha256", "confirmed_at"):
+                if isinstance(record.get(key), str):
+                    material["observations"][-1][key] = record[key]
             # Multiple modes are preserved independently; no numeric rank can
             # promote a transcript to a full audiovisual observation.
             material["observation_level"] = "imported_observations"

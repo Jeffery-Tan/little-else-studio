@@ -26,6 +26,7 @@ from .pipeline import Pipeline
 from .materials import list_materials
 from .store import Store
 from .structured import direction_options, open_questions, view
+from .progress import project_progress
 
 #: Sort tiebreak when a note and a card share a timestamp: the note announced the
 #: work, so it goes above the work.
@@ -66,6 +67,7 @@ def build_timeline(
 
     return {
         "run": state.get("run"),
+        "progress": project_progress(state),
         "turns": turns,
         "rail": v.build_rail(state["stages"], state.get("next_stage")),
         # The standing list of what the run is waiting on him for. Separate from

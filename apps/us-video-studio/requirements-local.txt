@@ -2,3 +2,5 @@
 # The venv is created with --system-site-packages, so httpx / fastapi / uvicorn /
 # pydantic / PyYAML resolve from the existing interpreter. Only what is missing here.
 pytest==9.1.1
+# Validate still images and reject damaged/animated/oversized inputs before sending.
+Pillow==12.2.0

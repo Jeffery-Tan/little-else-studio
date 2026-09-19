@@ -1,0 +1,117 @@
+"""Mock transport tests; never calls a provider or uses a real key."""
+import json
+
+import httpx
+import pytest
+
+from studio.agents.client import AnthropicCompatClient, JobCancelled, ModelError, Turn, Usage, ToolCall, run_agent_loop
+from studio.agents.openai_compat import OpenAICompatClient, _messages, _parse
+
+
+def response(**overrides):
+    data = {'model': 'custom-model', 'choices': [{'finish_reason': 'stop', 'message': {'content': 'Done'}}],
+            'usage': {'prompt_tokens': 31, 'completion_tokens': 12}}
+    return dict(data, **overrides)
+
+
+def test_tool_call_and_result_round_trip_preserves_studio_tool_boundary():
+    data = response(choices=[{'finish_reason': 'tool_calls', 'message': {'content': 'Inspecting', 'tool_calls': [
+        {'id': 'call-1', 'type': 'function', 'function': {'name': 'read_artifact', 'arguments': '{"stage":"intake"}'}}]}}])
+    turn = _parse(data, 'custom-model')
+    assert turn.tool_calls == [ToolCall('call-1', 'read_artifact', {'stage': 'intake'})]
+    wire = _messages('Role scope', [{'role': 'assistant', 'content': turn.raw_blocks},
+        {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'call-1', 'content': 'Observed only', 'is_error': False}]}])
+    assert wire[0] == {'role': 'system', 'content': 'Role scope'}
+    assert json.loads(wire[1]['tool_calls'][0]['function']['arguments']) == {'stage': 'intake'}
+    assert wire[-1] == {'role': 'tool', 'tool_call_id': 'call-1', 'content': 'Observed only'}
+    assert (turn.usage.input_tokens, turn.usage.output_tokens) == (31, 12)
+
+
+@pytest.mark.parametrize('base_url,expected', [('https://fixture.invalid', 'https://fixture.invalid/v1/chat/completions'),
+    ('https://fixture.invalid/v1', 'https://fixture.invalid/v1/chat/completions')])
+@pytest.mark.parametrize('parameter', ['max_tokens', 'max_completion_tokens'])
+def test_exact_endpoint_one_request_no_redirects_or_env_proxy(monkeypatch, base_url, expected, parameter):
+    real_client = httpx.Client
+    seen = []
+    def handle(request):
+        seen.append(request)
+        assert str(request.url) == expected
+        assert request.headers['Authorization'] == 'Bearer synthetic-only'
+        payload = json.loads(request.content)
+        assert payload[parameter] == 123
+        assert payload['stream'] is False
+        assert payload['tools'][0]['function']['parameters'] == {'type': 'object'}
+        return httpx.Response(200, json=response())
+    def factory(**kwargs):
+        assert kwargs['follow_redirects'] is False and kwargs['trust_env'] is False
+        return real_client(**kwargs, transport=httpx.MockTransport(handle))
+    monkeypatch.setattr(httpx, 'Client', factory)
+    client = OpenAICompatClient(base_url, 'synthetic-only', max_tokens=123, token_limit_parameter=parameter)
+    turn = client.complete(model='custom-model', system='Role', messages=[{'role': 'user', 'content': 'Task'}],
+                           tools=[{'name': 'read_artifact', 'input_schema': {'type': 'object'}}])
+    assert turn.text == 'Done' and len(seen) == 1
+
+
+@pytest.mark.parametrize('status', [302, 307, 401, 429, 500])
+def test_gateway_errors_do_not_echo_credentials_or_follow_redirect(monkeypatch, status):
+    real_client = httpx.Client
+    calls = []
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(status, headers={'Location': 'https://other.invalid'},
+                              text='echo synthetic-only prompt-private')
+    monkeypatch.setattr(httpx, 'Client', lambda **kw: real_client(**kw, transport=httpx.MockTransport(handle)))
+    with pytest.raises(ModelError) as failure:
+        OpenAICompatClient('https://fixture.invalid', 'synthetic-only').complete(
+            model='custom', system='', messages=[], tools=[])
+    assert len(calls) == 1
+    assert 'synthetic-only' not in str(failure.value) and 'prompt-private' not in str(failure.value)
+    assert failure.value.usage.input_tokens is None
+
+
+def test_anthropic_versioned_base_rejects_redirect_without_leaking_key(monkeypatch):
+    real_client = httpx.Client
+    seen = []
+    def handle(request):
+        seen.append(request)
+        assert str(request.url) == 'https://fixture.invalid/v1/messages'
+        assert request.headers['x-api-key'] == 'synthetic-only'
+        return httpx.Response(307, headers={'Location': 'https://other.invalid'}, text='echo synthetic-only')
+    monkeypatch.setattr(httpx, 'Client', lambda **kw: real_client(**kw, transport=httpx.MockTransport(handle)))
+    with pytest.raises(ModelError) as failure:
+        AnthropicCompatClient('https://fixture.invalid/v1', 'synthetic-only').complete(
+            model='custom', system='', messages=[], tools=[])
+    assert len(seen) == 1 and 'synthetic-only' not in str(failure.value)
+
+
+def test_malformed_tool_response_retains_known_usage_without_echoing_arguments():
+    with pytest.raises(ModelError) as failure:
+        _parse(response(choices=[{'finish_reason': 'tool_calls', 'message': {'tool_calls': [
+            {'id': 'x', 'type': 'function', 'function': {'name': 'read_artifact', 'arguments': 'private-invalid'}}]}}]), 'custom')
+    assert failure.value.usage.input_tokens == 31
+    assert 'private-invalid' not in str(failure.value)
+
+
+def test_missing_usage_remains_unknown_and_invalid_counts_rejected():
+    turn = _parse(response(usage={}), 'custom')
+    assert turn.usage.input_tokens is None and turn.usage.output_tokens is None
+    with pytest.raises(ModelError):
+        _parse(response(usage={'prompt_tokens': True}), 'custom')
+
+
+def test_cancel_after_completed_model_prevents_tool_execution_without_erasing_turn():
+    calls = []
+    cancelled = False
+    class Fake:
+        def complete(self, **kwargs):
+            nonlocal cancelled
+            cancelled = True
+            return Turn(tool_calls=[ToolCall('one', 'submit_stage', {})], stop_reason='tool_use', usage=Usage(10, 20))
+    def check_cancel():
+        if cancelled:
+            raise JobCancelled('cancelled at boundary')
+    with pytest.raises(JobCancelled):
+        run_agent_loop(Fake(), model='fixture', system='', messages=[], tools=[],
+                       execute_tool=lambda *args: calls.append(args),
+                       on_turn=lambda turn: calls.append(('usage', turn.usage.input_tokens)), check_cancel=check_cancel)
+    assert calls == [('usage', 10)]

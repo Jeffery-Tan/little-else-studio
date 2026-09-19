@@ -12,6 +12,8 @@ and means it can never act on a stale picture of the run.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
 from typing import Any, Callable
 
 from ..config import Settings
@@ -23,9 +25,11 @@ from ..tools.dispatch import Dispatcher
 from ..tools.registry import tools_for
 from ..tools.workspace import ToolError, Workspace
 from .budget import BudgetedClient
-from .client import ModelClient, run_agent_loop
+from .client import JobCancelled, ModelClient, ModelError, run_agent_loop
+from .codex_client import CodexUnavailable
+from ..connections import ConnectionUnavailable
 from .reviewer import run_review
-from .roles import ORCHESTRATOR, OWNER
+from .roles import ORCHESTRATOR, OWNER, creative_selection, production_allowed
 
 #: How many past chat turns to carry into a request. The state read supplies
 #: everything else, so this only needs to cover the current conversation.
@@ -58,6 +62,8 @@ class Orchestrator:
         ledger: Ledger,
         run_id: str,
         on_event: Callable[[dict[str, Any]], None] | None = None,
+        check_cancel: Callable[[], None] | None = None,
+        learning_service=None,
     ):
         self.store = store
         self.pipeline = pipeline
@@ -66,8 +72,19 @@ class Orchestrator:
         self.ledger = ledger
         self.run_id = run_id
         self.on_event = on_event
+        self.check_cancel = check_cancel
+        if learning_service is None:
+            from ..learning import LearningService
+            learning_service = LearningService(store)
+        self.learning = learning_service
+        self.selection = creative_selection(store, run_id)
+        self.method_context = None
+        self._context_refs: list[str] = []
+        self._current_user_message = ""
         self.dispatcher = Dispatcher(
-            store, pipeline, settings, client, ledger, run_id, on_event=on_event
+            store, pipeline, settings, client, ledger, run_id, on_event=on_event,
+            check_cancel=check_cancel,
+            learning_service=self.learning,
         )
 
     def _emit(self, event: dict[str, Any]) -> None:
@@ -81,6 +98,8 @@ class Orchestrator:
         message = message.strip()
         if not message:
             raise ValueError("empty message")
+        if self.check_cancel:
+            self.check_cancel()
 
         # Persist before doing anything else, for two reasons and the second one
         # is a repair:
@@ -92,6 +111,11 @@ class Orchestrator:
         # 2. If the budget cap aborts the turn, what he wrote must survive. It
         #    used to be dropped, because the raise happened before the append.
         self.store.append_chat(self.run_id, "user", message)
+        self._current_user_message = message
+        self.selection = creative_selection(self.store, self.run_id)
+        self.method_context = self.learning.prepare_context(
+            self.run_id, "orchestrator", **self.selection, purpose="message")
+        self._context_refs = [self.method_context["evidence_ref"]]
 
         history = self._build_messages()
         workspace = Workspace(self.store, self.pipeline, self.run_id, "orchestrator")
@@ -103,18 +127,26 @@ class Orchestrator:
             return self._execute(name, args, workspace)
 
         try:
+            system = ORCHESTRATOR.system(self.store.read_run(self.run_id), extra=self._system_extra(),
+                                         format=self.selection["format"])
+            self._emit({'type': 'context_ready', 'role': 'orchestrator',
+                        'system_sha256': hashlib.sha256(system.encode('utf-8')).hexdigest(),
+                        'messages_sha256': hashlib.sha256(json.dumps(history, ensure_ascii=False,
+                            sort_keys=True).encode('utf-8')).hexdigest(),
+                        'chat_window': CHAT_WINDOW, 'messages_count': len(history)})
+            self._emit({'type': 'learning_context', 'role': 'orchestrator',
+                        'snapshot_sha256': self.method_context['snapshot_sha256'],
+                        'evidence_ref': self.method_context['evidence_ref']})
             result = run_agent_loop(
                 budgeted,
                 model=self.settings.model_for("orchestrator"),
-                system=ORCHESTRATOR.system(
-                    self.store.read_run(self.run_id),
-                    extra=self._system_extra(),
-                ),
+                system=system,
                 messages=history,
                 tools=tools_for("orchestrator"),
                 execute_tool=execute,
                 max_rounds=self.settings.max_tool_rounds,
                 max_continuations=self.settings.max_continuations,
+                check_cancel=self.check_cancel,
                 on_turn=lambda t: self._emit(
                     {"type": "agent_turn", "role": "orchestrator", "stage": "",
                      "stop_reason": t.stop_reason, "tools": [c.name for c in t.tool_calls]}
@@ -128,7 +160,9 @@ class Orchestrator:
             # without this a reload shows his question followed by silence and
             # no way to find out why. 'system' is filtered out of model requests
             # by _build_messages, so this cannot come back as a bad role.
-            self.store.append_chat(self.run_id, "system", f"{type(exc).__name__}: {exc}")
+            detail = str(exc) if isinstance(exc, (JobCancelled, ModelError, PipelineError,
+                CodexUnavailable, ConnectionUnavailable)) else '执行失败；请检查连接及已保留的调用状态。'
+            self.store.append_chat(self.run_id, "system", f"{type(exc).__name__}: {detail}")
             raise
 
         if result.text:
@@ -215,6 +249,7 @@ class Orchestrator:
         )
 
     def _system_extra(self) -> str:
+        workspace = Workspace(self.store, self.pipeline, self.run_id, "orchestrator")
         lines = [
             "# 你能做什么",
             "",
@@ -222,12 +257,70 @@ class Orchestrator:
             "**你不能批准任何东西**，也没有这个工具。门禁由 Jeffery 在界面上点。",
             "",
             self._spend_line(),
+            "# 当前项目状态（本次重新读取，历史对话不能覆盖）",
+            workspace.render_state(),
+            workspace.render_context('writing' if self.store.latest_artifact(self.run_id, 'intake') else 'intake'),
+            "# Studio 方法目录与显式路由\n" + json.dumps(self.learning.skill_catalog(), ensure_ascii=False),
+            "当前显式路由：" + json.dumps(self.selection, ensure_ascii=False),
+            self.method_context["text"] if self.method_context else "",
         ]
         return "\n".join(lines)
 
     # --------------------------------------------------------------- tools -- #
 
     def _execute(self, name: str, args: dict[str, Any], workspace: Workspace) -> str:
+        if name == 'read_project_history':
+            from ..project_history import snapshot, read_document
+            data = (read_document(self.store, self.run_id, args['document_id']) if args.get('document_id')
+                    else snapshot(self.store, self.run_id))
+            return json.dumps(data, ensure_ascii=False)
+        if name == "prepare_creative_context":
+            selection = {"intent": args["intent"], "format": args["format"],
+                         "tags": args.get("tags", []), "case_ids": args.get("case_ids")}
+            context = self.learning.prepare_context(self.run_id, "orchestrator", **selection, purpose="message")
+            self.store.append_event(self.run_id, "creative_context_selected", selection=selection,
+                                    snapshot_sha256=context["snapshot_sha256"])
+            self.selection, self.method_context = selection, context
+            self._context_refs.append(context["evidence_ref"])
+            self._emit({"type": "learning_context", "role": "orchestrator",
+                        "snapshot_sha256": context["snapshot_sha256"], "evidence_ref": context["evidence_ref"]})
+            return context["text"] + "\n\n当前路由：" + json.dumps(selection, ensure_ascii=False)
+        if name == "read_learning_cases":
+            selection = dict(self.selection)
+            selection.update({k: args[k] for k in ("tags", "case_ids") if k in args})
+            context = self.learning.prepare_context(self.run_id, "orchestrator", **selection, purpose="message")
+            self._context_refs.append(context["evidence_ref"])
+            return context["text"]
+        if name == "read_method_document":
+            document = self.learning.read_method_document(args["name"], role="orchestrator", run_id=self.run_id)
+            if isinstance(document, dict) and document.get("evidence_ref"):
+                self._context_refs.append(document["evidence_ref"])
+            return document if isinstance(document, str) else json.dumps(document, ensure_ascii=False)
+        if name == "propose_learning_feedback":
+            proposal = self.learning.propose_feedback(self.run_id, args,
+                current_user_message=self._current_user_message, actor="agent")
+            return json.dumps(proposal, ensure_ascii=False)
+        if name == 'read_production':
+            from ..production import draft_records
+            from ..evidence import evidence_snapshot
+            return json.dumps({'drafts': list(draft_records(self.store, self.run_id).values()),
+                               'materials': evidence_snapshot(self.store, self.run_id)['materials'],
+                               'notice': '准备方案免费；生成、图审与费用只能由用户在制作界面确认。'}, ensure_ascii=False)
+        if name in ("write_stage", "dispatch", "request_review", "compile_creative_package", "prepare_production"):
+            if not production_allowed(self.selection):
+                raise ToolError("当前明确路由只允许读取/反馈；先明确选择 new/continue/edit 和交付格式，才能开始制作。")
+        if name == 'prepare_production':
+            from ..production import DraftIn, prepare_draft
+            try:
+                return json.dumps(prepare_draft(self.store, self.pipeline, self.run_id, DraftIn(**args), actor='agent'), ensure_ascii=False)
+            except (ValueError, PipelineError) as exc:
+                raise ToolError('制作方案未保存，请核对当前已批准脚本、参考图和参数。') from exc
+        if name == "compile_creative_package":
+            from ..creative_packages import CreativePackages
+            if args["format"] != self.selection["format"]:
+                raise ToolError("编译格式必须与本轮明确选择的交付格式一致。")
+            return json.dumps(CreativePackages(self.store, repository_root=self.learning.repository_root).compile(
+                self.run_id, **args), ensure_ascii=False)
         if name == "read_project_state":
             # Spend belongs here, not only in the system prompt: the system
             # prompt is written once at the start of the turn, and an agent that
@@ -235,7 +328,12 @@ class Orchestrator:
             # number, not the number from before it started.
             return workspace.render_state() + "\n\n" + self._spend_line()
         if name == "read_artifact":
-            return workspace.render_artifact(args["stage"], args.get("version"))
+            rendered = workspace.render_artifact(args["stage"], args.get("version"))
+            artifact = (self.store.read_artifact(self.run_id, args["stage"], args["version"])
+                        if args.get("version") is not None else self.store.latest_artifact(self.run_id, args["stage"]))
+            if artifact:
+                rendered += f"\n\n准确版本引用：artifact:{artifact.stage}-v{artifact.version}#{artifact.sha256}"
+            return rendered
         if name == "list_reviews":
             return workspace.render_reviews(args["stage"])
         if name == "list_materials":
@@ -264,7 +362,7 @@ class Orchestrator:
             attempt.token,
             content=args.get("content", ""),
             summary=args.get("summary", ""),
-            evidence=args.get("evidence") or [],
+            evidence=list(dict.fromkeys([*(args.get("evidence") or []), *self._context_refs])),
             limitations=args.get("limitations") or [],
             # Passed through unvalidated on purpose: the pipeline normalises it,
             # and a model that got the shape wrong must still be able to submit
@@ -276,7 +374,8 @@ class Orchestrator:
             f"这一步让下游失效了，需要重做。" if artifact.version > 1 else ""
         )
         return (
-            f"已提交 {stage}-v{artifact.version}。它不可修改；要改就是新版本。{extra}"
+            f"已提交 {stage}-v{artifact.version}。它不可修改；要改就是新版本。{extra}\n"
+            f"准确版本引用：artifact:{stage}-v{artifact.version}#{artifact.sha256}"
         )
 
     def _request_review(self, stage: str) -> str:
@@ -291,6 +390,8 @@ class Orchestrator:
             run_id=self.run_id,
             stage=stage,
             on_event=self.on_event,
+            check_cancel=self.check_cancel,
+            learning_service=self.learning,
         )
         if outcome.error and outcome.verdict is None:
             raise PipelineError("review", outcome.error)

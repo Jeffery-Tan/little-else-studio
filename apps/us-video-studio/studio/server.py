@@ -1,39 +1,53 @@
-"""Local HTTP server: REST for state, SSE for the conversation.
+"""Loopback HTTP surface for durable jobs, role connections and reviewed artifacts.
 
-Binds to loopback only. There is no authentication because there is no network
-exposure — the whole point is that it runs on Jeffery's machine and nowhere else.
-
-The one security-relevant thing here is the approval nonce. The server mints it,
-returns it to the requesting page, and validates it on the way back. It is never
-logged, never written to the run directory, and never included in a model
-request. ``POST /decision`` is the only route that can write an approval, and it
-requires a nonce that the caller could only have got from ``POST /nonce``.
+Host/origin and JSON checks protect local mutations from third-party pages.
+Browser polling and legacy SSE observe the same execution journal. Approval
+nonces remain outside logs and model context; only the decision route approves.
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
-import queue
-import threading
+import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .agents.client import AnthropicCompatClient
 from .agents.orchestrator import Orchestrator
-from .config import Settings, credentials, load_settings
+from .config import Settings, load_settings
 from .ledger import Ledger
-from .models import BudgetExceeded, PipelineError, STAGES, STAGE_SPEC, valid_run_id
+from .models import PipelineError, STAGES, STAGE_SPEC, valid_run_id
 from .pipeline import Pipeline
 from .store import Store
 from . import materials
 from . import vocabulary
 from .structured import open_questions, view
 from .timeline import build_timeline
+from .jobs import JobManager
+from .recovery import install_recovery_routes
+from .connections import ConnectionStore, ConnectionConflict
+from .connection_checks import ConnectionCheckError
+from .learning import LearningService, LearningConflict
+from .learning_assets import LearningAssets, REPOSITORY, US_MEDIA
+from .creative_packages import CreativePackages
+from .progress import project_progress
+from .delivery import delivery_snapshot, delivery_zip
+from .material_observations import material_workspace, save_human_observation, ObservationError, ObservationConflict
+from .image_analysis import install_image_analysis_routes
+from .revisions import install_revision_routes
+from .product_cards import CardBinding, create_with_card, install_product_card_routes
+from .references import install_reference_routes
+from .outcomes import install_outcome_routes
+from .production import install_production_routes
+from .project_history import install_history_routes
 
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -42,10 +56,15 @@ class RunIn(BaseModel):
     run_id: str = Field(min_length=1, max_length=64)
     title: str = Field(min_length=1, max_length=200)
     brief: str = Field(min_length=1, max_length=20000)
+    product_card: CardBinding | None = None
 
 
 class MessageIn(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
+
+
+class JobIn(MessageIn):
+    request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
 
 
 class DecisionIn(BaseModel):
@@ -57,6 +76,32 @@ class DecisionIn(BaseModel):
     expected_artifact_sha256: str = Field(min_length=64, max_length=64)
     expected_version: int = Field(ge=1)
     selected_option_id: str | None = None
+
+
+class LearningProposalIn(BaseModel):
+    type: str
+    payload: dict[str, Any]
+
+
+class LearningApplyIn(BaseModel):
+    expected_library_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+class DeepSeekCheckIn(BaseModel):
+    expected_revision: int = Field(ge=0, strict=True)
+    connection_id: str = Field(min_length=1, max_length=64, pattern=r'^[a-z0-9][a-z0-9-]*$')
+    api_key: str | None = Field(default=None, min_length=1, max_length=8192)
+
+
+class MaterialObservationIn(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    expected_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    expected_manifest_sha256: str | None = None
+    purpose: str
+    level: str
+    coverage: str = Field(min_length=1, max_length=2000)
+    findings: list[str] = Field(min_length=1, max_length=30)
+    limitations: list[str] = Field(min_length=1, max_length=30)
 
 
 def _read_capped(file: Any, limit: int = materials.MAX_UPLOAD_BYTES) -> bytes:
@@ -86,27 +131,97 @@ def _read_capped(file: Any, limit: int = materials.MAX_UPLOAD_BYTES) -> bytes:
 def build_app(
     settings: Settings | None = None,
     client_factory: Callable[[], Any] | None = None,
+    *,
+    learning_repository_root: Path | None = None,
+    learning_media_root: Path | None = None,
+    production_image_factory: Callable[[], Any] | None = None,
+    production_video_factory: Callable[[], Any] | None = None,
+    production_poll_delay: float = 3,
+    production_poll_count: int = 200,
 ) -> FastAPI:
     """Build the app.
 
     ``client_factory`` exists so tests can drive the whole HTTP surface with a
     scripted model and spend nothing. In normal use it is None and each turn
-    builds a real client from the environment.
+    freezes a role-connection snapshot for each job.
     """
     settings = settings or load_settings()
     store = Store(settings.data_root)
     pipeline = Pipeline(store)
-    ledger = Ledger(store, settings)
+    connections = ConnectionStore(settings.data_root)
+    learning = LearningService(store, repository_root=learning_repository_root)
+    learning_assets = LearningAssets(learning_repository_root or REPOSITORY, learning_media_root or US_MEDIA)
+    creative_packages = CreativePackages(store, learning_repository_root or REPOSITORY)
+    ledger = Ledger(store, settings if client_factory is not None else connections.settings(settings))
 
-    app = FastAPI(title="US video studio", docs_url=None, redoc_url=None)
-
-    def make_client() -> Any:
+    def prepare_job(run_id):
         if client_factory is not None:
-            return client_factory()
-        # Read at call time so a rotated credential is picked up on restart
-        # without the value ever passing through persisted state.
-        _, token = credentials()
-        return AnthropicCompatClient(settings.base_url, token, max_tokens=settings.max_tokens)
+            job_settings, client = settings, client_factory()
+            summary = {'source': 'injected-test-client',
+                       'roles': {role: {'model': settings.model_for(role)} for role in
+                                 ('orchestrator', 'director', 'material', 'writer', 'reviewer')}}
+        else:
+            snapshot = connections.snapshot()
+            job_settings = snapshot.settings(settings)
+            summary = snapshot.public()
+
+        def run(text, emit, check_cancel):
+            job_client = client if client_factory is not None else snapshot.client(
+                check_cancel=check_cancel, max_tokens=job_settings.max_tokens)
+            return Orchestrator(store, pipeline, job_settings, job_client,
+                Ledger(store, job_settings), run_id, on_event=emit, check_cancel=check_cancel,
+                learning_service=learning).send(text)
+        return run, summary
+
+    jobs = JobManager(store, pipeline, ledger, prepare_job)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        jobs.initialize()
+        try:
+            yield
+        finally:
+            jobs.close()
+
+    app = FastAPI(title="US video studio", docs_url=None, redoc_url=None, lifespan=lifespan)
+    app.state.jobs = jobs
+
+    @app.exception_handler(RequestValidationError)
+    async def safe_validation_error(request, exc):
+        # FastAPI's default includes rejected input, which may contain an API key.
+        return JSONResponse({'detail': [
+            {key: error[key] for key in ('loc', 'msg', 'type') if key in error}
+            for error in exc.errors()
+        ]}, status_code=422)
+
+    @app.middleware('http')
+    async def local_requests_only(request: Request, call_next):
+        host = request.headers.get('host', '')
+        try:
+            parsed = urlsplit('http://' + host)
+            allowed = parsed.hostname in {'127.0.0.1', 'localhost', '::1', 'testserver'}
+            origin = request.headers.get('origin')
+            if origin:
+                source = urlsplit(origin)
+                allowed = allowed and source.scheme == request.url.scheme and source.netloc.lower() == host.lower()
+            allowed = allowed and request.headers.get('sec-fetch-site') != 'cross-site'
+        except ValueError:
+            allowed = False
+        if not allowed:
+            return JSONResponse({'detail': '只接受本机制片室同源请求。'}, status_code=403)
+        if request.method in {'POST', 'PUT', 'PATCH'} and request.url.path.startswith('/api/'):
+            content_type = request.headers.get('content-type', '').split(';')[0].lower()
+            upload = request.url.path.endswith('/materials')
+            empty = request.url.path.endswith(('/nonce', '/cancel'))
+            if ((upload and content_type != 'multipart/form-data') or
+                    (not upload and not empty and content_type != 'application/json')):
+                return JSONResponse({'detail': '此接口要求 application/json。'}, status_code=415)
+        if request.url.path.startswith('/api/'):
+            try:
+                jobs.initialize()
+            except PipelineError as exc:
+                return JSONResponse({'detail': str(exc)}, status_code=409)
+        return await call_next(request)
 
     def require_run(run_id: str) -> None:
         if not valid_run_id(run_id):
@@ -116,19 +231,129 @@ def build_app(
         except PipelineError as exc:
             raise HTTPException(404, str(exc)) from exc
 
-    #: Run ids with a turn in flight. One turn at a time per run.
-    #:
-    #: ``POST /message`` spawns a daemon thread, and ``Store.append_event``
-    #: numbers a record by reading the whole log and adding one. Two turns
-    #: interleaving there write duplicate ``seq`` values, and
-    #: ``Pipeline._attempts`` reconstructs attempts by scanning that log for
-    #: ``{stage}#{number}`` — so duplicates corrupt attempt state rather than
-    #: merely looking untidy. Refusing the second message is the smallest fix
-    #: that cannot be wrong; serialising the writes would be the other, and the
-    #: turn is long enough (minutes) that queueing it would just hide the
-    #: problem from whoever is clicking.
-    _in_flight: set[str] = set()
-    _in_flight_lock = threading.Lock()
+    install_recovery_routes(app, jobs, require_run)
+    install_history_routes(app, store, require_run)
+    install_image_analysis_routes(app, jobs, require_run, connections, settings, client_factory=client_factory)
+    install_revision_routes(app, jobs, require_run, connections, settings, learning, client_factory=client_factory)
+    install_product_card_routes(app, jobs, require_run)
+    install_reference_routes(app, jobs, require_run, learning)
+    install_outcome_routes(app, jobs, require_run)
+    install_production_routes(app, jobs, require_run, connections, settings, learning,
+        client_factory=client_factory, image_factory=production_image_factory,
+        video_factory=production_video_factory, poll_delay=production_poll_delay, poll_count=production_poll_count)
+
+    # Read-only history and explicit human review share the canonical US library.
+    @app.get('/api/learning')
+    def learning_catalog():
+        return {**learning.catalog(), 'archives': learning_assets.archives()}
+
+    @app.get('/api/learning/documents/{document_id}')
+    def learning_document(document_id: str):
+        try:
+            return learning.document(document_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    def learning_file(path):
+        headers = {'X-Content-Type-Options': 'nosniff',
+                   'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'"}
+        return FileResponse(path, headers=headers)
+
+    @app.get('/api/learning/cases/{case_id}/media')
+    def learning_case_media(case_id: str):
+        try:
+            return learning_file(learning_assets.case_media(learning.catalog(), case_id))
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get('/api/learning/archive/{archive_id}')
+    def learning_archive(archive_id: str):
+        try:
+            return learning_file(learning_assets.archive(archive_id))
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get('/api/learning/photo-archive/{filename}')
+    def learning_photo_archive(filename: str):
+        try:
+            return learning_file(learning_assets.photo_archive_file(filename))
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get('/api/runs/{run_id}/learning')
+    def run_learning(run_id: str):
+        require_run(run_id)
+        return {'artifacts': [{'stage': a.stage, 'version': a.version,
+                              'artifact_sha256': a.sha256, 'title': a.summary}
+                             for a in store.list_artifacts(run_id)],
+                'contexts': [{**event, 'snapshot': learning.context_record(run_id, event['snapshot_sha256'])}
+                             for event in learning.contexts(run_id)],
+                'proposals': learning.proposals(run_id)}
+
+    @app.post('/api/runs/{run_id}/learning/proposals')
+    def learning_propose(run_id: str, payload: LearningProposalIn):
+        require_run(run_id)
+        methods = {'feedback': learning.propose_feedback, 'source': learning.propose_source,
+                   'method': learning.propose_method, 'observation': learning.propose_observation}
+        if payload.type not in methods:
+            raise HTTPException(400, '未知学习变更类型。')
+        try:
+            with jobs.lock:
+                if jobs.active is not None:
+                    raise HTTPException(409, '当前制作仍在运行，请结束后再整理学习记录。')
+                return methods[payload.type](run_id, payload.payload, actor='user')
+        except LearningConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (ValueError, PipelineError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post('/api/runs/{run_id}/learning/proposals/{proposal_id}/apply')
+    def learning_apply(run_id: str, proposal_id: str, payload: LearningApplyIn):
+        require_run(run_id)
+        try:
+            with jobs.lock:
+                if jobs.active is not None:
+                    raise HTTPException(409, '当前制作仍在运行，请结束后再应用学习变更。')
+                return learning.apply(run_id, proposal_id, payload.expected_library_sha256)
+        except LearningConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (ValueError, PipelineError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get('/api/runs/{run_id}/creative-packages')
+    def packages(run_id: str):
+        require_run(run_id)
+        try:
+            return {'packages': creative_packages.packages(run_id)}
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get('/api/runs/{run_id}/delivery')
+    def delivery(run_id: str):
+        require_run(run_id)
+        try:
+            return delivery_snapshot(store, pipeline, creative_packages, run_id)
+        except (ValueError, PipelineError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get('/api/runs/{run_id}/delivery/download')
+    def download_delivery(run_id: str):
+        require_run(run_id)
+        try:
+            payload = delivery_zip(store, pipeline, creative_packages, run_id)
+            return Response(payload, media_type='application/zip', headers={
+                'Content-Disposition': f'attachment; filename="{run_id}-planning.zip"',
+                'Cache-Control': 'no-store'})
+        except (ValueError, PipelineError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get('/api/runs/{run_id}/creative-packages/{package_id}/files/{filename:path}')
+    def package_file(run_id: str, package_id: str, filename: str):
+        require_run(run_id)
+        try:
+            return learning_file(creative_packages.file(run_id, package_id, filename))
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
 
     # ------------------------------------------------------------------ runs --
 
@@ -137,14 +362,17 @@ def build_app(
         out = []
         for run in store.list_runs():
             totals = ledger.totals(run.run_id)
-            out.append({**run.to_dict(), "spend": totals.to_dict()})
+            out.append({**run.to_dict(), "spend": totals.to_dict(),
+                        "progress": project_progress(pipeline.state(run.run_id).to_dict())})
         return sorted(out, key=lambda r: r["created_at"], reverse=True)
 
     @app.post("/api/runs")
     def create_run(payload: RunIn) -> dict[str, Any]:
         try:
-            run = store.create_run(payload.run_id, payload.title, payload.brief)
-        except PipelineError as exc:
+            with jobs.lock:
+                run = (create_with_card(store, payload) if payload.product_card
+                       else store.create_run(payload.run_id, payload.title, payload.brief))
+        except (ValueError, PipelineError) as exc:
             raise HTTPException(400, str(exc)) from exc
         return run.to_dict()
 
@@ -231,6 +459,27 @@ def build_app(
 
     # -------------------------------------------------------------- materials --
 
+    @app.get('/api/runs/{run_id}/material-observations')
+    def read_material_observations(run_id: str):
+        require_run(run_id)
+        try:
+            return material_workspace(store, run_id)
+        except ObservationError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post('/api/runs/{run_id}/material-observations')
+    def write_material_observation(run_id: str, payload: MaterialObservationIn):
+        require_run(run_id)
+        with jobs.lock:
+            if jobs.active is not None:
+                raise HTTPException(409, '制作团队正在运行，请结束本轮后再更新素材观察。')
+            try:
+                return save_human_observation(store, run_id, **payload.model_dump())
+            except ObservationConflict as exc:
+                raise HTTPException(409, str(exc)) from exc
+            except ObservationError as exc:
+                raise HTTPException(400, str(exc)) from exc
+
     @app.get("/api/runs/{run_id}/materials")
     def materials_index(run_id: str) -> list[dict[str, Any]]:
         """What is in the run's materials directory, usable ones and all."""
@@ -267,8 +516,11 @@ def build_app(
         """
         require_run(run_id)
         try:
-            data = _read_capped(file)
-            return materials.accept_upload(store, run_id, file.filename or "", data)
+            with jobs.lock:
+                if jobs.busy(run_id):
+                    raise HTTPException(409, '当前制作仍在运行，请停止或等待后再修改素材。')
+                data = _read_capped(file)
+                return materials.accept_upload(store, run_id, file.filename or "", data)
         except materials.MaterialError as exc:
             # The message is written for Jeffery, not for a log — it says which
             # rule the file broke and, where there is one, what to do instead.
@@ -287,8 +539,8 @@ def build_app(
         if stage not in STAGE_SPEC or not STAGE_SPEC[stage].gated:
             raise HTTPException(400, f"{stage} is not a gated stage")
         try:
-            with _in_flight_lock:
-                if run_id in _in_flight:
+            with jobs.lock:
+                if jobs.busy(run_id):
                     raise HTTPException(409, "当前制作仍在运行，请等这一轮结束后确认。")
                 nonce = pipeline.issue_nonce(run_id, stage,
                     expected_artifact_sha256=expected_artifact_sha256,
@@ -303,8 +555,8 @@ def build_app(
         if payload.stage not in STAGE_SPEC:
             raise HTTPException(400, "unknown stage")
         try:
-            with _in_flight_lock:
-                if run_id in _in_flight:
+            with jobs.lock:
+                if jobs.busy(run_id):
                     raise HTTPException(409, "当前制作仍在运行，请等这一轮结束后确认。")
                 approval = pipeline.record_approval(
                     run_id, payload.stage, nonce=payload.nonce,
@@ -335,47 +587,89 @@ def build_app(
             payload["say"] = vocabulary.describe_event(event)
             yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-    @app.post("/api/runs/{run_id}/message")
-    def send_message(run_id: str, payload: MessageIn) -> StreamingResponse:
+    @app.get("/api/connections")
+    def connection_settings():
+        return connections.public()
+
+    @app.post('/api/connections/deepseek/check')
+    def check_deepseek_connection(payload: DeepSeekCheckIn):
+        try:
+            return connections.check_deepseek(**payload.model_dump())
+        except ConnectionConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ConnectionCheckError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
+
+    @app.put("/api/connections")
+    def update_connections(payload: dict[str, Any]):
+        try:
+            result = connections.save(payload)
+            if client_factory is None:
+                ledger.settings = connections.settings(settings)
+            return result
+        except ConnectionConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    def present_job(job):
+        if job is not None:
+            for event in job["events"]:
+                event["say"] = vocabulary.describe_event(event)
+        return job
+
+    @app.post("/api/runs/{run_id}/jobs")
+    def create_job(run_id: str, payload: JobIn):
         require_run(run_id)
-        with _in_flight_lock:
-            if run_id in _in_flight:
-                raise HTTPException(409, "这一轮还没跑完，等它结束再发下一条。")
-            _in_flight.add(run_id)
-        events: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        try:
+            return present_job(jobs.submit(run_id, payload.text, payload.request_id))
+        except (PipelineError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
 
-        def worker() -> None:
-            try:
-                orchestrator = Orchestrator(
-                    store, pipeline, settings, make_client(), ledger, run_id,
-                    on_event=events.put,
-                )
-                turn = orchestrator.send(payload.text)
-                events.put(
-                    {
-                        "type": "done",
-                        "text": turn.text,
-                        "rounds": turn.rounds,
-                        "stopped_because": turn.stopped_because,
-                        "tools": turn.used_tools,
-                    }
-                )
-            except BudgetExceeded as exc:
-                events.put({"type": "blocked", "message": str(exc)})
-            except PipelineError as exc:
-                events.put({"type": "error", "message": str(exc)})
-            except Exception as exc:  # the UI must show a failure, not hang
-                events.put({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
-            finally:
-                with _in_flight_lock:
-                    _in_flight.discard(run_id)
-                events.put(None)
+    @app.get("/api/runs/{run_id}/jobs/latest")
+    def latest_job(run_id: str, after_seq: int = 0):
+        require_run(run_id)
+        return present_job(jobs.latest(run_id, max(0, after_seq)))
 
-        threading.Thread(target=worker, daemon=True).start()
+    @app.get("/api/runs/{run_id}/jobs/{job_id}")
+    def get_job(run_id: str, job_id: str, after_seq: int = 0):
+        require_run(run_id)
+        try:
+            return present_job(jobs.get(run_id, job_id, max(0, after_seq)))
+        except PipelineError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.post("/api/runs/{run_id}/jobs/{job_id}/cancel")
+    def cancel_job(run_id: str, job_id: str):
+        require_run(run_id)
+        try:
+            return present_job(jobs.cancel(run_id, job_id))
+        except PipelineError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/runs/{run_id}/message")
+    def send_message(run_id: str, payload: MessageIn, request: Request) -> StreamingResponse:
+        require_run(run_id)
+        try:
+            job = jobs.submit(run_id, payload.text, str(uuid.uuid4()))
+        except (PipelineError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        async def observe():
+            cursor = 0
+            while not await request.is_disconnected():
+                current = jobs.get(run_id, job['job_id'], cursor)
+                for chunk in sse(iter(current['events'])):
+                    yield chunk
+                cursor = current['cursor']
+                if current['status'] in {'succeeded', 'failed', 'blocked', 'cancelled', 'interrupted'}:
+                    return
+                await asyncio.sleep(.1)
+
         return StreamingResponse(
-            sse(iter(events.get, None)),
+            observe(),
             media_type="text/event-stream",
-            headers={"cache-control": "no-store", "x-accel-buffering": "no"},
+            headers={"cache-control": "no-store", "x-accel-buffering": "no",
+                     "x-studio-job-id": job['job_id']},
         )
 
     # ---------------------------------------------------------------- static --
@@ -398,6 +692,8 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=4760)
     parser.add_argument("--host", default="127.0.0.1")
     args = parser.parse_args()
+    if args.host not in {"127.0.0.1", "localhost", "::1"}:
+        parser.error("the studio must bind to loopback")
 
     import uvicorn
 

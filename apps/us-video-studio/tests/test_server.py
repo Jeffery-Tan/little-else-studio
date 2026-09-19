@@ -329,7 +329,8 @@ def test_a_model_failure_surfaces_as_an_error_event_not_a_hang(client_factory):
     res = http.post(f"/api/runs/{RUN}/message", json={"text": "在吗"})
     events = stream_events(res)
     assert events[-1]["type"] == "error"
-    assert "endpoint unreachable" in events[-1]["message"]
+    assert "RuntimeError" in events[-1]["message"]
+    assert "台账" in events[-1]["message"]
 
     # The failure was recorded on the ledger as a failed call.
     rows = http.get(f"/api/runs/{RUN}/ledger").json()["rows"]
@@ -393,7 +394,7 @@ def test_a_second_message_is_refused_while_one_is_still_running(client_factory):
 
         second = http.post(f"/api/runs/{RUN}/message", json={"text": "第二句"})
         assert second.status_code == 409, "a concurrent turn must be refused"
-        assert "还没跑完" in second.json()["detail"]
+        assert "未调用模型" in second.json()["detail"]
     finally:
         release.set()
         thread.join(timeout=10)
@@ -626,15 +627,20 @@ def test_decision_routes_require_the_displayed_version(client_factory):
 
 
 def test_configured_endpoint_is_used_for_actual_client_construction(tmp_path, monkeypatch):
-    import studio.server as server
+    import studio.agents.client as transport
+    from studio.connections import ConnectionStore
     seen = []
-    monkeypatch.setattr(server, "credentials", lambda: ("https://ignored.invalid", "test-only"))
     def client(base_url, token, **kwargs):
-        seen.append(base_url)
+        seen.append((base_url, token))
         return ScriptedModel([final_turn("done")])
-    monkeypatch.setattr(server, "AnthropicCompatClient", client)
-    http = TestClient(build_app(settings_for(tmp_path)))
-    make_run(http)
-    res = http.post(f"/api/runs/{RUN}/message", json={"text": "test"})
-    assert stream_events(res)[-1]["type"] == "done"
-    assert seen == ["https://example.invalid/anthropic"]
+    monkeypatch.setattr(transport, "AnthropicCompatClient", client)
+    config = ConnectionStore(tmp_path)
+    config.save({"expected_revision": 0, "connections": [{"id": "synthetic",
+        "provider": "anthropic_compat", "base_url": "https://example.invalid/anthropic",
+        "api_key": "synthetic-test-only"}], "roles": {r: {"connection": "synthetic", "model": "test-model"}
+            for r in ("orchestrator", "director", "material", "writer", "reviewer")}})
+    with TestClient(build_app(settings_for(tmp_path))) as http:
+        make_run(http)
+        res = http.post(f"/api/runs/{RUN}/message", json={"text": "test"})
+        assert stream_events(res)[-1]["type"] == "done"
+        assert seen == [("https://example.invalid/anthropic", "synthetic-test-only")]

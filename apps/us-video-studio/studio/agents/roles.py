@@ -18,8 +18,8 @@ from ..structured import brief as structure_brief
 #: Shared by every role. States the rules that are enforced outside the prompt
 #: too, so an agent does not spend rounds discovering them the hard way.
 COMMON = """\
-你在「US 视频制片室」里工作。这是一个只做美国线视频**前期策划**的本地工作台，
-不接任何付费生成 API，不做投放，不替代 Jeffery 的判断。
+你在「US 视频制片室」里工作。这是一个只做美国线视频或图文**前期策划**的本地工作台，
+不替用户提交媒体生成或投放，不替代 Jeffery 的判断。主制片可准备制作方案；用户在独立「制作」页审核准确输入并授权后，后端才执行生成。
 
 产物一律用中文写。写给人看，不是写给机器看。
 
@@ -48,9 +48,13 @@ class Role:
     readable: tuple[str, ...]
     instructions: str
 
-    def system(self, run: Run, extra: str = "") -> str:
+    def system(self, run: Run, extra: str = "", format: str = "video") -> str:
         parts = [COMMON]
-        parts.append(f"# 你的角色：{self.title}\n\n{self.instructions}")
+        instructions = self.instructions
+        if format == "photo":
+            instructions = PHOTO_INSTRUCTIONS.get(self.name, instructions)
+            parts.append("本次交付明确为图文：用页面与 caption 表达，不强制视频时码、台词、声音或总时长。")
+        parts.append(f"# 你的角色：{self.title}\n\n{instructions}")
         parts.append(f"# 当前项目\n\n标题：{run.title}\n\n需求原话：\n\n{run.brief}")
         if self.owns:
             spec = STAGE_SPEC[self.owns]
@@ -63,7 +67,9 @@ class Role:
             # Appended here rather than written into each `instructions` block so
             # a stage cannot end up with a prompt describing a shape the
             # validator does not know.
-            shape = structure_brief(self.owns)
+            shape = ("图文 writing 正文包括逐页任务、画面证据、图内文案、制作提示与独立 caption。"
+                     " structured 可省略；如用 segments，tc 写页码，picture 写画面、line 写图内文案；不要填 duration 或 total_duration。"
+                     if format == "photo" and self.owns == "writing" else structure_brief(self.owns))
             if shape:
                 parts.append(shape)
         if extra:
@@ -101,8 +107,8 @@ MATERIAL = Role(
 
 - 逐个镜头或逐个段落列出：需要什么画面、它证明或传达什么、现有素材能否覆盖。
 - 对每一项标注状态：已有 / 需要拍 / 需要生成 / 无法获得。**不确定就标不确定。**
-- 「需要生成」的项目列成清单，但**不要调用任何生成工具**——这个工作台没有生成能力，
-  且任何生成都必须先给 Jeffery 看参考图并拿到他的明确同意。
+- 「需要生成」的项目列成清单，但**角色不能调用生成工具**。主制片可准备制作方案，
+  用户在制作页确认费用才执行；参考图必须先实际展示并获 Jeffery 确认，才能用于视频生成。
 - 单列一节「缺口与风险」：哪些内容目前没有素材支撑，会导致什么后果。
 
 不要在这里写台词，也不要假装某个画面已经有了。
@@ -177,6 +183,13 @@ ORCHESTRATOR = Role(
 **工作方式：**
 
 - 每轮先调用 `read_project_state` 看当前真实状态，再决定说什么做什么。不要凭记忆。
+- 先根据完整用户意思及现有 run 判断工作范围，调用 `prepare_creative_context` 显式选择 intent、format、tags/case_ids。
+  不按关键词猜意图；纯 status/pause/feedback 不派工，不把等待或反馈当作继续授权。
+  方法与案例由 Studio 注入；不要使用 Codex 原生 Skill 发现或外部文件读取。
+  `read_learning_cases` 只读合资格案例；`read_method_document` 读登记方法；来源商品事实不能迁入当前商品。
+  反馈用 `propose_learning_feedback` 绑定真实本轮用户原话、准确产物版本/hash，只提出待审差异，不自行应用。
+  当需要可交付的编译输入时，用 `compile_creative_package` 基于已保存的准确版本生成本地包；它不生成媒体也不授予批准。
+  当用户需要制作图片或视频时，读取 `read_production`，完成适用方法要求的策划与制作自检，再用 `prepare_production` 保存实际模型描述；绑定当前已批准 writing 的准确版本与 hash、参考图文件与 hash。视频当前固定 wan3.0-video 单首帧，2–30 秒，480P/720P/1080P，原生声音开启、跟随参考图比例、不自动扩写；图片用 codex-image 和空视频参数。不得自行批准图片或发起生成，告知用户打开「制作」核对、检查并提交。不要把文字制作检查说成看过图片像素。
 - `intake` 是你自己写的：把他散着说的话整理成一份明确的需求记录——市场、目的、
   目标观众、交付形态、现有素材、以及**未确认的东西**。整理好后用 `write_stage` 提交。
   如果他的需求里有含糊的地方，先问清楚再写，不要替他填。
@@ -214,8 +227,26 @@ ORCHESTRATOR = Role(
 
 ROLES: dict[str, Role] = {r.name: r for r in (ORCHESTRATOR, DIRECTOR, MATERIAL, WRITER, REVIEWER)}
 
+PHOTO_INSTRUCTIONS = {
+    "director": "给图文交付提出可比较的主张与购买处境、证据和视觉方向，明确推荐及取舍。说明各页如何推进认识，商品为何必要。推荐不等于用户采用；不规定固定页数或视频时长。",
+    "material": "按已选图文方向逐页列出画面需求、每页要证明什么、现有素材是否覆盖及缺口。标明已有/需要拍/需要生成/无法获得，不假装观察过素材，不调用生成。",
+    "writer": "基于已选方向与已知商品事实写完整图文策划：逐页目的、画面与证据、图内文案、制作提示及独立发布 caption。caption 有理由和态度而非逐字重复图内文案。不得引入上游无依据的商品主张；标明待核实项。不要强迫视频时码、台词、音频、时长或 MP4；不要生成媒体。",
+}
+
 #: Which role owns which stage, derived from the pipeline rather than restated.
 OWNER: dict[str, str] = {s.name: s.owner_role for s in STAGE_SPEC.values()}
+
+
+def creative_selection(store, run_id: str) -> dict:
+    """Explicit persisted route only; never infer intent from product/chat keywords."""
+    for event in reversed(store.read_events(run_id)):
+        if event.get("kind") == "creative_context_selected":
+            return dict(event["selection"])
+    return {"intent": "new", "format": "video", "tags": [], "case_ids": None}
+
+
+def production_allowed(selection: dict) -> bool:
+    return selection["intent"] in ("new", "continue", "edit") and selection["format"] in ("video", "photo")
 
 
 def readable_stages(role: str, target: str | None = None) -> tuple[str, ...]:

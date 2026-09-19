@@ -53,6 +53,10 @@ const box = (tag, cls, text) => {
 };
 
 const state = {
+  view: 'home',
+  runs: [],
+  artifactBodies: new Map(),
+  chatDrafts: new Map(),
   runId: null,
   timeline: null,
   rail: [],
@@ -71,7 +75,7 @@ const state = {
   // The conversation band. Collapsed by default, because the point of this
   // screen is the stage; forced open while a turn runs, because work in flight
   // is not something he should be able to hide from himself.
-  conversationOpen: false,
+  conversationOpen: true,
   atBottom: true,
   // Answers he has written on the question rows but not sent yet, keyed by the
   // question they answer. Local to the browser and to one artifact version —
@@ -92,7 +96,9 @@ async function api(path, options) {
     try {
       detail = (await res.json()).detail || detail;
     } catch (_) { /* non-JSON body */ }
-    throw new Error(detail);
+    const error = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    error.status = res.status;
+    throw error;
   }
   return res.json();
 }
@@ -124,6 +130,7 @@ function toast(message, isError) {
 
 async function loadRuns() {
   const runs = await api("/api/runs");
+  state.runs = runs;
   const select = $("run-select");
   select.innerHTML = "";
   if (!runs.length) {
@@ -132,6 +139,7 @@ async function loadRuns() {
     opt.value = "";
     select.appendChild(opt);
     state.runId = null;
+    renderProjects();
     return;
   }
   for (const run of runs) {
@@ -140,12 +148,30 @@ async function loadRuns() {
     opt.textContent = run.title;
     select.appendChild(opt);
   }
+  const remembered = sessionStorage.getItem("studio-selected-run");
+  if (!state.runId && runs.some((r) => r.run_id === remembered)) state.runId = remembered;
   if (!state.runId || !runs.some((r) => r.run_id === state.runId)) state.runId = runs[0].run_id;
   select.value = state.runId;
+  renderProjects();
 }
 
 async function selectRun(runId) {
+  if (state.decisionBusy) { $('run-select').value = state.runId; return false; }
+  $('spend-panel').hidden = true;
+  $('spend-panel').costRequest = null;
+  if (state.runId) state.chatDrafts.set(state.runId, $('chat-input').value);
   state.runId = runId;
+  $('run-select').value = runId;
+  $('chat-input').value = state.chatDrafts.get(runId) || '';
+  state.timeline = null;
+  state.rail = [];
+  $("rail").innerHTML = "";
+  $("project-progress").innerHTML = "";
+  state.materials = [];
+  state.artifactBodies.clear();
+  sessionStorage.setItem("studio-selected-run", runId);
+  state.busy = true;
+  $("send").disabled = true;
   // A different run is a different set of stages; the stage that owned the
   // screen before has no claim on it.
   state.activeStage = null;
@@ -153,7 +179,13 @@ async function selectRun(runId) {
   // Before the first render, so the question rows come back carrying whatever he
   // had written and not sent.
   loadDraft();
-  await refreshTimeline();
+  // Restoring a durable execution must not depend on a successful content fetch.
+  await Promise.all([
+    refreshTimeline().catch(() => toast("项目内容暂时无法读取，任务状态仍会继续同步。", true)),
+    restoreJob(runId),
+  ]);
+  if (state.view === 'project') setStudioView('project');
+  return state.runId === runId;
 }
 
 async function refreshTimeline() {
@@ -162,6 +194,9 @@ async function refreshTimeline() {
   const tl = await api(`/api/runs/${runId}/timeline`);
   if (state.runId !== runId || serial !== state.refreshSerial) return;
   state.timeline = tl;
+  const project = state.runs.find(run => run.run_id === runId);
+  if (project) project.progress = tl.progress;
+  state.artifactBodies.clear();
   // Set before anything is drawn: `wireMedia` runs while the pane is being
   // built, and it resolves filenames against this list.
   state.materials = tl.materials || [];
@@ -177,6 +212,7 @@ async function refreshTimeline() {
   renderDraft();
   renderSpend(tl);
   renderMaterials();
+  renderProjects();
 }
 
 /* --------------------------------------------------------------- header -- */
@@ -234,6 +270,7 @@ function renderRail(rail) {
  * items. Here there is at most one thing waiting at a time.
  */
 function defaultStage(rail, tl) {
+  if (tl.progress?.stage && rail.some(s => s.stage === tl.progress.stage)) return tl.progress.stage;
   const pending = tl.pending;
   if (pending && rail.some((s) => s.stage === pending.stage)) return pending.stage;
 
@@ -247,6 +284,7 @@ function defaultStage(rail, tl) {
 }
 
 function selectStage(stage) {
+  setStudioView('project');
   if (!stage || stage === state.activeStage) return;
   state.activeStage = stage;
   renderRail(state.rail);
@@ -263,12 +301,19 @@ function renderPane() {
     return;
   }
   const tl = state.timeline || {};
+  renderProjectProgress();
+  const expected = tl.pending?.stage === step.stage && tl.pending.version === step.version
+    ? tl.pending.artifact_sha256 : undefined;
+  const displayStep = {...step, artifact_sha256: expected};
+  const bodyKey = `${state.runId}:${step.stage}:${step.version}`;
+  if (step.has_doc && !(step.blocks?.length) && !state.artifactBodies.has(bodyKey)) loadStageBody(displayStep);
 
   // Scroll is put back where he left it. Every refresh used to jump the stream
   // to the bottom, which is half of what 「翻来翻去」 meant: a stage that updated
   // under him moved the text out from beneath his eyes.
   const kept = host.scrollTop;
-  host.innerHTML = stageHtml(step, {
+  host.innerHTML = stageHtml(displayStep, {
+    artifactBody: state.artifactBodies.get(bodyKey),
     // Every question the run has. `stageHtml` keeps the ones belonging to this
     // stage — the rule lives there so it has one home and one test.
     questions: tl.questions || [],
@@ -277,10 +322,16 @@ function renderPane() {
     drafts: state.draft,
   });
   wireGate(host);
+  if (typeof wireRevisionActions === 'function') wireRevisionActions(host, state.runId, step);
+  if (typeof wireProductCards === 'function') wireProductCards(host, state.runId, step);
+  if (typeof wireInlineFeedback === 'function') wireInlineFeedback(host, state.runId, step);
   for (const button of host.querySelectorAll('[data-act="read"]')) {
     button.onclick = () => openReader(button.dataset.stage, Number(button.dataset.version))
       .catch(err => toast(`原文暂时无法打开：${err.message || err}`));
   }
+  for (const button of host.querySelectorAll('[data-act="retry-body"]')) button.onclick = () => {
+    state.artifactBodies.delete(bodyKey); renderPane();
+  };
   // The answer boxes come and go with the stage, so they are bound here rather
   // than once at load. Only the pane's boxes are in the map — the tray keeps
   // drafts for stages that are not on screen, and reaches their inputs by a key
@@ -290,6 +341,21 @@ function renderPane() {
   // resolvable once `state.materials` is loaded.
   wireMedia(host);
   host.scrollTop = kept;
+}
+
+async function loadStageBody(step) {
+  const runId = state.runId, key = `${runId}:${step.stage}:${step.version}`;
+  const entry = {stage:step.stage,version:step.version,status:'loading'};
+  state.artifactBodies.set(key,entry);
+  try {
+    const record = await api(`/api/runs/${encodeURIComponent(runId)}/artifacts/${step.stage}/${step.version}`);
+    if (record.stage !== step.stage || record.version !== step.version || !record.integrity_ok
+        || (step.artifact_sha256 && record.sha256 !== step.artifact_sha256)) throw new Error('方案版本已变化，请刷新项目后重新阅读。');
+    Object.assign(entry,{status:'loaded',text:record.content,sha256:record.sha256});
+  } catch (error) {
+    Object.assign(entry,{status:'error',error:'暂时无法读取这一版内容，请重新加载。'});
+  }
+  if (state.runId === runId && state.activeStage === step.stage && state.artifactBodies.get(key) === entry) renderPane();
 }
 
 /* ---------------------------------------------------------- the questions -- */
@@ -451,10 +517,10 @@ function renderDraft() {
 
   const sendBtn = box("button", "primary small", "发送");
   sendBtn.type = "button";
-  sendBtn.disabled = state.busy;
+  sendBtn.disabled = state.busy || state.decisionBusy || state.recoveryBlocked;
   sendBtn.onclick = () => {
     const text = composeDraft();
-    if (!text || state.busy) return;
+    if (!text || state.busy || state.decisionBusy || state.recoveryBlocked || !state.runId) return;
     state.draft = {};
     saveDraft();
     renderDraft();
@@ -498,21 +564,15 @@ function questionByKey(key) {
 
 function renderSpend(tl) {
   $("spend").textContent = "用量与费用";
-  $("spend").title = tl.spend_sentence;
-  const panel = $("spend-panel");
-  const p = tl.budget.pricing;
-  panel.innerHTML = "";
-  panel.append(
-    box("div", "spend-line", tl.spend_sentence),
-    box("div", "spend-line", tl.all_runs_sentence),
-    box("div", "spend-note", `美元是按价目表估算的，不是账单。价目来源：${p.source}（${p.as_of}）`),
-    box("div", "spend-note", p.note)
-  );
+  $("spend").title = [tl.spend_sentence,tl.all_runs_sentence].filter(Boolean).join('\n');
 }
 
 $("spend").onclick = () => {
+  if(!state.runId){toast('先打开一个项目，再查看用量与费用。');return;}
   const panel = $("spend-panel");
   panel.hidden = !panel.hidden;
+  if(!panel.hidden)StudioProjectCosts.mount(panel,{runId:state.runId,isCurrent:id=>state.runId===id,
+    onRecover:id=>{if(state.runId!==id)return;setStudioView('project');setProjectFocus('chat');$('job-status').scrollIntoView({block:'nearest'});}});
 };
 
 /* --------------------------------------------------------------- media -- */
@@ -646,7 +706,7 @@ function renderMaterials() {
   const usable = list.filter((m) => m.usable);
   // The count rides on the chip as well as in the panel. A shelf he has to open
   // to find out whether anything is on it is a shelf he will forget about.
-  $("materials-toggle").textContent = list.length ? `素材 · ${usable.length}` : "素材";
+  $("materials-toggle").textContent = list.length ? `项目素材 · ${usable.length}` : "项目素材";
   $("materials-count").textContent = list.length
     ? `${usable.length} 个能用 · 共 ${list.length} 个文件`
     : "还没有素材";
@@ -655,12 +715,13 @@ function renderMaterials() {
   grid.innerHTML = "";
   if (!list.length) {
     grid.appendChild(
-      box("p", "materials-empty", "这个项目手上没有任何图片或视频。没有素材是个答案——上面那句「把图拖进来」就是唯一的下一步。")
+      box("p", "materials-empty", "添加商品照片、参考图或视频，再记录可确认的内容，供团队策划使用。")
     );
     return;
   }
   for (const m of list) grid.appendChild(materialTile(m));
   wireMedia(grid);
+  if (state.materialsOpen) loadMaterialWorkspace();
 }
 
 function materialTile(m) {
@@ -683,9 +744,11 @@ function materialTile(m) {
 }
 
 function toggleMaterials(open) {
+  if (!state.runId && open !== false) {newRunDialog();return;}
   state.materialsOpen = open == null ? !state.materialsOpen : open;
   $("materials").hidden = !state.materialsOpen;
   $("materials-toggle").setAttribute("aria-expanded", String(state.materialsOpen));
+  if (state.materialsOpen) loadMaterialWorkspace();
 }
 
 /* Dropping files on the shelf.
@@ -700,7 +763,7 @@ async function uploadFiles(files) {
     return;
   }
   if (!files.length) return;
-
+  const uploadRunId = state.runId;
   const problems = [];
   let landed = 0;
   for (const file of files) {
@@ -713,7 +776,7 @@ async function uploadFiles(files) {
       // Raw `fetch`, not `api()`: that helper forces a JSON content type, and
       // this body is multipart.
       const res = await fetch(
-        `/api/runs/${encodeURIComponent(state.runId)}/materials`,
+        `/api/runs/${encodeURIComponent(uploadRunId)}/materials`,
         { method: "POST", body: form }
       );
       if (res.ok) {
@@ -730,7 +793,7 @@ async function uploadFiles(files) {
     }
   }
 
-  await refreshTimeline();
+  if (state.runId === uploadRunId) await refreshTimeline();
   if (problems.length) toast(problems.join("；"), true);
   else toast(`放进去了 ${landed} 个。`);
 }
@@ -791,6 +854,9 @@ function renderConversation(tl) {
     : "还没有对话";
   setConversationOpen(state.conversationOpen);
 
+  if (!tl.turns.length) host.innerHTML = '<div class="chat-welcome"><span class="chat-welcome-mark">le.</span><h3>从你的想法聊起</h3><p>说说商品、想打动的人，或者这次想尝试的表达。我们一起把方案做出来。</p><button class="chat-suggestion" type="button">帮我梳理这个项目的创意方向 ↗</button></div>';
+  const suggestion=host.querySelector('.chat-suggestion');
+  if (suggestion) suggestion.onclick=()=>{$('chat-input').value='先帮我梳理这个项目的创意方向。';$('chat-input').focus();};
   for (const turn of tl.turns) host.appendChild(renderTurn(turn));
   if (state.atBottom) host.scrollTop = host.scrollHeight;
 }
@@ -823,14 +889,14 @@ function renderTurn(turn) {
 
   if (turn.reply) {
     const bubble = box("div", "msg assistant");
-    const who = box("div", "who", "主 Agent");
+    const who = box("div", "who", "制片团队");
     const body = box("div", "body");
     body.innerHTML = renderMarkdown(turn.reply.text);
     bubble.append(who, body);
     wrap.appendChild(bubble);
   }
 
-  const detail = renderMachineDetail(turn.detail);
+  const detail = state.machineDetail ? renderMachineDetail(turn.detail) : null;
   if (detail) wrap.appendChild(detail);
 
   return wrap;
@@ -954,7 +1020,7 @@ function wireGate(host) {
       }
     } finally {
       state.decisionBusy = false;
-      $("run-select").disabled = state.busy; $("send").disabled = state.busy;
+      $("run-select").disabled = false; $("send").disabled = state.busy || state.recoveryBlocked;
       gate.dataset.saving = "0";
       for (const control of gate.querySelectorAll('button,input,textarea')) control.disabled = false;
     }
@@ -984,7 +1050,7 @@ function renderMachineDetail(detail) {
   more.open = state.machineDetail;
   const tokens = detail.input_tokens + detail.output_tokens;
   more.appendChild(
-    box("summary", null, `机器细节 · ${detail.calls} 次调用 · ${tokens.toLocaleString()} token`)
+    box("summary", null, `调用记录 · ${detail.calls} 次 · ${tokens.toLocaleString()} token`)
   );
   const list = box("div", "machine-list");
   for (const r of detail.roles) {
@@ -1109,26 +1175,6 @@ async function decide(stage, decision, reason) {
 
 /* ----------------------------------------------------------------- chat -- */
 
-function liveTurn(userText) {
-  const wrap = box("div", "turn live");
-  const bubble = box("div", "msg user");
-  bubble.append(box("div", "who", "你"), box("div", "body", userText));
-  wrap.appendChild(bubble);
-
-  const progress = box("div", "progress");
-  wrap.appendChild(progress);
-
-  const reply = box("div", "msg assistant");
-  const body = box("div", "body");
-  reply.append(box("div", "who", "主 Agent"), body);
-  reply.hidden = true;
-  wrap.appendChild(reply);
-
-  $("conversation-body").appendChild(wrap);
-  scrollDown();
-  return { progress, reply, body };
-}
-
 /* Scrolling belongs to the band now, and only to the band.
  *
  * The pane does not follow anything: it holds one stage, and a stage that
@@ -1148,100 +1194,17 @@ $("conversation-body").addEventListener("scroll", () => {
 });
 
 async function send(text) {
-  if (state.busy || state.decisionBusy || !state.runId) return;
-  state.busy = true;
+  if (state.busy || state.decisionBusy || state.recoveryBlocked || !state.runId) return;
   state.atBottom = true;
-  $("send").disabled = true;
-
-  // Work he just asked for must not run inside a folded band. Opening it here
-  // rather than leaving it to him is the one place the band forces itself open;
-  // `renderConversation` does not re-close it, so it stays open afterwards.
   setConversationOpen(true);
-
-  const live = liveTurn(text);
-  live.progress.appendChild(box("div", "progress-line working", "主 Agent 正在处理…"));
-
-  try {
-    const res = await fetch(`/api/runs/${state.runId}/message`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text }),
-    });
-    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let first = true;
-
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split("\n\n");
-      buffer = parts.pop();
-      for (const part of parts) {
-        const line = part.split("\n").find((l) => l.startsWith("data: "));
-        if (!line) continue;
-        first = handleEvent(JSON.parse(line.slice(6)), live, first);
-      }
-    }
-  } catch (err) {
-    live.progress.appendChild(box("div", "progress-line fail", String(err.message || err)));
-  } finally {
-    state.busy = false;
-    $("send").disabled = false;
-    // The persisted turn is the source of truth; re-rendering from it means the
-    // live view can never drift from what is on disk.
-    await refreshTimeline();
-  }
-}
-
-function handleEvent(ev, live, first) {
-  if (ev.type === "done") {
-    if (ev.text) {
-      live.body.innerHTML = renderMarkdown(ev.text);
-      live.reply.hidden = false;
-    }
-    if (ev.stopped_because === "max_rounds") {
-      live.progress.appendChild(
-        box("div", "progress-line fail", "它这一轮步骤太多被叫停了，可能没做完。")
-      );
-    }
-    return false;
-  }
-  if (ev.type === "error") {
-    live.progress.appendChild(box("div", "progress-line fail", ev.message));
-    return first;
-  }
-  if (ev.type === "blocked") {
-    live.progress.appendChild(box("div", "progress-line fail", ev.message));
-    return first;
-  }
-
-  // The server already turned this event into Chinese; draw it as-is.
-  if (ev.say) {
-    if (first) {
-      live.progress.innerHTML = "";
-      first = false;
-    }
-    live.progress.appendChild(box("div", "progress-line", ev.say));
-    scrollDown();
-  }
-  if (state.machineDetail && ev.type === "agent_tool") {
-    const who = ev.role === "orchestrator" ? "" : `[${ev.role}] `;
-    live.progress.appendChild(
-      box("div", "progress-line raw", `${ev.ok ? "✓" : "✗"} ${who}${ev.tool}`)
-    );
-  }
-  return first;
+  await submitJob(state.runId, { text, request_id: crypto.randomUUID() });
 }
 
 /* ---------------------------------------------------------------- input -- */
 
 function submit() {
   const value = $("chat-input").value.trim();
-  if (!value || !state.runId || state.busy) return;
+  if (!value || !state.runId || state.busy || state.decisionBusy || state.recoveryBlocked) return;
   $("chat-input").value = "";
   $("chat-input").style.height = "auto";
   send(value);
@@ -1249,7 +1212,7 @@ function submit() {
 
 $("send").onclick = submit;
 $("chat-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     submit();
   }
@@ -1261,50 +1224,85 @@ $("chat-input").addEventListener("input", (e) => {
 
 $("detail-toggle").onclick = () => {
   state.machineDetail = !state.machineDetail;
-  $("detail-toggle").textContent = state.machineDetail ? "隐藏机器细节" : "显示机器细节";
-  if (state.timeline) renderStream(state.timeline);
+  $("detail-toggle").textContent = state.machineDetail ? "收起运行详情" : "运行详情";
+  $("detail-toggle").setAttribute('aria-pressed',String(state.machineDetail));
+  if (state.timeline) renderConversation(state.timeline);
 };
 
 /* -------------------------------------------------------- new project -- */
 
-function newRunDialog() {
+function newRunDialog(format='video') {
+  if (state.decisionBusy) { toast('正在保存你的决定，请稍后再新建项目。'); return; }
+  if (document.querySelector('.new-project-dialog')) return;
   const dialog = document.createElement("dialog");
+  const runId = autoRunId();
+  let createdRun = null, creationPayload = null, submitting = false;
+  dialog.className='new-project-dialog';
   dialog.innerHTML = `
-    <form method="dialog">
-      <h2>新建项目</h2>
-      <p class="muted">起个你认得出的名字就行。编号由系统生成，不用你取。</p>
-      <label>这个项目叫什么
-        <input id="nr-title" placeholder="保温午餐包 15 秒" required></label>
-      <label>你要做什么（照你平时说话写，不用整理成需求文档）
-        <textarea id="nr-brief" rows="6"
-          placeholder="例：给已经采购的保温午餐包做一条 15 秒的短视频，投 TikTok Shop 美国线。"></textarea></label>
+    <form>
+      <div class="dialog-kicker">A NEW STORY</div><h2>这次，你想创作什么？</h2>
+      <p class="muted">从商品和一个想法开始，细节可以一起打磨。</p>
+      <label>内容形式<select id="nr-format"><option value="video">商品视频</option><option value="photo">带货图文</option></select></label>
+      <label>项目名称<input id="nr-title" placeholder="通勤午餐包 · 周末短片" required maxlength="200"></label>
+      <div data-product-card-picker></div>
+      <label>聊聊你的想法<textarea id="nr-brief" rows="5" required maxlength="19000" placeholder="想介绍什么商品？给谁看？希望对方看完记住什么？"></textarea></label>
+      <p class="form-note">先建立项目，发送对话后才开始调用模型。</p><p class="form-error" role="alert"></p>
       <div class="dialog-actions">
-        <button value="cancel" class="ghost">取消</button>
-        <button value="ok" class="primary">建立</button>
+        <button type="button" class="ghost" data-cancel>取消</button>
+        <button type="submit" class="primary">创建项目 ↗</button>
       </div>
     </form>`;
   document.body.appendChild(dialog);
-  dialog.addEventListener("close", async () => {
-    if (dialog.returnValue === "ok") {
+  dialog.querySelector('#nr-format').value=format==='photo'?'photo':'video';
+  if (typeof attachProductCardPicker === 'function') attachProductCardPicker(dialog);
+  dialog.querySelector('[data-cancel]').onclick=()=>dialog.close();
+  dialog.querySelector('form').onsubmit=async(event)=>{
+    event.preventDefault();
+    if (submitting || state.decisionBusy) return;
       const title = $("nr-title").value.trim();
       const brief = $("nr-brief").value.trim();
       if (title && brief) {
+        const submitButton=dialog.querySelector('[type="submit"]');submitting=true;submitButton.disabled=true;submitButton.textContent=createdRun?'正在打开…':'正在创建…';
+        dialog.querySelector('[data-cancel]').disabled=true;
+        if (!creationPayload) {
+          creationPayload = { run_id: runId, title, brief: `交付形式：${$('nr-format').value==='photo'?'带货图片与文案':'商品视频'}。\n${brief}` };
+          const card=dialog.productCardBinding?.();if(card)creationPayload.product_card=card;
+        }
+        for (const field of dialog.querySelectorAll('input,textarea,select')) field.disabled=true;
         try {
-          const run = await api("/api/runs", {
-            method: "POST",
-            body: JSON.stringify({ run_id: autoRunId(), title, brief }),
-          });
+          if (!createdRun) {
+            try {
+              createdRun = await api("/api/runs", {
+                method: "POST",
+                body: JSON.stringify(creationPayload),
+              });
+            } catch (err) {
+              // A lost response may have followed a successful write. Reuse this
+              // form's identity and recover that exact project on a retry.
+              if (![400,409].includes(err.status)) throw err;
+              const existingRuns=await api('/api/runs');
+              createdRun = existingRuns.find(run=>run.run_id===runId && run.title===creationPayload.title && run.brief===creationPayload.brief);
+              if(!createdRun&&existingRuns.some(run=>run.run_id===runId))err.creationConflict=true;
+              if (!createdRun) throw err;
+            }
+          }
+          for (const field of dialog.querySelectorAll('input,textarea,select')) field.disabled=true;
           await loadRuns();
-          $("run-select").value = run.run_id;
-          await selectRun(run.run_id);
-          toast("项目已建立。在下面说要做什么就行。");
+          if (!await selectRun(createdRun.run_id)) throw new Error('Project switch is busy');
+          setStudioView('project');dialog.close();$('chat-input').focus();
+          toast("项目已创建，和制片团队聊聊下一步。");
         } catch (err) {
-          toast(String(err.message || err), true);
+          const invalid=!createdRun&&!err.creationConflict&&[400,422].includes(err.status);
+          dialog.querySelector('.form-error').textContent=createdRun?'项目已创建，但暂时无法打开。重试会打开同一个项目。':invalid?err.message:'暂时无法确认创建结果，请检查连接后重试。';
+          if(invalid){creationPayload=null;for(const field of dialog.querySelectorAll('input,textarea,select'))field.disabled=false;}
+          submitButton.disabled=false;submitButton.textContent=createdRun?'重新打开':invalid?'创建项目 ↗':'重试创建';
+        } finally {
+          submitting=false;dialog.querySelector('[data-cancel]').disabled=false;
         }
       }
-    }
-    dialog.remove();
-  });
+  };
+  dialog.addEventListener('close',()=>dialog.remove());
+  dialog.addEventListener('cancel',event=>{if (submitting) event.preventDefault();});
   dialog.showModal();
 }
 
@@ -1319,16 +1317,18 @@ function autoRunId() {
   return `p-${stamp}-${tail}`;
 }
 
-$("new-run").onclick = newRunDialog;
-$("run-select").onchange = (e) => selectRun(e.target.value);
+$("new-run").onclick = () => newRunDialog();
+$("run-select").onchange = async (e) => {await selectRun(e.target.value);setStudioView('project');};
 
 /* ----------------------------------------------------------------- init -- */
 
 (async function init() {
   try {
+    initStudioNavigation();
     await loadRuns();
     if (state.runId) await selectRun(state.runId);
-    else $("stage").appendChild(box("p", "empty-state", "还没有项目。点右上角「＋ 新项目」开始。"));
+    setStudioView('home');
+    loadInspiration();
   } catch (err) {
     toast(String(err.message || err), true);
   }

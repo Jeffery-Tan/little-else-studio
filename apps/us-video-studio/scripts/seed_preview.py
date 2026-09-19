@@ -61,7 +61,8 @@ APP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(APP))
 sys.stdout.reconfigure(encoding="utf-8")
 
-from studio.config import Pricing, Settings  # noqa: E402
+from studio.connections import ConnectionStore
+from studio.config import ROLES, Pricing, Settings  # noqa: E402
 from studio.ledger import Ledger, LedgerEntry  # noqa: E402
 from studio.pipeline import Pipeline  # noqa: E402
 from studio.store import Store  # noqa: E402
@@ -93,6 +94,14 @@ ROOT = Path(
 if ROOT.exists():
     raise SystemExit(f"Refusing to replace existing preview data: {ROOT}; choose a new directory")
 ROOT.mkdir(parents=True)
+# Preview must not inherit the new default Codex login or any real API key.
+ConnectionStore(ROOT).save({
+    "expected_revision": 0,
+    "connections": [{"id": "offline-preview", "name": "离线预览（无模型调用）",
+                     "provider": "openai_compat", "base_url": "http://127.0.0.1:9",
+                     "pricing": {}}],
+    "roles": {role: {"connection": "offline-preview", "model": "offline-preview"} for role in ROLES},
+})
 
 # The shelf, filled by hand — the first of the two ways in, before the run
 # exists. `create_run` does not make this folder; `materials.py` does, on first

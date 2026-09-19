@@ -3,128 +3,74 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>US 视频制片室</title>
-<meta name="theme-color" content="#11120f">
-<link rel="icon" type="image/svg+xml" href="/static/studio-mark.svg">
-<link rel="stylesheet" href="/static/style.css">
-<link rel="stylesheet" href="/static/cinema.css">
-</head>
-<body>
-
-<a class="skip-link" href="#stage">跳到当前阶段</a>
-<header class="top">
-  <div class="studio-brand" aria-label="Little Else 视频制片室">
-    <img src="/static/studio-mark.svg" alt="" width="30" height="30">
-    <div><strong>LITTLE ELSE</strong><span>视频制片室 <i>/</i> US</span></div>
+<title>Little Else Studio · US 视频制片室</title>
+<meta name="description" content="从商品灵感到视频与图文方案，你的创作工作空间。">
+<meta name="theme-color" content="#0b0b0d">
+<link rel="icon" type="image/svg+xml" href="/static/studio-mark.svg?v=creative-20260919">
+<link rel="stylesheet" href="/static/style.css?v=creative-20260919">
+<link rel="stylesheet" href="/static/history.css?v=migration-20260919">
+<link rel="stylesheet" href="/static/cinema.css?v=hero-20260919">
+<link rel="stylesheet" href="/static/connections.css?v=production-20260919">
+<link rel="stylesheet" href="/static/learning.css?v=creative-20260919">
+<link rel="stylesheet" href="/static/revisions.css?v=revision-20260919">
+<link rel="stylesheet" href="/static/product-cards.css?v=reuse-20260919-final"><link rel="stylesheet" href="/static/inline-feedback.css?v=reuse-20260919-final"><link rel="stylesheet" href="/static/outcomes.css?v=production-20260919"><link rel="stylesheet" href="/static/project-costs.css?v=production-20260919"><link rel="stylesheet" href="/static/production.css?v=production-20260919"></head>
+<body data-view="home">
+<a class="skip-link" href="#workspace">跳到内容</a>
+<aside class="sidebar" aria-label="主导航">
+  <button class="studio-brand" id="brand-home" aria-label="Little Else 首页"><img src="/static/studio-mark.svg?v=creative-20260919" alt="" width="34" height="34"><span><strong>little else<span class="brand-dot">.</span></strong><small>CREATIVE STUDIO</small></span></button>
+  <button id="new-run" class="primary create-button"><span aria-hidden="true">＋</span> 开始创作</button>
+  <nav class="primary-nav" aria-label="工作空间">
+    <button id="nav-home" class="nav-item active" aria-label="工作空间" title="工作空间" aria-current="page"><span class="nav-icon" data-icon="grid"></span><span>工作空间</span></button>
+    <button id="nav-project" class="nav-item" aria-label="当前项目" title="当前项目"><span class="nav-icon" data-icon="film"></span><span>当前项目</span></button>
+    <button id="materials-toggle" class="nav-item" aria-label="项目素材" title="项目素材" aria-expanded="false" aria-controls="materials">项目素材</button>
+    <button id="learning-open" class="nav-item" aria-label="灵感与方法" title="灵感与方法" aria-haspopup="dialog"><span class="nav-icon" data-icon="spark"></span><span>灵感与方法</span></button>
+  </nav>
+  <div class="sidebar-note"><span class="small-dot"></span> US 创作空间</div>
+  <div class="sidebar-bottom">
+    <button id="connections-open" class="nav-item" aria-label="模型设置" title="模型设置"><span class="nav-icon" data-icon="sliders"></span><span>模型设置</span></button>
+    <button id="spend" class="nav-item" aria-label="用量与费用" title="用量与费用">用量与费用</button>
+    <div class="profile"><span class="profile-avatar">J</span><div><strong>Jeffery</strong><small>个人工作空间</small></div></div>
   </div>
-  <div class="left">
-    <select id="run-select" aria-label="选择项目"></select>
-    <button id="new-run" class="ghost" title="新建项目">＋ 新项目</button>
-  </div>
-
-  <nav class="rail" id="rail" aria-label="进度"></nav>
-
-  <div class="right">
-    <button id="materials-toggle" class="chip" aria-expanded="false"
-            aria-controls="materials">素材</button>
-    <button id="spend" class="chip" title="点开看明细">—</button>
-  </div>
-</header>
-
-<div id="spend-panel" class="spend-panel" hidden></div>
-
-<!-- The shelf: what this run really has on disk. Files land here by being copied
-     into runs/<id>/materials/ or dropped on this panel. It sits at the top of the
-     page because it answers "what does this run actually have" — a question about
-     the whole run, the way the stage below is a question about one stage. -->
-<div id="materials" class="materials" hidden>
-  <div class="materials-head">
-    <span id="materials-count" class="materials-count">还没有素材</span>
-    <span class="materials-hint">拖入图片或视频，整理这个项目的素材</span>
-    <button id="materials-close" class="ghost small">收起</button>
-  </div>
+</aside>
+<div class="app-shell">
+  <header class="top"><div class="top-breadcrumb"><span id="page-heading">工作空间</span><span class="top-context">Little Else Studio</span></div><div class="project-select-wrap"><select id="run-select" aria-label="选择项目"></select></div><button id="top-create" class="ghost top-create">＋ 新建项目</button></header>
+  <div id="spend-panel" class="spend-panel" hidden></div>
+  <main id="workspace" class="workspace" tabindex="-1">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy"><span class="eyebrow">从一个想法开始</span><h1 id="hero-title">下一条好内容，<br>从这里开始<span class="hero-dot">.</span></h1><p>让商品有故事，让每个画面有理由。<br>和你的 AI 制片团队一起，把想法变成方案。</p><div class="hero-actions"><button class="primary" data-create-format="video">创作视频 <span aria-hidden="true">↗</span></button><button class="ghost" data-create-format="photo">策划图文 <span aria-hidden="true">↗</span></button></div><span class="hero-footnote">从创意方向，到分镜与文案。</span></div>
+      <div id="hero-visual" class="hero-visual" aria-label="灵感预览"><div class="hero-placeholder"><span class="visual-frame"></span><span>让一个想法，拥有画面。</span></div></div>
+    </section>
+    <section class="projects-section" aria-labelledby="projects-heading">
+      <div class="section-heading"><div><h2 id="projects-heading">继续你的创作</h2><p>想法、素材和每一次修改，都留在项目里。</p></div><label class="project-search"><span data-icon="search" aria-hidden="true"></span><input id="project-search" type="search" aria-label="搜索项目" placeholder="搜索项目"></label></div>
+      <div id="project-grid" class="project-grid"><div class="loading-card">正在读取项目…</div></div>
+    </section>
+    <section class="inspiration-section" aria-labelledby="inspiration-heading">
+      <div class="section-heading"><div><h2 id="inspiration-heading">从好表达里找灵感</h2><p>看具体的画面，理解选择背后的理由。</p></div><button id="browse-inspiration" class="text-button">探索灵感库 <span aria-hidden="true">↗</span></button></div>
+      <div id="inspiration-grid" class="inspiration-grid"><div class="loading-card">正在整理参考…</div></div>
+    </section>
+    <footer class="workspace-footer"><span>little else. <span>Make something worth watching.</span></span><span>你的内容，你来决定。</span></footer>
+  </main>
+  <section id="project-workspace" class="project-workspace" data-focus="canvas" aria-label="项目工作区" hidden>
+    <div class="project-tools"><div role="group" aria-label="工作区视图"><button class="ghost small" data-project-focus="canvas" aria-pressed="true">创作板</button><button class="ghost small" data-project-focus="chat" aria-pressed="false">制片对话</button></div><div class="project-delivery-actions"><button id="history-open" class="ghost small">项目历史</button><button id="production-open" class="primary small">制作</button><button id="outcomes-open" class="ghost small">作品与表现</button><button id="delivery-open" class="ghost small">查看交付 ↗</button></div></div>
+    <div class="project-canvas"><nav class="rail" id="rail" aria-label="创作进度"></nav><div id="project-progress"></div><main id="stage" class="stage" tabindex="-1"></main></div>
+    <aside class="composer" aria-label="制片对话">
+      <div class="producer-heading"><span class="producer-avatar">le.</span><div><strong>你的制片团队</strong><span>一起把想法推进到下一步</span></div></div>
+      <div id="job-status" class="job-status" role="status" hidden></div>
+      <div id="conversation" class="conversation"><button id="conversation-toggle" class="conversation-bar" aria-expanded="true" aria-controls="conversation-body"><span>项目对话</span><span id="conversation-count" class="conversation-count">还没有对话</span><span id="conversation-caret" class="conversation-caret">收起</span></button><div id="conversation-body" class="conversation-body" aria-live="polite"></div></div>
+      <div id="draft" class="draft" hidden></div>
+      <div class="composer-inner"><textarea id="chat-input" rows="3" aria-label="与制片 Agent 对话" placeholder="聊聊你的想法，或告诉我想改哪里…"></textarea><button id="send" class="primary" aria-label="发送消息">发送 <span aria-hidden="true">↑</span></button></div>
+      <div class="composer-hint"><span>Shift + Enter 换行</span><button id="detail-toggle" class="ghost small" aria-pressed="false">运行详情</button></div>
+    </aside>
+  </section>
+</div>
+<section id="materials" class="materials" aria-label="项目素材" hidden>
+  <div class="materials-head"><div><h2>项目素材</h2><span id="materials-count" class="materials-count">还没有素材</span></div><button id="materials-close" class="ghost small">关闭</button></div>
+  <label class="upload-area" for="material-upload"><span data-icon="upload"></span><strong>添加图片或视频</strong><span>点击选择，或拖入文件 · 单个文件最多 64 MB</span><input id="material-upload" type="file" accept="image/*,video/*" multiple></label>
   <div id="materials-grid" class="materials-grid"></div>
-</div>
-
-<!-- The one stage he is looking at. Everything below the rail is drawn from
-     whichever stage the rail has selected: what is waiting on him, the document,
-     the review, the questions it could not settle.
-
-     Not `aria-live`: switching stages replaces all of this, and a screen reader
-     announcing the whole panel every time he clicks a rail step is noise. The
-     live region is the conversation band, which is where things actually arrive. -->
-<main id="stage" class="stage" tabindex="-1"></main>
-
-<footer class="composer">
-  <!-- What happened, in order, folded away. Demoted rather than deleted: reading
-       one document closely and following the run over time are two needs, and the
-       stage owns the screen because that is where the thing waiting on him is.
-       It forces itself open when a turn starts — see `send` in app.js. -->
-  <div id="conversation" class="conversation">
-    <button id="conversation-toggle" class="conversation-bar" aria-expanded="false"
-            aria-controls="conversation-body">
-      <span class="conversation-mark">≡</span>
-      <span>对话</span>
-      <span id="conversation-count" class="conversation-count">还没有对话</span>
-      <span id="conversation-caret" class="conversation-caret">展开</span>
-    </button>
-    <div id="conversation-body" class="conversation-body" aria-live="polite" hidden></div>
-  </div>
-
-  <!-- Answers drafted on the question rows, before they are sent. It sits above
-       the composer because it is the same act — saying something to the agent —
-       only composed from the boxes instead of typed from scratch. Global on
-       purpose: answers from four stages become one message, one agent turn. -->
-  <div id="draft" class="draft" hidden></div>
-  <div class="composer-inner">
-    <textarea id="chat-input" rows="1"
-      aria-label="与制片 Agent 对话" placeholder="告诉制片 Agent，你想调整或继续什么…"></textarea>
-    <button id="send" class="primary">发送</button>
-  </div>
-  <div class="composer-hint">
-    <span>Enter 发送，Shift+Enter 换行</span>
-    <button id="detail-toggle" class="ghost small">显示机器细节</button>
-  </div>
-</footer>
-
-<!-- Full-document reader -->
-<div id="reader" class="reader" hidden>
-  <div class="reader-box" role="dialog" aria-modal="true">
-    <div class="reader-head">
-      <div>
-        <h2 id="reader-title">—</h2>
-        <div class="reader-sub" id="reader-sub"></div>
-      </div>
-      <div class="reader-actions">
-        <div class="versions" id="reader-versions"></div>
-        <button id="reader-close" class="ghost">关闭</button>
-      </div>
-    </div>
-    <div class="reader-body" id="reader-body"></div>
-  </div>
-</div>
-
-<!-- One material, big. Clicking a photo must not take him off the screen he is
-     already reading — the same reason the artifact reader is an overlay. -->
-<div id="viewer" class="viewer" hidden>
-  <div class="viewer-box" role="dialog" aria-modal="true">
-    <div class="viewer-head">
-      <span id="viewer-name">—</span>
-      <button id="viewer-close" class="ghost small">关闭</button>
-    </div>
-    <div id="viewer-body" class="viewer-body"></div>
-  </div>
-</div>
-
-<div id="toast" class="toast"></div>
-
-<!-- Load order is a dependency chain, each link the same kind: md.js first,
-     because blocks.js and stage.js both call its `escapeHtml`; then blocks.js,
-     because stage.js draws a document through `blocksHtml`; then stage.js, whose
-     `stageHtml` and `answerKey` are what app.js calls and stores drafts by. -->
-<script src="/static/md.js"></script>
-<script src="/static/blocks.js"></script>
-<script src="/static/stage.js"></script>
-<script src="/static/app.js"></script>
+</section>
+<div id="reader" class="reader" hidden><div class="reader-box" role="dialog" aria-modal="true" aria-labelledby="reader-title"><div class="reader-head"><div><h2 id="reader-title">方案详情</h2><div class="reader-sub" id="reader-sub"></div></div><div class="reader-actions"><div class="versions" id="reader-versions"></div><button id="reader-close" class="ghost">关闭</button></div></div><div class="reader-body" id="reader-body"></div></div></div>
+<div id="viewer" class="viewer" hidden><div class="viewer-box" role="dialog" aria-modal="true" aria-label="素材预览"><div class="viewer-head"><span id="viewer-name"></span><button id="viewer-close" class="ghost small">关闭</button></div><div id="viewer-body" class="viewer-body"></div></div></div>
+<div id="toast" class="toast" role="status"></div>
+<script src="/static/md.js?v=creative-20260919"></script><script src="/static/blocks.js?v=creative-20260919"></script><script src="/static/stage.js?v=creative-20260919"></script><script src="/static/workspace.js?v=migration-20260919"></script><script src="/static/progress.js?v=workflow-20260919"></script><script src="/static/materials.js?v=migration-20260919"></script><script src="/static/image-analysis.js?v=vision-20260919-final"></script><script src="/static/image-workspace.js?v=vision-20260919-final"></script><script src="/static/material-workspace.js?v=vision-20260919-final"></script><script src="/static/runtime.js?v=production-20260919"></script><script src="/static/revisions.js?v=revision-20260919"></script><script src="/static/revision-workspace.js?v=revision-20260919"></script><script src="/static/product-cards.js?v=reuse-20260919-final"></script><script src="/static/outcomes.js?v=production-20260919"></script><script src="/static/project-costs.js?v=production-20260919"></script><script src="/static/history.js?v=migration-20260919"></script><script src="/static/production.js?v=production-20260919"></script><script src="/static/app.js?v=production-20260919"></script><script src="/static/connections.js?v=production-20260919"></script><script src="/static/learning.js?v=reuse-20260919-final"></script><script src="/static/inline-feedback.js?v=reuse-20260919-final"></script>
 </body>
 </html>

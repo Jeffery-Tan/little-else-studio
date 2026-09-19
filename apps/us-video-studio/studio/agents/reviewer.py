@@ -28,8 +28,8 @@ from ..store import Store
 from ..tools.registry import tools_for
 from ..tools.workspace import ToolError, Workspace
 from .budget import BudgetedClient
-from .client import ModelClient, run_agent_loop
-from .roles import REVIEWER
+from .client import JobCancelled, ModelClient, SafePreflightError, run_agent_loop
+from .roles import REVIEWER, creative_selection, production_allowed
 
 
 @dataclass
@@ -73,7 +73,11 @@ def run_review(
     run_id: str,
     stage: str,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    check_cancel: Callable[[], None] | None = None,
+    learning_service=None,
 ) -> ReviewOutcome:
+    if check_cancel:
+        check_cancel()
     outcome = ReviewOutcome(stage=stage)
 
     def emit(event: dict[str, Any]) -> None:
@@ -102,6 +106,17 @@ def run_review(
         outcome.findings = state.review.findings
         outcome.error = f"{stage}-v{state.latest.version} 已经审核过了，不重复审核"
         return outcome
+
+    selection = creative_selection(store, run_id)
+    if not production_allowed(selection):
+        raise ToolError("当前路由只允许读取/反馈；不能启动新审核调用。")
+    if learning_service is None:
+        from ..learning import LearningService
+        learning_service = LearningService(store)
+    # Fresh purpose-specific retrieval; never reuse the producer's snapshot.
+    context = learning_service.prepare_context(run_id, "reviewer", **selection, purpose="review")
+    emit({"type": "learning_context", "role": "reviewer", "stage": stage,
+          "snapshot_sha256": context["snapshot_sha256"], "evidence_ref": context["evidence_ref"]})
 
     workspace = Workspace(store, pipeline, run_id, "reviewer", target_stage=stage)
     versions = {name: store.latest_artifact(run_id, name).version
@@ -157,14 +172,16 @@ def run_review(
                     "# 你正在审的东西\n\n"
                     f"阶段：{stage}（第 {state.latest.version} 版）\n"
                     f"你可以读取的产物：{'、'.join(workspace.readable)}\n\n"
-                    "你看不到创作者是谁、怎么想的、怎么自我评价的。这是故意的。"
+                    "你看不到创作者是谁、怎么想的、怎么自我评价的。这是故意的。\n\n" + context["text"]
                 ),
+                format=selection["format"],
             ),
             messages=[{"role": "user", "content": seed}],
             tools=tools_for("reviewer"),
             execute_tool=execute,
             max_rounds=settings.max_tool_rounds,
             max_continuations=settings.max_continuations,
+            check_cancel=check_cancel,
             on_turn=lambda t: emit(
                 {"type": "agent_turn", "role": "reviewer", "stage": stage,
                  "stop_reason": t.stop_reason, "tools": [c.name for c in t.tool_calls]}
@@ -173,7 +190,7 @@ def run_review(
                 {"type": "agent_tool", "role": "reviewer", "stage": stage, **r}
             ),
         )
-    except BudgetExceeded:
+    except (BudgetExceeded, JobCancelled, SafePreflightError):
         # Same reasoning as `Dispatcher.run_role`: a review has no attempt to
         # close, so there is nothing to clean up — but turning this into
         # `outcome.error` would report an exhausted budget as a failed review

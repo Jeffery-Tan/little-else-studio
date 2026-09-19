@@ -45,9 +45,20 @@ class BudgetedClient:
 
     def _complete_guarded(self, *, model: str, system: str,
                           messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> Turn:
+        cancel = getattr(self.inner, 'check_cancel', None)
+        if cancel:
+            cancel()
+        if hasattr(self.inner, 'validate_model'):
+            self.inner.validate_model(self.role, model)
+        target = self.inner.for_role(self.role, self.run_id) if hasattr(self.inner, 'for_role') else self.inner
+        preflight = getattr(target, 'preflight', None)
+        if preflight:
+            preflight()
+        if cancel:
+            cancel()
         call_id = self.ledger.begin_call(self.run_id, role=self.role, stage=self.stage, model=model)
         try:
-            turn = self.inner.complete(
+            turn = target.complete(
                 model=model, system=system, messages=messages, tools=tools
             )
         except Exception as exc:
@@ -66,6 +77,7 @@ class BudgetedClient:
             input_tokens=turn.usage.input_tokens,
             output_tokens=turn.usage.output_tokens,
             stop_reason=turn.stop_reason,
+            actual_model=turn.model,
             usage_status="known" if turn.usage.input_tokens is not None and turn.usage.output_tokens is not None else "unknown",
             ok=True,
         )

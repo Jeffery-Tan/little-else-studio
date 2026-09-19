@@ -243,6 +243,15 @@ class LedgerEntry:
     call_status: str = "settled"
     call_id: str = ""
     resolution_note: str = ""
+    provider: str = "legacy"
+    connection_id: str = ""
+    pricing_as_of: str = ""
+    input_usd_per_mtok: float | None = None
+    output_usd_per_mtok: float | None = None
+    actual_model: str = ""
+    usage_unit: str = "tokens"
+    usage_quantity: float | None = None
+    estimated_cny: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -259,6 +268,15 @@ class LedgerEntry:
             "call_id": self.call_id,
             "resolution_note": self.resolution_note,
             "pricing_source": self.pricing_source,
+            "provider": self.provider,
+            "connection_id": self.connection_id,
+            "pricing_as_of": self.pricing_as_of,
+            "input_usd_per_mtok": self.input_usd_per_mtok,
+            "output_usd_per_mtok": self.output_usd_per_mtok,
+            "actual_model": self.actual_model,
+            "usage_unit": self.usage_unit,
+            "usage_quantity": self.usage_quantity,
+            "estimated_cny": self.estimated_cny,
             "stop_reason": self.stop_reason,
             "request_id": self.request_id,
             "ok": self.ok,

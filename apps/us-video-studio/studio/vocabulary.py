@@ -102,7 +102,12 @@ def version_label(version: int | None) -> str:
 
 def stale_sentence(stage: str, reason: str = "") -> str:
     """Say what happened and what it costs him, not the word "stale"."""
-    head = f"上游改过了：{reason}。" if reason else "上游改过了。"
+    if reason == 'source materials or observation records changed after this version was produced':
+        head = '商品素材或观察记录已更新。'
+    elif reason.startswith(('upstream ', 'an upstream ', 'intake-', 'direction-', 'material_plan-')):
+        head = '前面的方案或采用决定已更新。'
+    else:
+        head = f"上游改过了：{reason.rstrip('。.!！')}。" if reason else "上游改过了。"
     return f"{head}这份「{stage_label(stage)}」已经是旧的，要重做。"
 
 
@@ -535,6 +540,7 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None) -> list[dic
                 "state": state,
                 "has_doc": has_doc,
                 "version": latest.get("version"),
+                "artifact_sha256": latest.get("sha256"),
                 "version_label": version_label(latest.get("version")),
                 # Who wrote it and when, so the panel does not have to join
                 # against `turns[].items` to find the card it already holds.

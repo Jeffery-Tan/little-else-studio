@@ -9,11 +9,12 @@
  *
  * This file draws one stage and nothing else:
  *
- *   gate     what is waiting on him, if anything is — pinned above the document
+ *   title    a human stage name and its purpose
  *   head     which version, who wrote it, when
  *   warn     the two reasons the document below may not be trustworthy
  *   doc      the document, laid out; or, if there is none, why there is none
  *   review   what the reviewer said about this exact version
+ *   gate     the exact version decision, after the work and its review
  *   ask      what this stage could not settle, answerable in place
  *
  * WHAT IT DOES NOT KNOW. It does not decide whether a gate is open — the server
@@ -66,13 +67,13 @@ function stageHtml(step, ctx) {
   return (
     `<div class="pane${pending ? " has-gate" : ""}" data-stage="${escapeHtml(step.stage)}">` +
     (pending ? `<a class="decision-jump" href="#stage-decision">阅读后提交决定 ↓</a>` : "") +
-    (pending ? gateHtml(pending) : "") +
     titleHtml(step) +
     warnHtml(step) +
     headHtml(step) +
     (step.decision_sentence ? `<div class="pane-decision">${escapeHtml(step.decision_sentence)}</div>` : "") +
-    docHtml(step) +
+    docHtml(step, ctx) +
     (step.review ? reviewHtml(step.review) : "") +
+    (pending ? gateHtml(pending) : "") +
     askHtml(step, questions, drafts) +
     `</div>`
   );
@@ -80,14 +81,8 @@ function stageHtml(step, ctx) {
 
 /* --------------------------------------------------------------- the gate -- */
 
-/* Compact on purpose.
- *
- * The measured tools put the review control in a bar 41–44px tall (Gitea
- * `repo.css:782-793`, Forgejo `1397-1408`) and keep it there while the content
- * scrolls under it. Ours cannot be that thin — the question here is not "yes or
- * no" but "which of A, B, C", and the reviewer's findings have to be reachable —
- * so the findings and the price of the click go behind `<details>`, and what
- * stays pinned is the headline, the buttons, and the reason field.
+/* Read the work before deciding. A top link reaches this exact-version card;
+ * findings and historical usage remain available without overtaking the work.
  */
 function gateHtml(pending) {
   const options = pending.options || [];
@@ -113,9 +108,10 @@ function gateHtml(pending) {
 }
 
 function findingHtml(f) {
+  const kind = {content:"内容", feasibility:"可执行性", evidence:"证据", unverified:"尚未验证"}[f.kind] || f.kind;
   return (
     `<div class="finding">` +
-    (f.kind ? `<span class="finding-kind">${escapeHtml(f.kind)}</span>` : "") +
+    (kind ? `<span class="finding-kind">${escapeHtml(kind)}</span>` : "") +
     `<span class="finding-text">${escapeHtml(f.issue)}</span>` +
     `</div>`
   );
@@ -143,18 +139,28 @@ function warnHtml(step) {
 }
 
 function titleHtml(step) {
-  const chapter = {intake:["01", "BRIEF"], direction:["02", "DIRECTION"], material_plan:["03", "MATERIALS"], writing:["04", "SCRIPT"]}[step.stage] || ["", "STUDIO"];
-  return `<header class="stage-heading"><div class="stage-eyebrow">${chapter[0]} <span>/</span> ${chapter[1]}</div>` +
-    `<h1>${escapeHtml(step.label || "创作项目")}</h1><div class="stage-rule" aria-hidden="true"></div></header>`;
+  const explanation = {
+    intake: "明确要打动谁，以及这次创作要解决什么。",
+    direction: "比较创意主张，找到值得继续的方向。",
+    material_plan: "看看已有的画面证据，还缺哪些素材。",
+    writing: "阅读完整表达，检查画面、文案与节奏。",
+  }[step.stage] || "阅读这一步的创作内容。";
+  return `<header class="stage-heading"><h1>${escapeHtml(step.label || "创作项目")}</h1>` +
+    `<p class="stage-description">${escapeHtml(explanation)}</p></header>`;
 }
 
 function headHtml(step) {
   if (!step.has_doc) return "";
-  const by = step.author ? `${escapeHtml(step.author)}写于 ${escapeHtml(step.created_at)}` : "";
+  const date = String(step.created_at || "").match(/^(\d{4})-(\d{2})-(\d{2})(?:T|\s|$)/);
+  const shortDate = date ? `${Number(date[2])}月${Number(date[3])}日` : "";
+  const details = (step.author || step.created_at) ? `<details class="pane-version-details"><summary>版本详情</summary>` +
+    (step.author ? `<div>创作者：${escapeHtml(step.author)}</div>` : "") +
+    (step.created_at ? `<div>保存时间：${escapeHtml(step.created_at)}</div>` : "") + `</details>` : "";
   return (
     `<div class="pane-head">` +
-    `<span class="pane-title">${escapeHtml(step.number)} · ${escapeHtml(step.version_label)}</span>` +
-    (by ? `<span class="pane-by">${by}</span>` : "") +
+    `<span class="pane-title">版本 ${escapeHtml(String(step.version))}</span>` +
+    (shortDate ? `<span class="pane-by">${escapeHtml(shortDate)}</span>` : "") +
+    details +
     `<button type="button" class="ghost small" data-act="read" ` +
     `data-stage="${escapeHtml(step.stage)}" data-version="${escapeHtml(String(step.version))}">` +
     `看原文</button>` +
@@ -164,7 +170,7 @@ function headHtml(step) {
 
 /* ------------------------------------------------------------ the document -- */
 
-function docHtml(step) {
+function docHtml(step, ctx) {
   // Nothing written yet. The server already worked out which of four situations
   // this is — waiting, in progress, failed, came out empty — and worded it. This
   // file repeats none of that judgement.
@@ -174,19 +180,43 @@ function docHtml(step) {
     return `<div class="pane-blank ${escapeHtml(state)}">${escapeHtml(text)}</div>`;
   }
 
-  const body = step.blocks && step.blocks.length
-    ? blocksHtml(step.blocks)
-    : // The model produced no shape for this stage, so there is nothing to lay
-      // out. Said out loud rather than left as a suspiciously empty panel: a
-      // blank panel and one that failed to load look identical otherwise.
-      `<p class="blk-none">这一版没有可排版的内容，打开原文看正文。</p>`;
+  const body = step.blocks && step.blocks.length ? blocksHtml(step.blocks) : artifactBodyHtml(step, ctx.artifactBody);
 
   return (
     `<div class="pane-doc">` +
-    (step.summary ? `<p class="pane-summary">${escapeHtml(step.summary)}</p>` : "") +
+    summaryHtml(step.summary) +
     body +
     `</div>`
   );
+}
+
+function summaryHtml(summary) {
+  if (!summary) return "";
+  const characters = Array.from(String(summary));
+  if (characters.length <= 180) return `<p class="pane-summary">${escapeHtml(summary)}</p>`;
+  // This is a literal excerpt, never a new model-written summary.
+  return `<details class="pane-summary summary-expand"><summary>${escapeHtml(characters.slice(0, 120).join(""))}… ` +
+    `<span>展开完整摘要</span></summary><p class="pane-summary-full">${escapeHtml(summary)}</p></details>`;
+}
+
+function artifactBodyHtml(step, artifactBody) {
+  // Fetch completion must identify the exact stage/version. A late response
+  // from a previously selected document must never be dressed as this one.
+  const matches = artifactBody && artifactBody.stage === step.stage && artifactBody.version === step.version;
+  const fingerprintMatches = !step.artifact_sha256 || artifactBody?.sha256 === step.artifact_sha256;
+  const state = !matches ? "loading" : artifactBody.status === "loaded" && !fingerprintMatches ? "error" : artifactBody.status;
+  if (state === "loaded" && typeof artifactBody.text === "string" && artifactBody.text.trim()) {
+    return `<article class="artifact-prose">${renderMarkdown(artifactBody.text)}</article>`;
+  }
+  const attrs = `data-stage="${escapeHtml(step.stage)}" data-version="${escapeHtml(String(step.version))}"`;
+  if (state === "error" || state === "loaded") {
+    const message = state === "error" ? "正文暂时没有加载成功。" : "这一版正文为空，请查看原文确认。";
+    return `<div class="artifact-body-state" role="status"><p>${message}</p>` +
+      `<button type="button" class="ghost small" data-act="retry-body" ${attrs}>重新加载正文</button> ` +
+      `<button type="button" class="ghost small" data-act="read" ${attrs}>查看原文</button></div>`;
+  }
+  return `<div class="artifact-body-state" role="status" aria-busy="true"><p>正在加载这一版正文…</p>` +
+    `<button type="button" class="ghost small" data-act="read" ${attrs}>先查看原文</button></div>`;
 }
 
 function reviewHtml(review) {

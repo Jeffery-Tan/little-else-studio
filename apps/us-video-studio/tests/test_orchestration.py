@@ -119,7 +119,8 @@ def test_dispatch_runs_the_role_in_its_own_context(env, tmp_path):
     assert outcome.submitted == "direction-v1"
     artifact = pipeline.stage_state(RUN, "direction").latest
     assert artifact.author_role == "director"
-    assert artifact.evidence == ["intake 里说到上班族"]
+    context_event = [e for e in store.read_events(RUN) if e["kind"] == "learning_context_loaded"][-1]
+    assert artifact.evidence == ["intake 里说到上班族", context_event["evidence_ref"]]
     assert artifact.limitations == ["没有商品实拍图"]
     assert set(artifact.inputs) == {"intake", "evidence:snapshot"}
 
@@ -693,7 +694,7 @@ def test_a_message_is_not_lost_when_the_budget_stops_the_turn(env, tmp_path):
 
 
 def test_a_failed_turn_leaves_a_trace_in_the_log(env, tmp_path):
-    """A crash is persisted, because the SSE error is not.
+    """A crash leaves a safe trace alongside the durable job error.
 
     Without it, reloading after a failure shows his question followed by silence
     and no way to find out what happened.
@@ -712,7 +713,9 @@ def test_a_failed_turn_leaves_a_trace_in_the_log(env, tmp_path):
 
     chat = store.read_chat(RUN)
     assert [c["role"] for c in chat] == ["user", "system"]
-    assert "provider said no" in chat[-1]["text"]
+    assert "RuntimeError" in chat[-1]["text"]
+    assert "provider said no" not in chat[-1]["text"]
+    assert "调用状态" in chat[-1]["text"]
 
 
 def test_failure_records_never_go_back_to_the_model(env, tmp_path):
@@ -762,3 +765,17 @@ def test_a_failure_record_does_not_end_up_as_a_stray_user_turn(env, tmp_path):
     messages = model.calls[0]["messages"]
     assert [m["role"] for m in messages] == ["user", "assistant", "user"]
     assert messages[0]["content"] == "第一次", "the first user turn is the conversation opener"
+
+
+def test_latest_facts_enter_main_context_even_after_chat_window_rolls_over(env, tmp_path):
+    store, pipeline, ledger = env
+    seed_intake(pipeline, 'Old synthetic facts')
+    for index in range(24):
+        store.append_chat(RUN, 'user' if index % 2 == 0 else 'assistant', f'Old chat {index}')
+    seed_intake(pipeline, 'Current exact synthetic product facts, revised by user')
+    model = ScriptedModel([final_turn('只读测试')])
+    make_orchestrator(store, pipeline, ledger, model, tmp_path).send('按最新事实继续')
+    context = model.calls[0]['system']
+    assert 'Current exact synthetic product facts, revised by user' in context
+    assert 'intake-v2' in context
+    assert 'Old synthetic facts' not in context

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .pipeline import Pipeline
+from .jobs import WriterLease
 from .store import Store
 
 MAX_INPUT_BYTES = 2 * 1024 * 1024
@@ -119,8 +120,9 @@ def main() -> None:
     parser.add_argument("--allow-root", type=Path, action="append", required=True)
     args = parser.parse_args()
     store = Store(args.data_root)
-    artifact = import_content_input(store, Pipeline(store), args.run_id, path=args.path,
-                                    repository_root=args.repository_root, allowed_roots=args.allow_root)
+    with WriterLease(store.root):
+        artifact = import_content_input(store, Pipeline(store), args.run_id, path=args.path,
+                                        repository_root=args.repository_root, allowed_roots=args.allow_root)
     print(json.dumps({"artifact": artifact.key, "sha256": artifact.sha256}, ensure_ascii=False))
 
 

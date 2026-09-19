@@ -1,15 +1,13 @@
-"""Studio configuration.
+"""Budget settings and compatibility loading for historical Studio config.json.
 
-Two separate concerns, deliberately kept apart:
+New workbench jobs use connections.ConnectionStore: each role binds a provider
+and arbitrary model, defaults to Codex CLI, and freezes routing per job. API keys
+entered in the workbench use Windows DPAPI outside Git; no environment keys are
+imported into those connections. Pricing is keyed by connection and exact model.
 
-* **Settings** live in ``<data_root>/config.json`` (outside Git) and can be edited
-  by Jeffery. Roles, models and the spend cap are policy, not code.
-* **Credentials** are read from the environment at call time and never written
-  anywhere. Nothing in this module returns a key into a log or an artifact.
-
-The default model per role is ``deepseek-flash`` for every role in v1. The
-endpoint exposes exactly two models, ``deepseek-flash`` and ``deepseek-v4-pro``;
-switching a role is a config edit, not a code change.
+The legacy loader and credentials() helper below remain for explicit historical
+callers only. Loading that old format never rewrites it or silently migrates
+existing keys. New server routing does not call credentials().
 """
 from __future__ import annotations
 
@@ -96,13 +94,27 @@ class Settings:
     max_tool_rounds: int = 12
     max_tokens: int = DEFAULT_MAX_TOKENS
     max_continuations: int = 1
+    connection_by_role: dict[str, str] = field(default_factory=dict)
+    provider_by_role: dict[str, str] = field(default_factory=dict)
+    pricing_by_route: dict[tuple[str, str], Pricing] = field(default_factory=dict)
 
     def model_for(self, role: str) -> str:
         return self.model_by_role.get(role, DEFAULT_MODEL)
 
+    def pricing_for(self, role: str, model: str) -> Pricing:
+        if role not in self.connection_by_role:
+            return self.pricing  # Existing explicitly loaded legacy configuration.
+        connection = self.connection_by_role[role]
+        if self.provider_by_role.get(role) == 'codex_cli':
+            return Pricing('unknown: Codex CLI subscription cost is not an API rate', None, None, '')
+        return self.pricing_by_route.get((connection, model),
+            Pricing('unknown: no price for this connection/model', None, None, ''))
+
     @property
     def usd_cap_is_enforceable(self) -> bool:
         """A zero rate card means the dollar figure cannot stop anything."""
+        if self.connection_by_role:
+            return all(self.pricing_for(role, self.model_for(role)).known for role in ROLES)
         return self.pricing.known
 
 

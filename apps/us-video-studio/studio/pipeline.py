@@ -231,6 +231,14 @@ class Pipeline:
                 stale = True
                 stale_reason = "source materials or observation records changed after this version was produced"
 
+        if latest is not None and stage != 'intake':
+            from .references import reference_fingerprint
+            if '__references_snapshot__' not in memo:
+                memo['__references_snapshot__'] = reference_fingerprint(self.store, run_id)
+            if latest.inputs.get('references:snapshot') != memo['__references_snapshot__']:
+                stale = True
+                stale_reason = '项目选择的灵感参考已调整，请根据当前参考更新这一版。'
+
         integrity_ok = True
         if latest is not None:
             integrity_ok = self.store.verify_artifact(run_id, stage, latest.version)
@@ -377,6 +385,11 @@ class Pipeline:
         inputs: dict[str, str] = {}
         from .evidence import evidence_fingerprint
         inputs["evidence:snapshot"] = evidence_fingerprint(self.store, run_id)
+        if stage != 'intake':
+            from .references import reference_fingerprint
+            selected_references = reference_fingerprint(self.store, run_id)
+            if selected_references is not None:
+                inputs['references:snapshot'] = selected_references
         for up in self.upstream_stages(stage):
             self.stage_state(run_id, up, memo)
             if not memo.get(f"__complete__{up}"):
