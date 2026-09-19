@@ -9,7 +9,7 @@ import math
 import sys
 from pathlib import Path
 
-from creative_learning import DEFAULT, read, validate as validate_library
+from creative_learning import DEFAULT, creator_library, read, validate as validate_library
 
 
 def digest(data):
@@ -38,7 +38,16 @@ def validate(plan, library):
         text(plan.get('audience_source'), 'audience_source')
     cases = {case['id']: case for case in library['cases']}
     decisions = plan.get('reference_decisions', [])
-    if not isinstance(decisions, list) or not decisions:
+    mode = plan.get('reference_mode', 'references')
+    if mode not in ('references', 'original_product_facts'):
+        raise ValueError('Unknown reference_mode')
+    if not isinstance(decisions, list):
+        raise ValueError('reference_decisions must be a list')
+    if mode == 'original_product_facts':
+        text(plan.get('reference_reason'), 'original reference_reason')
+        if decisions:
+            raise ValueError('Original product-facts mode cannot contain reference decisions')
+    elif not decisions:
         raise ValueError('Explicit reference decisions required')
     for decision in decisions:
         cid, _, eid = text(decision.get('evidence'), 'evidence').partition('/')
@@ -107,6 +116,9 @@ def compile_prompt(plan):
              f"Opening reason to watch: {plan['opening_reason_to_watch']}",
              f"Payoff: {plan['payoff']}",
              'Product evidence boundaries (do not invent additional claims):']
+    if plan.get('reference_mode') == 'original_product_facts':
+        parts.insert(-1, 'Original concept based on product facts; no usable learning reference. '
+                     f"Reason: {plan['reference_reason']}")
     for fact in plan['product_facts']:
         parts.append(f"- {fact['statement']} Limit: {fact['limit']}")
     for scene in plan['scenes']:
@@ -127,16 +139,25 @@ def compile_prompt(plan):
 
 def compile_files(plan_path, library_path, out):
     plan_bytes, library_bytes = plan_path.read_bytes(), library_path.read_bytes()
-    plan, library = read(plan_path), read(library_path)
+    # Parse the same bytes that are frozen/hashed, not a second filesystem read.
+    plan = json.loads(plan_bytes.decode('utf-8-sig'))
+    library = json.loads(library_bytes.decode('utf-8-sig'))
     validate(plan, library)
+    subset = creator_library(library, {d['evidence'].split('/')[0]
+                                       for d in plan.get('reference_decisions', [])})
+    validate(plan, subset)
+    snapshot_bytes = (json.dumps(subset, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
     prompt = compile_prompt(plan)
     # Refuse replacement of any earlier frozen brief or user work.
     out.mkdir(parents=True, exist_ok=False)
     (out / 'brief.json').write_bytes(plan_bytes)
-    (out / 'library-snapshot.json').write_bytes(library_bytes)
+    (out / 'library-snapshot.json').write_bytes(snapshot_bytes)
     (out / 'prompt.txt').write_bytes(prompt.encode('utf-8'))
-    record = {'schema_version': 1, 'market': 'US', 'brief_id': plan['id'],
+    record = {'schema_version': 2, 'market': 'US', 'brief_id': plan['id'],
               'brief_sha256': digest(plan_bytes), 'library_sha256': digest(library_bytes),
+              'library_schema_version': library['schema_version'],
+              'library_snapshot_sha256': digest(snapshot_bytes),
+              'library_snapshot_scope': 'eligible_calibration_dependency_closure',
               'prompt_sha256': digest(prompt.encode('utf-8')),
               'structural_validation': 'passed', 'creative_review': 'not_performed_by_compiler',
               'generation_authorized': False, 'references_approved': False}
@@ -149,7 +170,9 @@ def compile_files(plan_path, library_path, out):
              f"希望改变的判断：{plan['belief_change']}",
              f"人物关系：{plan['speaker_relationship']}；形式依据：{plan['form_reason']}",
              f"开场：{plan['opening_reason_to_watch']}；结尾：{plan['payoff']}", '', '## 案例取舍', '']
-    for decision in plan['reference_decisions']:
+    if plan.get('reference_mode') == 'original_product_facts':
+        lines += [f"基于商品事实原创；没有可用参考。原因：{plan['reference_reason']}"]
+    for decision in plan.get('reference_decisions', []):
         lines += [f"- {decision['evidence']} / {decision['decision']}：{decision['reason']}；迁移边界：{decision['transfer_limit']}"]
     lines += ['', '## 片内证据与观众推断', '']
     for scene in plan['scenes']:
@@ -168,11 +191,18 @@ def compile_files(plan_path, library_path, out):
 
 def verify(compiled, actual_prompt):
     record = read(compiled / 'manifest.json')
-    for filename, key in [('brief.json', 'brief_sha256'), ('library-snapshot.json', 'library_sha256'), ('prompt.txt', 'prompt_sha256')]:
+    version = record.get('schema_version')
+    if version not in (1, 2):
+        raise ValueError('Unsupported compiled manifest schema_version')
+    library_key = 'library_snapshot_sha256' if version == 2 else 'library_sha256'
+    for filename, key in [('brief.json', 'brief_sha256'), ('library-snapshot.json', library_key), ('prompt.txt', 'prompt_sha256')]:
         if digest((compiled / filename).read_bytes()) != record[key]:
             raise ValueError(f'{filename} changed since compilation; compile a new version')
     plan, library = read(compiled / 'brief.json'), read(compiled / 'library-snapshot.json')
     validate(plan, library)
+    if version == 2 and creator_library(library, {d['evidence'].split('/')[0]
+                                                 for d in plan.get('reference_decisions', [])}) != library:
+        raise ValueError('Creator snapshot contains material outside its calibration dependency scope')
     expected = compile_prompt(plan).encode('utf-8')
     if (compiled / 'prompt.txt').read_bytes() != expected or actual_prompt.read_bytes() != expected:
         raise ValueError('Actual prompt differs from the reviewed brief. Reconcile the brief and recompile; do not append conflicting instructions.')
