@@ -4,6 +4,13 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const source = fs.readFileSync(new URL('../../studio/web/runtime.js', import.meta.url), 'utf8');
+test('missing Codex executable explains the startup problem without exposing paths', () => {
+  const h = harness(async () => ({}));
+  const guidance = h.context.jobGuidance({status:'blocked', reason:'连接准备未通过：Codex CLI is not installed or not on PATH'});
+  assert.match(guidance, /服务没有找到 Codex CLI/);
+  assert.match(guidance, /重启工作台服务/);
+  assert.doesNotMatch(guidance, /API Key|制作团队|C:\\/);
+});
 test('uncertain revision submission retries the same draft on its dedicated route',async()=>{
   const calls=[];
   const h=harness(async(url,options)=>{

@@ -79,6 +79,7 @@ class JobManager:
         self.cancelled = threading.Event()
         self.initialized = False
         self.closing = False
+        self.before_submit: Callable[[], None] | None = None
 
     def initialize(self):
         with self.lock:
@@ -165,6 +166,8 @@ class JobManager:
                     return self.get(run_id, row['job_id'])
             if self.active is not None:
                 raise PipelineError('job_busy', f'制片室正在运行 {self.active[0]} 的任务；本次未排队、未调用模型。')
+            if self.before_submit is not None:
+                self.before_submit()
             runner, config = (prepare or self.prepare)(run_id)
             job_id = str(uuid.uuid4())
             with self.store.run_lock(run_id):

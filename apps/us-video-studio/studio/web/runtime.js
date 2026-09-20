@@ -13,6 +13,7 @@ function jobGuidance(job) {
     return "有模型调用的用量与费用尚未核实。请先核对提供方记录并完成核账，再继续创作。";
   }
   if (/soft cap|预算.*上限|预算不足/i.test(reason)) return "已达到本轮预算上限。请先检查用量与预算，再决定是否继续。";
+  if (/Codex CLI is not installed or not on PATH/i.test(reason)) return "服务没有找到 Codex CLI。请确认本机已安装 Codex，重启工作台服务后再发送消息；已保存的内容不受影响。";
   if (/连接准备未通过|ConnectionUnavailable|CodexUnavailable/i.test(reason)) return "模型连接尚未准备好。请检查制作团队中的对应服务设置，再发送继续指令。";
   if (job.open_attempts?.length) return "有尚未结束的制作阶段。请先按下方恢复步骤处理遗留任务，再继续创作。";
   if (job.status === "failed") return "本轮未完成，已有内容已保留。请查看下方原因与恢复步骤，处理后再继续。";

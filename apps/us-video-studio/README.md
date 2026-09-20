@@ -37,7 +37,7 @@ Set-Location apps/us-video-studio
 
 点击左侧「模型设置」，先配置模型服务，再为主制片、创意导演、视觉策划、编剧和独立审片分配服务与模型。DeepSeek 提供模型选项；通用兼容连接仍填写提供方的准确模型 ID。新增服务不会自动替换主制片或其他角色。
 
-- **Codex CLI**：使用本机 CLI 的现有 ChatGPT 登录。模型 ID 留空时使用 CLI 默认模型。每次模型调用使用新的临时线程，制片室明确传入业务上下文，不复用当前开发对话。CLI 仍可能加载自身全局 AGENTS.md；适配器只允许该明确路径，拒绝仓库和其他项目指令来源，不承诺与 Windows 用户完全隔离。CLI 内置执行能力受限，模型只返回制片室工具请求，由后端执行与校验。CLI 必须在服务进程 PATH 上可用。
+- **Codex CLI**：使用本机 CLI 的现有 ChatGPT 登录。模型 ID 留空时使用 CLI 默认模型。每次模型调用使用新的临时线程，制片室明确传入业务上下文，不复用当前开发对话。CLI 仍可能加载自身全局 AGENTS.md；适配器只允许该明确路径，拒绝仓库和其他项目指令来源，不承诺与 Windows 用户完全隔离。CLI 内置执行能力受限，模型只返回制片室工具请求，由后端执行与校验。优先使用服务进程 PATH 中的 CLI；Windows 普通终端未配置 PATH 时，自动从当前用户 `%LOCALAPPDATA%/OpenAI/Codex/bin/` 的已安装版本定位，优先最近更新的版本目录，其次旧版平铺目录。仍会校验实际协议与限制配置，不修改系统 PATH，也不要求桌面客户端保持打开。找不到时页面会明确提示安装与重启服务。
 - **DeepSeek 官方 API**：选择 DeepSeek 后填写 API Key，地址与兼容参数由应用设置，不需要手填。可先点击「验证密钥与模型」，再把可用模型分配给角色；也可先保存，未验证状态会明确显示。默认提供 `deepseek-flash` / `deepseek-v4-pro` 选项，验证后以提供方返回的模型列表为准，既有模型不会被静默替换。更换 Key 或服务后旧验证结果失效。
 - **连接验证范围**：只向固定官方地址 `https://api.deepseek.com/v1/models` 发出一次只读 GET，验证认证并获取模型列表；不生成内容、不提交业务资料、不保存输入的 Key、不改变角色绑定。成功不代表余额、文本生成或完整 Agent 流程已经实测。Key 仅在点保存时按原本机 DPAPI 机制持久化；关闭窗口清空输入。验证结果仅用于当前编辑会话。
 - **DeepSeek 任务运行**：专用适配器使用 `max_tokens`、thinking enabled/high；同一角色的当前循环精确保留工具往返和续写所需的私有推理字段，不进入用户正文或其他角色。新 job 从已保存对话与产物开启新的推理请求，旧助手回复作为标记的历史资料，不伪造旧推理字段或持久化第二套私有对话。调用继续通过原用量台账和任务恢复边界。接口依据：[思考与工具调用](https://api-docs.deepseek.com/guides/thinking_mode/)、[模型列表](https://api-docs.deepseek.com/api/list-models/)（2026-09-19 核对）。
@@ -53,6 +53,16 @@ Set-Location apps/us-video-studio
 | `STUDIO_BASE_URL`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | 旧直接客户端的兼容配置；新的站内连接不自动导入环境凭据 |
 
 没有 `connections.json` 的新服务默认各角色选择 Codex CLI。已有旧版 `config.json` 的模型/端点不会自动迁移为站内连接；第一次正式使用前在页面确认角色配置。预算和历史账目继续沿用原数据根。API Key 只在服务端加密存储，接口仅返回是否已保存，不写入浏览器存储、任务事件或模型上下文。
+
+### Codex 登录 / 授权
+
+在「模型设置」的 Codex 服务卡内查看登录状态；未登录时点击「登录 / 授权」，在系统浏览器完成官方 ChatGPT 登录，返回工作台后自动更新。流程使用本机 `codex login`，凭据仍由 CLI 自行保存，工作台不读取或返回密码、令牌及原始登录输出。依据：[官方身份验证说明](https://learn.chatgpt.com/docs/auth)。
+
+打开设置和「刷新登录状态」只执行 `codex login status`，不调用模型、不查额度。已登录 ChatGPT 时不重复授权；已使用 API Key 登录时提示用户在终端自行确认切换，不自动登出或覆盖账号。未找到 CLI 时先安装，再刷新状态。
+
+同一服务只允许一个登录流程，重复点击复用当前等待；模型任务运行时不能启动授权，授权等待期间不能新发起模型任务。登录最长等待10分钟，失败或超时后可手动重试；不自动启动第二次授权。关闭设置只停止页面查询，重新打开可继续查看；「取消本次登录」绑定显示的 attempt_id，只停止这次等待，不登出已经登录的账号。普通服务关闭会清理仍在等待的登录子进程。
+
+接口：`GET /api/connections/codex/status` 返回受限状态、中文提示、登录方式和本次 attempt_id；`POST /api/connections/codex/login` 要求 `{"consent":true}`；`POST /api/connections/codex/login/cancel` 要求 `{"attempt_id":"界面实际显示的ID"}`。两个写接口要求本机同源 JSON，不提供 logout、令牌读取或账号切换接口。登录状态不证明实际生成或费用验收通过。
 
 ### 隔离界面预览
 

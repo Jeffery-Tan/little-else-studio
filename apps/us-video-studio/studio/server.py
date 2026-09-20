@@ -48,6 +48,7 @@ from .references import install_reference_routes
 from .outcomes import install_outcome_routes
 from .production import install_production_routes
 from .project_history import install_history_routes
+from .codex_auth import CodexAuth, install_codex_auth_routes
 
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -174,6 +175,8 @@ def build_app(
         return run, summary
 
     jobs = JobManager(store, pipeline, ledger, prepare_job)
+    codex_auth = CodexAuth(jobs)
+    jobs.before_submit = codex_auth.require_idle
 
     @asynccontextmanager
     async def lifespan(app):
@@ -181,10 +184,14 @@ def build_app(
         try:
             yield
         finally:
-            jobs.close()
+            try:
+                codex_auth.close()
+            finally:
+                jobs.close()
 
     app = FastAPI(title="US video studio", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.jobs = jobs
+    app.state.codex_auth = codex_auth
 
     @app.exception_handler(RequestValidationError)
     async def safe_validation_error(request, exc):
@@ -212,7 +219,8 @@ def build_app(
         if request.method in {'POST', 'PUT', 'PATCH'} and request.url.path.startswith('/api/'):
             content_type = request.headers.get('content-type', '').split(';')[0].lower()
             upload = request.url.path.endswith('/materials')
-            empty = request.url.path.endswith(('/nonce', '/cancel'))
+            empty = (request.url.path.endswith(('/nonce', '/cancel'))
+                     and request.url.path != '/api/connections/codex/login/cancel')
             if ((upload and content_type != 'multipart/form-data') or
                     (not upload and not empty and content_type != 'application/json')):
                 return JSONResponse({'detail': '此接口要求 application/json。'}, status_code=415)
@@ -232,6 +240,7 @@ def build_app(
             raise HTTPException(404, str(exc)) from exc
 
     install_recovery_routes(app, jobs, require_run)
+    install_codex_auth_routes(app, codex_auth)
     install_history_routes(app, store, require_run)
     install_image_analysis_routes(app, jobs, require_run, connections, settings, client_factory=client_factory)
     install_revision_routes(app, jobs, require_run, connections, settings, learning, client_factory=client_factory)

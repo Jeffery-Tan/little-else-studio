@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import io
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -227,6 +228,69 @@ def test_successful_preflight_is_local_only_and_discovers_mcp_names(client, monk
     assert client._mcp_names == ("local_mcp",)
     assert FakeSession.instances[-1].config["mcp_servers.local_mcp.enabled"] is False
     assert all(s.sent == [("initialize", {})] for s in FakeSession.instances)
+
+
+def test_desktop_cli_discovery_without_terminal_path(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(codex.sys, "platform", "win32")
+    monkeypatch.setattr(codex.shutil, "which", lambda _: None)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    root = tmp_path / "OpenAI" / "Codex" / "bin"
+    old = root / "aaaaaaaaaaaaaaaa" / "codex.exe"
+    latest = root / "bbbbbbbbbbbbbbbb" / "codex.exe"
+    for i, path in enumerate((old, latest)):
+        path.parent.mkdir(parents=True)
+        path.write_text("synthetic executable, never run")
+        os.utime(path, (100 + i, 100 + i))
+    (root / "codex.exe").write_text("legacy flat executable, never run")
+    (root / "cccccccccccccccc").mkdir()  # An incomplete update is ignored.
+    commands = []
+    def version(args, **kwargs):
+        commands.append(args)
+        return SimpleNamespace(returncode=0, stdout=f"codex-cli {codex.AUDITED_VERSION}\n")
+    monkeypatch.setattr(codex.subprocess, "run", version)
+    monkeypatch.setattr(codex, "_verify_schema", lambda *a: None)
+    result = client.preflight()
+    assert client.command == str(latest)
+    assert commands == [[str(latest), "--version"]]
+    assert result["model_invoked"] is False
+    assert all(s.sent == [("initialize", {})] for s in FakeSession.instances)
+
+
+def test_explicit_cli_on_path_wins_over_desktop(monkeypatch):
+    monkeypatch.setattr(codex.shutil, "which", lambda _: "chosen-codex.exe")
+    monkeypatch.setattr(codex, "_desktop_codex_candidates", lambda: pytest.fail("must not scan"))
+    assert codex.resolve_codex_command() == "chosen-codex.exe"
+
+
+def test_missing_custom_cli_does_not_fall_back(monkeypatch):
+    monkeypatch.setattr(codex.sys, "platform", "win32")
+    monkeypatch.setattr(codex.shutil, "which", lambda _: None)
+    monkeypatch.setattr(codex, "_desktop_codex_candidates", lambda: pytest.fail("must not scan"))
+    with pytest.raises(codex.CodexUnavailable, match="not installed"):
+        codex.resolve_codex_command("explicit-missing-codex")
+
+
+def test_absent_desktop_installation_fails_before_model(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(codex.sys, "platform", "win32")
+    monkeypatch.setattr(codex.shutil, "which", lambda _: None)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    with pytest.raises(codex.CodexUnavailable) as error:
+        client.preflight()
+    assert error.value.provider_invoked is False
+    assert FakeSession.instances == []
+
+
+def test_flat_desktop_layout_and_non_windows_resolution(monkeypatch, tmp_path):
+    monkeypatch.setattr(codex.sys, "platform", "win32")
+    monkeypatch.setattr(codex.shutil, "which", lambda _: None)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    flat = tmp_path / "OpenAI" / "Codex" / "bin" / "codex.exe"
+    flat.parent.mkdir(parents=True)
+    flat.write_text("synthetic, never run")
+    assert codex.resolve_codex_command() == str(flat)
+    monkeypatch.setattr(codex.sys, "platform", "linux")
+    with pytest.raises(codex.CodexUnavailable):
+        codex.resolve_codex_command()
 
 
 def test_unrecognized_cli_fails_before_protocol_or_model(client, monkeypatch):

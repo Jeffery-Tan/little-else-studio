@@ -111,6 +111,7 @@ function openConnectionDialog(config) {
   function syncButtons() {
     close.disabled = saving; save.disabled = saving;
     for (const row of rows) {
+      row.codexLogin?.sync();
       row.check.disabled = saving || row.checking;
       if (row.remove) {
         const bound = Object.values(roleInputs).some(fields => fields.connection.value === row.id);
@@ -172,7 +173,7 @@ function openConnectionDialog(config) {
       const remove = box("button", "ghost small", "取消添加"); remove.type = "button"; row.remove = remove;
       remove.onclick = () => {
         if (saving || row.checking || Object.values(roleInputs).some(fields => fields.connection.value === row.id)) return;
-        row.editVersion++; row.key.value = ""; rows.splice(rows.indexOf(row), 1); card.remove(); refreshChoices();
+        row.editVersion++; row.key.value = ""; row.codexLogin?.dispose(); rows.splice(rows.indexOf(row), 1); card.remove(); refreshChoices();
       };
       header.append(remove);
     }
@@ -181,6 +182,8 @@ function openConnectionDialog(config) {
     const verification = box("div", "connection-check");
     verification.append(check, status, box("p", "muted", "仅验证认证与模型列表，不代表 Agent 已实际运行，也不会自动保存 Key 或更换角色。"));
     const hint = box("p", "muted"), advanced = box("details", "connection-advanced"), protocolFields = box("div", "connection-grid");
+    const codexLoginHost = box("div", "codex-login");
+    row.codexLogin = createCodexLogin(codexLoginHost, () => saving || closed);
     const tokenField = field("输出上限参数（按提供方接口选择）", tokenLimit);
     protocolFields.append(field("服务地址（不含具体接口路径）", baseUrl), tokenField);
     const pricingHost = box("div", "pricing-list"), pricingSection = box("details", "");
@@ -204,6 +207,7 @@ function openConnectionDialog(config) {
       if (deepseek) { baseUrl.value = DEEPSEEK_URL; tokenLimit.value = "max_tokens"; }
       updateKeyHint();
       apiFields.hidden = codex; verification.hidden = !deepseek; protocolFields.hidden = deepseek || codex; advanced.hidden = codex;
+      row.codexLogin.setVisible(codex);
       tokenField.hidden = provider.value !== "openai_compat";
       hint.textContent = deepseek ? "已预设 DeepSeek 官方连接，无需填写地址或兼容参数。填入 Key 后可先验证。"
         : codex ? "使用本机 Codex 登录。模型按下方角色设置；主制片不会自动改用其他服务。"
@@ -247,7 +251,7 @@ function openConnectionDialog(config) {
         if (err.status === 409) status.textContent += " 本次输入仍保留，未保存或覆盖设置。";
       } finally { row.checking = false; if (!closed) syncButtons(); }
     };
-    card.append(header, grid, apiFields, hint, verification, advanced); connectionsHost.append(card); providerChanged(false);
+    card.append(header, grid, apiFields, hint, codexLoginHost, verification, advanced); connectionsHost.append(card); providerChanged(false);
     return row;
   }
   for (const connection of config.connections) addConnection(connection);
@@ -311,6 +315,6 @@ function openConnectionDialog(config) {
   };
   dialog.append(form); document.body.append(dialog);
   dialog.addEventListener("cancel", event => { if (saving) event.preventDefault(); });
-  dialog.addEventListener("close", () => { closed = true; rows.forEach(row => { row.editVersion++; row.key.value = ""; }); dialog.remove(); });
+  dialog.addEventListener("close", () => { closed = true; rows.forEach(row => { row.editVersion++; row.key.value = ""; row.codexLogin?.dispose(); }); dialog.remove(); });
   dialog.showModal();
 }

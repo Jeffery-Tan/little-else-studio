@@ -49,6 +49,8 @@ function harness(initial = config(), handler = async () => verified()) {
     box: (tag, className, text = '') => Object.assign(new Element(tag), { className, textContent: text }),
     crypto: { randomUUID: () => `new-id-${++id}-fixture` },
     toast: message => toasts.push(message),
+    // Login controller has its own lifecycle and transport coverage in test_codex_login.mjs.
+    createCodexLogin: () => ({setVisible(){},sync(){},dispose(){}}),
     api: async (url, options) => { const call = {url, method:options?.method, body:options?.body ? JSON.parse(options.body) : undefined}; calls.push(call); return handler(call); },
   });
   vm.runInContext(source, context);

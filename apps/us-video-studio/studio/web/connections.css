@@ -34,6 +34,9 @@
 .connection-save-note { margin: 24px 0 8px; font-size: 12px; line-height: 1.7; color: #aaaabb; }
 .connection-dialog .dialog-actions { margin-top: 20px; position: sticky; bottom: -1px; padding: 14px 0 4px; background: var(--panel, #1a1a20); }
 .connection-dialog button:disabled { cursor: not-allowed; opacity: .48; }
+.codex-login { margin: 16px 0; padding: 16px; border: 1px solid #404050; border-radius: 10px; background: #23232d; }
+.codex-login-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.codex-login > .muted { margin: 0; font-size: 12px; line-height: 1.7; }
 @media (max-width: 650px) {
   .connection-dialog { width: 96vw; padding: 20px 16px; }
   .connection-steps { gap: 10px 15px; }

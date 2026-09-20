@@ -60,6 +60,7 @@
 | --- | --- |
 | 项目/产物 | `/api/runs`；run 的 `/state`、`/timeline`、`/chat`、`/events`、`/ledger`、`/artifacts`；GET 指定版本，POST `/nonce` 与 `/decision` 执行用户决定 |
 | 连接/任务 | GET/PUT `/api/connections`；POST `/api/connections/deepseek/check` 只读验密钥；run 的 POST `/jobs`、GET `/jobs/latest` 或 `/jobs/{job_id}`、POST `/jobs/{job_id}/cancel` |
+| Codex 登录 | GET `/api/connections/codex/status`；POST `/api/connections/codex/login` 显式启动官方浏览器登录，POST `/api/connections/codex/login/cancel` 取消对应 attempt_id；与模型任务互斥，不读取凭据或自动登出 |
 | 恢复 | GET `/recovery`；POST `/recovery/reconcile` 核对文字用量；POST `/recovery/abandon` 关闭准确遗留尝试，不清除未知账 |
 | 素材/分析 | GET/POST `/materials`、`/material-observations`、`/image-analysis`；GET `/materials/{name}`；POST `/image-analysis/{analysis_id}/confirm` 逐条采用 |
 | 修订 | GET/POST `/edits/{stage}`，POST `/edits/{stage}/{draft_id}/generate`；GET `/artifacts/{stage}/compare` |
@@ -73,7 +74,7 @@
 
 ## 本机运维
 
-启动、依赖和离线测试命令见 [README](../README.md#启动与检查)。环境兼容项：`STUDIO_DATA_ROOT` 选择数据根；旧客户端的 `STUDIO_BASE_URL` / `ANTHROPIC_BASE_URL` 与 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` 不会自动导入站内连接。Codex 必须在服务进程 PATH 上可用；百炼通过 `%LOCALAPPDATA%/E-commerce/credentials/` 使用原用户 DPAPI 凭据，只在明确提交或查询原任务时解密。
+启动、依赖和离线测试命令见 [README](../README.md#启动与检查)。环境兼容项：`STUDIO_DATA_ROOT` 选择数据根；旧客户端的 `STUDIO_BASE_URL` / `ANTHROPIC_BASE_URL` 与 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` 不会自动导入站内连接。Codex 优先从服务进程 PATH 定位；Windows 未配置 PATH 时使用当前用户桌面应用安装目录内的 CLI（具体优先顺序见 README），无需打开桌面客户端；百炼通过 `%LOCALAPPDATA%/E-commerce/credentials/` 使用原用户 DPAPI 凭据，只在明确提交或查询原任务时解密。
 
 服务更新前先确认目标端口、对应 studio.server 进程和数据根；查看各项目 recovery，确认活动任务、开放尝试、未知用量，保留原记录再正常停止对应服务。不要因更新而清空 ledger、覆盖运行目录或启动第二个 writer。若执行工具拒绝停止/启动，记录实际拒绝，不宣称已加载；再次操作前重新查端口与进程，不使用过期 PID。服务重新启动只恢复本地状态，不自动重发模型或视频请求。
 

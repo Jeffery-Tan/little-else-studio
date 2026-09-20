@@ -18,6 +18,7 @@ import queue
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -52,6 +53,43 @@ class CodexUnavailable(ModelError, SafePreflightError):
 
     def __init__(self, message: str):
         super().__init__(0, message, provider_invoked=False)
+
+
+def _desktop_codex_candidates() -> list[Path]:
+    """Discover only this Windows user's installed desktop CLI, not workspace files."""
+    local = os.environ.get("LOCALAPPDATA", "")
+    if not local or not Path(local).is_absolute():
+        return []
+    root = (Path(local) / "OpenAI" / "Codex" / "bin").resolve()
+    try:
+        versioned = [p / "codex.exe" for p in root.iterdir()
+                     if p.is_dir() and re.fullmatch(r"[0-9a-f]{8,64}", p.name)]
+    except OSError:
+        return []
+    candidates = []
+    for path in versioned:
+        try:
+            if path.is_file() and path.resolve().is_relative_to(root):
+                candidates.append((path.stat().st_mtime_ns, str(path), path))
+        except OSError:
+            continue  # An installer may be replacing a version while we enumerate.
+    result = [item[2] for item in sorted(candidates, reverse=True)]
+    flat = root / "codex.exe"
+    if flat.is_file() and flat.resolve().is_relative_to(root):
+        result.append(flat)
+    return result
+
+
+def resolve_codex_command(command: str = "codex") -> str:
+    executable = shutil.which(command)
+    if executable:
+        return executable
+    # Do not silently replace an explicitly requested executable or custom command.
+    if sys.platform == "win32" and command in {"codex", "codex.exe"}:
+        candidates = _desktop_codex_candidates()
+        if candidates:
+            return str(candidates[0])
+    raise CodexUnavailable("Codex CLI is not installed or not on PATH")
 
 
 class _CancelledBeforeInvocation(JobCancelled, ModelError):
@@ -355,9 +393,7 @@ class CodexClient:
     def preflight(self):
         """Only local CLI/config checks, before the ledger starts a model intent."""
         self._check()
-        executable = shutil.which(self.command)
-        if not executable:
-            raise CodexUnavailable("Codex CLI is not installed or not on PATH")
+        executable = resolve_codex_command(self.command)
         try:
             version = subprocess.run([executable, "--version"], capture_output=True, text=True,
                                      encoding="utf-8", timeout=10,
