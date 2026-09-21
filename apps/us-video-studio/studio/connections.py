@@ -342,12 +342,14 @@ class RoutedClient:
             try:
                 if not valid_deepseek_key(token):
                     raise ValueError('Invalid local DeepSeek key')
-                return DeepSeekClient(token, max_tokens=self.max_tokens)
+                # The shared legacy cap is for compatibility transports. Native
+                # DeepSeek uses its provider default, including on restored jobs.
+                return DeepSeekClient(token)
             except (ValueError, TypeError):
                 # This happens before the budget wrapper opens a call intent.
                 # Stop a dispatched role without turning a local setup problem
                 # into a retryable tool error or exposing the submitted value.
-                raise ConnectionUnavailable('DeepSeek 本地连接配置无效，请检查密钥和输出上限后重试。') from None
+                raise ConnectionUnavailable('DeepSeek 本地连接配置无效，请检查密钥后重试。') from None
         try:
             base_url = validate_base_url(connection['base_url'])
         except ValueError:

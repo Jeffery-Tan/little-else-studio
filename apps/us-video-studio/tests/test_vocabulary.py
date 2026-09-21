@@ -22,6 +22,12 @@ def test_every_stage_and_role_has_a_name_in_his_language():
         assert v.role_label(role) != role, f"{role} has no label"
 
 
+def test_historical_accounting_stop_no_longer_asks_for_manual_reconciliation():
+    note = v.failure_note('BudgetExceeded: unknown, partial or pending usage; reconcile provider evidence')
+    assert '现已取消核账限制，可以继续' in note
+    assert 'BudgetExceeded' not in note
+
+
 def test_unknown_names_degrade_to_themselves_rather_than_blank():
     # A new stage added to the pipeline must still render as *something*.
     assert v.stage_label("storyboard") == "storyboard"
@@ -416,10 +422,10 @@ def test_the_answers_header_leaves_the_count_to_the_screen():
 def test_each_open_question_carries_the_line_its_answer_becomes():
     questions = v.build_questions([
         _stage("direction", latest={
-            "version": 2,
+            "version": 2, "digest_algorithm": "artifact-v2", "sha256": "a" * 64,
             "structured": {"open_questions": [
-                {"question": "主推哪个 SKU？", "blocks": "素材计划定不了"},
-                {"question": "要不要露脸", "blocks": ""},
+                {"question": "主推哪个 SKU？", "blocks": "素材计划定不了", "owner": "user", "timing": "now", "reason": "商品选择"},
+                {"question": "要不要露脸", "blocks": "", "owner": "user", "timing": "now", "reason": "表达偏好"},
             ]},
         }),
     ])

@@ -302,7 +302,7 @@ def cost_sentence(cost: dict[str, Any] | None) -> str:
     if cost.get("usd_is_real") and cost.get("estimated_usd") is not None:
         line += f"，约 ${cost['estimated_usd']:.2f}（估算）"
     if cost.get("unknown_calls", 0):
-        line += "，另有未核实用量；以上仅为已知部分"
+        line += "，另有未返回完整用量；以上仅为已知部分"
     return line + "。"
 
 
@@ -389,6 +389,8 @@ def failure_note(text: str) -> str:
     failure shows his question followed by silence. The technical text is kept
     verbatim — it is the actual error, and he may need to quote it.
     """
+    if 'unknown, partial or pending usage' in text or 'reconcile provider evidence' in text:
+        return '这一轮当时因用量记录缺失而暂停，已有内容已保留。现已取消核账限制，可以继续。'
     return f"这一轮没能做完：{text}"
 
 
@@ -471,10 +473,10 @@ def spend_sentence(spend: Any, usd_enforceable: bool) -> str:
     tokens = spend.input_tokens + spend.output_tokens
     line = f"已用约 {human_tokens(tokens)} token · {spend.calls} 次调用"
     if getattr(spend, "unknown_calls", 0):
-        line = f"已知用量约 {human_tokens(tokens)} token · {spend.calls} 次调用 · {spend.unknown_calls} 次用量待核实"
+        line = f"已知用量约 {human_tokens(tokens)} token · {spend.calls} 次调用 · {spend.unknown_calls} 次用量未返回"
     if usd_enforceable and spend.estimated_usd is not None:
         return f"{line} · 约 ${spend.estimated_usd:.2f}（估算）"
-    return f"{line} · 金额待核实（调用用量不完整）" if usd_enforceable else f"{line} · 花多少钱还没法算（价目表未确认）"
+    return f"{line} · 金额未记录（调用用量不完整）" if usd_enforceable else f"{line} · 花多少钱还没法算（价目表未确认）"
 
 
 # --------------------------------------------------------------------------- #
@@ -561,11 +563,11 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None) -> list[dic
                 "needs_you": bool(st.get("can_approve")),
                 "blank": blank,
                 "blocks": view(stage, structured),
-                "questions": [
-                    q
-                    for q in (structured.get("open_questions") or [])
-                    if isinstance(q, dict) and q.get("question")
-                ],
+                "questions": [q for q in build_questions(stages) if q["stage"] == stage],
+                "team_issues": [q for q in (structured.get("open_questions") or [])
+                                if isinstance(q, dict) and q.get("question")
+                                and not any(q.get("question") == ask["question"] for ask in build_questions(stages)
+                                            if ask["stage"] == stage)],
                 "review": None
                 if not review.get("verdict")
                 else review_view(review["verdict"], review.get("findings") or []),
@@ -582,25 +584,9 @@ def build_questions(stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     stage that raised it is rewritten without it, which is the only honest way to
     close one.
     """
-    out: list[dict[str, Any]] = []
-    for st in stages:
-        stage = st["stage"]
-        structured = (st.get("latest") or {}).get("structured") or {}
-        for row in structured.get("open_questions") or []:
-            if not isinstance(row, dict) or not row.get("question"):
-                continue
-            out.append(
-                {
-                    "stage": stage,
-                    "stage_label": stage_label(stage),
-                    "numbered": numbered_stage(stage),
-                    "question": row["question"],
-                    "blocks": row.get("blocks", ""),
-                    "version": (st.get("latest") or {}).get("version"),
-                    # What the answer he types here turns into. Built server-side
-                    # and carried with the question so the screen never composes
-                    # a sentence of its own — see `answer_prefix`.
-                    "send_prefix": answer_prefix(row["question"]),
-                }
-            )
-    return out
+    from .project_brief import project_brief
+    if not any((s.get('latest') or {}).get('structured', {}).get('open_questions') for s in stages):
+        return []
+    return [{**q, "stage_label": stage_label(q["stage"]), "numbered": numbered_stage(q["stage"]),
+             "send_prefix": answer_prefix(q["question"])}
+            for q in project_brief({"stages": stages})["questions"]]

@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+import uuid
 from typing import Any, Callable
 
 from ..config import Settings
@@ -21,9 +22,12 @@ from ..ledger import Ledger
 from ..models import PipelineError, STAGE_SPEC
 from ..pipeline import Pipeline
 from ..store import Store
+from ..project_brief import project_brief, latest_execution
 from ..tools.dispatch import Dispatcher
 from ..tools.registry import tools_for
+from ..tools.execution import ToolResult
 from ..tools.workspace import ToolError, Workspace
+from ..revision_scope import work_plan, plan_revision, check_base, patch_payload, record_applied
 from .budget import BudgetedClient
 from .client import JobCancelled, ModelClient, ModelError, run_agent_loop
 from .codex_client import CodexUnavailable
@@ -64,6 +68,7 @@ class Orchestrator:
         on_event: Callable[[dict[str, Any]], None] | None = None,
         check_cancel: Callable[[], None] | None = None,
         learning_service=None,
+        production_review=None,
     ):
         self.store = store
         self.pipeline = pipeline
@@ -73,11 +78,15 @@ class Orchestrator:
         self.run_id = run_id
         self.on_event = on_event
         self.check_cancel = check_cancel
+        self.production_review = production_review
         if learning_service is None:
             from ..learning import LearningService
             learning_service = LearningService(store)
         self.learning = learning_service
         self.selection = creative_selection(store, run_id)
+        self._scope_selected = False
+        self._revision_scope = None
+        self._turn_id = None
         self.method_context = None
         self._context_refs: list[str] = []
         self._current_user_message = ""
@@ -111,8 +120,16 @@ class Orchestrator:
         # 2. If the budget cap aborts the turn, what he wrote must survive. It
         #    used to be dropped, because the raise happened before the append.
         self.store.append_chat(self.run_id, "user", message)
+        from ..interactions import answer
+        answer(self.store, self.run_id, message)
         self._current_user_message = message
-        self.selection = creative_selection(self.store, self.run_id)
+        previous = creative_selection(self.store, self.run_id)
+        self._scope_selected = False
+        self._revision_scope = None
+        self._turn_id = uuid.uuid4().hex
+        self.selection = {"intent": "status", "format": previous["format"], "tags": [], "case_ids": None}
+        self.store.append_event(self.run_id, "agent_turn_scope_started", turn_id=self._turn_id,
+                                previous_selection=previous, scope_selected=False)
         self.method_context = self.learning.prepare_context(
             self.run_id, "orchestrator", **self.selection, purpose="message")
         self._context_refs = [self.method_context["evidence_ref"]]
@@ -123,12 +140,12 @@ class Orchestrator:
             self.client, self.ledger, run_id=self.run_id, role="orchestrator", stage="intake"
         )
 
-        def execute(name: str, args: dict[str, Any]) -> str:
+        def execute(name: str, args: dict[str, Any]) -> str | ToolResult:
             return self._execute(name, args, workspace)
 
         try:
             system = ORCHESTRATOR.system(self.store.read_run(self.run_id), extra=self._system_extra(),
-                                         format=self.selection["format"])
+                                         format="none")
             self._emit({'type': 'context_ready', 'role': 'orchestrator',
                         'system_sha256': hashlib.sha256(system.encode('utf-8')).hexdigest(),
                         'messages_sha256': hashlib.sha256(json.dumps(history, ensure_ascii=False,
@@ -147,6 +164,7 @@ class Orchestrator:
                 max_rounds=self.settings.max_tool_rounds,
                 max_continuations=self.settings.max_continuations,
                 check_cancel=self.check_cancel,
+                on_activity=lambda event: self._emit({"role": "orchestrator", "stage": "", **event}),
                 on_turn=lambda t: self._emit(
                     {"type": "agent_turn", "role": "orchestrator", "stage": "",
                      "stop_reason": t.stop_reason, "tools": [c.name for c in t.tool_calls]}
@@ -231,10 +249,10 @@ class Orchestrator:
                 "# 成本（实时）",
                 "",
                 (f"开发期累计估算：{spend.estimated_usd:.4f} 美元" if spend.estimated_usd is not None else "开发期金额未知")
-                + f"（已知 {tokens}，{spend.calls} 次调用；{spend.unknown_calls} 次用量待核实）。",
+                + f"（已知 {tokens}，{spend.calls} 次调用；{spend.unknown_calls} 次未返回完整用量（不阻断继续））。",
                 "累计数包含本项目里所有角色的调用，不只是你自己的；"
                 "派工和送审产生的调用也算在里面。",
-                (f"本次运行估算金额：{run_spend.estimated_usd:.4f} 美元。" if run_spend.estimated_usd is not None else "本次运行金额未知，需先核实用量。"),
+                (f"本次运行估算金额：{run_spend.estimated_usd:.4f} 美元。" if run_spend.estimated_usd is not None else "本次运行金额未知。无需手工核账，账单以提供方平台为准，不影响继续创作。"),
                 f"开发期总额度 {limit:.2f} 美元，跨所有运行共享。",
                 "美元按价目表估算，不是账单；用量含未核实部分时只展示已知小计。上限为软阈值，不保证最后一笔不超额。",
                 *(
@@ -256,19 +274,33 @@ class Orchestrator:
             "读状态和产物、自己写 intake、把阶段派给角色 Agent、送审。",
             "**你不能批准任何东西**，也没有这个工具。门禁由 Jeffery 在界面上点。",
             "",
-            self._spend_line(),
+            "# 当前项目摘要（界面与对话共用）\n" + json.dumps(
+                project_brief(self.pipeline.state(self.run_id).to_dict(), latest_execution(self.store, self.run_id)), ensure_ascii=False),
             "# 当前项目状态（本次重新读取，历史对话不能覆盖）",
             workspace.render_state(),
             workspace.render_context('writing' if self.store.latest_artifact(self.run_id, 'intake') else 'intake'),
             "# Studio 方法目录与显式路由\n" + json.dumps(self.learning.skill_catalog(), ensure_ascii=False),
             "当前显式路由：" + json.dumps(self.selection, ensure_ascii=False),
+            "本轮工作范围尚未选择。历史路由不授予权限；写稿、派工、审核前必须按当前用户原话调用 prepare_creative_context。",
             self.method_context["text"] if self.method_context else "",
         ]
         return "\n".join(lines)
 
     # --------------------------------------------------------------- tools -- #
 
-    def _execute(self, name: str, args: dict[str, Any], workspace: Workspace) -> str:
+    def _execute(self, name: str, args: dict[str, Any], workspace: Workspace) -> str | ToolResult:
+        if name == 'read_work_plan':
+            return json.dumps(work_plan(self.pipeline, self.run_id, **args), ensure_ascii=False)
+        if name == 'read_capabilities':
+            from ..tools.context import capabilities
+            return json.dumps(capabilities(self.settings, 'orchestrator'), ensure_ascii=False)
+        if name == 'read_conversation_history':
+            from ..tools.context import conversation
+            return json.dumps(conversation(self.store, self.run_id, **args), ensure_ascii=False)
+        if name == 'ask_user':
+            from ..interactions import ask
+            question = ask(self.store, self.run_id, args)
+            return ToolResult(json.dumps(question, ensure_ascii=False), concludes_turn=True)
         if name == 'read_project_history':
             from ..project_history import snapshot, read_document
             data = (read_document(self.store, self.run_id, args['document_id']) if args.get('document_id')
@@ -277,10 +309,13 @@ class Orchestrator:
         if name == "prepare_creative_context":
             selection = {"intent": args["intent"], "format": args["format"],
                          "tags": args.get("tags", []), "case_ids": args.get("case_ids")}
+            if self._scope_selected and not production_allowed(self.selection) and production_allowed(selection):
+                raise ToolError("本轮已明确为只读/反馈/暂停，不能自行升级制作；等待新的用户指令。")
             context = self.learning.prepare_context(self.run_id, "orchestrator", **selection, purpose="message")
             self.store.append_event(self.run_id, "creative_context_selected", selection=selection,
-                                    snapshot_sha256=context["snapshot_sha256"])
+                                    snapshot_sha256=context["snapshot_sha256"], turn_id=self._turn_id)
             self.selection, self.method_context = selection, context
+            self._scope_selected = True
             self._context_refs.append(context["evidence_ref"])
             self._emit({"type": "learning_context", "role": "orchestrator",
                         "snapshot_sha256": context["snapshot_sha256"], "evidence_ref": context["evidence_ref"]})
@@ -306,9 +341,38 @@ class Orchestrator:
             return json.dumps({'drafts': list(draft_records(self.store, self.run_id).values()),
                                'materials': evidence_snapshot(self.store, self.run_id)['materials'],
                                'notice': '准备方案免费；生成、图审与费用只能由用户在制作界面确认。'}, ensure_ascii=False)
-        if name in ("write_stage", "dispatch", "request_review", "compile_creative_package", "prepare_production"):
+        if name in ("write_stage", "dispatch", "request_review", "compile_creative_package", "prepare_production", "review_production", "plan_revision", "submit_patch"):
+            if not self._scope_selected:
+                raise ToolError("尚未选择本轮工作范围；先根据本条用户消息调用 prepare_creative_context。历史制作路由不能自动沿用。")
             if not production_allowed(self.selection):
                 raise ToolError("当前明确路由只允许读取/反馈；先明确选择 new/continue/edit 和交付格式，才能开始制作。")
+        if name == 'plan_revision':
+            with self.store.run_lock(self.run_id):
+                self._revision_scope = plan_revision(self.store, self.pipeline, self.run_id, args,
+                    turn_id=self._turn_id, user_message=self._current_user_message, previous=self._revision_scope)
+            return json.dumps(self._revision_scope, ensure_ascii=False)
+        if name == 'submit_patch':
+            scope = self._revision_for('intake', args.get('plan_id'))
+            if not scope or scope['mode'] != 'local':
+                raise ToolError('先绑定 intake 的局部修改范围；专业阶段通过 dispatch 交责任角色。')
+            if self.check_cancel:
+                self.check_cancel()
+            with self.store.run_lock(self.run_id):
+                payload, changes = patch_payload(self.store, self.pipeline, self.run_id, scope,
+                                                {k: v for k, v in args.items() if k != 'plan_id'})
+                attempt = self.pipeline.start_attempt(self.run_id, 'intake', actor='orchestrator')
+                try:
+                    artifact = self.pipeline.submit(self.run_id, 'intake', attempt.token,
+                                                    **payload, actor='orchestrator-revision')
+                except Exception:
+                    self.pipeline.reject(self.run_id, 'intake', attempt.token, '局部修改未保存，原稿保留。')
+                    raise
+                impact = record_applied(self.store, self.pipeline, self.run_id, scope, artifact, changes)
+            return json.dumps({'version': artifact.version, 'sha256': artifact.sha256, 'work_plan': impact}, ensure_ascii=False)
+        if name == 'review_production':
+            if not self.production_review:
+                raise ToolError('制作检查服务暂不可用，保留方案。')
+            return json.dumps(self.production_review(args), ensure_ascii=False)
         if name == 'prepare_production':
             from ..production import DraftIn, prepare_draft
             try:
@@ -326,13 +390,15 @@ class Orchestrator:
             # prompt is written once at the start of the turn, and an agent that
             # has just spent money on four dispatch rounds needs the current
             # number, not the number from before it started.
-            return workspace.render_state() + "\n\n" + self._spend_line()
+            return "# 当前项目摘要\n" + json.dumps(project_brief(
+                self.pipeline.state(self.run_id).to_dict(), latest_execution(self.store, self.run_id)), ensure_ascii=False) + "\n\n" + workspace.render_state()
         if name == "read_artifact":
             rendered = workspace.render_artifact(args["stage"], args.get("version"))
             artifact = (self.store.read_artifact(self.run_id, args["stage"], args["version"])
                         if args.get("version") is not None else self.store.latest_artifact(self.run_id, args["stage"]))
             if artifact:
                 rendered += f"\n\n准确版本引用：artifact:{artifact.stage}-v{artifact.version}#{artifact.sha256}"
+                rendered += '\n\n用于定位修改字段的原结构（数组下标从 0 开始）：\n' + json.dumps(artifact.structured, ensure_ascii=False)
             return rendered
         if name == "list_reviews":
             return workspace.render_reviews(args["stage"])
@@ -341,17 +407,40 @@ class Orchestrator:
         if name == "write_stage":
             return self._write_stage(args)
         if name == "dispatch":
-            return self.dispatcher.dispatch(args["stage"], args.get("brief", "")).render()
+            scope = self._revision_for(args['stage'], args.get('plan_id'))
+            outcome = self.dispatcher.dispatch(args["stage"], args.get("brief", ""), revision_scope=scope)
+            return ToolResult(outcome.render(), is_error=bool(outcome.error or not outcome.submitted))
         if name == "request_review":
             return self._request_review(args["stage"])
         raise ToolError(f"orchestrator has no tool named {name!r}")
 
+    def _revision_for(self, stage, plan_id):
+        scope = self._revision_scope
+        if scope and scope['mode'] == 'local' and scope['stage'] != stage:
+            raise ToolError('本轮已限定局部修改，不能改写其他阶段。')
+        if plan_id:
+            if not scope or scope['plan_id'] != plan_id or scope['stage'] != stage or scope['turn_id'] != self._turn_id:
+                raise ToolError('修订计划不是本轮当前阶段的范围，请重新核对。')
+            check_base(self.store, self.pipeline, self.run_id, scope)
+            return scope
+        if ((scope and scope['mode'] == 'local') or
+                (self.selection['intent'] == 'edit' and self.store.latest_artifact(self.run_id, stage))):
+            raise ToolError('修改已有内容前先用 plan_revision 绑定准确版本和范围，并传入 plan_id。')
+        return None
+
     def _write_stage(self, args: dict[str, Any]) -> str:
+        with self.store.run_lock(self.run_id):
+            return self._write_stage_locked(args)
+
+    def _write_stage_locked(self, args: dict[str, Any]) -> str:
         stage = args["stage"]
         if OWNER.get(stage) != "orchestrator":
             raise ToolError(
                 f"{stage} is owned by {OWNER.get(stage)}, not by you. Use dispatch for it."
             )
+        scope = self._revision_for(stage, args.get('plan_id'))
+        if scope and scope['mode'] == 'local':
+            raise ToolError('局部修改不能提交全文；使用 submit_patch。')
         state = self.pipeline.stage_state(self.run_id, stage)
         attempt = state.open_attempt or self.pipeline.start_attempt(
             self.run_id, stage, actor="orchestrator"
@@ -370,15 +459,16 @@ class Orchestrator:
             structured=args.get("structured"),
             actor=f"orchestrator:{attempt.key}",
         )
-        extra = (
-            f"这一步让下游失效了，需要重做。" if artifact.version > 1 else ""
-        )
+        affected = [s.stage for s in self.pipeline.state(self.run_id).stages.values() if s.latest and s.stale]
+        if scope:
+            record_applied(self.store, self.pipeline, self.run_id, scope, artifact, [])
+        extra = f"已存在且需更新的下游版本：{'、'.join(affected)}。" if affected else ""
         return (
             f"已提交 {stage}-v{artifact.version}。它不可修改；要改就是新版本。{extra}\n"
             f"准确版本引用：artifact:{stage}-v{artifact.version}#{artifact.sha256}"
         )
 
-    def _request_review(self, stage: str) -> str:
+    def _request_review(self, stage: str) -> ToolResult:
         if stage not in STAGE_SPEC:
             raise ToolError(f"unknown stage: {stage!r}")
         outcome = run_review(
@@ -393,6 +483,4 @@ class Orchestrator:
             check_cancel=self.check_cancel,
             learning_service=self.learning,
         )
-        if outcome.error and outcome.verdict is None:
-            raise PipelineError("review", outcome.error)
-        return outcome.render()
+        return ToolResult(outcome.render(), is_error=bool(outcome.error or outcome.verdict is None))

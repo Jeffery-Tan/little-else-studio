@@ -18,6 +18,7 @@ that passed.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from typing import Any, Callable
 
 from ..config import Settings
@@ -26,6 +27,7 @@ from ..models import BudgetExceeded, PipelineError, STAGE_SPEC
 from ..pipeline import Pipeline
 from ..store import Store
 from ..tools.registry import tools_for
+from ..tools.execution import ToolResult
 from ..tools.workspace import ToolError, Workspace
 from .budget import BudgetedClient
 from .client import JobCancelled, ModelClient, SafePreflightError, run_agent_loop
@@ -75,6 +77,7 @@ def run_review(
     on_event: Callable[[dict[str, Any]], None] | None = None,
     check_cancel: Callable[[], None] | None = None,
     learning_service=None,
+    explicit_request: bool = False,
 ) -> ReviewOutcome:
     if check_cancel:
         check_cancel()
@@ -104,11 +107,11 @@ def run_review(
     if state.review is not None and state.review.artifact_sha256 == state.latest.sha256:
         outcome.verdict = state.review.verdict
         outcome.findings = state.review.findings
-        outcome.error = f"{stage}-v{state.latest.version} 已经审核过了，不重复审核"
+        outcome.text = f"{stage}-v{state.latest.version} 使用已保存的审核结论，没有重复调用模型。"
         return outcome
 
     selection = creative_selection(store, run_id)
-    if not production_allowed(selection):
+    if not explicit_request and not production_allowed(selection):
         raise ToolError("当前路由只允许读取/反馈；不能启动新审核调用。")
     if learning_service is None:
         from ..learning import LearningService
@@ -130,7 +133,12 @@ def run_review(
 
     recorded: dict[str, Any] = {}
 
-    def execute(name: str, args: dict[str, Any]) -> str:
+    def execute(name: str, args: dict[str, Any]) -> str | ToolResult:
+        if name == "read_capabilities":
+            from ..tools.context import capabilities
+            return json.dumps(capabilities(settings, "reviewer"), ensure_ascii=False)
+        if name == "read_method_document":
+            return json.dumps(learning_service.read_method_document(args["name"], role="reviewer", run_id=run_id), ensure_ascii=False)
         if name == "read_artifact":
             requested_stage = args["stage"]
             if args.get("version") not in (None, versions.get(requested_stage)):
@@ -149,9 +157,10 @@ def run_review(
             recorded["verdict"] = review.verdict
             recorded["findings"] = review.findings
             recorded["sha"] = review.artifact_sha256
-            return (
+            return ToolResult(
                 f"已记录：{stage} 判定为 {verdict}。"
-                + ("你可以结束了。" if verdict == "pass" else "你可以结束了；退回的是产物，不是你。")
+                + ("你可以结束了。" if verdict == "pass" else "你可以结束了；退回的是产物，不是你。"),
+                concludes_turn=True,
             )
         raise ToolError(f"reviewer has no tool named {name!r}")
 
@@ -173,6 +182,8 @@ def run_review(
                     f"阶段：{stage}（第 {state.latest.version} 版）\n"
                     f"你可以读取的产物：{'、'.join(workspace.readable)}\n\n"
                     "你看不到创作者是谁、怎么想的、怎么自我评价的。这是故意的。\n\n" + context["text"]
+                    + "\n登记方法目录（只读，不包含原始研究和旧审核）：\n"
+                    + json.dumps(learning_service.skill_catalog(), ensure_ascii=False)
                 ),
                 format=selection["format"],
             ),
@@ -182,6 +193,7 @@ def run_review(
             max_rounds=settings.max_tool_rounds,
             max_continuations=settings.max_continuations,
             check_cancel=check_cancel,
+            on_activity=lambda event: emit({"role": "reviewer", "stage": stage, **event}),
             on_turn=lambda t: emit(
                 {"type": "agent_turn", "role": "reviewer", "stage": stage,
                  "stop_reason": t.stop_reason, "tools": [c.name for c in t.tool_calls]}

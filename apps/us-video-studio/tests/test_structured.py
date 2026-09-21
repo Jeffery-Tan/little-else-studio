@@ -31,7 +31,7 @@ def test_every_stage_can_report_open_questions():
         field = shape.field("open_questions")
         assert field is not None, f"{stage} has nowhere to put its open questions"
         assert field.kind == "rows"
-        assert field.columns == ("question", "blocks")
+        assert field.columns == ("question", "blocks", "owner", "timing", "reason")
 
 
 def test_the_direction_shape_covers_what_the_role_is_told_to_write():
@@ -169,7 +169,8 @@ def test_an_overlong_cell_is_truncated_rather_than_refused():
 
 def test_open_questions_come_back_tagged_with_their_stage():
     out = s.normalize("intake", {
-        "open_questions": [{"question": "主推 SKU 是哪个", "blocks": "素材计划定不了"}],
+        "open_questions": [{"question": "主推 SKU 是哪个", "blocks": "素材计划定不了",
+                            "owner": "user", "timing": "now", "reason": "用户决定主推商品"}],
     })
     questions = s.open_questions(out.data, "intake")
     assert questions == [{

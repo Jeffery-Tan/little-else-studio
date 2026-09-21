@@ -27,6 +27,7 @@ function harness({ post, list, loadRuns } = {}) {
   const context = vm.createContext({
     state, $: get,
     document: {
+      querySelectorAll: () => [],
       querySelector: () => dialogs.find(dialog => !dialog.removed) || null,
       body: { appendChild: dialog => dialogs.push(dialog) },
       createElement: () => {

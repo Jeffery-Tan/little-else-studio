@@ -319,7 +319,7 @@ class Ledger:
         note = "USD figures are estimates from this rate card, not the provider's bill."
         if not enforceable:
             note += " Unverified rates mean the USD cap cannot stop anything yet; dollar totals remain unknown."
-        note += " Limits stop new calls after recorded totals reach them; an in-flight call may exceed the limit. Unknown usage blocks new calls until reconciled."
+        note += " Limits stop new calls after recorded totals reach them; an in-flight call may exceed the limit. Unknown usage is retained for diagnostics and does not block new calls."
         routes = {role: {'connection': cid, 'provider': self.settings.provider_by_role[role],
                         'model': self.settings.model_for(role),
                         'source': self.settings.pricing_for(role, self.settings.model_for(role)).source}
@@ -332,8 +332,6 @@ class Ledger:
 
     def ensure_within_budget(self) -> None:
         totals = self.totals()
-        if totals.unknown_calls:
-            raise BudgetExceeded(f"{totals.unknown_calls} model call(s) have unknown, partial or pending usage; reconcile provider evidence before any new call.")
         tokens = totals.input_tokens + totals.output_tokens
         if tokens >= self.settings.budget_limit_tokens:
             raise BudgetExceeded(f"{tokens} tokens reached the soft cap of {self.settings.budget_limit_tokens}; refusing a new call.")

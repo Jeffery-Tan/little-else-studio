@@ -42,14 +42,14 @@ def request(client, **overrides):
 
 
 @pytest.mark.parametrize("model", ["deepseek-flash", "deepseek-v4-pro"])
-def test_fixed_official_endpoint_enabled_high_and_max_tokens(monkeypatch, model):
+def test_fixed_official_endpoint_enabled_high_and_provider_output_default(monkeypatch, model):
     seen = transport(monkeypatch, [response()])
     turn = request(DeepSeekClient("synthetic-only"), model=model)
     assert len(seen) == 1 and str(seen[0].url) == ENDPOINT
     assert seen[0].headers["Authorization"] == "Bearer synthetic-only"
     payload = json.loads(seen[0].content)
     assert payload["model"] == model
-    assert payload["max_tokens"] == 16384
+    assert "max_tokens" not in payload
     assert "max_completion_tokens" not in payload
     assert payload["thinking"] == {"type": "enabled"}
     assert payload["reasoning_effort"] == "high" and payload["stream"] is False
@@ -71,7 +71,8 @@ def test_multi_tool_rounds_replay_exact_reasoning_and_never_display_it(monkeypat
     result = run_agent_loop(DeepSeekClient("synthetic-only"), model="deepseek-flash", system="director scope",
         messages=[{"role": "user", "content": "Make direction"}], tools=TOOLS, execute_tool=execute,
         on_turn=lambda turn: observed.append((turn.text, turn.thinking)))
-    assert result.text == "检查资料\n公开结论"
+    assert result.text == "公开结论"
+    assert observed[0][0] == "检查资料"  # Progress is observable, not part of the final reply.
     assert len(executed) == 3
     second = json.loads(seen[1].content)["messages"]
     assert second[2]["reasoning_content"] == reasoning
@@ -159,6 +160,7 @@ def test_malformed_reasoning_retains_known_usage_without_echoing_contents(reason
     with pytest.raises(ModelError) as failure:
         _parse(response(reasoning=reasoning), "deepseek-flash", require_reasoning=True)
     assert failure.value.usage.input_tokens == 31 and failure.value.usage.output_tokens == 17
+    assert failure.value.usage_status == 'known'
     assert "secret" not in str(failure.value)
 
 
@@ -168,6 +170,14 @@ def test_unknown_usage_remains_unknown_and_no_tools_payload_omits_tools(monkeypa
     assert turn.usage.input_tokens is None and turn.usage.output_tokens is None
     payload = json.loads(seen[0].content)
     assert "tools" not in payload and payload["max_tokens"] == 500
+
+
+@pytest.mark.parametrize("limit", [0, -1, 393217, True, 1.5, "16384"])
+def test_invalid_explicit_output_limit_is_rejected_before_http(monkeypatch, limit):
+    seen = transport(monkeypatch, [])
+    with pytest.raises(ValueError, match="max_tokens"):
+        DeepSeekClient("synthetic-only", max_tokens=limit)
+    assert seen == []
 
 
 @pytest.mark.parametrize("model", ["deepseek-future-2027", "deepseek-reasoner", "team/deepseek-next:preview"])

@@ -122,6 +122,23 @@ def workspace(scene):
     return response.json()
 
 
+def test_team_input_review_uses_frozen_client_without_media_authority(scene, monkeypatch):
+    from studio.production import ActionIn
+    http, store, pipe, reviewer, images, videos, settings = scene
+    item = draft(scene, kind='image').json()
+    service = http.app.state.production
+    monkeypatch.setattr(service.connections, 'snapshot', lambda: pytest.fail('must reuse the current turn connection'))
+    before = list(store.list_approvals(RUN))
+    runner, _ = service.prepare_review(RUN, item['draft_id'], ActionIn(
+        request_id='team-check', expected_sha256=item['draft_sha256'], consent=True),
+        frozen=(settings, reviewer, {'source': 'offline-frozen'}))
+    runner('check', lambda event: None, lambda: None)
+    checked = service.workspace(RUN, for_agent=True)['drafts'][-1]
+    assert checked['review']['verdict'] == 'ready'
+    assert not images.calls and not videos.calls
+    assert store.list_approvals(RUN) == before
+
+
 def draft(scene, kind='video', request_id='draft-1', **over):
     data = workspace(scene); source = data['sources'][-1]; ref = next(m for m in data['materials'] if m['name'] == 'reference.png')
     payload = dict(request_id=request_id, kind=kind, prompt='Synthetic product on table; slowly move camera.',
@@ -207,12 +224,14 @@ def test_image_preserves_unknown_bill_and_text_tokens_then_explicit_recovery(sce
     row = Ledger(scene[1], scene[-1]).entries()[-1]
     assert row.input_tokens == 100 and row.output_tokens == 30
     assert row.actual_model == 'fixture-codex' and row.usage_quantity is None
-    assert action(scene, d, 'generate', request_id='generate-2').status_code == 409
+    next_response = action(scene, d, 'generate', request_id='generate-2')
+    assert next_response.status_code == 200
+    wait(scene, next_response)
     response = scene[0].post(BASE + '/attempts/generate-1/recover', json={
         'nonce': data['nonce'], 'quantity': 1, 'evidence_note': 'Synthetic provider export'})
     assert response.status_code == 200, response.text
-    assert not Ledger(scene[1], scene[-1]).totals().unknown_calls
-    assert len(scene[4].calls) == 1
+    assert Ledger(scene[1], scene[-1]).totals().unknown_calls == 1
+    assert len(scene[4].calls) == 2
 
 
 def test_image_partial_result_survives_and_does_not_claim_success(scene):

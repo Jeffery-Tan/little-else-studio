@@ -25,6 +25,7 @@ from typing import Any, Callable, Iterable, Protocol
 import httpx
 
 from ..models import BudgetExceeded
+from ..tools.execution import ToolResult, validate_call
 
 ANTHROPIC_VERSION = "2023-06-01"
 
@@ -36,7 +37,8 @@ DEFAULT_MAX_TOKENS = 16384
 
 
 class ModelError(RuntimeError):
-    def __init__(self, status: int, message: str, *, usage=None, provider_invoked: bool | None = None):
+    def __init__(self, status: int, message: str, *, usage=None, provider_invoked: bool | None = None,
+                 usage_final: bool = False):
         super().__init__(f"model endpoint returned {status}: {message}")
         self.status = status
         self.message = message
@@ -44,7 +46,11 @@ class ModelError(RuntimeError):
         # Only a transport that has not sent a model request may assert this.
         # HTTP errors/disconnects keep the default unknown invocation state.
         self.usage = Usage(0, 0) if provider_invoked is False else (usage or Usage(None, None))
-        self.usage_status = ('known' if provider_invoked is False else
+        # A complete non-streaming response can have valid accounting even when
+        # its content is invalid. Stream counters alone are not final evidence.
+        confirmed = usage_final and all(type(v) is int and v >= 0 for v in
+                                        (self.usage.input_tokens, self.usage.output_tokens))
+        self.usage_status = ('known' if provider_invoked is False or confirmed else
             ('partial' if any(v is not None for v in (self.usage.input_tokens, self.usage.output_tokens)) else 'unknown'))
 
 
@@ -327,17 +333,21 @@ def run_agent_loop(
     system: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
-    execute_tool: Callable[[str, dict[str, Any]], str],
+    execute_tool: Callable[[str, dict[str, Any]], str | ToolResult],
     max_rounds: int = 12,
     max_continuations: int = 1,
     on_turn: Callable[[Turn], None] | None = None,
     on_tool: Callable[[dict[str, Any]], None] | None = None,
+    on_activity: Callable[[dict[str, Any]], None] | None = None,
     check_cancel: Callable[[], None] | None = None,
+    stop_when: Callable[[], bool] | None = None,
 ) -> LoopResult:
     """Drive a tool-use conversation to completion.
 
-    ``execute_tool`` returns the text to hand back to the model. Anything it
-    raises is converted into an ``is_error`` tool result *and* recorded in
+    ``execute_tool`` returns text or a backend-owned ``ToolResult``. A successful
+    concluding result ends this role after recording the batch; remaining calls
+    are paired with explicit skips. Only tools in this request may execute.
+    Anything it raises is converted into an ``is_error`` tool result *and* recorded in
     ``tool_log`` — the failure is visible to the model and to the caller, never
     swallowed.
 
@@ -349,6 +359,7 @@ def run_agent_loop(
     stream). Neither can change what happens.
     """
     convo = list(messages)
+    allowed_tools = frozenset(t["name"] for t in tools)
     tool_log: list[dict[str, Any]] = []
     text_seen: list[str] = []
     continuations_left = max_continuations
@@ -356,10 +367,19 @@ def run_agent_loop(
     for round_index in range(1, max_rounds + 1):
         if check_cancel is not None:
             check_cancel()
+        if on_activity is not None:
+            on_activity({"type": "agent_activity", "phase": "thinking", "round": round_index})
         turn = client.complete(model=model, system=system, messages=convo, tools=tools)
         if on_turn is not None:
             on_turn(turn)
-        if turn.text:
+        if turn.tool_calls:
+            # Operational narration belongs to the execution journal, not the
+            # final answer (or the next conversational context window).
+            text_seen.clear()
+            if turn.text and on_activity is not None:
+                on_activity({"type": "agent_narration", "text": turn.text, "round": round_index})
+        elif turn.text:
+            # Preserve continuation fragments of the final answer only.
             text_seen.append(turn.text)
 
         if not turn.tool_calls:
@@ -392,12 +412,25 @@ def run_agent_loop(
         convo.append({"role": "assistant", "content": turn.raw_blocks})
 
         results: list[dict[str, Any]] = []
+        concluded = False
         for call in turn.tool_calls:
-            if check_cancel is not None:
+            skipped = concluded
+            if check_cancel is not None and not concluded:
                 check_cancel()
+            if on_activity is not None and not concluded:
+                # Progress carries only a tool name and stage, never full model inputs.
+                on_activity({"type": "agent_activity", "phase": "tool", "tool": call.name,
+                             "args": {"stage": call.input.get("stage", "") if isinstance(call.input, dict) else ""}, "round": round_index})
             try:
-                output = execute_tool(call.name, call.input)
-                is_error = False
+                if concluded:
+                    outcome = ToolResult("Not executed: this role's turn already concluded.", is_error=True)
+                else:
+                    validate_call(call.name, call.input, allowed_tools)
+                    value = execute_tool(call.name, call.input)
+                    outcome = value if isinstance(value, ToolResult) else ToolResult(value)
+                output, is_error = outcome.content, outcome.is_error
+                if not is_error:
+                    concluded = outcome.concludes_turn or (stop_when is not None and stop_when())
             except (BudgetExceeded, JobCancelled, SafePreflightError):
                 # Deliberately *not* converted into a tool result. Doing so
                 # handed the model the string "派工失败" and let it retry: each
@@ -415,6 +448,8 @@ def run_agent_loop(
                 is_error = True
             record = {"round": round_index, "tool": call.name, "args": call.input,
                       "ok": not is_error, "result": output[:2000]}
+            if skipped:
+                record["skipped"] = True
             tool_log.append(record)
             if on_tool is not None:
                 on_tool(record)
@@ -427,6 +462,11 @@ def run_agent_loop(
                 }
             )
         convo.append({"role": "user", "content": results})
+        if concluded:
+            # Commit the terminal result and explicit skips for the remaining
+            # batch before returning. No dangling tool_use blocks on resume.
+            return LoopResult(text="", messages=convo, rounds=round_index,
+                              stopped_because="done", tool_log=tool_log)
 
     return LoopResult(
         text="\n".join(text_seen).strip(),

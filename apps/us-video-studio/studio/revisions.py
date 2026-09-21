@@ -21,7 +21,7 @@ from .agents.roles import ROLES, OWNER, creative_selection, production_allowed
 from .connections import ConnectionConflict
 from .ledger import Ledger
 from .models import PipelineError, STAGES
-from .structured import SHAPES, MAX_CELL, LABEL, normalize
+from .structured import SHAPES, MAX_CELL, LABEL, normalize, is_canonical_document
 from .tools.workspace import Workspace
 
 EDITABLE = {'direction': 'options', 'writing': 'segments'}
@@ -83,7 +83,10 @@ def editable_base(store, pipeline, run_id, stage, version, sha):
 
 def apply_cells(base, edits):
     group = EDITABLE[base.stage]
-    result = copy.deepcopy(base.structured)
+    baseline = normalize(base.stage, base.structured)
+    if baseline.dropped:
+        raise PipelineError('edit', '原版本结构不能完整读取，请保留原稿并先更新方案。')
+    result = copy.deepcopy(baseline.data)
     rows = result[group]
     columns = set(SHAPES[base.stage].field(group).columns) - {'key'}
     seen, changes = set(), []
@@ -189,6 +192,28 @@ def prepare_revision(store, pipeline, connections, settings, learning, run_id, s
         if any(e['field'] == 'file' and e['after'] and resolve(store, run_id, e['after']) is None for e in changes):
             raise PipelineError('edit', '指定的素材文件不在项目中，请先上传或修正文件名。')
         original = store.read_artifact_text(run_id, stage, base.version)
+    if is_canonical_document(stage, base.structured, original):
+        def save_canonical(_text, emit, check_cancel):
+            check_cancel()
+            with store.run_lock(run_id):
+                editable_base(store, pipeline, run_id, stage, base.version, base.sha256)
+                attempt = pipeline.start_attempt(run_id, stage, actor='user-revision')
+                try:
+                    artifact = pipeline.submit(run_id, stage, attempt.token, content='',
+                        summary=f'已按你的修改更新 {len(changes)} 处内容；等待审核。',
+                        structured=structured, evidence=base.evidence, limitations=base.limitations,
+                        actor='user-revision')
+                except Exception:
+                    pipeline.reject(run_id, stage, attempt.token, '本地修改未保存，原稿和修改草稿保留。')
+                    raise
+                store.append_event(run_id, 'revision_applied', draft_id=draft_id, stage=stage,
+                                   version=artifact.version, sha256=artifact.sha256,
+                                   base_version=base.version, base_sha256=base.sha256)
+            emit({'type': 'revision_ready', 'stage': stage, 'version': artifact.version,
+                  'message': '修改已保存为新版本；正文与创作板同步，等待审核。'})
+            return SimpleNamespace(stopped_because='done', text='新版本已保存，尚未审核或采用。', rounds=0, used_tools=[])
+        return save_canonical, {'source': 'local-structured-revision', 'base_version': base.version,
+                                'base_sha256': base.sha256, 'draft_id': draft_id}
     snapshot = connections.snapshot()
     if snapshot.public()['revision'] != payload.expected_revision:
         raise ConnectionConflict('模型设置已更新，请重新查看本次使用的角色和模型。')
@@ -274,6 +299,8 @@ def install_revision_routes(app, jobs, require_run, connections, settings, learn
             try: editable_base(store, pipeline, run_id, stage, selected.version, selected.sha256)
             except PipelineError as exc: reason = error_message(exc)
             return {'stage': stage, 'version': selected.version, 'sha256': selected.sha256,
+                    'revision_mode': 'local' if is_canonical_document(stage, selected.structured,
+                        store.read_artifact_text(run_id, stage, selected.version)) else 'model',
                     'editable': not reason, 'reason': reason, 'group': EDITABLE[stage],
                     'rows': selected.structured.get(EDITABLE[stage], []), 'labels': LABELS,
                     'columns': [c for c in SHAPES[stage].field(EDITABLE[stage]).columns if c != 'key'],

@@ -10,6 +10,15 @@ function progressHtml(progress, selectedStage, rail = []) {
     `</div><button class="primary" data-progress-action="${escapeHtml(progress.action)}">${escapeHtml(progress.label)}</button></section>`;
 }
 
+function projectBriefHtml(brief) {
+  if (!brief) return '';
+  const action = brief.action || {};
+  return `<section class="project-brief" aria-label="当前项目状态" data-phase="${escapeHtml(brief.phase)}">` +
+    `<div class="brief-copy"><strong>${escapeHtml(brief.title)}</strong><span>${escapeHtml(brief.detail)}</span></div>` +
+    `<div class="brief-actions">${brief.stage ? '<button class="ghost small" data-brief-view>查看当前成果</button>' : ''}` +
+    `<button class="primary small" data-brief-action>${escapeHtml(action.label)}</button></div></section>`;
+}
+
 function deliveryHtml(data) {
   const names = { intake:'创作要求', direction:'创意方向', material_plan:'素材策划', writing:'脚本与分镜' };
   return `<p class="delivery-status">${data.ready ? '本次策划已就绪' : '这是进行中的策划资料'} · ${escapeHtml(data.run.title)}</p>` +
@@ -21,8 +30,10 @@ function deliveryHtml(data) {
 }
 
 function setProjectFocus(focus) {
-  document.getElementById('project-workspace').dataset.focus = focus;
+  document.getElementById('project-workspace').dataset.focus = 'workbench';
+  document.getElementById('project-workspace').dataset.mobileFocus = focus;
   for (const node of document.querySelectorAll('[data-project-focus]')) node.setAttribute('aria-pressed', String(node.dataset.projectFocus === focus));
+  if (focus === 'chat' && typeof scrollDown === 'function') requestAnimationFrame(scrollDown);
 }
 
 function prepareProjectDraft(text) {
@@ -38,12 +49,40 @@ function prepareProjectDraft(text) {
 function renderProjectProgress() {
   const host = $('project-progress');
   if (!host) return;
+  if (typeof renderJourneyStatus === 'function') { renderJourneyStatus(); return; }
   const runId = state.runId, timeline = state.timeline;
+  const brief = state.projectBrief || timeline?.brief;
+  if (brief) {
+    host.innerHTML = projectBriefHtml(brief);
+    const view = host.querySelector('[data-brief-view]');
+    if (view) view.onclick = () => { if(state.runId !== runId) return; selectStage(brief.stage); setProjectFocus('canvas'); };
+    const action = brief.action || {}, button = host.querySelector('[data-brief-action]');
+    button.disabled = state.decisionBusy || (state.busy && action.kind !== 'activity');
+    button.onclick = async () => {
+      if (state.runId !== runId || (state.projectBrief || state.timeline?.brief) !== brief || state.decisionBusy) return;
+      if (action.kind === 'activity') return openTeamProgress();
+      if (state.busy) return;
+      if (action.kind === 'review_stage') {
+        button.disabled = true;
+        return submitJob(runId, {request_kind:'stage_review',request_id:crypto.randomUUID(),
+          stage:action.stage,expected_version:action.version,expected_artifact_sha256:action.sha256});
+      }
+      if (action.kind === 'delivery') return openDelivery();
+      if (action.kind === 'recovery') {setProjectFocus('chat');$('job-status').scrollIntoView({block:'nearest'});return;}
+      if (action.stage) selectStage(action.stage);
+      if (action.kind === 'draft') return prepareProjectDraft(action.prompt);
+      setProjectFocus('canvas');
+      const target = action.kind === 'questions' ? document.querySelector('.pane-ask')
+        : action.kind === 'review' ? document.getElementById('stage-decision') : $('stage');
+      target?.scrollIntoView({block:'start'});
+    };
+    return;
+  }
   let progress = state.timeline?.progress;
   if (!progress) { host.innerHTML = ''; return; }
   if (typeof currentRecovery !== 'undefined' && currentRecovery && !currentRecovery.can_continue) {
     progress = {...progress,action:'recovery',label:'查看运行状态',
-      title:currentRecovery.unresolved_calls?.length ? '有模型用量需要核实' : '先处理未完成的制作',
+      title:'先处理未完成的制作',
       detail:'已有内容已保留，请在制片对话中查看当前执行与恢复事项。'};
   }
   host.innerHTML = progressHtml(progress, state.activeStage, state.rail);
@@ -93,4 +132,4 @@ async function openDelivery() {
   await load();
 }
 
-if (typeof module !== 'undefined') module.exports = { progressHtml, deliveryHtml };
+if (typeof module !== 'undefined') module.exports = { progressHtml, deliveryHtml, projectBriefHtml };

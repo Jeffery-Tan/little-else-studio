@@ -100,7 +100,7 @@ def test_intent_is_durable_before_network_and_collapses_after_success(ledger):
     assert ledger.totals().unknown_calls == 0
 
 
-def test_partial_failure_blocks_further_calls_and_keeps_usage(ledger):
+def test_partial_failure_keeps_usage_without_blocking_explicit_next_call(ledger):
     class Fake:
         def complete(self, **kwargs):
             from studio.agents.client import Usage
@@ -113,17 +113,17 @@ def test_partial_failure_blocks_further_calls_and_keeps_usage(ledger):
     assert row.output_tokens is None
     assert row.estimated_usd is None
     assert row.usage_status == "partial"
-    with pytest.raises(BudgetExceeded, match="reconcile"):
+    with pytest.raises(ModelError):
         client.complete(model="test", system="", messages=[], tools=[])
-    assert ledger.totals().calls == 1
+    assert ledger.totals().calls == 2
     assert ledger.totals().estimated_usd is None
 
 
 def test_process_restart_sees_pending_intent_and_explicit_recovery_is_accounting_only(ledger):
     call_id = ledger.begin_call("integrity", role="director", stage="direction", model="test")
     restarted = Ledger(ledger.store, ledger.settings)
-    with pytest.raises(BudgetExceeded):
-        restarted.ensure_within_budget()
+    restarted.ensure_within_budget()
+    assert restarted.totals().unknown_calls == 1
     with pytest.raises(ValueError):
         restarted.reconcile("integrity", call_id, input_tokens=11, output_tokens=4, evidence_note="")
     row = restarted.reconcile("integrity", call_id, input_tokens=11, output_tokens=4,
@@ -137,15 +137,17 @@ def test_process_restart_sees_pending_intent_and_explicit_recovery_is_accounting
         restarted.reconcile("integrity", call_id, input_tokens=11, output_tokens=4, evidence_note="duplicate")
 
 
-def test_settlement_disk_failure_leaves_a_pending_call_blocker(ledger, monkeypatch):
+def test_settlement_disk_failure_preserves_unknown_diagnostic_and_write_failure(ledger, monkeypatch):
     call_id = ledger.begin_call("integrity", role="director", stage="direction", model="test")
     def fail(*args): raise OSError("disk full")
     monkeypatch.setattr(ledger, "_append", fail)
     with pytest.raises(OSError):
         ledger.settle_call("integrity", call_id, input_tokens=9, output_tokens=4,
                            usage_status="known", ok=True)
-    with pytest.raises(BudgetExceeded):
-        ledger.ensure_within_budget()
+    ledger.ensure_within_budget()
+    assert ledger.totals().unknown_calls == 1
+    with pytest.raises(OSError):
+        ledger.begin_call("integrity", role="director", stage="direction", model="test")
 
 
 def test_legacy_error_zero_is_unknown_and_reconcilable(ledger):
@@ -233,7 +235,7 @@ def test_offline_abandon_closes_only_named_attempt_without_spending(ledger, caps
     main(["--data-root", root, "attempts", "integrity"])
     assert json.loads(capsys.readouterr().out)[0]["stage"] == "intake"
     main(["--data-root", root, "abandon", "integrity", "intake",
-          "--attempt-token", attempt.token, "--reason", "test process crashed",
+          f"--attempt-token={attempt.token}", "--reason", "test process crashed",
           "--server-stopped"])
     assert pipeline.stage_state("integrity", "intake").open_attempt is None
     assert not ledger.entries()

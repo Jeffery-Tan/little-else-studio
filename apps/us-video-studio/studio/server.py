@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import hashlib
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,7 +22,9 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .agents.orchestrator import Orchestrator
+from .agents.orchestrator import Orchestrator, OrchestratorTurn
+from .agents.reviewer import run_review
+from .project_brief import project_brief, latest_execution
 from .config import Settings, load_settings
 from .ledger import Ledger
 from .models import PipelineError, STAGES, STAGE_SPEC, valid_run_id
@@ -66,6 +69,14 @@ class MessageIn(BaseModel):
 
 class JobIn(MessageIn):
     request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
+    question_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
+
+
+class ReviewActionIn(BaseModel):
+    request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
+    stage: str = Field(pattern=r'^(direction|writing)$')
+    expected_version: int = Field(ge=1)
+    expected_artifact_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
 
 
 class DecisionIn(BaseModel):
@@ -155,7 +166,19 @@ def build_app(
     creative_packages = CreativePackages(store, learning_repository_root or REPOSITORY)
     ledger = Ledger(store, settings if client_factory is not None else connections.settings(settings))
 
-    def prepare_job(run_id):
+    def require_review_version(run_id, review):
+        if any(s.open_attempt for s in pipeline.state(run_id).stages.values()):
+            raise PipelineError('review', '有尚未结束的制作步骤，请先在运行状态中处理。')
+        current = pipeline.stage_state(run_id, review.stage)
+        if (not current.latest or current.latest.version != review.expected_version
+                or current.latest.sha256 != review.expected_artifact_sha256):
+            raise PipelineError('version_conflict', '方案已更新，请阅读当前版本后再审核。')
+        if not current.can_review:
+            raise PipelineError('review', '这一版当前不能发起审核，请刷新项目状态。')
+
+    def prepare_job(run_id, review=None):
+        if review is not None:
+            require_review_version(run_id, review)
         if client_factory is not None:
             job_settings, client = settings, client_factory()
             summary = {'source': 'injected-test-client',
@@ -169,9 +192,34 @@ def build_app(
         def run(text, emit, check_cancel):
             job_client = client if client_factory is not None else snapshot.client(
                 check_cancel=check_cancel, max_tokens=job_settings.max_tokens)
+            def production_review(args):
+                from .production import ActionIn
+                service = app.state.production
+                payload = ActionIn(request_id=uuid.uuid4().hex, expected_sha256=args['expected_sha256'], consent=True)
+                runner, _ = service.prepare_review(run_id, args['draft_id'], payload,
+                    frozen=(job_settings, job_client, summary))
+                runner('检查制作输入', emit, check_cancel)
+                return next(d for d in service.workspace(run_id, for_agent=True)['drafts'] if d['draft_id'] == args['draft_id'])
+            if review is not None:
+                # A typed command bypasses the producer loop, not review checks.
+                require_review_version(run_id, review)
+                check_cancel()
+                store.append_chat(run_id, 'user', text)
+                outcome = run_review(store=store, pipeline=pipeline, settings=job_settings,
+                    client=job_client, ledger=Ledger(store, job_settings), run_id=run_id,
+                    stage=review.stage, on_event=emit, check_cancel=check_cancel,
+                    learning_service=learning, explicit_request=True)
+                if outcome.verdict is None:
+                    raise PipelineError('review', outcome.error or '审核未返回结论，原方案已保留。')
+                label = vocabulary.stage_label(review.stage)
+                reply = (f'「{label}」第 {review.expected_version} 版已通过审核。请在创作板阅读并决定是否采用。'
+                         if outcome.verdict == 'pass' else
+                         f'「{label}」第 {review.expected_version} 版审核提出了修改意见。请在创作板查看关键问题，再决定调整方向。')
+                store.append_chat(run_id, 'assistant', reply)
+                return OrchestratorTurn(reply, 'done', outcome.rounds)
             return Orchestrator(store, pipeline, job_settings, job_client,
                 Ledger(store, job_settings), run_id, on_event=emit, check_cancel=check_cancel,
-                learning_service=learning).send(text)
+                learning_service=learning, production_review=production_review).send(text)
         return run, summary
 
     jobs = JobManager(store, pipeline, ledger, prepare_job)
@@ -231,13 +279,15 @@ def build_app(
                 return JSONResponse({'detail': str(exc)}, status_code=409)
         return await call_next(request)
 
-    def require_run(run_id: str) -> None:
+    def require_run(run_id: str, *, include_deleted: bool = False) -> None:
         if not valid_run_id(run_id):
             raise HTTPException(400, "invalid run id")
         try:
             store.read_run(run_id)
         except PipelineError as exc:
             raise HTTPException(404, str(exc)) from exc
+        if not include_deleted and store.deletion_state(run_id):
+            raise HTTPException(410, '项目已移入回收站，请先恢复后再继续。')
 
     install_recovery_routes(app, jobs, require_run)
     install_codex_auth_routes(app, codex_auth)
@@ -370,10 +420,38 @@ def build_app(
     def list_runs() -> list[dict[str, Any]]:
         out = []
         for run in store.list_runs():
+            if store.deletion_state(run.run_id):
+                continue
             totals = ledger.totals(run.run_id)
+            brief = project_brief(pipeline.state(run.run_id).to_dict(), latest_execution(store, run.run_id))
             out.append({**run.to_dict(), "spend": totals.to_dict(),
-                        "progress": project_progress(pipeline.state(run.run_id).to_dict())})
+                        "progress": {**project_progress(pipeline.state(run.run_id).to_dict()),
+                                     'title': brief['title'], 'detail': brief['detail']}, 'project_brief': brief})
         return sorted(out, key=lambda r: r["created_at"], reverse=True)
+
+    @app.get('/api/trash')
+    def list_deleted_projects():
+        return sorted([
+            {**run.to_dict(), 'deleted_at': deleted['at']}
+            for run in store.list_runs()
+            if (deleted := store.deletion_state(run.run_id))
+        ], key=lambda row: row['deleted_at'], reverse=True)
+
+    @app.delete('/api/runs/{run_id}')
+    def delete_project(run_id: str):
+        with jobs.lock:
+            require_run(run_id, include_deleted=True)
+            if jobs.active and jobs.active[0] == run_id:
+                raise HTTPException(409, '项目正在执行。请先停止任务，等待结束后再删除。')
+            store.set_deleted(run_id, True)
+        return {'run_id': run_id, 'deleted': True}
+
+    @app.post('/api/runs/{run_id}/restore')
+    def restore_project(run_id: str):
+        with jobs.lock:
+            require_run(run_id, include_deleted=True)
+            store.set_deleted(run_id, False)
+        return store.read_run(run_id).to_dict()
 
     @app.post("/api/runs")
     def create_run(payload: RunIn) -> dict[str, Any]:
@@ -384,6 +462,25 @@ def build_app(
         except (ValueError, PipelineError) as exc:
             raise HTTPException(400, str(exc)) from exc
         return run.to_dict()
+
+    @app.post('/api/conversations')
+    def begin_conversation(payload: JobIn):
+        """Reserve one implicit project; uploads and the first message follow.
+
+        Retrying a lost response resolves the same run, never a second project.
+        """
+        text = payload.text.strip()
+        if not text:
+            raise HTTPException(422, '先说说你想做什么，也可以附上参考素材。')
+        run_id = 'chat-' + hashlib.sha256(payload.request_id.encode()).hexdigest()[:24]
+        with jobs.lock:
+            existing = next((r for r in store.list_runs() if r.run_id == run_id), None)
+            if existing:
+                require_run(run_id)
+                if existing.brief != text:
+                    raise HTTPException(409, '这次发送已保存，请使用原内容重试。')
+                return existing.to_dict()
+            return store.create_run(run_id, text.splitlines()[0][:48], text).to_dict()
 
     @app.get("/api/runs/{run_id}/state")
     def state(run_id: str) -> dict[str, Any]:
@@ -464,7 +561,8 @@ def build_app(
         cached view that could disagree with the run directory.
         """
         require_run(run_id)
-        return build_timeline(store, pipeline, ledger, run_id)
+        with store.run_lock(run_id):
+            return build_timeline(store, pipeline, ledger, run_id, latest_execution(store, run_id))
 
     # -------------------------------------------------------------- materials --
 
@@ -515,7 +613,7 @@ def build_app(
         return FileResponse(str(path))
 
     @app.post("/api/runs/{run_id}/materials")
-    def material_upload(run_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
+    def material_upload(run_id: str, file: UploadFile = File(...), retry_sha256: str | None = None) -> dict[str, Any]:
         """Put one file into `materials/`.
 
         The third write entry point, and the only one that touches no state. It
@@ -529,6 +627,12 @@ def build_app(
                 if jobs.busy(run_id):
                     raise HTTPException(409, '当前制作仍在运行，请停止或等待后再修改素材。')
                 data = _read_capped(file)
+                if retry_sha256 is not None:
+                    if hashlib.sha256(data).hexdigest() != retry_sha256:
+                        raise HTTPException(409, '附件与原发送内容不一致，请重新选择原文件。')
+                    existing = materials.resolve(store, run_id, file.filename or '')
+                    if existing is not None and hashlib.sha256(existing.read_bytes()).hexdigest() == retry_sha256:
+                        return {'name': file.filename, 'already_saved': True}
                 return materials.accept_upload(store, run_id, file.filename or "", data)
         except materials.MaterialError as exc:
             # The message is written for Jeffery, not for a log — it says which
@@ -625,12 +729,31 @@ def build_app(
         if job is not None:
             for event in job["events"]:
                 event["say"] = vocabulary.describe_event(event)
+            job['brief'] = project_brief(pipeline.state(job['run_id']).to_dict(), latest_execution(store, job['run_id']))
         return job
+
+    @app.post('/api/runs/{run_id}/actions/review')
+    def review_stage_action(run_id: str, payload: ReviewActionIn):
+        require_run(run_id)
+        try:
+            return present_job(jobs.submit(run_id,
+                f'请审核「{vocabulary.stage_label(payload.stage)}」第 {payload.expected_version} 版。',
+                payload.request_id, kind='stage_review', payload=payload.model_dump(exclude={'request_id'}),
+                prepare=lambda rid: prepare_job(rid, review=payload)))
+        except (PipelineError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/runs/{run_id}/jobs")
     def create_job(run_id: str, payload: JobIn):
         require_run(run_id)
         try:
+            if payload.question_id:
+                from .interactions import check_answer
+                def prepare_answer(rid):
+                    check_answer(store, rid, payload.question_id)
+                    return prepare_job(rid)
+                return present_job(jobs.submit(run_id, payload.text, payload.request_id,
+                    payload={'question_id': payload.question_id}, prepare=prepare_answer))
             return present_job(jobs.submit(run_id, payload.text, payload.request_id))
         except (PipelineError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc

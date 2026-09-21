@@ -47,3 +47,23 @@ test('no finding is adopted by default; historical accepted selections remain vi
   assert.match(card,/Zipper visible/);
   assert.doesNotMatch(card,/Handle visible/);
 });
+
+test('video setup describes actual transmission and cannot pretend it hears the soundtrack',()=>{
+  const html=ui.setup({name:'reference.mp4',kind:'video'},{connections:[{id:'api',name:'Vision'}],video:{available:true}});
+  assert.match(html,/最多 12/);
+  assert.match(html,/不发送原视频、音频或项目对话/);
+  assert.match(html,/开始视频画面分析/);
+  assert.doesNotMatch(html,/checked/);
+  const unavailable=ui.setup({kind:'video'},{connections:[],video:{available:false}});
+  assert.match(unavailable,/视频观察组件尚未就绪/);
+  assert.doesNotMatch(unavailable,/<form|type="submit"/);
+});
+
+test('video review exposes observation coverage and bounded reference hypotheses as escaped text',()=>{
+  const html=ui.review({...candidate,media_kind:'video',sampling:{frames:[{},{}],duration_seconds:4,audio_track_present:true},
+    reference_methods:[{supports:[0,1],mechanism:'<script>unsafe</script>',non_transferable:'<img src=x>',test_change:'Compare two scenes'}]});
+  assert.match(html,/检测到音轨，但没有发送或听取/);
+  assert.match(html,/只有全部依据被采用/);
+  assert.match(html,/&lt;script&gt;/);
+  assert.doesNotMatch(html,/<script>|<img src=x/);
+});

@@ -44,6 +44,7 @@ MAX_CELL = 4000
 #: Most rows kept per list field. A model that emits 400 shots has misunderstood
 #: something, and the sidecar should not grow to match.
 MAX_ROWS = 200
+QUESTION_COLUMNS = ("question", "blocks", "owner", "timing", "reason")
 
 
 @dataclass(frozen=True)
@@ -88,12 +89,12 @@ SHAPES: dict[str, Shape] = {
         Field("facts", "rows", ("label", "value", "source")),
         # §4 硬约束: rules that must survive every downstream stage.
         Field("constraints", "texts"),
-        Field("open_questions", "rows", ("question", "blocks")),
+        Field("open_questions", "rows", QUESTION_COLUMNS),
     )),
     "direction": Shape("direction", (
         # A/B/C × the seven attributes roles.py already asks the director for.
         Field("options", "rows", (
-            "key", "claim", "audience_moment", "hook",
+            "key", "claim", "audience_moment", "hook", "story",
             "gives_up", "evidence_strength", "difficulty", "asset_needs",
         )),
         Field("recommended", "text"),
@@ -105,7 +106,7 @@ SHAPES: dict[str, Shape] = {
         # ①实拍官方图 / ②目标观众 / ③主推SKU × each option. A grid, not a
         # paragraph: this was prose listing which option died on which blank.
         Field("dependency_matrix", "rows", ("need", "options")),
-        Field("open_questions", "rows", ("question", "blocks")),
+        Field("open_questions", "rows", QUESTION_COLUMNS),
     )),
     "material_plan": Shape("material_plan", (
         # One row per shot, carrying its availability. `status` is one of the
@@ -115,7 +116,7 @@ SHAPES: dict[str, Shape] = {
         # a visible failure when the name matches nothing.
         Field("items", "rows", ("shot", "purpose", "status", "note", "file")),
         Field("gaps", "rows", ("gap", "consequence")),
-        Field("open_questions", "rows", ("question", "blocks")),
+        Field("open_questions", "rows", QUESTION_COLUMNS),
     )),
     "writing": Shape("writing", (
         # One row per timed shot. `duration` is an assumption, and the role is
@@ -124,7 +125,7 @@ SHAPES: dict[str, Shape] = {
         Field("segments", "rows", ("tc", "picture", "line", "sound", "duration", "file")),
         Field("total_duration", "text"),
         Field("assumptions", "texts"),
-        Field("open_questions", "rows", ("question", "blocks")),
+        Field("open_questions", "rows", QUESTION_COLUMNS),
     )),
 }
 
@@ -158,8 +159,9 @@ BRIEF: dict[str, str] = {
 
     "direction": """\
 - `options`：一个方案一行。`key` 用 A/B/C。`claim` 主张一句话。
-  `audience_moment` 给谁看、在什么场景下被看到。`hook` 前 3 秒钩子。
-  `gives_up` 这个方案放弃了什么。`evidence_strength` 证据强度。
+  `audience_moment` 给谁看、在什么场景下被看到。`hook` 开场识别点。
+  `story` 写清开场、关键动作、结尾回报及必要的样例对白，让用户看得见这条片子。
+  `gives_up` 是创作方案的取舍，不要求角色必须放弃物品或承担代价。`evidence_strength` 证据强度。
   `difficulty` 执行难度。`asset_needs` 素材依赖。
 - `recommended` / `recommended_because`：你推荐哪个，为什么。
 - `prerequisites`：**推荐成立的前提**，一条一行。写具体、写可验证的——
@@ -199,16 +201,16 @@ def brief(stage: str) -> str:
     if not text:
         return ""
     return (
-        "# 除了正文，再交一份排好版的\n\n"
-        "正文照写。另外用 `submit_stage` / `write_stage` 的 `structured` 字段交一份"
-        "**同一份东西的另一种排法**，让工作台能把它排成表格或板子，而不是一篇文章。\n\n"
+        "# 一份内容，多种展示\n\n"
+        "优先只在 `structured` 中写完整产物，`content` 传空字符串。程序从同一份内容生成正文与创作板，"
+        "不要再写第二份重复正文。不能用现有结构完整表达的产物可以使用非空 content 正文，但必须保持展示一致。\n\n"
         f"{text}\n"
-        "- `open_questions`：**每个阶段都要有。** 你没能定下来的事，一条一行，"
-        "`question` 是问题本身，`blocks` 是它卡住了什么。这些会被收进「等你拍板」的清单，"
-        "直接送到 Jeffery 面前——这是它唯一的去处，别只写在 limitations 里。\n\n"
-        "两条要求：**它和正文说的必须是同一件事**，不是第二份结论；"
-        "**没话说的字段就留空**，格式不合法会被丢掉、不会让你的提交失败，"
-        "但那一块就不会显示。"
+        "- `open_questions`：仅保留实际未决事项，可以为空。每条包含 question、blocks、owner、timing、reason。"
+        "owner 为 user 或 team；timing 为 now 或 later；reason 说明为什么必须由该责任人处理。"
+        "只有 owner=user、timing=now 且理由明确的事项会请用户回答。素材检查、版本对应、工具能力、"
+        "试读时长和内部审核都由 team 处理；执行细节在相应阶段处理。不要重复已回答的问题，"
+        "不要为了填满字段制造问题。创意假设不自动成为必须由用户证明的事实。\n"
+        "结构化正文缺少核心内容或发生字段丢失会返回错误，请补全后再提交；不要用空正文掩盖丢失内容。"
     )
 
 
@@ -350,8 +352,91 @@ def open_questions(structured: dict[str, Any], stage: str) -> list[dict[str, str
     return [
         {"stage": stage, "question": r.get("question", ""), "blocks": r.get("blocks", "")}
         for r in rows
-        if isinstance(r, dict) and r.get("question")
+        if isinstance(r, dict) and r.get("question") and r.get("owner") == "user"
+        and r.get("timing") == "now" and r.get("reason", "").strip()
     ]
+
+
+def canonical_document(stage: str, data: dict[str, Any]) -> str:
+    """Render the normalized source, never a second model-authored document."""
+    core = {"intake": "facts", "direction": "options", "material_plan": "items", "writing": "segments"}
+    if not data.get(core.get(stage, "")):
+        raise ValueError("结构化正文缺少本阶段核心内容；请补全或提交完整正文。")
+    labels = {
+        "intake": "创作需求", "direction": "创意方向", "material_plan": "素材计划", "writing": "脚本与分镜",
+        "facts": "已知事实", "constraints": "制作要求", "open_questions": "待处理事项",
+        "options": "方向方案", "recommended": "推荐方向", "recommended_because": "推荐理由",
+        "prerequisites": "需要验证的前提", "dependency_matrix": "方案依赖", "items": "素材安排",
+        "gaps": "素材缺口", "segments": "分镜内容", "total_duration": "总时长", "assumptions": "时长假设",
+        "label": "事实", "value": "内容", "source": "来源", "key": "方案", "claim": "主张",
+        "audience_moment": "观众与处境", "hook": "开场", "story": "画面与表达", "gives_up": "方案取舍",
+        "evidence_strength": "依据", "difficulty": "执行难度", "asset_needs": "素材需求",
+        "need": "前提", "shot": "画面", "purpose": "作用", "status": "状态", "note": "说明", "file": "素材文件",
+        "gap": "缺口", "consequence": "影响", "tc": "段落", "picture": "画面", "line": "台词或字幕",
+        "sound": "声音", "duration": "时长", "question": "事项", "blocks": "影响", "owner": "责任人",
+        "timing": "处理时机", "reason": "责任说明",
+    }
+    lines = [f"# {labels[stage]}", "", "<!-- studio:structured-document-v1 -->"]
+    for field in SHAPES[stage].fields:
+        value = data.get(field.name)
+        if not value:
+            continue
+        lines += ["", f"## {labels.get(field.name, field.name)}", ""]
+        if isinstance(value, str):
+            lines.append(value)
+        elif field.kind == "texts":
+            lines.extend(f"- {item}" for item in value)
+        else:
+            for index, row in enumerate(value, 1):
+                lines += [f"### {index}", ""]
+                for key, cell in row.items():
+                    if isinstance(cell, dict):
+                        cell = "；".join(f"{k}：{'需要' if v else '不依赖'}" for k, v in cell.items())
+                    if cell:
+                        lines.append(f"- **{labels.get(key, key)}**：{cell}")
+                lines.append("")
+    return "\n".join(lines).strip()
+
+
+def is_canonical_document(stage: str, data: dict, text: str) -> bool:
+    try:
+        return text == canonical_document(stage, data)
+    except ValueError:
+        return False
+
+
+def validate_canonical_input(stage: str, payload: dict) -> None:
+    """Single-source authoring cannot silently truncate or drop source content."""
+    shape = SHAPES[stage]
+    def check_text(value):
+        if value is not None and (not isinstance(value, str) or len(value.strip()) > MAX_CELL):
+            raise ValueError("结构化文字必须为字符串且不超过字段容量；请调整字段或使用完整正文。")
+    for key, value in payload.items():
+        field = shape.field(key)
+        if field is None:
+            if value:
+                raise ValueError(f"结构化正文不支持字段 {key}，请放入对应内容字段或使用完整正文。")
+            continue
+        if field.kind == 'text':
+            check_text(value)
+        elif isinstance(value, list):
+            for item in value:
+                if field.kind == 'texts':
+                    check_text(item)
+                elif isinstance(item, dict):
+                    for column, cell in item.items():
+                        if column not in field.columns and cell:
+                            raise ValueError(f"结构化正文不支持 {key}.{column}，请使用已定义字段。")
+                        if column == 'options':
+                            if not isinstance(cell, dict) or any(not isinstance(v, bool) for v in cell.values()):
+                                raise ValueError("方案依赖必须明确写 true 或 false。")
+                            if len(cell) > 12 or any(not isinstance(k, str) or len(k) > 32 for k in cell):
+                                raise ValueError("方案依赖最多 12 项，方案标识不超过 32 字符。")
+                        else:
+                            check_text(cell)
+                    if key == 'open_questions' and item.get('question'):
+                        if item.get('owner') not in {'user', 'team'} or item.get('timing') not in {'now', 'later'} or not (item.get('reason') or '').strip():
+                            raise ValueError("待处理事项需要明确 owner、timing 和 reason；内部工作归 team。")
 
 
 def blocked_material(structured: dict[str, Any]) -> list[dict[str, str]]:
@@ -395,7 +480,11 @@ LABEL: dict[str, str] = {
     "claim": "主张",
     "audience_moment": "给谁看、什么场景",
     "hook": "前 3 秒",
-    "gives_up": "放弃了什么",
+    "gives_up": "方案取舍",
+    "story": "画面与表达",
+    "owner": "责任人",
+    "timing": "处理时机",
+    "reason": "需要确认的原因",
     "evidence_strength": "证据强度",
     "difficulty": "执行难度",
     "asset_needs": "素材依赖",
@@ -457,10 +546,10 @@ def label(key: str) -> str:
     return LABEL.get(key, key)
 
 
-def _fields(row: dict[str, Any], keys: tuple[str, ...]) -> list[dict[str, str]]:
+def _fields(row: dict[str, Any], keys: tuple[str, ...], secondary=()) -> list[dict[str, Any]]:
     """The non-empty columns of one row, labelled, in the order given."""
     return [
-        {"label": label(k), "value": str(row.get(k) or "")}
+        {"label": label(k), "value": str(row.get(k) or ""), **({"secondary": True} if k in secondary else {})}
         for k in keys
         if row.get(k)
     ]
@@ -537,9 +626,10 @@ def _direction(data: dict[str, Any]) -> list[dict[str, Any]]:
                         "fields": _fields(
                             o,
                             (
-                                "claim", "audience_moment", "hook", "gives_up",
+                                "claim", "audience_moment", "hook", "story", "gives_up",
                                 "evidence_strength", "difficulty", "asset_needs",
                             ),
+                            secondary=("gives_up", "evidence_strength", "difficulty", "asset_needs"),
                         ),
                     }
                     for o in options
@@ -571,6 +661,7 @@ def _direction(data: dict[str, Any]) -> list[dict[str, Any]]:
         blocks.append(
             {
                 "type": "matrix",
+                "collapsed": True,
                 "title": "这几个空白不解决，哪些方向站不住",
                 "columns": keys,
                 # ``true`` means "dies on this blank" — see the brief for

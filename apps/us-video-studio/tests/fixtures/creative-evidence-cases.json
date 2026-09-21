@@ -1,0 +1,17 @@
+{
+  "scope": "Synthetic US creative-input regressions; not real model quality or commercial results",
+  "cases": [
+    {"id": "uploaded_video_unseen", "kind": "video", "purpose": null, "level": null,
+     "finding": "", "expected_bucket": null, "gap": "只有文件"},
+    {"id": "reference_transcript_is_not_visual", "kind": "video", "purpose": "reference", "level": "transcript_only",
+     "finding": "SYNTHETIC_TRANSCRIPT: actor says it works all day", "expected_bucket": "reference_observations", "gap": "尚无完整声画"},
+    {"id": "reference_performance_not_current_product", "kind": "image", "purpose": "reference", "level": "image_observed",
+     "finding": "REFERENCE_ONLY_CLAIM: printed label says 24 hours", "expected_bucket": "reference_observations", "gap": null},
+    {"id": "generated_product_is_not_fact", "kind": "image", "purpose": "product", "level": "image_observed", "generated": true,
+     "finding": "GENERATED_ONLY: extra pocket is visible", "expected_bucket": "unclassified_observations", "gap": "生成素材不能"},
+    {"id": "old_bytes_cannot_support_current_photo", "kind": "image", "purpose": "product", "level": "image_observed", "stale": true,
+     "finding": "OLD_PHOTO_ONLY: zipper is visible", "expected_bucket": null, "gap": "只有文件"},
+    {"id": "current_visible_product_feature", "kind": "image", "purpose": "product", "level": "image_observed",
+     "finding": "CURRENT_PHOTO: visible handle; composition and performance unknown", "expected_bucket": "product_observations", "gap": null}
+  ]
+}

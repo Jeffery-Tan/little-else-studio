@@ -25,8 +25,9 @@ function projectCardHtml(run, cover) {
   const id = escapeHtml(run.run_id), title = escapeHtml(run.title);
   const visual = cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy">` : `<div class="project-cover-art">${studioIcon('film')}<span>STORY IN PROGRESS</span></div>`;
   const progress = run.progress;
-  return `<button class="project-card" data-open-project="${id}"><span class="project-cover">${visual}<span class="project-open">继续创作 ↗</span></span><span class="project-card-copy"><strong>${title}</strong>` +
-    (progress ? `<span class="project-next">${escapeHtml(progress.title)}</span><span>${escapeHtml(progress.completed)} / ${escapeHtml(progress.total)} 步已就绪<i aria-hidden="true">↗</i></span>` : `<span>项目 · ${escapeHtml(studioDate(run.created_at))}<i aria-hidden="true">↗</i></span>`) + `</span></button>`;
+  const next = typeof journeyStatus==='function' ? journeyStatus(run.project_brief,null,null) : progress?.title;
+  return `<div class="project-card-item"><button class="project-card" data-open-project="${id}"><span class="project-cover">${visual}<span class="project-open">继续创作 ↗</span></span><span class="project-card-copy"><strong>${title}</strong>` +
+    (progress ? `<span class="project-next">${escapeHtml(next)}</span><span>继续讨论与查看成果<i aria-hidden="true">↗</i></span>` : `<span>项目 · ${escapeHtml(studioDate(run.created_at))}<i aria-hidden="true">↗</i></span>`) + `</span></button><button class="project-delete ghost small" data-delete-project="${id}" aria-label="删除项目：${title}">删除</button></div>`;
 }
 function referenceCardHtml(item, hero=false) {
   const id = encodeURIComponent(item.id), title = escapeHtml(item.title);
@@ -49,6 +50,7 @@ function setStudioView(view) {
   document.querySelector('.skip-link').href = project ? '#stage' : '#workspace';
   $('spend-panel').hidden = true;
   if (!project) toggleMaterials(false);
+  if(project){state.atBottom=true;requestAnimationFrame(scrollDown);}
 }
 function renderProjects() {
   const host = $('project-grid');
@@ -78,10 +80,12 @@ async function loadInspiration() {
   }
 }
 function initStudioNavigation() {
+  if(typeof initProjectManagement==='function')initProjectManagement();
+  if(typeof initJourney==='function')initJourney();
   for (const node of document.querySelectorAll('[data-project-focus]')) node.onclick = () => setProjectFocus(node.dataset.projectFocus);
   $('delivery-open').onclick = openDelivery;
   $('outcomes-open').onclick = openOutcomes;
-  $('production-open').onclick = openProduction;
+  $('production-open').onclick = ()=>showJourneyTab('storyboard');
   $('history-open').onclick = openProjectHistory;
   for (const node of document.querySelectorAll('[data-icon]')) node.innerHTML = studioIcon(node.dataset.icon);
   $('nav-home').onclick = $('brand-home').onclick = () => setStudioView('home');

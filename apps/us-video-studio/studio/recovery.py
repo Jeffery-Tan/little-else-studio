@@ -66,7 +66,7 @@ def recovery_snapshot(jobs, run_id):
                 "open_attempts": attempts, "saved_artifacts": saved,
                 "active_run_id": jobs.active[0] if jobs.active else None,
                 "can_recover": jobs.active is None,
-                "can_continue": jobs.active is None and not calls and not attempts}
+                "can_continue": jobs.active is None and not attempts}
 
 
 def install_recovery_routes(app, jobs, require_run):

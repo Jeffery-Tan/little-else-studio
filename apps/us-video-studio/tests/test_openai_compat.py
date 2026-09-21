@@ -89,6 +89,7 @@ def test_malformed_tool_response_retains_known_usage_without_echoing_arguments()
         _parse(response(choices=[{'finish_reason': 'tool_calls', 'message': {'tool_calls': [
             {'id': 'x', 'type': 'function', 'function': {'name': 'read_artifact', 'arguments': 'private-invalid'}}]}}]), 'custom')
     assert failure.value.usage.input_tokens == 31
+    assert failure.value.usage_status == 'known'
     assert 'private-invalid' not in str(failure.value)
 
 

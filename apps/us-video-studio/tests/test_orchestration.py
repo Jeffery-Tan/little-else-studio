@@ -72,7 +72,7 @@ def test_the_reviewer_cannot_produce_or_dispatch_work():
     # photo is exactly the kind of claim the reviewer should be able to check,
     # and it is a read of filenames — not of the producer's reasoning, and not
     # of anything it could write.
-    assert set(names) == {"read_artifact", "list_materials", "finish_review"}
+    assert set(names) == {"read_artifact", "list_materials", "finish_review", "read_capabilities", "read_method_document"}
     assert "submit_stage" not in names
     assert "dispatch" not in names
     assert "write_stage" not in names
@@ -222,8 +222,9 @@ def test_every_round_of_a_sub_agent_is_on_the_ledger(env, tmp_path):
     )
 
     rows = ledger.entries(RUN)
-    assert len(store.read_ledger(RUN)) == 6
-    assert len(rows) == 3
+    # Read + submit each have intent/settlement; no paid farewell after submit.
+    assert len(store.read_ledger(RUN)) == 4
+    assert len(rows) == len(model.calls) == 2
     assert {r.role for r in rows} == {"director"}
     assert all(r.pricing_source == "test" for r in rows)
 
@@ -271,7 +272,7 @@ def test_reviewer_sees_the_artifact_and_not_the_producer_conversation(env, tmp_p
 
     assert outcome.verdict == "pass"
     request = model.calls[0]
-    assert request["tool_names"] == ["read_artifact", "list_materials", "finish_review"]
+    assert request["tool_names"] == list(tool_names_for("reviewer"))
     seed = request["messages"][0]["content"]
     assert "早上装好，中午还是热的" in seed      # the artifact itself
     assert "带饭用" in seed                       # upstream, as evidence
@@ -421,7 +422,8 @@ def test_review_is_not_repeated_for_the_same_fingerprint(env, tmp_path):
         store=store, pipeline=pipeline, settings=settings_for(tmp_path),
         client=model, ledger=ledger, run_id=RUN, stage="direction",
     )
-    assert "已经审核过" in outcome.error
+    assert outcome.error == "" and outcome.verdict == "pass"
+    assert "已保存的审核结论" in outcome.text
     assert model.calls == []
 
 
@@ -449,6 +451,7 @@ def test_a_stale_version_is_not_sent_for_review(env, tmp_path):
 def test_orchestrator_turn_dispatches_writes_and_reports(env, tmp_path):
     store, pipeline, ledger = env
     model = ScriptedModel([
+        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video"}),
         tool_turn("t1", "read_project_state", {}),
         tool_turn("t2", "write_stage", {
             "stage": "intake",
@@ -457,10 +460,8 @@ def test_orchestrator_turn_dispatches_writes_and_reports(env, tmp_path):
             "limitations": ["卖点还没定"],
         }),
         tool_turn("t3", "dispatch", {"stage": "direction", "brief": "出两个方向"}),
-        # The next two turns belong to the dispatched director, not to the
-        # orchestrator: it submits, then stops.
+        # The next turn belongs to the director; committing ends its role.
         tool_turn("t4", "submit_stage", {"content": "方向正文", "summary": "两个方向"}),
-        final_turn("导演：已提交。"),
         final_turn("intake 已整理，direction 已派出去并提交。"),
     ])
     orch = make_orchestrator(store, pipeline, ledger, model, tmp_path)
@@ -490,10 +491,10 @@ def test_orchestrator_cannot_approve_and_is_told_so(env, tmp_path):
 
     # No such tool exists; the loop reports it and nothing was approved.
     assert store.list_approvals(RUN, "direction") == []
-    assert "no tool named" in model.requests_text()
+    assert "not available in this role's request" in model.requests_text()
 
 
-def test_orchestrator_state_view_includes_spend_and_the_no_approval_rule(env, tmp_path):
+def test_orchestrator_state_view_prioritizes_project_not_accounting(env, tmp_path):
     store, pipeline, ledger = env
     ledger.record(RUN, role="director", stage="direction", model="deepseek-flash",
                   input_tokens=1000, output_tokens=500)
@@ -502,12 +503,12 @@ def test_orchestrator_state_view_includes_spend_and_the_no_approval_rule(env, tm
     orch.send("现在什么情况？")
 
     system = model.calls[0]["system"]
-    assert "0.0020" in system          # 1000/1e6*1 + 500/1e6*2
+    assert "0.0020" not in system
     assert "不能批准" in system
-    assert "不是账单" in system
+    assert "当前项目摘要" in system
 
 
-def test_reading_state_returns_spend_not_just_the_stage_board(env, tmp_path):
+def test_reading_state_returns_shared_brief_without_accounting_tasks(env, tmp_path):
     """Observed live 2026-09-17: the orchestrator said it had no cost figures.
 
     The spend block was only in the system prompt, which is written once before
@@ -523,13 +524,13 @@ def test_reading_state_returns_spend_not_just_the_stage_board(env, tmp_path):
         final_turn("看完了。"),
     ])
     orch = make_orchestrator(store, pipeline, ledger, model, tmp_path)
-    orch.send("花了多少钱？")
+    orch.send("现在进展如何？")
 
     # What the model saw in round 2, after the tool ran.
     second = model.requests_text()
-    assert "成本" in second
-    assert "开发期累计估算" in second
-    assert "已知" in second and "用量待核实" in second
+    assert "当前项目摘要" in second
+    assert "开发期累计估算" not in second
+    assert 'schema_version' in second and 'deliverables' in second
 
 
 def test_second_turn_carries_the_first_turn_and_reanchors_to_user(env, tmp_path):
@@ -582,7 +583,7 @@ def test_a_budget_stop_from_a_tool_is_not_handed_back_to_the_model():
         raise BudgetExceeded("token cap reached")
 
     with pytest.raises(BudgetExceeded):
-        run_agent_loop(model, model="m", system="s", messages=[], tools=[],
+        run_agent_loop(model, model="m", system="s", messages=[], tools=[{"name": "read_artifact"}],
                        execute_tool=execute, max_rounds=3)
     assert len(model.calls) == 1, "the loop must not go round again"
 

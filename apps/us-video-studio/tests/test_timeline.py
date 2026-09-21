@@ -605,7 +605,8 @@ def test_a_card_carries_the_stage_laid_out(env):
             ],
             "recommended": "B",
             "dependency_matrix": [{"need": "主推 SKU", "options": {"A": True, "B": False}}],
-            "open_questions": [{"question": "主推哪个 SKU？", "blocks": "依赖矩阵整行"}],
+            "open_questions": [{"question": "主推哪个 SKU？", "blocks": "依赖矩阵整行",
+                                "owner": "user", "timing": "now", "reason": "用户选择主推商品"}],
         },
     )
 
@@ -638,7 +639,7 @@ def test_the_payload_survives_the_sidecar(env):
 # ------------------------------------------ what the run is waiting on him for -- #
 
 
-def test_unanswered_questions_from_every_stage_are_collected(env):
+def test_legacy_unknowns_are_preserved_for_triage_not_assigned_to_user(env):
     store, pipeline, ledger = env
     store.append_chat(RUN, "user", "整理需求。")
     attempt = pipeline.start_attempt(RUN, "intake")
@@ -658,12 +659,10 @@ def test_unanswered_questions_from_every_stage_are_collected(env):
     )
 
     questions = timeline(store, pipeline, ledger)["questions"]
-    assert [q["question"] for q in questions] == [
-        "这条片子投哪里？", "有没有实拍素材？", "主推哪个 SKU？",
-    ]
-    assert questions[0]["numbered"] == "①需求整理"
-    assert questions[2]["stage_label"] == "创意方向"
-    assert questions[2]["blocks"] == "方向 A"
+    assert questions == []
+    issues = timeline(store, pipeline, ledger)['brief']['issues']
+    assert [q['question'] for q in issues] == ['这条片子投哪里？', '有没有实拍素材？', '主推哪个 SKU？']
+    assert all(q['needs_triage'] and q['owner'] == 'team' for q in issues)
 
 
 def test_a_question_row_with_no_question_is_not_listed(env):

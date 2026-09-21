@@ -3,7 +3,39 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
-const source = fs.readFileSync(new URL('../../studio/web/runtime.js', import.meta.url), 'utf8');
+const source = fs.readFileSync(new URL('../../studio/web/team-progress.js', import.meta.url), 'utf8') + '\n' + fs.readFileSync(new URL('../../studio/web/runtime.js', import.meta.url), 'utf8');
+test('project brief outranks successful job status and historical missing usage',()=>{
+  const h=harness(async()=>{throw new Error('no request on render');});
+  const brief={title:'创意方向第 3 版 · 审核未完成',detail:'原方案已保留',phase:'review_failed'};
+  h.context.showJob({job_id:'j',status:'succeeded',job_kind:'conversation',brief,events:[],unresolved_calls:[{usage_status:'unknown'}]});
+  assert.equal(h.context.state.projectBrief,brief);
+  const copy=visibleText(h.nodes.get('job-status'));
+  assert.match(copy,/团队工作记录/);assert.doesNotMatch(copy,/本轮完成|核账|未返回用量/);
+  assert.equal(h.context.state.busy,false);
+});
+
+test('uncertain review retries preserve the exact version and dedicated endpoint',async()=>{
+  const calls=[];
+  const h=harness(async(url,options)=>{
+    if(!options)return {can_continue:true,revision:'r'};
+    calls.push({url,body:JSON.parse(options.body)});
+    if(calls.length===1)throw new TypeError('offline');
+    return {job_id:'review',request_id:'same-review',job_kind:'stage_review',status:'succeeded',events:[]};
+  });
+  const payload={request_kind:'stage_review',request_id:'same-review',stage:'direction',expected_version:3,expected_artifact_sha256:'f'.repeat(64)};
+  await h.context.submitJob('run-a',payload);
+  await h.nodes.get('job-status').children.at(-1).onclick();
+  assert.equal(calls.length,2);
+  assert.ok(calls.every(c=>c.url==='/api/runs/run-a/actions/review'));
+  assert.deepEqual(calls[0].body,calls[1].body);
+});
+test('resolved accounting uses current recovery state without hiding actual budget caps', () => {
+  const h = harness(async () => ({}));
+  const job = {status: 'blocked', reason: '1 model call(s) have unknown, partial or pending usage', events: []};
+  assert.equal(h.context.jobPresentation(job, {can_continue: true}).label, '可以继续');
+  assert.notEqual(h.context.jobPresentation(job, {can_continue: false}).label, '可以继续');
+  assert.notEqual(h.context.jobPresentation({...job, reason: 'tokens reached the soft cap'}, {can_continue: true}).label, '可以继续');
+});
 test('missing Codex executable explains the startup problem without exposing paths', () => {
   const h = harness(async () => ({}));
   const guidance = h.context.jobGuidance({status:'blocked', reason:'连接准备未通过：Codex CLI is not installed or not on PATH'});
@@ -45,14 +77,35 @@ test('uncertain image submission retains the same payload and image route',async
   assert.equal(h.storage.size,0);
   assert.equal(h.context.state.busy,false);
 });
+
+test('uncertain video observation retries acceptance identity without becoming a conversation job',async()=>{
+  const calls=[];
+  const h=harness(async(url,options)=>{
+    if(!options) return {can_continue:true,revision:'r'};
+    calls.push({url,body:JSON.parse(options.body)});
+    if(calls.length===1) throw new TypeError('offline');
+    return {job_id:'video-1',request_id:'same-video',job_kind:'video_analysis',status:'succeeded',events:[]};
+  });
+  const payload={request_kind:'video_analysis',request_id:'same-video',name:'reference.mp4',consent:true};
+  await h.context.submitJob('run-a',payload);
+  await h.nodes.get('job-status').children.at(-1).onclick();
+  assert.equal(calls.length,2);
+  assert.ok(calls.every(c=>c.url==='/api/runs/run-a/video-analysis'));
+  assert.deepEqual(calls[0].body,calls[1].body);
+  assert.equal(h.storage.size,0);
+});
 function harness(api) {
   const nodes = new Map();
   const node = () => ({ children: [], disabled: false, hidden: false, value: '',
-    append(...items) { this.children.push(...items); }, replaceChildren() { this.children = []; } });
+    append(...items) { this.children.push(...items); }, replaceChildren() { this.children = []; },
+    setAttribute() {}, addEventListener() {}, showModal() { this.open = true; },
+    querySelector(selector) { return descendants(this, n=>n.className?.split(' ').includes(selector.slice(1)))[0]; } });
+  const body = node();
   const storage = new Map();
   const timers = [];
   const context = vm.createContext({
     state: { runId: 'run-a', busy: false, decisionBusy: false },
+    document: {body},
     $: (id) => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); },
     box: (tag, className, text) => Object.assign(node(), { tag, className, text }),
     sessionStorage: { getItem: (key) => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key) },
@@ -60,7 +113,7 @@ function harness(api) {
     refreshTimeline: async () => {}, toast() {}, api,
   });
   vm.runInContext(source, context);
-  return { context, nodes, storage, timers };
+  return { context, nodes, storage, timers, body };
 }
 
 test('uncertain acceptance retries the same request id and preserves the user message', async () => {
@@ -152,7 +205,7 @@ function visibleText(node) {
   return [node.text || '', ...node.children.map(visibleText)].join(' ');
 }
 
-test('raw errors and machine identifiers are collapsed while unknown-usage recovery stays prominent', () => {
+test('raw errors stay collapsed and unfinished stages remain actionable without accounting forms', () => {
   const h = harness(async () => { throw new Error('must not call'); });
   const job = { job_id: 'raw-job-id', status: 'blocked', reason: 'RawTransportError: diagnostic-secret',
     unresolved_calls: [{ call_id: 'raw-call-id', usage_status: 'unknown' }],
@@ -161,21 +214,26 @@ test('raw errors and machine identifiers are collapsed while unknown-usage recov
   h.context.showJob(job);
   const host = h.nodes.get('job-status');
   const visible = visibleText(host);
-  assert.match(visible, /用量与费用尚未核实/);
-  assert.match(visible, /核对提供方记录/);
+  assert.match(visible, /尚未结束的制作阶段/);
+  assert.doesNotMatch(visible, /核账|待核实/);
+  assert.doesNotMatch(visible, /输入 Tokens|确认并保存核账结果/);
   assert.match(visible, /不会自动重试/);
   assert.doesNotMatch(visible, /diagnostic-secret|raw-job-id|raw-call-id|raw-attempt-id|material_plan/);
-  const details = host.children[0].children.find((node) => node.tag === 'details');
+  const activity = host.children[0].children.find(node => node.text === '团队工作记录 ↗');
+  activity.onclick();
+  const dialog = h.body.children[0];
+  assert.doesNotMatch(visibleText(dialog), /diagnostic-secret|raw-job-id|raw-call-id/);
+  const details = dialog.querySelector('.team-diagnostics');
   details.open = true;
-  assert.match(visibleText(host), /diagnostic-secret/);
-  assert.match(visibleText(host), /recovery abandon/);
+  assert.match(visibleText(dialog), /diagnostic-secret/);
+  assert.match(visibleText(dialog), /recovery abandon/);
   assert.equal(h.timers.length, 0);
 });
 
 test('current production role replaces raw model progress on the collapsed running status', () => {
   const h = harness(async () => {});
   h.context.showJob({ job_id: 'j1', status: 'running', events: [{ role: 'writer', say: 'internal-schema-dump' }] });
-  assert.match(visibleText(h.nodes.get('job-status')), /编剧正在推进/);
+  assert.match(visibleText(h.nodes.get('job-status')), /编剧 · 继续处理本轮内容/);
   assert.doesNotMatch(visibleText(h.nodes.get('job-status')), /internal-schema-dump/);
 });
 
@@ -196,50 +254,16 @@ const recoverySnapshot = {
   unresolved_calls: [{ run_id: 'run-a', call_id: 'call-exact', role: 'director', provider: 'synthetic', model: 'test', call_status: 'pending' }],
 };
 
-test('recovery is visible without a previous job and never supplies default token counts', async () => {
-  const calls = [];
-  const h = harness(async (url, options) => {
-    calls.push({ url, options });
-    return url.endsWith('/recovery') ? recoverySnapshot : null;
-  });
-  await h.context.restoreJob('run-a');
-  const host = h.nodes.get('job-status');
-  assert.equal(host.hidden, false);
-  assert.match(visibleText(host), /找回创作进度/);
-  assert.equal(h.nodes.get('send').disabled, true);
-  const counts = descendants(host, (node) => node.type === 'number');
-  assert.equal(counts.length, 2);
-  assert.deepEqual(counts.map((node) => node.value), ['', '']);
-  assert.ok(calls.every((call) => !call.options));
-});
-
-test('accounting form requires evidence and explicit confirmation, binds the exact call and snapshot', async () => {
+test('unknown usage alone never disables sending or creates an accounting form', async () => {
   const writes = [];
   const h = harness(async (url, options) => {
-    if (options) {
-      writes.push({ url, payload: JSON.parse(options.body) });
-      return { ...recoverySnapshot, can_continue: true, unresolved_calls: [] };
-    }
-    return url.endsWith('/recovery') ? recoverySnapshot : null;
+    if (options) writes.push(options);
+    return url.endsWith('/recovery') ? {...recoverySnapshot, can_continue: true} : null;
   });
   await h.context.restoreJob('run-a');
-  const host = h.nodes.get('job-status');
-  const form = descendants(host, (node) => node.tag === 'form')[0];
-  const inputs = descendants(form, (node) => node.type === 'number');
-  const evidence = descendants(form, (node) => node.tag === 'textarea')[0];
-  const confirmation = descendants(form, (node) => node.type === 'checkbox')[0];
-  const event = { preventDefault() {} };
-  await form.onsubmit(event);
+  assert.equal(h.nodes.get('send').disabled, false);
+  assert.equal(descendants(h.nodes.get('job-status'), n => n.tag === 'form').length, 0);
   assert.equal(writes.length, 0);
-  inputs[0].value = '123'; inputs[1].value = '8'; evidence.value = 'provider export #1';
-  await form.onsubmit(event);
-  assert.equal(writes.length, 0);
-  confirmation.checked = true;
-  await form.onsubmit(event);
-  assert.equal(writes.length, 1);
-  assert.equal(writes[0].url, '/api/runs/run-a/recovery/reconcile');
-  assert.deepEqual(writes[0].payload, { expected_revision: 'a'.repeat(64), call_id: 'call-exact',
-    input_tokens: 123, output_tokens: 8, evidence_note: 'provider export #1' });
 });
 
 test('abandon binds the viewed attempt, retains typed reason on conflict, and cannot target another selected project', async () => {
@@ -264,17 +288,12 @@ test('abandon binds the viewed attempt, retains typed reason on conflict, and ca
   assert.equal(writes.length, 1);
 });
 
-test('a call in another project exposes navigation, never a settlement form for that call', async () => {
-  const h = harness(async (url) => url.endsWith('/recovery')
-    ? { ...recoverySnapshot, unresolved_calls: [{ ...recoverySnapshot.unresolved_calls[0], run_id: 'other-run' }] } : null);
-  let selected;
-  h.context.selectRun = (runId) => { selected = runId; };
+test('unknown usage in another project does not block this project or request settlement', async () => {
+  const h = harness(async url => url.endsWith('/recovery')
+    ? {...recoverySnapshot, can_continue: true, unresolved_calls: [{...recoverySnapshot.unresolved_calls[0], run_id:'other-run'}]} : null);
   await h.context.restoreJob('run-a');
-  const host = h.nodes.get('job-status');
-  assert.equal(descendants(host, (node) => node.tag === 'form').length, 0);
-  const link = descendants(host, (node) => node.text === '打开对应项目')[0];
-  link.onclick();
-  assert.equal(selected, 'other-run');
+  assert.equal(h.nodes.get('send').disabled, false);
+  assert.equal(descendants(h.nodes.get('job-status'), node => node.tag === 'form').length, 0);
 });
 
 test('continue after recovery only prepares a draft and never sends it', async () => {

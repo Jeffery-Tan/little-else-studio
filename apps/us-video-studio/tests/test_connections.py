@@ -177,8 +177,8 @@ def test_pricing_is_route_specific_codex_unknown_and_frozen_through_reconciliati
     assert codex.estimated_usd is None and codex.provider == 'codex_cli'
     assert 'DeepSeek' not in codex.pricing_source
     call = ledger.begin_call('test-run', role='writer', stage='writing', model='custom-model')
-    with pytest.raises(BudgetExceeded):
-        ledger.begin_call('test-run', role='writer', stage='writing', model='custom-model')
+    ledger.ensure_within_budget()
+    assert ledger.totals().unknown_calls == 1
     ledger.settle_call('test-run', call, input_tokens=100, output_tokens=None, usage_status='partial', ok=False)
     changed = Ledger(store, replace(settings, pricing_by_route={('test-api', 'custom-model'): old}))
     recovered = changed.reconcile('test-run', call, input_tokens=100, output_tokens=200, evidence_note='Synthetic provider receipt')
@@ -227,8 +227,7 @@ def test_proven_uninvoked_setup_failure_is_failed_zero_usage_but_sent_failure_st
         BudgetedClient(SentFailure(), ledger, run_id='test-run', role='writer', stage='writing').complete(
             model='test', system='', messages=[], tools=[])
     assert ledger.entries()[-1].usage_status == 'unknown'
-    with pytest.raises(BudgetExceeded):
-        ledger.ensure_within_budget()
+    ledger.ensure_within_budget()
 
 
 @pytest.mark.parametrize('tool', ['dispatch', 'request_review'])
@@ -244,7 +243,7 @@ def test_subrole_connection_preflight_stops_orchestrator_without_retry_or_open_a
     if tool == 'request_review':
         attempt = pipeline.start_attempt('test-run', 'direction')
         pipeline.submit('test-run', 'direction', attempt.token, content='Synthetic directions', summary='fixture')
-    model = ScriptedModel([tool_turn('call-1', tool, {'stage': 'direction', 'brief': 'Synthetic task'})])
+    model = ScriptedModel([tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video"}), tool_turn('call-1', tool, {'stage': 'direction', 'brief': 'Synthetic task'})])
     class Router:
         def for_role(self, role, run_id):
             if role != 'orchestrator':
@@ -254,8 +253,8 @@ def test_subrole_connection_preflight_stops_orchestrator_without_retry_or_open_a
     ledger = Ledger(store, settings)
     with pytest.raises(ConnectionUnavailable):
         Orchestrator(store, pipeline, settings, Router(), ledger, 'test-run').send('Proceed with synthetic task')
-    assert len(model.calls) == 1
-    assert ledger.totals().calls == 1 and ledger.totals().unknown_calls == 0
+    assert len(model.calls) == 2
+    assert ledger.totals().calls == 2 and ledger.totals().unknown_calls == 0
     assert pipeline.stage_state('test-run', 'direction').open_attempt is None
     assert not store.list_reviews('test-run', 'direction')
 

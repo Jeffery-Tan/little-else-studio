@@ -123,14 +123,15 @@ def test_restart_marks_interrupted_and_preserves_unknown_call(tmp_path):
     model = ScriptedModel([final_turn('不应调用')])
     with TestClient(build_app(settings, client_factory=lambda: model)) as http:
         job = http.get(f'/api/runs/{RUN}/jobs/latest').json()
-        assert job['status'] == 'interrupted' and not job['can_continue']
+        assert job['status'] == 'interrupted' and job['can_continue']
         assert job['unresolved_calls'][0]['call_id'] == call_id
         assert '不会自动重发' in job['recovery']
         assert post_job(http, 'old', '旧指令')['job_id'] == 'interrupted-job'
         next_job = post_job(http, 'new', '先继续')
-        assert wait_job(http, next_job['job_id'])['status'] == 'blocked'
-        assert model.calls == []
-        assert (store.run_dir(RUN) / 'ledger.jsonl').read_bytes() == original_ledger
+        assert wait_job(http, next_job['job_id'])['status'] == 'succeeded'
+        assert len(model.calls) == 1
+        assert (store.run_dir(RUN) / 'ledger.jsonl').read_bytes().startswith(original_ledger)
+        assert Ledger(store, settings).totals().unknown_calls == 1
 
 
 def test_writer_lease_refuses_second_service_and_releases(tmp_path):
@@ -184,10 +185,11 @@ def test_role_connections_are_frozen_per_job_and_keys_never_enter_events(tmp_pat
     monkeypatch.setattr(connections, '_dpapi', lambda data, **kwargs: data)
     entered, release = threading.Event(), threading.Event()
     model = ScriptedModel([
+        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video"}),
         tool_turn('i', 'write_stage', {'stage': 'intake', 'content': '需求', 'summary': '需求'}),
         tool_turn('d', 'dispatch', {'stage': 'direction', 'brief': '两个方向'}),
         tool_turn('s', 'submit_stage', {'content': '方案', 'summary': '方向'}),
-        final_turn('导演结束'), final_turn('主控结束'),
+        final_turn('主控结束'),
     ])
     seen = []
     class Adapter:
@@ -216,7 +218,8 @@ def test_role_connections_are_frozen_per_job_and_keys_never_enter_events(tmp_pat
         release.set()
         final = wait_job(http, job['job_id'])
         assert final['status'] == 'succeeded'
-        assert len(model.calls) == 5
+        assert len(model.calls) == 5  # Current-turn routing plus a real director submission.
+        assert http.get(f"/api/runs/{RUN}/artifacts/direction/1").status_code == 200
         assert {c['model'] for c in model.calls} == {'model-v1'}
         assert {token for _, token in seen} == {'synthetic-key-v1'}
         assert final['model_config']['revision'] == 1

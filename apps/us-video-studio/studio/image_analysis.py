@@ -1,4 +1,4 @@
-"""Explicit single-image jobs and human-selected evidence, on existing journals.
+"""Explicit image/frame observation jobs and selected evidence on existing journals.
 
 No generation, no background retries, and no image bytes in durable job metadata.
 Model observations remain candidates until the user selects them in the UI.
@@ -65,7 +65,7 @@ def _digest(value):
 def read_image(store, run_id, name, expected_sha256):
     path = resolve(store, run_id, name)
     if path is None or path.suffix.lower() not in {'.png', '.jpg', '.jpeg', '.webp'}:
-        raise ObservationError('请选择 PNG、JPEG 或 WebP 静态图片。视频请先记录人工观察。')
+        raise ObservationError('请选择 PNG、JPEG 或 WebP 静态图片。视频请使用视频画面分析入口。')
     with path.open('rb') as source:
         raw = source.read(MAX_IMAGE_BYTES + 1)
     if len(raw) > MAX_IMAGE_BYTES:
@@ -97,7 +97,7 @@ def candidates(store, run_id):
         current = {m['name']: m['sha256'] for m in material_workspace(store, run_id)['materials']}
         results = []
         for event in store.read_events(run_id):
-            if event.get('kind') != 'image_analysis_candidate':
+            if event.get('kind') not in ('image_analysis_candidate', 'video_analysis_candidate'):
                 continue
             candidate = event['candidate']
             status = ('stale' if current.get(candidate['name']) != candidate['sha256'] else
@@ -136,6 +136,13 @@ def confirm_candidate(store, run_id, analysis_id, *, expected_candidate_sha256,
                       analysis_id=analysis_id, candidate_sha256=expected_candidate_sha256,
                       selected_findings=sorted(indices), call_id=candidate['call_id'],
                       findings=[candidate['findings'][i] for i in sorted(indices)])
+        if candidate.get('media_kind') == 'video':
+            record.update(level='frames_observed',
+                          method='模型收到带时间点的抽帧；工作台用户选择采用，未发送音频',
+                          coverage=f"{len(candidate['sampling']['frames'])} 个稀疏画面，视频时长 {candidate['sampling']['duration_seconds']:.3f}s；未听声音",
+                          sampling=candidate['sampling'],
+                          timeline=[t for t in candidate['timeline'] if t['finding_index'] in indices],
+                          reference_methods=[m for m in candidate['reference_methods'] if set(m['supports']) <= set(indices)])
         manifest['observations'].append(record)
         encoded = json.dumps(manifest, ensure_ascii=False, indent=2) + '\n'
         if len(encoded.encode('utf-8')) > MAX_MANIFEST_BYTES:
@@ -144,16 +151,20 @@ def confirm_candidate(store, run_id, analysis_id, *, expected_candidate_sha256,
         return material_workspace(store, run_id)
 
 
-def prepare_analysis(store, pipeline, connections, settings, request, *, client_factory=None):
+def prepare_analysis(store, pipeline, connections, settings, request, *, client_factory=None, video=False):
     """Freeze actual bytes and only the selected credential before creating a job."""
     run_id, payload = request
     if payload.consent is not True:
-        raise ObservationError('请确认将此图片发送至所选模型，并了解可能产生调用费用。')
+        raise ObservationError('请确认将此素材的观察输入发送至所选模型，并了解可能产生调用费用。')
     with store.run_lock(run_id):
         store.read_run(run_id)
         if any(pipeline.stage_state(run_id, s).open_attempt for s in STAGES):
-            raise ObservationConflict('请先在恢复面板处理未完成的制作阶段，再分析图片。')
-        raw, mime = read_image(store, run_id, payload.name, payload.expected_sha256)
+            raise ObservationConflict('请先在恢复面板处理未完成的制作阶段，再分析素材。')
+        if video:
+            from .video_observation import read_video
+            raw, mime = read_video(store, run_id, payload.name, payload.expected_sha256), None
+        else:
+            raw, mime = read_image(store, run_id, payload.name, payload.expected_sha256)
     snapshot = connections.snapshot(image_connection=payload.connection_id, image_model=payload.model,
                                     expected_revision=payload.expected_revision)
     job_settings = snapshot.settings(settings)
@@ -167,15 +178,30 @@ def prepare_analysis(store, pipeline, connections, settings, request, *, client_
 
     def run(_text, emit, check_cancel):
         check_cancel()
-        emit({'type': 'status', 'role': 'material', 'message': '正在观察这张图片，结果将等待你的确认。'})
-        client = client_factory() if client_factory is not None else snapshot.client(check_cancel=check_cancel, max_tokens=2048)
+        emit({'type': 'status', 'role': 'material', 'message': '正在提取视频画面，不分析音频。' if video else '正在观察这张图片，结果将等待你的确认。'})
+        packet = None
+        if video:
+            from .video_observation import SYSTEM as VIDEO_SYSTEM, sample_video, public_packet, parse_result
+            try:
+                packet = sample_video(raw, check_cancel)
+            except ObservationError as exc:
+                raise PipelineError('video_input', str(exc)) from exc
+            blocks = [{'type': 'text', 'text': '素材用途：' + payload.purpose + '\n实际输入范围：' + json.dumps(public_packet(packet), ensure_ascii=False)}]
+            for frame in packet['frames']:
+                blocks.extend([{'type': 'text', 'text': f"帧 {frame['id']} · {frame['time_seconds']:.6f}s"},
+                    {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/jpeg',
+                        'data': base64.b64encode(frame['data']).decode('ascii')}}])
+            system = VIDEO_SYSTEM
+        else:
+            blocks = [{'type': 'image', 'source': {'type': 'base64', 'media_type': mime,
+                        'data': base64.b64encode(raw).decode('ascii')}},
+                      {'type': 'text', 'text': '素材用途：' + ('商品素材' if payload.purpose == 'product' else '创意参考')}]
+            system = SYSTEM
+        check_cancel()
+        client = client_factory() if client_factory is not None else snapshot.client(check_cancel=check_cancel, max_tokens=4096 if video else 2048)
         before = {c.call_id for c in ledger.entries(run_id)}
-        turn = BudgetedClient(client, ledger, run_id=run_id, role='material', stage='image_analysis').complete(
-            model=model, system=SYSTEM, tools=[], messages=[{'role': 'user', 'content': [
-                {'type': 'image', 'source': {'type': 'base64', 'media_type': mime,
-                                           'data': base64.b64encode(raw).decode('ascii')}},
-                {'type': 'text', 'text': '素材用途：' + ('商品素材' if payload.purpose == 'product' else '创意参考')},
-            ]}])
+        turn = BudgetedClient(client, ledger, run_id=run_id, role='material', stage='video_analysis' if video else 'image_analysis').complete(
+            model=model, system=system, tools=[], messages=[{'role': 'user', 'content': blocks}])
         # BudgetedClient has already retained the actual usage, even if the
         # returned structured observation cannot be accepted as a candidate.
         try:
@@ -187,21 +213,25 @@ def prepare_analysis(store, pipeline, connections, settings, request, *, client_
             result = json.loads(content)
             if not isinstance(result, dict):
                 raise ValueError()
-            findings, limitations = _lines(result.get('findings'), '观察内容'), _lines(result.get('limitations'), '未知或限制')
+            parsed = parse_result(result, packet, payload.purpose) if video else result
+            findings, limitations = _lines(parsed.get('findings'), '观察内容'), _lines(parsed.get('limitations'), '未知或限制')
             if len(findings) > 20 or len(limitations) > 20 or any(len(x) > 1000 for x in findings + limitations):
                 raise ValueError()
         except (ValueError, TypeError):
-            raise PipelineError('analysis_invalid', '模型未返回完整、可审阅的图片观察。本次用量已保留，没有自动重试。') from None
+            raise PipelineError('analysis_invalid', '模型未返回完整、可审阅的素材观察。本次用量已保留，没有自动重试。') from None
         row = next(c for c in ledger.entries(run_id) if c.call_id not in before)
         candidate = dict(analysis_id=str(uuid.uuid4()), name=payload.name, sha256=payload.expected_sha256,
-                         purpose=payload.purpose, findings=findings, limitations=limitations + [LIMITATION],
+                         purpose=payload.purpose, findings=findings, limitations=limitations if video else limitations + [LIMITATION],
                          observed_at=utcnow(), call_id=row.call_id, actual_model=turn.model,
                          usage_status=row.usage_status, estimated_usd=row.estimated_usd, **summary)
+        if video:
+            candidate.update(media_kind='video', sampling=public_packet(packet),
+                             timeline=parsed['timeline'], reference_methods=parsed['reference_methods'])
         with store.run_lock(run_id):
-            store.append_event(run_id, 'image_analysis_candidate', candidate=candidate)
+            store.append_event(run_id, 'video_analysis_candidate' if video else 'image_analysis_candidate', candidate=candidate)
         emit({'type': 'image_analysis_ready', 'analysis_id': candidate['analysis_id'],
-              'message': '图片分析已保存。请打开项目素材，核对并选择要采用的观察。'})
-        return SimpleNamespace(stopped_because='done', text='图片分析已保存，等待确认。', rounds=1, used_tools=[])
+              'message': '素材分析已保存。请打开项目素材，核对并选择要采用的观察。'})
+        return SimpleNamespace(stopped_because='done', text='素材分析已保存，等待确认。', rounds=1, used_tools=[])
 
     return run, summary
 
@@ -214,11 +244,13 @@ def install_image_analysis_routes(app, jobs, require_run, connections, settings,
         require_run(run_id)
         try:
             doc = connections.public()
+            from .video_observation import available, MAX_SECONDS, MAX_FRAMES
             return {'candidates': candidates(store, run_id), 'revision': doc['revision'],
                     'connections': [{**c, 'suggested_model': next((b['model'] for b in doc['roles'].values()
                         if b['connection'] == c['id'] and b['model']), '')}
                         for c in doc['connections'] if c['provider'] in VISION_PROVIDERS and c['has_key']],
-                    'max_bytes': MAX_IMAGE_BYTES}
+                    'max_bytes': MAX_IMAGE_BYTES, 'video': {'available': available(), 'max_seconds': MAX_SECONDS,
+                        'max_frames': MAX_FRAMES, 'audio_observed': False}}
         except ObservationError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -246,3 +278,14 @@ def install_image_analysis_routes(app, jobs, require_run, connections, settings,
                 raise HTTPException(409, str(exc)) from exc
             except ObservationError as exc:
                 raise HTTPException(400, str(exc)) from exc
+
+    @app.post('/api/runs/{run_id}/video-analysis')
+    def analyze_video(run_id: str, payload: AnalysisIn):
+        require_run(run_id)
+        try:
+            return jobs.submit(run_id, f'分析视频画面：{payload.name}', payload.request_id,
+                kind='video_analysis', payload=payload.model_dump(exclude={'request_id'}),
+                prepare=lambda _: prepare_analysis(store, jobs.pipeline, connections, settings,
+                    (run_id, payload), client_factory=client_factory, video=True))
+        except (PipelineError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc

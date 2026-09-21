@@ -24,7 +24,7 @@ def project_progress(state):
     artifact = target['latest']
     out.update(action='draft', label='准备继续', title=f'下一步：{label}',
                detail='先查看制作要求，再发送给制片团队。',
-               prompt=f'请基于本项目已保存的资料和当前有效决定，推进「{label}」。缺少必要事实时先列出问题；完成这一阶段后停下来供我阅读。不要代替我批准。')
+               prompt=f'请基于本项目已保存的资料和当前有效决定，推进「{label}」。先由团队查阅历史、素材和已有回答，解决内部工作；仅确需我提供的事实或选择才请我确认。完成这一阶段后停下来供我阅读。不要代替我批准。')
     if target['open_attempt']:
         out.update(action='recovery', title='有一项制作尚未结束', label='查看运行状态',
                    detail='先确认当前任务是否仍在执行；已保存的内容会保留。')

@@ -69,11 +69,12 @@ async function openRevisionWorkspace(runId,stage,version=0) {
       if(!data.editable || d.base_sha256!==data.sha256){node.append(box('p','material-warning',data.reason || '请打开这份修改对应的当前版本。'));continue;}
       if(stage==='writing'&&d.changes.some(e=>['tc','duration'].includes(e.field)))node.append(box('p','material-warning','镜头时码或时长已修改；新版总时长将标为待复核，需要重新检查全片节奏。'));
       const role=stage==='direction'?'director':'writer',binding=config.roles[role],connection=config.connections.find(c=>c.id===binding.connection);
-      const explanation=box('p','muted',`由${connection?.name || '所选服务'} · ${binding.model || 'Codex 默认模型'}同步完整正文。会调用一次模型并计入费用；新版本仍需独立审核与采用，依赖旧稿的内容需重新检查。`);
+      const local=data.revision_mode==='local';
+      const explanation=box('p','muted',local ? '保存后，正文与创作板会同步更新。此次保存不调用模型，新版本仍需审核与采用。' : `由${connection?.name || '所选服务'} · ${binding.model || 'Codex 默认模型'}同步完整正文。会调用一次模型并计入费用；新版本仍需独立审核与采用，依赖旧稿的内容需重新检查。`);
       node.append(explanation);
       const label=box('label','analysis-check'),consent=document.createElement('input');consent.type='checkbox';
-      label.append(consent,box('span','','确认使用上述模型整理这一份修改，可能产生费用。'));node.append(label);
-      const button=box('button','primary','整理为新版本');button.disabled=true;consent.onchange=()=>{button.disabled=!consent.checked;};
+      label.append(consent,box('span','','确认使用上述模型整理这一份修改，可能产生费用。'));if(!local)node.append(label);
+      const button=box('button','primary',local?'保存为新版本':'整理为新版本');button.disabled=!local;consent.onchange=()=>{button.disabled=!consent.checked;};
       button.onclick=()=>{
         if(state.runId!==runId||state.busy||state.decisionBusy||state.recoveryBlocked){toast('请先结束当前任务或处理恢复事项。',true);return;}
         dialog.close();setProjectFocus('chat');

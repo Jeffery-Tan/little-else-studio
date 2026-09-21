@@ -1,0 +1,129 @@
+/* The conversation is a primary reading surface, with its own full workspace. */
+.project-workspace {grid-template-rows:auto auto minmax(0,1fr)}
+#project-progress {grid-column:1/-1;min-width:0}
+.project-brief {display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 24px;border-bottom:1px solid #ceff6925;background:#ceff6905}
+.brief-copy {display:flex;flex-direction:column;gap:4px;min-width:0}
+.brief-copy strong {font-size:15px;color:#eceee7;line-height:1.5}
+.brief-copy span {font-size:12px;color:#c1c5bb;line-height:1.6}
+.brief-actions {display:flex;gap:8px;flex-shrink:0}
+.brief-actions button {font-size:12px}
+.turn-work,.reply-full,.team-issues {font-size:13px;color:#b8bdc8;margin:12px 0}
+.turn-work summary,.reply-full summary,.team-issues summary {cursor:pointer;padding:8px 0;color:#cbd0db}
+.turn-work .line {padding:10px 0;display:block}
+.turn-work .line-by {display:block;white-space:normal;margin:8px 0}
+.turn-deliverables {display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.team-issues {padding:12px 0;border-top:1px solid var(--line)}
+.team-issues small {display:block;color:#a9adb8;line-height:1.7;margin-top:4px}
+.vcard-evidence {margin-top:16px;border-top:1px solid var(--line);padding-top:8px;font-size:12px}
+.vcard-evidence summary,.blk>summary {cursor:pointer;color:#c2c7d0;line-height:1.6;padding:8px 0}
+.reply-full .body {color:#e0e1e7}
+.project-workspace[data-focus="chat"] {grid-template-columns:minmax(0,1fr)}
+.project-workspace[data-focus="chat"]>.project-canvas {display:none}
+.project-workspace[data-focus="chat"]>.composer {
+  border-left:0;min-height:0;height:auto;
+  padding:0 max(24px,calc((100% - 900px)/2)) 12px;
+}
+.producer-heading {flex:none;padding:10px 0;gap:10px}
+.producer-heading .producer-avatar {width:30px;height:30px;font-size:17px}
+.producer-heading div>span {display:none}
+#conversation-latest {margin-left:auto;font-size:12px;color:var(--ink-soft)}
+.job-status {position:relative;margin-top:8px;padding:10px 14px;font-size:13px;line-height:1.55;max-height:30%;border-color:#363d2e;background:#ceff6905}
+.job-copy {gap:4px;position:relative}
+.job-copy>strong:first-child {font-size:13px;color:var(--accent)}
+.job-copy>.muted {color:#cdced4;font-size:13px;line-height:1.6}
+.job-activity-open {align-self:flex-start;color:var(--accent);font-size:12px;text-align:left;padding:2px 0}
+.job-latest {font-size:12px;color:#b6b7c1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.job-updated {font-size:11px;color:#a8a9b5}
+.job-status[data-active="true"] .job-copy>strong:first-child::before {
+  content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-right:8px;
+}
+.job-status>.ghost {margin-top:5px}
+.conversation-bar {padding:9px 0;font-size:12px;color:#c8c9d2}
+.conversation-body {padding:12px 16px 24px 0;scrollbar-gutter:stable;overscroll-behavior:contain}
+.msg.assistant .body,.msg.user .body {font-size:15px;line-height:1.85;color:#e0e1e7}
+.msg.assistant .body {white-space:normal;max-width:78ch}
+.msg.assistant h1,.msg.assistant h2,.msg.assistant h3 {font-size:16px;margin:22px 0 10px;color:#f5f5f7}
+.msg .who {font-size:12px;color:#b4b5c0;letter-spacing:.2px}
+.msg.user {margin-left:min(12%,80px);padding:14px 18px;margin-bottom:24px}
+.msg.assistant {margin-bottom:28px}
+.turn+.turn {border-top:1px solid var(--line);padding-top:24px}
+.composer-inner {flex-direction:row;align-items:flex-end;gap:14px;padding:10px 12px;border-color:#50515d}
+#chat-input {min-height:46px;max-height:120px;font-size:14px;line-height:1.7;flex:1}
+#send {flex:none;margin:0 0 2px}
+.composer-hint {padding-top:6px;font-size:11px}
+.team-dialog {width:min(780px,94vw);max-height:86dvh;padding:0;background:#17171c;border:1px solid #45464f;border-radius:16px;color:var(--ink)}
+.team-dialog[open] {display:flex;flex-direction:column}
+.team-dialog::backdrop {background:#0009}
+.team-dialog-heading {display:flex;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:1px solid var(--line);flex:none}
+.team-dialog-heading h2 {font-size:19px;margin:0}
+.team-dialog-body {padding:8px 24px 24px;overflow:auto;min-height:0;line-height:1.8;font-size:14px}
+.team-current {font-weight:600;color:var(--accent);font-size:16px}
+.team-members {display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:20px 0 26px}
+.team-member {border:1px solid #373840;padding:10px;border-radius:9px;background:#202126}
+.team-member strong,.team-member span {display:block;font-size:12px}
+.team-member span {color:#aaaeba;font-size:11px;margin-top:4px}
+.team-member.active {border-color:var(--accent);background:#ceff690c}
+.team-member.active span {color:var(--accent)}
+.team-dialog-body h3 {font-size:14px;margin:20px 0 12px}
+.team-history {list-style:none;padding:0 0 0 12px;margin:0 0 20px}
+.team-step {border-left:1px solid #4d5542;position:relative;padding:0 0 20px 20px}
+.team-step::before {content:"";position:absolute;left:-4px;top:9px;width:7px;height:7px;border-radius:50%;background:#a4b68a}
+.team-step.failed::before {background:var(--wait)}
+.team-step-meta {font-size:12px;color:#aeb0bd}
+.team-step p {margin:4px 0 0;color:#e2e3e8;overflow-wrap:anywhere}
+.team-step button {margin-top:8px}
+.team-diagnostics {border-top:1px solid var(--line);padding-top:16px;color:#aaaeba;font-size:12px}
+.team-diagnostics pre {white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto}
+.team-diagnostics summary {cursor:pointer}
+@media(min-width:721px) {
+  .job-copy {padding-right:124px}
+  .job-status>.ghost {position:absolute;right:14px;bottom:10px;margin:0}
+  .job-activity-open {position:absolute;right:0;top:0}
+  .job-status[data-active="false"] .job-copy {display:block}
+  .job-status[data-active="false"] .job-copy>.muted {margin-left:12px}
+  .job-warning,.job-copy>.recovery-panel {display:block}
+}
+@media(max-width:720px) {
+  .project-workspace[data-focus="chat"]>.composer {padding:0 16px 10px}
+  .project-tools {flex-wrap:wrap}
+  .producer-heading {padding:8px 0}
+  .conversation-body {min-height:0;padding-right:8px}
+  .msg.assistant .body,.msg.user .body {font-size:14px}
+  .job-status {font-size:12px;max-height:27%;padding:8px 10px}
+  .job-updated {display:none}
+  .team-members {grid-template-columns:repeat(2,minmax(0,1fr))}
+  .team-dialog-body {padding:8px 16px 20px}
+  #chat-input {max-height:90px;min-height:42px}
+}
+
+/* A single reading scroll area; idle execution history is a compact link. */
+.job-status[data-active="false"] {max-height:none;overflow:visible;border:0;background:none;margin:0;padding:0}
+.job-status[data-active="false"] .job-copy {padding:0;display:flex;flex-direction:row;align-items:center;justify-content:flex-end}
+.job-status[data-active="false"] button {min-height:28px;padding:4px 0}
+.conversation-body {padding-bottom:12px}
+.msg.assistant {margin-bottom:12px}
+.msg.assistant>p {margin:6px 0;line-height:1.6}
+.reply-full {margin:4px 0}
+.job-status .job-copy:has(.job-live) {display:flex;flex-direction:row;align-items:center;gap:12px;padding:0;flex-wrap:wrap}
+.job-live {flex:1;min-width:0;color:#d3dfbd}
+@media(max-width:720px) {
+  .project-brief {padding:10px 16px;gap:8px;align-items:flex-start}
+  .brief-actions {flex-direction:column;gap:4px}
+  .brief-copy strong {font-size:13px}
+  .brief-copy span {font-size:11px}
+  .brief-actions button {padding:6px 8px;font-size:11px}
+}
+@media(max-height:650px) {
+  .project-workspace[data-focus="chat"] .producer-heading {display:none}
+  .project-workspace[data-focus="chat"] .conversation-bar {padding:4px 0;min-height:28px}
+  .project-workspace[data-focus="chat"] .composer-hint {padding:2px 0}
+  .project-workspace[data-focus="chat"] #chat-input {min-height:32px}
+  .project-workspace[data-focus="chat"] .composer-inner {padding:6px 10px}
+}
+
+/* Completed observation/review actions remain distinct clickable controls. */
+.job-status[data-active="false"] .job-copy {flex-wrap:wrap;justify-content:flex-start;gap:8px}
+.job-status[data-active="false"] .job-copy>strong {flex:0 0 auto}
+.job-status[data-active="false"] .job-copy>.muted {flex:1 1 180px;min-width:0;margin-left:0}
+.job-status[data-active="false"] .job-activity-open {position:static;flex:0 0 auto}
+.job-status[data-active="false"] .job-copy>button {flex:0 0 auto;padding:4px 8px}

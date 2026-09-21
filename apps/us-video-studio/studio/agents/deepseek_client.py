@@ -9,7 +9,7 @@ import json
 import re
 import httpx
 
-from .client import DEFAULT_MAX_TOKENS, ModelError
+from .client import ModelError
 from .openai_compat import _messages as openai_messages, _parse as openai_parse
 
 ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
@@ -57,7 +57,8 @@ def _parse(data, model, *, require_reasoning=False):
     turn = openai_parse(data, model)
     reasoning = data["choices"][0]["message"].get("reasoning_content")
     if (reasoning is not None and not isinstance(reasoning, str)) or (require_reasoning and not isinstance(reasoning, str)):
-        raise ModelError(200, "invalid DeepSeek reasoning response; received usage retained", usage=turn.usage)
+        raise ModelError(200, "invalid DeepSeek reasoning response; received usage retained",
+                         usage=turn.usage, usage_final=True)
     if reasoning is not None:
         # The loop replays raw_blocks verbatim. Neither text nor thinking nor
         # any observer-facing progress contains this private protocol field.
@@ -66,11 +67,11 @@ def _parse(data, model, *, require_reasoning=False):
 
 
 class DeepSeekClient:
-    def __init__(self, token, *, max_tokens=DEFAULT_MAX_TOKENS, timeout=180.0):
+    def __init__(self, token, *, max_tokens=None, timeout=180.0):
         if (not isinstance(token, str) or not token or not token.isascii()
                 or any(character.isspace() or ord(character) < 33 or ord(character) == 127 for character in token)):
             raise ValueError("DeepSeek API key must contain ASCII characters without whitespace or control characters")
-        if type(max_tokens) is not int or not 1 <= max_tokens <= 393216:
+        if max_tokens is not None and (type(max_tokens) is not int or not 1 <= max_tokens <= 393216):
             raise ValueError("DeepSeek max_tokens must be an integer between 1 and 393216")
         self._token = token
         self.max_tokens = max_tokens
@@ -84,7 +85,10 @@ class DeepSeekClient:
         try:
             payload = {"model": model, "messages": _messages(system, messages, with_tools=bool(tools)),
                        "thinking": {"type": "enabled"}, "reasoning_effort": "high",
-                       "max_tokens": self.max_tokens, "stream": False}
+                       "stream": False}
+            # Omit the optional limit to use the provider's thinking-mode default.
+            if self.max_tokens is not None:
+                payload["max_tokens"] = self.max_tokens
             if tools:
                 payload["tools"] = [{"type": "function", "function": {
                     "name": tool["name"], "description": tool.get("description", ""),

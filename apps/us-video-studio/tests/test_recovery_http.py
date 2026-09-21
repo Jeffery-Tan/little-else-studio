@@ -43,7 +43,8 @@ def test_recover_without_job_preserves_artifacts_costs_and_approval(tmp_path):
         })
         assert close.status_code == 200, close.text
         assert close.json()["open_attempts"] == []
-        assert not close.json()["can_continue"]  # unknown usage was not erased
+        assert close.json()["can_continue"]  # unknown usage remains diagnostic only
+        assert close.json()["unresolved_calls"][0]["input_tokens"] is None
         assert (store.run_dir(RUN) / "ledger.jsonl").read_bytes() == original
         assert pipe.stage_state(RUN, "intake").latest.sha256 == artifact.sha256
         assert pipe.stage_state(RUN, "direction").approval is None

@@ -40,7 +40,7 @@ test('pending and incomplete executions retain their measured usage and explain 
   const s=costs.summarize(rows);assert.equal(s.pending,1);assert.equal(s.incomplete,2);
   assert.equal(s.unknownUsage,1);assert.equal(s.knownCost,0.004);
   const html=costs.render({rows});
-  for(const phrase of ['等待用量确认','已停止','已核账 · 执行未完成','仍可能产生费用','data-cost-recover']) assert.ok(html.includes(phrase));
+  for(const phrase of ['未返回用量','已停止','已核账 · 执行未完成','仍可能产生费用','不影响继续']) assert.ok(html.includes(phrase));
 });
 test('Codex subscription price is explicitly unknown and distinct from remaining quota',()=>{
   const html=costs.render({rows:[row({provider:'codex_cli',estimated_usd:null})]});

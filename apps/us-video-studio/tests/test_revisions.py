@@ -190,7 +190,8 @@ def test_generation_boundaries_preserve_old_versions_and_cost_records(scene,mode
     assert pipe.stage_state(RUN,'direction').open_attempt is None
     if mode!='unknown_usage':assert store.latest_artifact(RUN,'direction').version==1 and job['status']=='failed'
     if mode in ('unknown_usage','transport'):
-        assert not http.get(f'/api/runs/{RUN}/recovery').json()['can_continue']
+        assert http.get(f'/api/runs/{RUN}/recovery').json()['can_continue']
+        assert Ledger(store,settings).totals().unknown_calls == 1
 
 
 def test_inflight_revision_blocks_other_writers_and_cancel_keeps_returned_version(scene):

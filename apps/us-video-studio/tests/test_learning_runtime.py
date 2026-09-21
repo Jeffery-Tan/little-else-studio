@@ -127,7 +127,8 @@ def test_main_explicit_photo_tool_returns_full_method_before_next_model_turn(run
     ])
     orchestrator(runtime, model).send("我要图文策划与 caption。")
     learning = runtime[-1]
-    assert skill_text(learning, "us-commerce-strategy") in model.calls[0]["system"]
+    assert skill_text(learning, "us-commerce-strategy") not in model.calls[0]["system"]
+    assert skill_text(learning, "us-commerce-strategy") in model.calls[1]["messages"][-1]["content"][0]["content"]
     assert skill_text(learning, "us-photo-copy") in model.calls[1]["messages"][-1]["content"][0]["content"]
     artifact = runtime[0].latest_artifact(RUN, "intake")
     snap = json.loads((runtime[0].run_dir(RUN) / artifact.evidence[-1]).read_text(encoding="utf-8"))
@@ -149,9 +150,9 @@ def test_feedback_is_pending_then_applied_feedback_enters_next_job_but_not_revie
     proposal = learning.proposals(RUN)[0]
     assert proposal["status"] == "pending"
     learning.apply(RUN, proposal["id"], proposal["base_library_sha256"])
-    next_model = ScriptedModel([final_turn("收到局部反馈")])
-    orchestrator(runtime, next_model).send("读取已保存的学习上下文。")
-    assert quote in next_model.calls[0]["system"]
+    next_model = ScriptedModel([tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video"}), final_turn("收到局部反馈")])
+    orchestrator(runtime, next_model).send("根据已保存反馈继续修改方向。")
+    assert quote in next_model.calls[1]["messages"][-1]["content"][0]["content"]
     review_model = ScriptedModel([tool_turn("review", "finish_review", {"verdict": "pass"}), final_turn("已审")])
     review = run_review(store=store, pipeline=pipeline, settings=settings, client=review_model, ledger=ledger,
                         run_id=RUN, stage="direction", learning_service=learning)
@@ -188,6 +189,7 @@ def test_model_reads_contract_and_compiles_real_local_video_pack(runtime):
     model = ScriptedModel([
         tool_turn("read", "read_artifact", {"stage": "intake"}),
         tool_turn("contract", "read_method_document", {"name": "creative-package-contract"}),
+        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video"}),
         tool_turn("compile", "compile_creative_package", args), final_turn("编译包已保存，未生成媒体。"),
     ])
     result = orchestrator(runtime, model).send("把当前已保存策划编译成视频输入包。")
@@ -196,7 +198,7 @@ def test_model_reads_contract_and_compiles_real_local_video_pack(runtime):
     method = json.loads(model.calls[2]["messages"][-1]["content"][0]["content"])
     assert method["text"] == contract
     assert (store.run_dir(RUN) / method["evidence_ref"]).is_file()
-    package = json.loads(model.calls[3]["messages"][-1]["content"][0]["content"])
+    package = json.loads(model.calls[4]["messages"][-1]["content"][0]["content"])
     root = store.run_dir(RUN) / "creative-packages" / package["package_id"]
     compiled = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     assert compiled["generation_authorized"] is False
@@ -238,10 +240,10 @@ def test_photo_contract_example_compiles_through_agent_without_generating_images
 def test_malformed_compile_inputs_are_tool_errors_and_do_not_crash_job(runtime, manifest):
     store, pipeline, settings, ledger, learning = runtime
     artifact = submit(pipeline, "intake")
-    model = ScriptedModel([tool_turn("bad", "compile_creative_package", {
+    model = ScriptedModel([tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video"}), tool_turn("bad", "compile_creative_package", {
         "format": "video", "stage": "intake", "version": 1, "artifact_sha256": artifact.sha256,
         "manifest": manifest}), final_turn("输入不合格，保留原产物。")])
     result = orchestrator(runtime, model).send("校验这个待编译输入。")
     assert result.failed_tools[0]["tool"] == "compile_creative_package"
-    assert len(model.calls) == 2
+    assert len(model.calls) == 3
     assert not any(e["kind"] == "creative_package_created" for e in store.read_events(RUN))

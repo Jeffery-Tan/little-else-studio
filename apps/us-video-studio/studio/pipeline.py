@@ -38,7 +38,7 @@ from .models import (
     utcnow,
 )
 from .store import Store, serialized_run, sha256_text
-from .structured import normalize
+from .structured import normalize, canonical_document, validate_canonical_input
 
 
 @dataclass(frozen=True)
@@ -501,6 +501,14 @@ class Pipeline:
         # and normalising is what makes a bad payload cost a rendering instead
         # of an attempt. `normalize` never raises; see `studio/structured.py`.
         shape = normalize(stage, structured or {})
+        if not content.strip():
+            if shape.dropped:
+                raise PipelineError("structure", "结构化内容存在无法保存的字段，请修正后提交；原尝试仍保留。")
+            try:
+                validate_canonical_input(stage, structured or {})
+                content = canonical_document(stage, shape.data)
+            except ValueError as exc:
+                raise PipelineError("structure", str(exc)) from exc
         artifact = self.store.write_artifact(
             run_id,
             stage,

@@ -1,8 +1,8 @@
 """The only path from an agent to the model endpoint.
 
-Every attempt records a durable intent before it starts and a settlement after
-it returns. Failure keeps received usage; missing usage remains unknown and
-blocks further calls until the operator reconciles provider evidence.
+Every attempt records a durable intent and logical request before it starts,
+then a settlement. Failure keeps received usage; missing usage remains unknown
+without requiring manual reconciliation or blocking future calls.
 
 Wrapping the client rather than hooking the loop means a new agent, a new role
 or a new tool cannot accidentally spend money off the books: it would have to
@@ -10,10 +10,12 @@ deliberately bypass this class to do it.
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ..ledger import Ledger
-from .client import ModelClient, ModelError, Turn, Usage
+from .client import ModelClient, ModelError, SafePreflightError, Turn, Usage
+from .requests import encode, save_request
 
 
 class BudgetedClient:
@@ -56,11 +58,32 @@ class BudgetedClient:
             preflight()
         if cancel:
             cancel()
+        # Detach exactly the logical input supplied to the provider adapter.
+        # Snapshot serialization happens before intent; failure cannot spend.
+        try:
+            request = json.loads(encode(dict(model=model, system=system, messages=messages, tools=tools)))
+        except (TypeError, ValueError):
+            raise SafePreflightError('模型输入无法完整记录，尚未发起请求。') from None
         call_id = self.ledger.begin_call(self.run_id, role=self.role, stage=self.stage, model=model)
         try:
-            turn = target.complete(
-                model=model, system=system, messages=messages, tools=tools
-            )
+            save_request(self.ledger.store, self.run_id, call_id, role=self.role, stage=self.stage,
+                         request=request, route={
+                             'connection': self.ledger.settings.connection_by_role.get(self.role),
+                             'provider': self.ledger.settings.provider_by_role.get(self.role),
+                         })
+        except Exception:
+            self.ledger.settle_call(self.run_id, call_id, input_tokens=0, output_tokens=0,
+                                   usage_status='known', ok=False, error='request snapshot failed before provider invocation')
+            raise SafePreflightError('本次模型输入记录失败，没有调用模型；请检查运行目录。') from None
+        try:
+            if cancel:
+                cancel()
+        except Exception:
+            self.ledger.settle_call(self.run_id, call_id, input_tokens=0, output_tokens=0,
+                                   usage_status='known', ok=False, error='cancelled before provider invocation')
+            raise
+        try:
+            turn = target.complete(**request)
         except Exception as exc:
             usage = exc.usage if isinstance(exc, ModelError) else Usage(None, None)
             self.ledger.settle_call(

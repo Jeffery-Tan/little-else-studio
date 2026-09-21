@@ -5,7 +5,31 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 const require = createRequire(import.meta.url);
 global.escapeHtml = require('../../studio/web/md.js').escapeHtml;
-const {progressHtml, deliveryHtml} = require('../../studio/web/progress.js');
+const {progressHtml, deliveryHtml, projectBriefHtml} = require('../../studio/web/progress.js');
+
+test('shared brief exposes the bound next step without claiming execution means approval',()=>{
+  const html=projectBriefHtml({phase:'review_failed',title:'创意方向第 3 版 · 审核未完成',
+    detail:'方案已保留',stage:'direction',action:{kind:'review_stage',label:'重试本版审核'}});
+  assert.match(html,/审核未完成/);assert.match(html,/重试本版审核/);
+  assert.doesNotMatch(html,/本轮完成|data-act="approve"|token/);
+  assert.doesNotMatch(projectBriefHtml({title:'<img onerror=x>',detail:'<script>',action:{label:'<svg>'}}),/<img|<script|<svg/);
+});
+
+test('review action submits only the displayed version and ignores detached stale actions',async()=>{
+  const button={}, view={}, calls=[];
+  const host={querySelector:s=>s==='[data-brief-action]'?button:view};
+  const brief={stage:'direction',title:'Saved',detail:'Waiting',action:{kind:'review_stage',label:'Review',stage:'direction',version:3,sha256:'a'.repeat(64)}};
+  const state={runId:'fixture',projectBrief:brief,rail:[],timeline:{brief}};
+  const ctx=vm.createContext({state,$:()=>host,escapeHtml:global.escapeHtml,crypto:{randomUUID:()=> 'review-id'},
+    submitJob:async(run,payload)=>calls.push({run,payload})});
+  vm.runInContext(fs.readFileSync(new URL('../../studio/web/progress.js',import.meta.url),'utf8'),ctx);
+  ctx.renderProjectProgress();assert.equal(calls.length,0);
+  const click=button.onclick;
+  await click();assert.equal(calls[0].payload.expected_version,3);
+  assert.equal(calls[0].payload.expected_artifact_sha256,'a'.repeat(64));
+  assert.equal(calls[0].payload.request_kind,'stage_review');
+  state.projectBrief={...brief};await click();assert.equal(calls.length,1);
+});
 
 test('waiting downstream points to actual prerequisite without submitting a model request', () => {
   const html = progressHtml({completed:1,total:4,stage:'direction',title:'等你决定',detail:'Read',action:'review',label:'阅读并决定'}, 'writing', [{stage:'direction',label:'创意方向'}]);

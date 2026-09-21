@@ -27,6 +27,7 @@ from .materials import list_materials
 from .store import Store
 from .structured import direction_options, open_questions, view
 from .progress import project_progress
+from .project_brief import project_brief
 
 #: Sort tiebreak when a note and a card share a timestamp: the note announced the
 #: work, so it goes above the work.
@@ -34,7 +35,7 @@ _PRIORITY = {"note": 0, "artifact": 1, "approval": 2, "decision_request": 3}
 
 
 def build_timeline(
-    store: Store, pipeline: Pipeline, ledger: Any, run_id: str
+    store: Store, pipeline: Pipeline, ledger: Any, run_id: str, job: dict | None = None
 ) -> dict[str, Any]:
     """``ledger`` is passed in rather than reached through ``pipeline.state``.
 
@@ -65,9 +66,12 @@ def build_timeline(
     everything = ledger.totals()
     pricing = ledger.price_note()
 
+    from .interactions import pending_question
     return {
         "run": state.get("run"),
+        "interaction": pending_question(store, run_id),
         "progress": project_progress(state),
+        "brief": project_brief(state, job),
         "turns": turns,
         "rail": v.build_rail(state["stages"], state.get("next_stage")),
         # The standing list of what the run is waiting on him for. Separate from
@@ -89,7 +93,7 @@ def build_timeline(
         "spend_sentence": v.spend_sentence(mine, pricing["usd_cap_enforceable"]),
         "all_runs_sentence": (
             f"开发期已知用量：{v.human_tokens(everything.input_tokens + everything.output_tokens)}"
-            f" token · {everything.calls} 次调用 · {everything.unknown_calls} 次用量待核实（跨所有项目）"
+            f" token · {everything.calls} 次调用 · {everything.unknown_calls} 次用量未返回（跨所有项目）"
         ),
         # The shelf rides along with the timeline rather than being fetched
         # separately, because the screen needs it to answer a question the

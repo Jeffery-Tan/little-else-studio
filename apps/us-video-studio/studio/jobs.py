@@ -129,7 +129,7 @@ class JobManager:
              'call_status': r.call_status, 'usage_status': r.usage_status}
             for r in self.ledger.entries() if r.call_status == 'pending' or r.usage_status != 'known'
         ]
-        out['can_continue'] = out['status'] in TERMINAL and not out['unresolved_calls']
+        out['can_continue'] = out['status'] in TERMINAL
         with self.store.run_lock(run_id):
             out['open_attempts'] = [
                 {'stage': stage, 'attempt': state.open_attempt.key}
@@ -138,7 +138,7 @@ class JobManager:
             ]
         out['can_continue'] = out['can_continue'] and not out['open_attempts']
         if out['status'] == 'interrupted':
-            out['recovery'] = ('不会自动重发旧请求。未知调用先按提供方证据核账；'
+            out['recovery'] = ('不会自动重发旧请求。用量缺失仅保留记录；'
                                '在恢复面板关闭遗留阶段尝试，再由你明确发起下一轮。')
         return out
 
@@ -158,6 +158,8 @@ class JobManager:
             self.initialize()
             if self.closing:
                 raise PipelineError('closing', '服务正在停止，请稍后重新连接。')
+            if self.store.deletion_state(run_id):
+                raise PipelineError('project_deleted', '项目已移入回收站，请先恢复后再继续。')
             for row in self.store.read_events(run_id):
                 if row.get('kind') == 'job_created' and row.get('request_id') == request_id:
                     if (row['text'] != text or row.get('job_kind', 'conversation') != kind

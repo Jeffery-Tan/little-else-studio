@@ -237,9 +237,8 @@ def test_invalid_key_is_rejected_consistently_before_save_check_or_http(tmp_path
     assert not store.path.exists() and store.public()['revision'] == 0
 
 
-@pytest.mark.parametrize('invalid_setting', ['legacy_key', 'output_limit'])
 def test_local_deepseek_construction_failure_stops_subrole_without_retry_or_ledger_intent(
-        tmp_path, fake_protection, monkeypatch, invalid_setting):
+        tmp_path, fake_protection, monkeypatch):
     from fakes import ScriptedModel, tool_turn
     from studio.agents.budget import BudgetedClient
     from studio.agents.client import run_agent_loop
@@ -250,11 +249,10 @@ def test_local_deepseek_construction_failure_stops_subrole_without_retry_or_ledg
     connections = ConnectionStore(tmp_path)
     connections.save(payload(connections))
     snapshot = connections.snapshot()
-    if invalid_setting == 'legacy_key':
-        # Simulate an already-loaded legacy credential; do not weaken save to
-        # produce it. The snapshot remains isolated from the saved configuration.
-        snapshot = replace(snapshot, _tokens={'deepseek-fixture': 'synthetic\x00key'})
-    router = snapshot.client(max_tokens=0 if invalid_setting == 'output_limit' else 16384)
+    # Simulate an already-loaded legacy credential; do not weaken save to
+    # produce it. The snapshot remains isolated from the saved configuration.
+    snapshot = replace(snapshot, _tokens={'deepseek-fixture': 'synthetic\x00key'})
+    router = snapshot.client()
     store = Store(tmp_path)
     store.create_run('preflight-test', 'Offline', 'Synthetic data only')
     ledger = Ledger(store, snapshot.settings(Settings(tmp_path, '')))
@@ -268,8 +266,35 @@ def test_local_deepseek_construction_failure_stops_subrole_without_retry_or_ledg
     with pytest.raises(ConnectionUnavailable) as failure:
         run_agent_loop(main, model='synthetic-main', system='main scope',
                        messages=[{'role': 'user', 'content': 'Synthetic dispatch'}],
-                       tools=[], execute_tool=dispatch)
+                       tools=[{'name': 'dispatch'}], execute_tool=dispatch)
     assert len(main.calls) == 1
     assert ledger.entries('preflight-test') == []
     assert 'synthetic' not in str(failure.value)
     assert connections.snapshot()._tokens['deepseek-fixture'] == 'synthetic-key'
+
+
+@pytest.mark.parametrize('legacy_limit', [16384, 4096, 2048])
+def test_routed_deepseek_request_does_not_inherit_shared_output_cap(
+        tmp_path, fake_protection, monkeypatch, legacy_limit):
+    connections = ConnectionStore(tmp_path)
+    connections.save(payload(connections))
+    snapshot = connections.snapshot()
+    settings = snapshot.settings(Settings(tmp_path, '', max_tokens=legacy_limit))
+    real_client = httpx.Client
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            'model': 'deepseek-flash',
+            'choices': [{'finish_reason': 'stop', 'message': {
+                'content': 'Complete', 'reasoning_content': 'private fixture'}}],
+            'usage': {'prompt_tokens': 50, 'completion_tokens': 20000}})
+
+    monkeypatch.setattr(httpx, 'Client', lambda **kw: real_client(**kw, transport=httpx.MockTransport(handler)))
+    client = snapshot.client(max_tokens=settings.max_tokens).for_role('writer', 'fixture-run')
+    turn = client.complete(model='deepseek-flash', system='writer',
+                           messages=[{'role': 'user', 'content': 'Synthetic task'}], tools=[])
+    assert len(seen) == 1
+    assert 'max_tokens' not in seen[0] and 'max_completion_tokens' not in seen[0]
+    assert turn.text == 'Complete' and turn.usage.output_tokens == 20000

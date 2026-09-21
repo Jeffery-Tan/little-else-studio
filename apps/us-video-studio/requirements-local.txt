@@ -4,3 +4,4 @@
 pytest==9.1.1
 # Validate still images and reject damaged/animated/oversized inputs before sending.
 Pillow==12.2.0
+av==18.1.0

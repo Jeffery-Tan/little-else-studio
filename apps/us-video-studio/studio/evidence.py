@@ -131,9 +131,12 @@ def evidence_snapshot(store: Store, run_id: str) -> dict[str, Any]:
             for key in ("findings", "limitations"):
                 if not isinstance(record.get(key), list) or not all(isinstance(x, str) for x in record[key]):
                     raise ValueError(f"{key} must be an array of strings")
+            from .video_observation import record_details
+            details = record_details(record)
             material["observations"].append({
                 key: record[key] for key in ("level", "observer", "method", "coverage", "observed_at", "findings", "limitations")
             })
+            material["observations"][-1].update(details)
             for key in ("purpose", "source_kind", "analysis_id", "call_id", "candidate_sha256", "confirmed_at"):
                 if isinstance(record.get(key), str):
                     material["observations"][-1][key] = record[key]

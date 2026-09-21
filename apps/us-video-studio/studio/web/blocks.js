@@ -42,6 +42,7 @@ function blockHtml(b) {
   const body = bodyHtml(b);
   if (body === null) return "";
   const title = b.title ? `<h4 class="blk-title">${escapeHtml(b.title)}</h4>` : "";
+  if (b.collapsed) return `<details class="blk blk-${escapeHtml(b.type)}"><summary>${escapeHtml(b.title || '查看详细依据')}</summary>${body}</details>`;
   return `<section class="blk blk-${escapeHtml(b.type)}">${title}${body}</section>`;
 }
 
@@ -145,14 +146,17 @@ function cardHtml(card) {
   // ComfyUI's template cards use, and the reason a picture reads as the subject
   // of the card rather than an illustration beside some text.
   const media = card.media ? `<div class="vcard-media" data-media="${escapeHtml(card.media)}"></div>` : "";
-  const fields = (card.fields || [])
+  const drawFields = fields => fields
     .map(
       (f) =>
         `<div class="vf-label">${escapeHtml(f.label)}</div>` +
         `<div class="vf-value">${escapeHtml(f.value)}</div>`
     )
     .join("");
-  return `<div class="vcard${emphasis}">${media}<div class="vcard-body"><div class="vcard-top">${head}${status}</div>${fields}</div></div>`;
+  const fields=drawFields((card.fields || []).filter(f=>!f.secondary));
+  const secondary=(card.fields || []).filter(f=>f.secondary);
+  const details=secondary.length ? `<details class="vcard-evidence"><summary>取舍、依据与执行条件</summary>${drawFields(secondary)}</details>` : '';
+  return `<div class="vcard${emphasis}">${media}<div class="vcard-body"><div class="vcard-top">${head}${status}</div>${fields}${details}</div></div>`;
 }
 
 /* The storyboard strip: one bar per shot, as wide as the shot is long.

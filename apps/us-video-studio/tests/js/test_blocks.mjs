@@ -25,6 +25,24 @@ const { blocksHtml } = require("../../studio/web/blocks.js");
 
 const one = (block) => blocksHtml([block]);
 
+test("collapsed evidence preserves and escapes every field", () => {
+  const html = one({type: 'cards', cards: [{head: 'A', fields: [
+    {label: '主张', value: '主要内容'},
+    {label: '依据', value: '<img src=x onerror=alert(1)>', secondary: true},
+  ]}]});
+  assert.ok(html.includes('主要内容'));
+  assert.ok(html.includes('<details class="vcard-evidence">'));
+  assert.ok(html.includes('&lt;img'));
+  assert.ok(!html.includes('<img'));
+});
+
+test("collapsed blocks preserve content without an open attribute", () => {
+  const html = one({type: 'text', title: '<script>title</script>', text: '完整依据', collapsed: true});
+  assert.ok(html.includes('<details class="blk blk-text">'));
+  assert.ok(html.includes('&lt;script&gt;title&lt;/script&gt;'));
+  assert.ok(html.includes('完整依据'));
+});
+
 /* ------------------------------------------------------------- security -- */
 
 test("a script tag in a table cell renders as text, not as an element", () => {

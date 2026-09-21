@@ -75,8 +75,16 @@ function stageHtml(step, ctx) {
     (step.review ? reviewHtml(step.review) : "") +
     (pending ? gateHtml(pending) : "") +
     askHtml(step, questions, drafts) +
+    teamIssuesHtml(step.team_issues || []) +
     `</div>`
   );
+}
+
+function teamIssuesHtml(issues) {
+  if(!issues.length) return '';
+  return `<details class="team-issues"><summary>团队待整理与后续事项 · ${issues.length} 项</summary>` +
+    '<p class="muted">这些事项尚未解决，由制片团队梳理；不要求你逐项作答。</p>' +
+    issues.map(q=>`<p>${escapeHtml(q.question)}${q.blocks ? `<small>${escapeHtml(q.blocks)}</small>` : ''}</p>`).join('') + '</details>';
 }
 
 /* --------------------------------------------------------------- the gate -- */
@@ -252,7 +260,8 @@ function askHtml(step, questions, drafts) {
     rows +=
       `<div class="q">` +
       `<div class="q-text">${escapeHtml(q.question)}</div>` +
-      (q.blocks ? `<div class="q-blocks">卡住了：${escapeHtml(q.blocks)}</div>` : "") +
+      (q.reason ? `<div class="q-blocks">需要你确认的原因：${escapeHtml(q.reason)}</div>` : "") +
+      (q.blocks ? `<div class="q-blocks">影响：${escapeHtml(q.blocks)}</div>` : "") +
       `<input class="q-answer" type="text" placeholder="在这里回答" ` +
       `data-draft-key="${escapeHtml(key)}" aria-label="回答：${escapeHtml(q.question)}" ` +
       `value="${escapeHtml(value)}">` +

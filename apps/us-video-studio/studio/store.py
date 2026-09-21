@@ -173,6 +173,21 @@ class Store:
                 out.append(Run(**json.loads(run_file.read_text(encoding="utf-8"))))
         return out
 
+    def deletion_state(self, run_id: str) -> dict[str, Any] | None:
+        """Project visibility lives in its existing journal, never in its files."""
+        for event in reversed(self.read_events(run_id)):
+            if event['kind'] == 'project_restored':
+                return None
+            if event['kind'] == 'project_deleted':
+                return event
+        return None
+
+    @serialized_run
+    def set_deleted(self, run_id: str, deleted: bool) -> None:
+        self.read_run(run_id)
+        if bool(self.deletion_state(run_id)) != deleted:
+            self.append_event(run_id, 'project_deleted' if deleted else 'project_restored')
+
     # -------------------------------------------------------------- events --
 
     def append_event(self, run_id: str, kind: str, **fields: Any) -> dict[str, Any]:

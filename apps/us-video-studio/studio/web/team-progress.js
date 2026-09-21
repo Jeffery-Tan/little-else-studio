@@ -1,0 +1,136 @@
+"use strict";
+
+const TEAM_ROLES = {orchestrator:'主制片', director:'创意导演', material:'视觉策划', writer:'编剧', reviewer:'独立审片'};
+const TEAM_STAGES = {intake:'创作需求', direction:'创意方向', material_plan:'素材计划', writing:'脚本与分镜'};
+const TEAM_WORK = {orchestrator:'整理资料与下一步建议', director:'构思创意方向', material:'整理画面与素材计划', writer:'编写脚本与分镜', reviewer:'检查方案与证据'};
+const TEAM_TOOLS = {
+  read_project_state:['核对项目进度','已核对项目进度'],
+  read_project_history:['查阅项目历史','已查阅历史资料'],
+  prepare_creative_context:['整理相关方法与案例','已整理相关方法与案例'],
+  read_artifact:['阅读方案','已阅读方案'], list_reviews:['核对审核意见','已核对审核意见'],
+  list_materials:['查看素材清单','已查看素材清单'],
+  write_stage:['保存创作内容','已保存创作内容'], submit_stage:['提交阶段方案','已提交阶段方案'],
+  dispatch:['安排角色工作','角色工作已返回'], request_review:['安排独立审核','审核已返回'],
+  finish_review:['记录审核结论','已记录审核结论'],
+  read_method_document:['查阅创作方法','已查阅创作方法'],
+  read_learning_cases:['阅读参考案例','已阅读参考案例'],
+  propose_learning_feedback:['整理反馈建议','已整理反馈建议，待你确认'],
+  compile_creative_package:['整理创意交付包','已整理创意交付包'],
+  read_production:['查阅制作方案','已查阅制作方案'],
+  prepare_production:['准备制作方案','已保存制作方案，待你检查'],
+};
+
+function teamAction(event, completed = false) {
+  const stage = TEAM_STAGES[event.args?.stage || event.stage];
+  let text = (TEAM_TOOLS[event.tool] || ['处理项目操作','项目操作已返回'])[completed ? 1 : 0];
+  if (stage) text += ` · ${stage}`;
+  if (completed && event.ok === false) return `${text.replace(/^已/, '')} · 未完成`;
+  if (completed && event.tool === 'read_project_history') {
+    try { const result = JSON.parse(event.result); if (typeof result.title === 'string') text += `「${result.title.slice(0, 100)}」`; } catch (_) { /* Older results may be truncated. */ }
+  }
+  if (completed && ['write_stage','submit_stage'].includes(event.tool) && typeof event.args?.summary === 'string') {
+    text += `：${event.args.summary.slice(0, 180)}`;
+  }
+  if (completed && event.tool === 'finish_review') {
+    const verdict = {pass:'审核通过，仍待你决定', return:'需要修改'}[event.args?.verdict];
+    if (verdict) text += ` · ${verdict}`;
+  }
+  return text;
+}
+
+function teamProgress(job) {
+  const events = job?.events || [];
+  const active = ['queued','running','cancelling'].includes(job?.status);
+  const last = [...events].reverse().find(e => TEAM_ROLES[e.role]);
+  const currentRole = active && job.status === 'running' ? last?.role : null;
+  let current = '';
+  if (currentRole) {
+    const action = last.type === 'agent_activity' && last.phase === 'tool' ? teamAction(last)
+      : last.type === 'agent_activity' && last.phase === 'thinking' ? TEAM_WORK[currentRole]
+      : '继续处理本轮内容（等待下一条进展）';
+    current = `${TEAM_ROLES[currentRole]} · ${action}`;
+  } else if (active) current = job.status === 'queued' ? '等待制作团队开始' : job.status === 'cancelling'
+    ? '等待当前调用结束，随后停止' : '正在准备本轮工作，等待角色进展';
+  const history = [];
+  for (const event of events) {
+    if (event.type !== 'agent_tool') continue;
+    history.push({role:TEAM_ROLES[event.role] || '制片团队', text:teamAction(event, true), at:event.at,
+      failed:event.ok === false, stage:event.ok && ['write_stage','submit_stage'].includes(event.tool)
+        ? event.args?.stage || event.stage : null});
+  }
+  const participants = Object.entries(TEAM_ROLES).map(([role,name]) => ({role,name,
+    status:role === currentRole ? '处理中' : events.some(e=>e.role === role) ? '本轮已参与' : '本轮未参与'}));
+  const outputs = history.filter(row => row.stage);
+  const summary = outputs.length ? `已保存 ${outputs.length} 次阶段内容，见团队工作记录。`
+    : events.some(e=>e.type === 'done' && e.text) ? '本轮回复已保存到下方对话。'
+    : '本轮状态已保存，可在团队工作记录中核对进展。';
+  return {current, currentRole, history, participants, outputs,
+    statusTitle: job?.brief?.title || '', summary: job?.brief?.detail || summary, lastAt:events.at(-1)?.at};
+}
+
+function teamTime(at) {
+  const date = new Date(at);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'});
+}
+
+let teamDialog = null;
+let teamDialogKey = '';
+function openTeamProgress() {
+  if (teamDialog) { teamDialog.close(); return; }
+  const dialog = box('dialog','team-dialog');
+  dialog.setAttribute('aria-label','团队工作记录');
+  const header = box('div','team-dialog-heading');
+  header.append(box('h2','','团队工作记录'));
+  const close = box('button','ghost small','关闭');
+  close.onclick = () => dialog.close(); header.append(close);
+  dialog.append(header, box('div','team-dialog-body'));
+  dialog.addEventListener('close',()=>{dialog.remove();teamDialog=null;teamDialogKey='';});
+  document.body.append(dialog); teamDialog=dialog; updateTeamDialog(); dialog.showModal();
+}
+
+function updateTeamDialog() {
+  if (!teamDialog) return;
+  const job = currentJob;
+  const brief = state.projectBrief || job?.brief;
+  const key = JSON.stringify([state.runId, job?.job_id, job?.status, job?.events?.length, job?.cursor, brief]);
+  if (key === teamDialogKey) return;
+  teamDialogKey = key;
+  const host = teamDialog.querySelector('.team-dialog-body');
+  const scroll = host.scrollTop;
+  const technicalOpen = host.querySelector('.team-diagnostics')?.open;
+  host.replaceChildren();
+  if (!job) { host.append(box('p','','这个项目还没有本轮工作记录。')); return; }
+  const view = teamProgress({...job, brief});
+  host.append(box('p','team-current',view.current || view.statusTitle || '本次执行已结束'));
+  if (!JOB_ACTIVE.has(job.status)) host.append(box('p','muted',view.summary));
+  const roles = box('div','team-members');
+  for (const row of view.participants) {
+    const card = box('div',`team-member${row.role === view.currentRole ? ' active' : ''}`);
+    card.append(box('strong','',row.name),box('span','',row.status));roles.append(card);
+  }
+  host.append(roles,box('h3','','本轮做了什么'));
+  const history = box('ol','team-history');
+  for (const row of view.history) {
+    const item = box('li',row.failed?'team-step failed':'team-step');
+    item.append(box('span','team-step-meta',`${teamTime(row.at)} · ${row.role}`),box('p','',row.text));
+    if (TEAM_STAGES[row.stage]) {
+      const read = box('button','ghost small','查看当前阶段');
+      read.onclick=()=>{dialogCloseTeam();selectStage(row.stage);setProjectFocus('canvas');};item.append(read);
+    }
+    history.append(item);
+  }
+  if (!view.history.length) history.append(box('li','muted','尚无已完成的操作记录；收到进展后会显示在这里。'));
+  host.append(history);
+  const technical = box('details','team-diagnostics');
+  technical.open = Boolean(technicalOpen);
+  technical.append(box('summary','','技术诊断（排障时使用）'));
+  technical.append(box('p','muted',`执行编号：${job.job_id || '待确认'}`));
+  if (job.reason) technical.append(box('pre','',String(job.reason)));
+  if (job.recovery) technical.append(box('pre','',String(job.recovery)));
+  if (job.open_attempts?.length || job.unresolved_calls?.length) technical.append(box('pre','',JSON.stringify({open_attempts:job.open_attempts,unresolved_calls:job.unresolved_calls},null,2)));
+  technical.append(box('pre','',JSON.stringify((job.events || []).map(e=>({type:e.type,role:e.role,tool:e.tool,ok:e.ok,at:e.at})),null,2)));
+  host.append(technical);host.scrollTop=scroll;
+}
+function dialogCloseTeam() { teamDialog?.close(); }
+
+if (typeof module !== 'undefined') module.exports = {teamAction, teamProgress};

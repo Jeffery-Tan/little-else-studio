@@ -207,8 +207,12 @@ def test_failures_keep_usage_and_never_retry_or_auto_accept(scene, mode):
     assert rows[0].input_tokens == (None if mode in {'unknown_usage','transport_failure'} else 110)
     assert not (store.run_dir(RUN)/'evidence'/'observations.json').exists()
     if mode in {'unknown_usage','transport_failure'}:
-        assert submit(scene,request_id='blocked').status_code==409
-        assert len(model.calls)==1
+        next_job = submit(scene,request_id='explicit-next')
+        assert next_job.status_code == 200
+        wait_job(http, next_job.json())
+        assert len(model.calls) == 2
+        assert Ledger(store,settings).entries(RUN)[0].input_tokens is None
+        assert len(model.calls)==2
 
 
 def test_open_stage_attempt_blocks_call(scene):

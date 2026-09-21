@@ -309,7 +309,7 @@ class Workspace:
                 parts.append("方向正文已批准；该历史稿没有结构化选项，不能猜测选项 ID。")
             else:
                 parts.append("尚无与此版本匹配的明确选项选择；不得沿用推荐项或自行选择。")
-        parts += ["# 素材证据与能力边界", self.render_materials()]
+        parts += ["# 素材证据与能力边界", self.render_materials(organize=True)]
         return "\n\n".join(parts)
 
     def render_reviews(self, stage: str) -> str:
@@ -331,7 +331,7 @@ class Workspace:
             )
         return "\n".join(out)
 
-    def render_materials(self) -> str:
+    def render_materials(self, *, organize=False) -> str:
         """What is really in ``runs/<id>/materials/``, by exact filename.
 
         Names are printed verbatim inside backticks because the model has to
@@ -359,8 +359,13 @@ class Workspace:
                 f"- `{file['name']}`（{file['kind']}，{_size(file['bytes'])}）",
                 f"  sha256={file['sha256']} · {file['observation_level']}",
             ]
-            for observation in file["observations"]:
-                out.append("  导入观察：" + json.dumps(observation, ensure_ascii=False, sort_keys=True))
+            if not organize:
+                for observation in file["observations"]:
+                    out.append("  导入观察：" + json.dumps(observation, ensure_ascii=False, sort_keys=True))
+        if organize:
+            from ..creative_evidence import creative_evidence
+            out += ["# 创作前证据整理：商品观察、参考方法与缺口（先读，再构思）",
+                    json.dumps(creative_evidence(self.store, self.run_id, source=snapshot), ensure_ascii=False)]
         out += [f"不可使用的证据：{error}" for error in snapshot["errors"]]
         out.append(snapshot["reference_discovery"]["reason"])
         out.append("`file` 字段只能逐字使用上面已列出的文件名；缺少素材时在 note 说明。")

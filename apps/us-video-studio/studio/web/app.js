@@ -4,16 +4,8 @@
  * nothing else: what is waiting on you, the document, what the reviewer said,
  * and the questions it left open — answerable where they are written.
  *
- * It used to be one conversation, oldest first, with every artifact ever written
- * stacked above whatever was actually waiting. After a full run the thing he had
- * to click on sat more than eight screens down, behind four documents he had
- * already read. The unit of work here is a stage, not a message, so the page is
- * built out of stages and the conversation is demoted to a band he can open.
- *
- * The band is not decoration and not a leftover: reading one document closely
- * and following what happened over time are two different needs, and every tool
- * measured keeps both views side by side. What changed is which one owns the
- * screen.
+ * The canvas and conversation each have a full-width reading view. The canvas
+ * owns version-bound decisions; the conversation preserves the project context.
  *
  * The UI has exactly two write paths that change the run: sending a message and
  * deciding a gate. It cannot dispatch work, cannot submit a stage, cannot write
@@ -72,9 +64,7 @@ const state = {
   refreshSerial: 0,
   machineDetail: false,
   materialsOpen: false,
-  // The conversation band. Collapsed by default, because the point of this
-  // screen is the stage; forced open while a turn runs, because work in flight
-  // is not something he should be able to hide from himself.
+  // The conversation keeps the full project context available for reading.
   conversationOpen: true,
   atBottom: true,
   // Answers he has written on the question rows but not sent yet, keyed by the
@@ -157,6 +147,10 @@ async function loadRuns() {
 
 async function selectRun(runId) {
   if (state.decisionBusy) { $('run-select').value = state.runId; return false; }
+  if (typeof closeEmbeddedProduction === 'function') closeEmbeddedProduction();
+  state.canvasTab = 'plan';
+  $('stage').hidden=false;$('journey-media').hidden=true;
+  for(const tab of document.querySelectorAll('[data-journey-tab]'))tab.setAttribute('aria-selected',String(tab.dataset.journeyTab==='plan'));
   $('spend-panel').hidden = true;
   $('spend-panel').costRequest = null;
   if (state.runId) state.chatDrafts.set(state.runId, $('chat-input').value);
@@ -164,6 +158,7 @@ async function selectRun(runId) {
   $('run-select').value = runId;
   $('chat-input').value = state.chatDrafts.get(runId) || '';
   state.timeline = null;
+  state.projectBrief = null;
   state.rail = [];
   $("rail").innerHTML = "";
   $("project-progress").innerHTML = "";
@@ -194,8 +189,14 @@ async function refreshTimeline() {
   const tl = await api(`/api/runs/${runId}/timeline`);
   if (state.runId !== runId || serial !== state.refreshSerial) return;
   state.timeline = tl;
+  state.projectBrief = tl.brief;
   const project = state.runs.find(run => run.run_id === runId);
-  if (project) project.progress = tl.progress;
+  if (project) {
+    project.project_brief = tl.brief;
+    project.progress = tl.brief
+      ? { ...tl.progress, title: tl.brief.title, detail: tl.brief.detail }
+      : tl.progress;
+  }
   state.artifactBodies.clear();
   // Set before anything is drawn: `wireMedia` runs while the pane is being
   // built, and it resolves filenames against this list.
@@ -209,6 +210,7 @@ async function refreshTimeline() {
   pruneDrafts(tl);
   renderPane();
   renderConversation(tl);
+  if (typeof renderJourneyDecision === 'function') renderJourneyDecision();
   renderDraft();
   renderSpend(tl);
   renderMaterials();
@@ -294,6 +296,7 @@ function selectStage(stage) {
 /* ------------------------------------------------------------ the stage -- */
 
 function renderPane() {
+  if (state.canvasTab && state.canvasTab !== 'plan') return;
   const host = $("stage");
   const step = (state.rail || []).find((s) => s.stage === state.activeStage);
   if (!step) {
@@ -302,6 +305,10 @@ function renderPane() {
   }
   const tl = state.timeline || {};
   renderProjectProgress();
+  if(!step.has_doc){
+    host.innerHTML='<div class="journey-empty"><h2>方案会在这里展开</h2><p>先和制片团队聊聊你的想法。参考素材、表达方案和画面会随着讨论逐步整理到这里。</p></div>';
+    return;
+  }
   const expected = tl.pending?.stage === step.stage && tl.pending.version === step.version
     ? tl.pending.artifact_sha256 : undefined;
   const displayStep = {...step, artifact_sha256: expected};
@@ -318,13 +325,18 @@ function renderPane() {
     // stage — the rule lives there so it has one home and one test.
     questions: tl.questions || [],
     // `stageHtml` draws the gate only when it names this stage.
-    pending: tl.pending || null,
+    pending: null,
     drafts: state.draft,
   });
   wireGate(host);
   if (typeof wireRevisionActions === 'function') wireRevisionActions(host, state.runId, step);
   if (typeof wireProductCards === 'function') wireProductCards(host, state.runId, step);
   if (typeof wireInlineFeedback === 'function') wireInlineFeedback(host, state.runId, step);
+  const tools = box('details','plan-tools');tools.append(box('summary','','方案原文与修改记录'));
+  for(const node of host.querySelectorAll('.pane-head,.revision-entry'))tools.append(node);
+  if(tools.children.length>1)host.querySelector('.stage-heading')?.after(tools);
+  const review=host.querySelector('.pane-review');
+  if(review){const detail=box('details','plan-tools');detail.append(box('summary','','团队检查记录'));review.before(detail);detail.append(review);}
   for (const button of host.querySelectorAll('[data-act="read"]')) {
     button.onclick = () => openReader(button.dataset.stage, Number(button.dataset.version))
       .catch(err => toast(`原文暂时无法打开：${err.message || err}`));
@@ -832,22 +844,13 @@ $("viewer").addEventListener("click", (e) => {
 
 /* ------------------------------------------------------ the conversation -- */
 
-/* What happened, in order, in a band he can open.
- *
- * Demoted, not deleted. Reading one document closely and following the run over
- * time are two different needs, and every tool measured keeps both views side by
- * side — Gerrit's Comments tab, Phorge's grouped summary, GitLab's pending list,
- * Gitea's review blocks in the thread. Only one of them can own the screen, and
- * the stage owns it because that is where the thing waiting on him is.
- *
- * An artifact is one line here, not a card. The document itself is in its stage,
- * laid out, one rail click away; drawing it a second time inside a band 30% of a
- * screen tall would give the same document two places to be read and two places
- * to disagree. The review goes the same way — it is next to the version it is
- * about, which is the only place it means anything.
+/* Continuous project context. Artifact links open the canvas, where the exact
+ * version and its approval controls remain together. Reading older turns must
+ * not jump to the latest reply when a background refresh completes.
  */
 function renderConversation(tl) {
   const host = $("conversation-body");
+  const previousScroll = host.scrollTop;
   host.innerHTML = "";
   $("conversation-count").textContent = tl.turns.length
     ? `${tl.turns.length} 轮`
@@ -858,7 +861,10 @@ function renderConversation(tl) {
   const suggestion=host.querySelector('.chat-suggestion');
   if (suggestion) suggestion.onclick=()=>{$('chat-input').value='先帮我梳理这个项目的创意方向。';$('chat-input').focus();};
   for (const turn of tl.turns) host.appendChild(renderTurn(turn));
+  const decision = box('div','journey-decision');decision.id='journey-decision';host.append(decision);
+  if (typeof renderJourneyDecision === 'function') renderJourneyDecision();
   if (state.atBottom) host.scrollTop = host.scrollHeight;
+  else host.scrollTop = previousScroll;
 }
 
 function setConversationOpen(open) {
@@ -880,19 +886,41 @@ function renderTurn(turn) {
     wrap.appendChild(bubble);
   }
 
-  for (const item of turn.items) {
-    if (item.kind === "note") wrap.appendChild(renderNote(item));
-    else if (item.kind === "artifact") wrap.appendChild(renderArtifactLine(item));
-    else if (item.kind === "approval") wrap.appendChild(renderApproval(item));
-    else if (item.kind === "decision_request") wrap.appendChild(renderPendingLine(item));
+  const history = box('details','turn-work');
+  const work = turn.items.filter(item => item.kind === 'note' || item.kind === 'artifact');
+  if(work.length) {
+    history.append(box('summary','',`本轮工作记录 · ${work.length} 项`));
+    for(const item of work) history.append(item.kind==='artifact' ? renderArtifactLine(item) : renderNote(item));
+    wrap.append(history);
+  }
+  // One link per stage, bound to the version produced in this turn. Intermediate
+  // drafts stay in the expandable journal, not between the user and the answer.
+  const delivered = new Map();
+  for(const item of work) if(item.kind==='artifact') delivered.set(item.stage,item);
+  if(delivered.size) {
+    const links = box('div','turn-deliverables');
+    for(const item of delivered.values()) {
+      const link=box('button','ghost small',`${item.stage==='writing'?'查看完整方案':item.stage==='direction'?'查看方向方案':item.stage==='intake'?'查看需求理解':'查看素材安排'} ↗`);
+      link.onclick=()=>openReader(item.stage,item.version).catch(err=>toast(err.message,true));
+      links.append(link);
+    }
+    wrap.append(links);
+  }
+  for(const item of turn.items) {
+    if(item.kind==='approval') wrap.append(renderApproval(item));
+    // The current decision is rendered once, alongside the conversation.
   }
 
-  if (turn.reply) {
+  if (turn.reply && turn.reply.text !== state.timeline?.interaction?.message) {
     const bubble = box("div", "msg assistant");
     const who = box("div", "who", "制片团队");
     const body = box("div", "body");
     body.innerHTML = renderMarkdown(turn.reply.text);
-    bubble.append(who, body);
+    if(turn.reply.text.length > 1400) {
+      const full=box('details','reply-full');
+      full.append(box('summary','','展开完整回复'),body);
+      bubble.append(who,box('p','muted','这条回复较长。当前进度见顶部，方案可从本轮成果打开。'),full);
+    } else bubble.append(who, body);
     wrap.appendChild(bubble);
   }
 
@@ -918,7 +946,9 @@ function renderArtifactLine(item) {
   const by = box("span", "line-by");
   by.textContent = item.summary ? `${item.author}交回：${item.summary}` : `${item.author}交回`;
   line.appendChild(by);
-  line.appendChild(goToStage(item.stage));
+  const view = box('button', 'ghost small', '查看本版 ↗');
+  view.onclick = () => openReader(item.stage, item.version).catch(err => toast(err.message, true));
+  line.appendChild(view);
   return line;
 }
 
@@ -940,7 +970,7 @@ function renderPendingLine(item) {
 function goToStage(stage) {
   const go = box("button", "ghost small", "去看");
   go.type = "button";
-  go.onclick = () => selectStage(stage);
+  go.onclick = () => { selectStage(stage); setProjectFocus('canvas'); };
   return go;
 }
 
@@ -995,6 +1025,7 @@ function wireGate(host) {
     gate.dataset.saving = "1";
     for (const control of gate.querySelectorAll('button,input,textarea')) control.disabled = true;
     const shown = { stage: gate.dataset.stage, expected_version: Number(gate.dataset.version), expected_artifact_sha256: gate.dataset.sha };
+    let continueText = null;
     save(); status.textContent = "正在保存…";
     try {
       if (!draft.nonce || draft.decision !== decision) {
@@ -1008,7 +1039,12 @@ function wireGate(host) {
         selected_option_id: decision === "approved" ? draft.option : null,
       })});
       try { localStorage.removeItem(key); } catch {}
-      toast(decision === "approved" ? "采用决定已保存，后续可在对话中继续。" : "调整意见已保存。");
+      if (gate.dataset.journey === '1') continueText = decision === 'returned'
+        ? `请按我的补充意见调整当前方案：${note}。完成内部检查后让我看方案。`
+        : shown.stage === 'direction'
+          ? `我已在界面选择方向 ${draft.option}。${note} 请继续完成素材安排和完整方案，完成内部审核后展示给我确认。`
+          : `我已在界面确认完整方案。${note} 请准备对应的分镜参考图制作方案，在工作区展示实际输入和费用供我确认。先不提交图片或视频生成。`;
+      toast(decision === "approved" ? "已确认，正在接续下一步。" : "已收到调整意见。");
       await refreshTimeline();
     } catch (err) {
       const message = String(err.message || err);
@@ -1024,6 +1060,7 @@ function wireGate(host) {
       gate.dataset.saving = "0";
       for (const control of gate.querySelectorAll('button,input,textarea')) control.disabled = false;
     }
+    if (continueText) await submitJob(runId, {text:continueText,request_id:crypto.randomUUID()});
   };
 }
 
@@ -1185,8 +1222,17 @@ async function decide(stage, decision, reason) {
  */
 function scrollDown() {
   const host = $("conversation-body");
-  if (state.atBottom) host.scrollTop = host.scrollHeight;
+  if (state.atBottom) {
+    if (typeof scrollToJourneyDecision === 'function' && scrollToJourneyDecision(host)) return;
+    host.scrollTop = host.scrollHeight;
+  }
 }
+
+$("conversation-latest").onclick = () => {
+  setConversationOpen(true);
+  state.atBottom = true;
+  scrollDown();
+};
 
 $("conversation-body").addEventListener("scroll", () => {
   const host = $("conversation-body");
@@ -1224,7 +1270,7 @@ $("chat-input").addEventListener("input", (e) => {
 
 $("detail-toggle").onclick = () => {
   state.machineDetail = !state.machineDetail;
-  $("detail-toggle").textContent = state.machineDetail ? "收起运行详情" : "运行详情";
+  $("detail-toggle").textContent = state.machineDetail ? "收起技术记录" : "技术记录";
   $("detail-toggle").setAttribute('aria-pressed',String(state.machineDetail));
   if (state.timeline) renderConversation(state.timeline);
 };
@@ -1232,6 +1278,7 @@ $("detail-toggle").onclick = () => {
 /* -------------------------------------------------------- new project -- */
 
 function newRunDialog(format='video') {
+  if (typeof startFromConversation === 'function') { startFromConversation(format); return; }
   if (state.decisionBusy) { toast('正在保存你的决定，请稍后再新建项目。'); return; }
   if (document.querySelector('.new-project-dialog')) return;
   const dialog = document.createElement("dialog");

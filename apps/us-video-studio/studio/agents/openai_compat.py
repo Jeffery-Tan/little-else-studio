@@ -94,7 +94,8 @@ def _parse(data, model):
             raise ValueError
         return turn
     except (ValueError, KeyError, TypeError, AttributeError, IndexError):
-        raise ModelError(200, 'invalid Chat Completions response; received usage retained', usage=usage) from None
+        raise ModelError(200, 'invalid Chat Completions response; received usage retained',
+                         usage=usage, usage_final=True) from None
 
 
 class OpenAICompatClient:

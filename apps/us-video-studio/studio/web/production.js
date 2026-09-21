@@ -10,14 +10,12 @@
   function price(estimate){return typeof estimate?.amount==='number'&&Number.isFinite(estimate.amount)&&estimate.amount>=0?`${esc(estimate.currency||'')} ${Number(estimate.amount).toFixed(2)}（估算）`:'费用未知';}
   function reviewGate(draft,data){
     if(data.active)return '制作团队正在执行，请等待本轮结束';
-    if(data.unresolved_calls>0)return '有调用用量待核实，请先在运行记录或制作记录中核账';
     if(draft.source_ready===false)return '关联稿件已变化，请核对后保存新方案';
     return '';
   }
   function gate(draft,data){
     const common=reviewGate(draft,data);if(common)return common;
     if(!data.capabilities?.[draft.kind]?.available)return data.capabilities?.[draft.kind]?.reason||'该制作方式尚未就绪';
-    if((draft.attempts||[]).some(a=>a.usage_status==='unknown'||a.usage_status==='unresolved'))return '本次用量待核实，请先补充提供方凭证';
     if(draft.source_ready===false)return '关联稿件已变化，请核对后保存新方案';
     if(draft.review?.verdict!=='ready')return '先完成本版本的制作检查';
     if(draft.kind==='video'&&(!draft.reference||draft.reference_approved!==true))return '先查看并确认本张参考图';
@@ -52,26 +50,30 @@
     const reason=gate(draft,data),ref=(data.materials||[]).find(m=>m.name===draft.reference?.name&&m.sha256===draft.reference?.sha256),url=mediaUrl(ref?.url,runId);
     return `<article class="production-card"><header><div><span class="eyebrow">${draft.kind==='video'?'视频':'图片'} · 脚本版本 ${esc(draft.source_version)}</span><h3>${draft.kind==='video'?`${esc(draft.duration)} 秒 · ${esc(draft.resolution)}`:'图片制作方案'}</h3></div><span class="production-price">${price(draft.estimate)}</span></header>${url?`<button class="production-thumb" data-image="${esc(ref.name)}"><img src="${esc(url)}" alt="参考图：${esc(ref.name)}"><span>${ref.approved?'已确认参考图':'查看并确认参考图'}</span></button>`:''}<p class="production-prompt">${esc(draft.prompt)}</p><p class="form-note">${esc(draft.estimate?.notice||'费用以提供方实际结算为准。')}</p>${reviewHtml(draft.review)}<div class="production-actions"><button class="ghost" data-revise="${esc(draft.draft_id)}">修改为新方案</button><button class="ghost" data-review="${esc(draft.draft_id)}" ${reviewGate(draft,data)?'disabled':''}>${draft.review?'重新检查':'制作检查'}</button><button class="primary" data-generate="${esc(draft.draft_id)}" ${reason?'disabled':''}>核对并生成</button></div>${reason?`<p class="form-note">${esc(reason)}</p>`:''}<div class="production-attempts">${(draft.attempts||[]).map(a=>{
       const output=mediaUrl(a.output?.url,runId),unknown=['unknown','submission_unknown'].includes(a.status),usageUnknown=['unknown','unresolved'].includes(a.usage_status);
-      return `<section><strong>${esc(statuses[a.status]||a.status)}</strong><p>${esc(a.message||'')}</p>${output?(draft.kind==='video'?`<video controls preload="metadata" src="${esc(output)}"></video>`:`<button class="production-thumb" data-image="${esc(a.output.name)}"><img src="${esc(output)}" alt="生成图片，点击查看与确认"></button>`):''}${a.task_id&&a.status!=='succeeded'&&a.status!=='completed'?`<button class="ghost small" data-refresh="${esc(a.attempt_id)}">查询并取回结果</button>`:''}${usageUnknown?`<p class="form-note">${draft.kind==='video'?'视频':'图片'}用量待核实，后续调用会暂停。请填写提供方确认的用量，不按产物数量推算。</p><button class="ghost small" data-recover-usage="${esc(a.attempt_id)}" ${canRecoverUsage(a,data)?'':'disabled'}>核实${draft.kind==='video'?'视频':'图片'}用量</button>${canRecoverUsage(a,data)?'':'<p class="form-note">本轮任务仍在执行，请等待结果后再核账。</p>'}`:''}${unknown?`<details><summary>核实提供方提交记录</summary><p class="form-note">${draft.kind==='video'?'请从提供方控制台核对。填写任务编号后，只会取回该任务；不会重新生成。':'如提供方证明未提交且未产生费用，可登记核实结果；不会重新生成。'}</p><button class="ghost small" data-recover="${esc(a.attempt_id)}">填写核实结果</button></details>`:''}</section>`;
+      return `<section><strong>${esc(statuses[a.status]||a.status)}</strong><p>${esc(a.message||'')}</p>${output?(draft.kind==='video'?`<video controls preload="metadata" src="${esc(output)}"></video>`:`<button class="production-thumb" data-image="${esc(a.output.name)}"><img src="${esc(output)}" alt="生成图片，点击查看与确认"></button>`):''}${a.task_id&&a.status!=='succeeded'&&a.status!=='completed'?`<button class="ghost small" data-refresh="${esc(a.attempt_id)}">查询并取回结果</button>`:''}${unknown?`<details><summary>核实提供方提交记录</summary><p class="form-note">${draft.kind==='video'?'请从提供方控制台核对。填写任务编号后，只会取回该任务；不会重新生成。':'如提供方证明未提交且未产生费用，可登记核实结果；不会重新生成。'}</p><button class="ghost small" data-recover="${esc(a.attempt_id)}">填写核实结果</button></details>`:''}</section>`;
     }).join('')}</div></article>`;
   }
   root.StudioProduction={esc,mediaUrl,price,gate,reviewGate,canRecoverUsage,usageQuantity,usageFormHtml,reviewHtml,uncertain,submission,actionRequest,draftHtml};
   if(typeof module!=='undefined')module.exports=root.StudioProduction;
 })(typeof window!=='undefined'?window:globalThis);
 
-async function openProduction(){
+async function openProduction(options={}){
   if(!state.runId){toast('先打开一个项目，再开始制作。');return;}
   if(document.querySelector('.production-dialog'))return;
   const runId=state.runId,base=`/api/runs/${encodeURIComponent(runId)}/production`,U=StudioProduction,opener=document.activeElement;
-  const dialog=document.createElement('dialog');dialog.className='production-dialog';dialog.setAttribute('aria-labelledby','production-title');
+  const mount=options.mount,kind=options.kind||'image';
+  const dialog=document.createElement(mount?'section':'dialog');dialog.className='production-dialog'+(mount?' production-embedded':'');dialog.setAttribute('aria-labelledby','production-title');
   dialog.innerHTML='<header class="production-heading"><div><span class="eyebrow">把方案变成画面</span><h2 id="production-title">制作</h2></div><button class="ghost" data-close>关闭</button></header><p class="form-note">先保存方案、完成制作检查，再核对准确输入并启动生成任务。关闭窗口只停止本地等待，提供方可能仍在处理。</p><p class="form-error" data-error role="alert"></p><div data-production-availability role="status"></div><div data-production-job role="status"></div><div data-confirm></div><div data-body>正在读取制作记录…</div>';
-  document.body.append(dialog);dialog.showModal();
+  if(mount){mount.replaceChildren(dialog);}else{document.body.append(dialog);dialog.showModal();}
   const body=dialog.querySelector('[data-body]'),error=dialog.querySelector('[data-error]'),confirm=dialog.querySelector('[data-confirm]');
+  if(mount)dialog.querySelector('.form-note').remove();
   const storageKey=`studio-production:${runId}`;let data=null,timer=null,reading=false,busy=false,closed=false,pending=null,lastJob=null,renderedRecords='',values={kind:'video',source_version:'',source_sha256:'',reference_name:'',reference_sha256:'',prompt:'',model:'wan3.0-video',duration:'5',resolution:'720P'};
   try{const saved=JSON.parse(sessionStorage.getItem(storageKey)||'null');if(saved){values={...values,...saved.values};pending=saved.pending||null;lastJob=saved.lastJob||null;}}catch(_){}
+  if(mount&&!pending){values.kind=kind;values.model=kind==='image'?'codex-image':'wan3.0-video';}
   function persist(){try{sessionStorage.setItem(storageKey,JSON.stringify({values,pending,lastJob}));}catch(_){error.textContent='浏览器无法暂存本次输入，请保持窗口直到请求结果确认。';}}
-  function current(){return !closed&&dialog.open&&state.runId===runId;}
-  function close(){closed=true;clearTimeout(timer);dialog.close();}
+  function current(){return !closed&&(mount?dialog.isConnected:dialog.open)&&state.runId===runId;}
+  function close(){closed=true;clearTimeout(timer);if(mount)dialog.remove();else dialog.close();}
+  dialog.studioClose=close;
   dialog.querySelector('[data-close]').onclick=close;
   dialog.addEventListener('cancel',()=>{closed=true;clearTimeout(timer);});
   dialog.addEventListener('close',()=>{closed=true;clearTimeout(timer);dialog.remove();opener?.focus();});
@@ -85,7 +87,10 @@ async function openProduction(){
   function render(){
     if(!current())return;
     renderedRecords=records();
-    body.innerHTML=`<div class="production-layout"><aside>${editor()}</aside><section><div class="production-record-heading"><h3>生成记录</h3><span>${data.drafts.length} 个方案</span></div><div data-records>${renderedRecords}</div></section></div>`;
+    body.innerHTML=mount
+      ? `<div class="journey-media-intro">${kind==='image'?'确认完整方案后，团队会在这里准备分镜图。生成后点击大图，确认商品、人物和画面是否可用。':'确认分镜图后，团队会准备视频。你核对画面描述和费用后再生成。'}<button class="ghost" data-prepare>让团队${kind==='image'?'准备分镜':'准备视频'}</button></div><div class="production-layout"><aside><details><summary>高级：手动编辑制作输入</summary>${editor()}</details></aside><section><div data-records>${renderedRecords}</div></section></div>`
+      : `<div class="production-layout"><aside>${editor()}</aside><section><div class="production-record-heading"><h3>生成记录</h3><span>${data.drafts.length} 个方案</span></div><div data-records>${renderedRecords}</div></section></div>`;
+    const prepare=body.querySelector('[data-prepare]');if(prepare){prepare.disabled=!!data.active;prepare.onclick=()=>submitJob(runId,{request_id:crypto.randomUUID(),text:kind==='image'?'请根据我已确认的完整方案，准备分镜参考图的图片制作输入，完成文字制作检查，让我核对后生成。':'请基于我已确认的分镜图准备视频输入，完成文字制作检查，展示画面描述、时长与费用，等我确认后生成。'});}
     const form=body.querySelector('form');for(const [key,value] of Object.entries(values)){const el=form.elements.namedItem(key);if(el)el.value=value;}
     function showSource(){const s=data.sources.find(s=>s.version===Number(values.source_version));form.querySelector('[data-source-note]').textContent=s?.summary||'不会自动选用最新稿件，请核对制作依据。';}
     showSource();
@@ -93,18 +98,24 @@ async function openProduction(){
     form.onsubmit=e=>{e.preventDefault();if(busy||pending||data.active)return;try{capture(form);const payload=U.submission(values,data,crypto.randomUUID());pending={action:'drafts',path:'/drafts',body:payload};persist();sendPending();}catch(err){notify(err.message);}};
     lock();if(pending)pendingView();
   }
-  function records(){return data.drafts.length?data.drafts.slice().reverse().map(d=>U.draftHtml(d,data,runId)).join(''):'<div class="production-empty"><span>从一个画面开始</span><p>保存制作方案后，在这里检查输入、发起生成并查看结果。</p></div>';}
+  function records(){
+    const drafts=mount?data.drafts.filter(d=>d.kind===kind):data.drafts;
+    const current=drafts.filter(d=>d.source_ready!==false),older=drafts.filter(d=>d.source_ready===false);
+    const draw=rows=>rows.slice().reverse().map(d=>U.draftHtml(d,data,runId)).join('');
+    return (current.length?draw(current):`<div class="production-empty"><span>${mount?(kind==='image'?'分镜会在这里展开':'成片会在这里呈现'):'从一个画面开始'}</span><p>可以继续在右侧讨论，团队会根据确认的方案准备制作输入。</p></div>`) +
+      (older.length?`<details><summary>查看历史制作记录</summary>${draw(older)}</details>`:'');
+  }
   function pendingView(){confirm.innerHTML='<section class="production-confirm"><h3>上次请求结果待确认</h3><p>请重试同一请求。输入与请求身份已保留，不会另开一次生成。</p><button class="primary" data-retry>核实上次请求</button></section>';confirm.querySelector('[data-retry]').onclick=()=>{if(!busy)sendPending();};}
   async function sendPending(){
     if(busy||!pending||!current())return;busy=true;lock();const request=pending;notify('');
-    try{const result=await api(base+request.path,{method:'POST',body:JSON.stringify(request.body)});if(result.job_id)lastJob={job_id:result.job_id,status:result.status,reason:result.reason||'',action:request.action};pending=null;persist();if(!current())return;confirm.innerHTML='';await load(true);toast(request.action==='drafts'?'制作方案已保存。':'请求已接收，请在生成记录查看进度。');}
+    try{const result=await api(base+request.path,{method:'POST',body:JSON.stringify(request.body)});if(result.job_id){lastJob={job_id:result.job_id,status:result.status,reason:result.reason||'',action:request.action};restoreJob(runId);}pending=null;persist();if(!current())return;confirm.innerHTML='';await load(true);toast(request.action==='drafts'?'制作方案已保存。':'请求已接收，请在生成记录查看进度。');}
     catch(err){if(!U.uncertain(err)){pending=null;persist();if(current()){confirm.innerHTML='';await load(true);}}else if(current())pendingView();notify(err.message||'请求结果暂未确认，请核实上次请求。');}
     finally{busy=false;if(current()){if(pending)pendingView();else render();}}
   }
   function reviewAction(draft,action){
     if(busy||pending)return;const reviewBlocked=U.reviewGate(draft,data);if(reviewBlocked){notify(reviewBlocked);return;}if(action==='generate'){const reason=U.gate(draft,data);if(reason){notify(reason);return;}}
     const material=data.materials.find(m=>m.name===draft.reference?.name&&m.sha256===draft.reference?.sha256),url=U.mediaUrl(material?.url,runId),generation=action==='generate';
-    confirm.innerHTML=`<section class="production-confirm"><span class="eyebrow">${generation?'生成前最后核对':'检查准确制作输入'}</span><h3>${generation?'启动一个生成任务':'确认一次制作检查'}</h3><p>脚本版本 ${U.esc(draft.source_version)} · ${U.esc(draft.model)}${draft.kind==='video'?` · ${U.esc(draft.duration)} 秒 · ${U.esc(draft.resolution)} · 原生声音开启 · 跟随参考图比例 · 不自动扩写`:''}</p>${url?`<img class="production-preview" src="${U.esc(url)}" alt="本次使用的准确参考图">`:'<p class="form-note">本方案未使用参考图。</p>'}<p class="production-prompt">${U.esc(draft.prompt)}</p><p><strong>${generation?U.price(draft.estimate):'制作检查会调用一次审核模型，费用按该模型配置结算。'}</strong></p><p class="form-note">${generation?U.esc(draft.estimate?.notice||'费用未知的部分保持未知；不代表免费。'): '检查不生成素材，也不代表用户已批准图片或生成费用。'} 不会自动重复提交。</p><label class="production-consent"><input type="checkbox" data-consent>我已核对以上输入，同意本次${generation?'生成任务及其费用':'审核模型调用及其费用'}</label><div class="production-actions"><button class="primary" data-authorize disabled>${generation?'启动生成任务':'开始制作检查'}</button><button class="ghost" data-dismiss>返回修改</button></div></section>`;
+    confirm.innerHTML=`<section class="production-confirm"><span class="eyebrow">${generation?'生成前最后核对':'检查准确制作输入'}</span><h3>${generation?'启动一个生成任务':'确认一次制作检查'}</h3><p>${mount?'按已确认方案制作':`脚本版本 ${U.esc(draft.source_version)}`} · ${U.esc(draft.model)}${draft.kind==='video'?` · ${U.esc(draft.duration)} 秒 · ${U.esc(draft.resolution)} · 原生声音开启 · 跟随参考图比例 · 不自动扩写`:''}</p>${url?`<img class="production-preview" src="${U.esc(url)}" alt="本次使用的准确参考图">`:'<p class="form-note">本方案未使用参考图。</p>'}<p class="production-prompt">${U.esc(draft.prompt)}</p><p><strong>${generation?U.price(draft.estimate):'制作检查会调用一次审核模型，费用按该模型配置结算。'}</strong></p><p class="form-note">${generation?U.esc(draft.estimate?.notice||'费用未知的部分保持未知；不代表免费。'): '检查不生成素材，也不代表用户已批准图片或生成费用。'} 不会自动重复提交。</p><label class="production-consent"><input type="checkbox" data-consent>我已核对以上输入，同意本次${generation?'生成任务及其费用':'审核模型调用及其费用'}</label><div class="production-actions"><button class="primary" data-authorize disabled>${generation?'启动生成任务':'开始制作检查'}</button><button class="ghost" data-dismiss>返回修改</button></div></section>`;
     const button=confirm.querySelector('[data-authorize]');confirm.querySelector('[data-consent]').onchange=e=>button.disabled=!e.target.checked;
     button.onclick=()=>{if(busy||pending||!current()||!confirm.querySelector('[data-consent]').checked)return;const reason=action==='generate'?U.gate(draft,data):U.reviewGate(draft,data);if(reason){notify(reason);return;}pending=U.actionRequest(action,draft,data.nonce,crypto.randomUUID());persist();sendPending();};
     confirm.querySelector('[data-dismiss]').onclick=()=>{confirm.innerHTML='';};confirm.scrollIntoView({block:'start'});
@@ -136,7 +147,7 @@ async function openProduction(){
   }
   async function load(full=false){
     if(!current()||reading)return;if(state.runId!==runId){close();return;}reading=true;
-    try{const result=await api(base);if(!current()){close();return;}data=result;dialog.querySelector('[data-production-availability]').textContent=data.active?'制作团队正在执行。当前输入会保留，本轮结束后可以继续。':data.unresolved_calls>0?'有调用用量待核实，请先在制作记录或运行记录中核账。':'';await showJob();if(!current())return;if(full||!body.querySelector('form'))render();else{const recordsHost=body.querySelector('[data-records]');const nextRecords=records();if(recordsHost&&nextRecords!==renderedRecords){recordsHost.innerHTML=nextRecords;renderedRecords=nextRecords;}lock();}}
+    try{const result=await api(base);if(!current()){close();return;}data=result;if(mount&&!values.source_version){const source=data.sources.find(s=>s.ready);if(source){values.source_version=String(source.version);values.source_sha256=source.artifact_sha256;}}dialog.querySelector('[data-production-availability]').textContent=data.active?'制作团队正在执行。当前输入会保留，本轮结束后可以继续。':'';await showJob();if(!current())return;if(full||!body.querySelector('form'))render();else{const recordsHost=body.querySelector('[data-records]');const nextRecords=records();if(recordsHost&&nextRecords!==renderedRecords){recordsHost.innerHTML=nextRecords;renderedRecords=nextRecords;}lock();}}
     catch(err){notify(err.status===404?'制作功能等待服务更新，重启工作台后再试。':err.message);if(!data)body.innerHTML='<button class="ghost" data-load>重新读取</button>';body.querySelector('[data-load]')?.addEventListener('click',()=>load(true));}
     finally{reading=false;clearTimeout(timer);if(current())timer=setTimeout(()=>{if(state.runId!==runId){close();return;}load();},2000);}
   }

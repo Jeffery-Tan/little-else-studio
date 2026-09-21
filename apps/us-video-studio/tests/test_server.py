@@ -108,6 +108,7 @@ def drive_intake_and_direction(box, structured=None):
     http = box["http"]
     make_run(http)
     box["model"] = ScriptedModel([
+        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video"}),
         tool_turn("t1", "write_stage", {
             "stage": "intake", "content": "需求正文", "summary": "需求整理",
         }),
@@ -115,7 +116,6 @@ def drive_intake_and_direction(box, structured=None):
         tool_turn("t3", "submit_stage", {
             "content": "方向正文", "summary": "两个方向", "structured": structured,
         }),
-        final_turn("导演：已提交。"),
         final_turn("intake 和 direction 都好了，等审核。"),
     ])
     res = http.post(f"/api/runs/{RUN}/message", json={"text": "做个保温袋视频"})
