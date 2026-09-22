@@ -2,7 +2,7 @@
 (function(root) {
   'use strict';
   const roles = {orchestrator:'主制片',director:'创意导演',material:'视觉策划',writer:'编剧',reviewer:'独立审片'};
-  const stages = {intake:'需求整理',direction:'创意方向',material_plan:'素材规划',writing:'脚本创作',image_analysis:'图片分析',image_generation:'图片生成',video_generation:'视频生成',production_review:'制作检查'};
+  const stages = {intake:'需求整理',direction:'创意方向',material_plan:'素材规划',writing:'脚本创作',image_analysis:'图片分析',video_analysis:'视频观察',image_generation:'图片生成',video_generation:'视频生成',production_review:'制作检查'};
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const numeric = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
   const count = value => numeric(value) && Number.isInteger(value);
@@ -62,14 +62,16 @@
     const s = summarize(rows);
     const media = rows.filter(r=>['images','video_seconds'].includes(r.usage_unit));
     const cny = media.filter(r=>numeric(r.estimated_cny));
+    const omniCny = rows.filter(r=>r.provider === 'bailian_omni' && numeric(r.estimated_cny));
+    const omniNote = omniCny.length ? `<div class="cost-notice"><strong>百炼声画分析 · 人民币</strong><p>${omniCny.length} 次有完整计费记录，人民币已知估算 CNY ${omniCny.reduce((n,r)=>n+r.estimated_cny,0).toFixed(6)}。缓存按原价保守估算，实际金额以百炼账单为准；不与美元相加。</p></div>` : '';
     const mediaNote = media.length ? `<div class="cost-notice"><strong>媒体制作 · 单独计量</strong><p>图片 ${media.filter(r=>r.usage_unit==='images').length} 次任务 · 视频 ${media.filter(r=>r.usage_unit==='video_seconds').length} 次任务。视频人民币已知估算：${cny.length?`CNY ${cny.reduce((n,r)=>n+r.estimated_cny,0).toFixed(2)}`:'未知'}。</p><p>人民币费用不与美元相加，也不受文字模型美元预算限制。图片/视频用量不换算为 Tokens；实际费用请在提供方平台查看。</p></div>` : '';
     return `<div class="cost-heading"><div><p class="cost-eyebrow">当前项目</p><h2>用量与费用</h2></div><button type="button" class="ghost small" data-cost-close aria-label="关闭用量与费用">关闭</button></div>
       <div class="cost-metrics"><div><span>模型调用</span><strong>${s.calls}</strong><small>${s.pending ? `${s.pending} 次等待确认` : '已记录的请求次数'}</small></div><div><span>已记录 Tokens</span><strong>${number(s.input+s.output)}</strong><small>输入 ${number(s.input)} · 输出 ${number(s.output)}${s.unknownUsage?' · 用量未齐':''}</small></div><div><span>已知估算金额</span><strong>${s.calls && !s.knownCostCalls?'金额未知':dollars(s.knownCost)}</strong><small>${s.unknownCost?`另有 ${s.unknownCost} 次金额未知`:'USD · 不是最终账单'}</small></div></div>
-      ${mediaNote}${!s.calls?'<p class="cost-message">这个项目还没有模型调用。资料整理和本地编辑不会产生模型调用。</p>':''}
+      ${mediaNote}${omniNote}${!s.calls?'<p class="cost-message">这个项目还没有模型调用。资料整理和本地编辑不会产生模型调用。</p>':''}
       ${s.unknownUsage?`<div class="cost-notice"><strong>${s.unknownUsage} 次未返回完整用量</strong><p>仅作运行记录，不影响继续。实际费用请在提供方平台查看。</p></div>`:''}
       ${s.incomplete?`<p class="cost-message">${s.incomplete} 次执行未完成。失败、停止或中断仍可能产生费用，已记录用量会保留。</p>`:''}
       ${rows.length?`<div class="cost-tabs" role="group" aria-label="费用分组"><button type="button" class="ghost small" data-cost-group="role" aria-pressed="true">按角色</button><button type="button" class="ghost small" data-cost-group="model" aria-pressed="false">按模型</button></div><div data-cost-groups>${groupTable(rows,'role')}</div>
-      <details class="cost-details"><summary>查看 ${rows.length} 次调用明细</summary><div class="cost-table-wrap"><table class="cost-table"><thead><tr><th>时间 / 角色</th><th>模型 / 进度</th><th>输入 / 输出 Tokens</th><th>估算金额（USD）</th></tr></thead><tbody>${rows.slice().reverse().map(row=>`<tr><td>${esc(label(row.at))}<small>${esc(roles[row.role]||'其他角色')} · ${esc(stages[row.stage]||'创作调用')}</small></td><td>${esc(label(row.actual_model||row.model,'未标明模型'))}<small>${esc(status(row))}</small></td><td>${['images','video_seconds'].includes(row.usage_unit)?`${numeric(row.usage_quantity)?number(row.usage_quantity):'待核实'} ${row.usage_unit==='images'?'张（提供方用量）':'秒'}<small>不按 Tokens 计量</small>`:`${count(row.input_tokens)?number(row.input_tokens):'未知'} / ${count(row.output_tokens)?number(row.output_tokens):'未知'}`}${row.usage_status!=='known'?'<small>用量未返回</small>':''}</td><td>${numeric(row.estimated_usd)?dollars(row.estimated_usd):numeric(row.estimated_cny)?`CNY ${row.estimated_cny.toFixed(2)}<small>人民币单独记录</small>`:'未知'}</td></tr>`).join('')}</tbody></table></div><button type="button" class="ghost small" data-cost-export>导出费用记录 CSV</button></details>`:''}
+      <details class="cost-details"><summary>查看 ${rows.length} 次调用明细</summary><div class="cost-table-wrap"><table class="cost-table"><thead><tr><th>时间 / 角色</th><th>模型 / 进度</th><th>输入 / 输出 Tokens</th><th>估算金额（USD）</th></tr></thead><tbody>${rows.slice().reverse().map(row=>`<tr><td>${esc(label(row.at))}<small>${esc(roles[row.role]||'其他角色')} · ${esc(stages[row.stage]||'创作调用')}</small></td><td>${esc(label(row.actual_model||row.model,'未标明模型'))}<small>${esc(status(row))}</small></td><td>${['images','video_seconds'].includes(row.usage_unit)?`${numeric(row.usage_quantity)?number(row.usage_quantity):'待核实'} ${row.usage_unit==='images'?'张（提供方用量）':'秒'}<small>不按 Tokens 计量</small>`:`${count(row.input_tokens)?number(row.input_tokens):'未知'} / ${count(row.output_tokens)?number(row.output_tokens):'未知'}`}${row.usage_status!=='known'?'<small>用量未返回</small>':''}</td><td>${numeric(row.estimated_usd)?dollars(row.estimated_usd):numeric(row.estimated_cny)?`CNY ${row.estimated_cny.toFixed(6)}<small>人民币单独记录</small>`:'未知'}</td></tr>`).join('')}</tbody></table></div><button type="button" class="ghost small" data-cost-export>导出费用记录 CSV</button></details>`:''}
       <details class="cost-details"><summary>费用如何计算</summary><p>仅累加每次调用当时记录的美元估算；不将未知金额补为零，也不跨币种相加。金额未知与用量未返回是两回事：完整用量已记录但价格未配置时，金额仍会未知。</p><p>Codex CLI 使用订阅或账户额度，本工作台不分摊订阅费用；金额未知不代表免费。金额、调用次数与 Tokens 都不是提供方剩余额度。</p><p>预算是停止后续请求的软阈值，不能保证最终账单不超出。最终费用请以提供方账单为准。</p></details>`;
   }
   function csvCell(value) {
@@ -80,7 +82,7 @@
   }
   function csv(rows) {
     const records = [['时间','角色','阶段','服务','请求模型','实际模型','执行状态','用量状态','输入 Tokens','输出 Tokens','已知估算金额','币种']];
-    for (const row of rows) records.push([label(row.at),roles[row.role]||'其他角色',stages[row.stage]||'创作调用',label(row.provider),label(row.model),label(row.actual_model,''),status(row),row.usage_status==='known'?'已知':'待核实',count(row.input_tokens)?row.input_tokens:'未知',count(row.output_tokens)?row.output_tokens:'未知',numeric(row.estimated_usd)?row.estimated_usd:'未知','USD']);
+    for (const row of rows) records.push([label(row.at),roles[row.role]||'其他角色',stages[row.stage]||'创作调用',label(row.provider),label(row.model),label(row.actual_model,''),status(row),row.usage_status==='known'?'已知':'待核实',count(row.input_tokens)?row.input_tokens:'未知',count(row.output_tokens)?row.output_tokens:'未知',numeric(row.estimated_usd)?row.estimated_usd:numeric(row.estimated_cny)?row.estimated_cny:'未知',numeric(row.estimated_cny) && !numeric(row.estimated_usd)?'CNY':'USD']);
     return '\ufeff'+records.map(values=>values.map(csvCell).join(',')).join('\r\n');
   }
   async function mount(panel,options) {

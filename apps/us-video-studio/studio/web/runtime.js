@@ -36,6 +36,8 @@ function jobPresentation(job, recovery = null) {
   const events = job.events || [];
   const team = teamProgress(job);
   const active = JOB_ACTIVE.has(job.status);
+  if (job.job_kind === 'reference_video') return {active,label:JOB_LABELS[job.status] || '状态待确认',
+    detail:active ? '正在获取并分析参考视频；复刻任务会接续策划。' : job.status==='succeeded' ? '参考任务结果已保存，请查看分析报告和创作方案。' : '已完成的步骤会保留，可在参考视频入口继续或上传原视频。',guidance:jobGuidance(job)};
   if ((job.job_kind || '').startsWith('production_')) return {active, label:JOB_LABELS[job.status] || '状态待确认',
     detail:active?'正在处理制作任务；媒体生成进度与结果保存在制作页。':'本次制作状态已保存，请在制作页查看结果与用量。',guidance:jobGuidance(job)};
   if (job.job_kind === 'artifact_revision') return {active,label:JOB_LABELS[job.status] || '状态待确认',
@@ -137,13 +139,13 @@ function showJob(job, notice = "") {
     review.onclick = () => {selectStage(job.job_payload.stage);openRevisionWorkspace(state.runId,job.job_payload.stage);};
     copy.append(review);
   }
-  if (!view.active && ['image_analysis','video_analysis'].includes(job?.job_kind)) {
-    const review = box('button','primary small','查看素材分析');
+  if (!view.active && ['image_analysis','video_analysis','reference_video'].includes(job?.job_kind)) {
+    const review = box('button','primary small',job?.job_kind === 'reference_video' ? '查看参考任务' : '查看素材分析');
     review.onclick = () => toggleMaterials(true);
     copy.append(review);
   }
   if (!view.active && currentRecovery && state.recoveryBlocked) renderRecoveryPanel(copy, currentRecovery);
-  if (!view.active && currentRecovery?.can_continue && job && !['image_analysis','video_analysis'].includes(job.job_kind) && ["interrupted", "failed", "cancelled", "blocked"].includes(job.status)) {
+  if (!view.active && currentRecovery?.can_continue && job && !['image_analysis','video_analysis','reference_video'].includes(job.job_kind) && ["interrupted", "failed", "cancelled", "blocked"].includes(job.status)) {
     const resume = box("button", "primary small", "准备继续创作");
     resume.onclick = () => {
       const text = "请先检查已保存的内容和当前进度，告诉我下一步建议。保留已确认的版本。";
@@ -276,6 +278,10 @@ async function restoreJob(runId) {
 
 async function submitJob(runId, payload) {
   if (runId !== state.runId) return;
+  // Both conversation entry points display the same on-demand analysis notice.
+  // This does not enable media generation; the main agent still needs an
+  // explicit reference request, a supplied source and the bounded tool.
+  if (!payload.request_kind && payload.reference_consent === undefined) payload={...payload,reference_consent:true};
   const generation = ++jobWatch;
   clearTimeout(jobTimer);
   currentRecovery = null;
@@ -287,7 +293,7 @@ async function submitJob(runId, payload) {
   showJob(null, "正在提交…");
   let job;
   try {
-    const route = payload.request_kind === 'stage_review' ? 'actions/review' : payload.request_kind === 'video_analysis' ? 'video-analysis' : payload.request_kind === 'image_analysis' ? 'image-analysis' : payload.request_kind === 'artifact_revision'
+    const route = payload.request_kind === 'reference_video' ? 'reference-videos' : payload.request_kind === 'stage_review' ? 'actions/review' : payload.request_kind === 'video_analysis' ? 'video-analysis' : payload.request_kind === 'image_analysis' ? 'image-analysis' : payload.request_kind === 'artifact_revision'
       ? `edits/${encodeURIComponent(payload.stage)}/${encodeURIComponent(payload.draft_id)}/generate` : 'jobs';
     job = await api(`/api/runs/${runId}/${route}`, { method: "POST", body: JSON.stringify(payload) });
   } catch (err) {

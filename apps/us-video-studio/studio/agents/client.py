@@ -341,6 +341,7 @@ def run_agent_loop(
     on_activity: Callable[[dict[str, Any]], None] | None = None,
     check_cancel: Callable[[], None] | None = None,
     stop_when: Callable[[], bool] | None = None,
+    completion_check: Callable[[], str | None] | None = None,
 ) -> LoopResult:
     """Drive a tool-use conversation to completion.
 
@@ -363,6 +364,7 @@ def run_agent_loop(
     tool_log: list[dict[str, Any]] = []
     text_seen: list[str] = []
     continuations_left = max_continuations
+    completion_reminders = 1
 
     for round_index in range(1, max_rounds + 1):
         if check_cancel is not None:
@@ -401,11 +403,24 @@ def run_agent_loop(
                                  "args": {}, "ok": True, "result": "truncated; asked to continue"})
                 continuations_left -= 1
                 continue
+            incomplete = False
+            if (completion_check and turn.stop_reason == 'end_turn'
+                    and not any(not r['ok'] for r in tool_log)):
+                reminder = completion_check()
+                incomplete = bool(reminder)
+                if reminder and completion_reminders and round_index < max_rounds:
+                    convo.append({'role': 'assistant', 'content': turn.text or '准备结束本轮。'})
+                    convo.append({'role': 'user', 'content': reminder})
+                    text_seen.clear()
+                    completion_reminders -= 1
+                    if on_activity:
+                        on_activity({'type':'agent_activity','phase':'continuing','round':round_index})
+                    continue
             return LoopResult(
                 text="\n".join(text_seen).strip(),
                 messages=convo,
                 rounds=round_index,
-                stopped_because="done" if turn.stop_reason != "max_tokens" else "max_tokens",
+                stopped_because="incomplete" if incomplete else "done" if turn.stop_reason != "max_tokens" else "max_tokens",
                 tool_log=tool_log,
             )
 

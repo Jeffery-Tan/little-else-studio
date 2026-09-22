@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from PIL import Image
 
 from .agents.budget import BudgetedClient
+from .agents.client import SafePreflightError
 from .ledger import Ledger
 from .material_observations import (
     ObservationError, ObservationConflict, _lines, _manifest, material_workspace,
@@ -49,6 +50,7 @@ class AnalysisIn(BaseModel):
     model: str = Field(min_length=1, max_length=200)
     purpose: str = Field(pattern=r'^(product|reference)$')
     consent: bool = Field(strict=True)
+    expected_endpoint: str | None = Field(default=None, max_length=300)
 
 
 class ConfirmIn(BaseModel):
@@ -94,6 +96,10 @@ def candidates(store, run_id):
     with store.run_lock(run_id):
         _, _, manifest = _manifest(store, run_id)
         accepted = {r.get('analysis_id'): r for r in manifest['observations'] if isinstance(r, dict)}
+        from .creation_mode import current as creation_mode
+        mode = creation_mode(store, run_id)
+        if mode and mode.get('analysis_id'):
+            accepted.setdefault(mode['analysis_id'], {'source_kind': 'requested_model_reference'})
         current = {m['name']: m['sha256'] for m in material_workspace(store, run_id)['materials']}
         results = []
         for event in store.read_events(run_id):
@@ -103,18 +109,22 @@ def candidates(store, run_id):
             status = ('stale' if current.get(candidate['name']) != candidate['sha256'] else
                       'accepted' if candidate['analysis_id'] in accepted else 'pending')
             results.append({**candidate, 'candidate_sha256': _digest(candidate), 'status': status,
-                            'selected_findings': accepted.get(candidate['analysis_id'], {}).get('selected_findings', [])})
+                            'adoption_source_kind': accepted.get(candidate['analysis_id'], {}).get('source_kind'),
+                            'selected_findings': accepted.get(candidate['analysis_id'], {}).get('selected_findings',
+                                list(range(len(candidate['findings']))) if mode and mode.get('analysis_id') == candidate['analysis_id'] else [])})
         return results
 
 
 def confirm_candidate(store, run_id, analysis_id, *, expected_candidate_sha256,
-                      expected_manifest_sha256, selected_findings):
+                      expected_manifest_sha256, selected_findings, _reference_request_id=None):
     with store.run_lock(run_id):
         candidate = next((c for c in candidates(store, run_id) if c['analysis_id'] == analysis_id), None)
         if not candidate or candidate['candidate_sha256'] != expected_candidate_sha256:
             raise ObservationConflict('分析结果已变化，请重新打开后确认。')
         if candidate['status'] == 'stale':
             raise ObservationConflict('原图片已变化，旧分析不能用于这张图片。')
+        if _reference_request_id and (candidate.get('reference_task_id') != _reference_request_id or candidate['purpose'] != 'reference'):
+            raise ObservationError('参考任务与观察不匹配。')
         indices = selected_findings
         if (not isinstance(indices, list) or not indices or len(set(indices)) != len(indices)
                 or any(type(i) is not int or i < 0 or i >= len(candidate['findings']) for i in indices)):
@@ -137,12 +147,25 @@ def confirm_candidate(store, run_id, analysis_id, *, expected_candidate_sha256,
                       selected_findings=sorted(indices), call_id=candidate['call_id'],
                       findings=[candidate['findings'][i] for i in sorted(indices)])
         if candidate.get('media_kind') == 'video':
-            record.update(level='frames_observed',
+            if candidate.get('audiovisual'):
+                info = candidate['audiovisual']
+                record.update(level='audiovisual_review',
+                    method='模型收到视频文件及可用音轨后分析；工作台用户逐条选择采用，非逐帧验收',
+                    coverage=f"视频输入 {info['duration_seconds']:.3f}s；音轨范围 {info['audio_ranges']}；模型采样理解",
+                    audiovisual=info,
+                    timeline=[t for t in candidate['timeline'] if t['finding_index'] in indices],
+                    reference_methods=[m for m in candidate['reference_methods'] if set(m['supports']) <= set(indices)])
+            else:
+                record.update(level='frames_observed',
                           method='模型收到带时间点的抽帧；工作台用户选择采用，未发送音频',
                           coverage=f"{len(candidate['sampling']['frames'])} 个稀疏画面，视频时长 {candidate['sampling']['duration_seconds']:.3f}s；未听声音",
                           sampling=candidate['sampling'],
                           timeline=[t for t in candidate['timeline'] if t['finding_index'] in indices],
                           reference_methods=[m for m in candidate['reference_methods'] if set(m['supports']) <= set(indices)])
+        if _reference_request_id:
+            record.update(source_kind='requested_model_reference', reference_task_id=_reference_request_id,
+                method='用户指定参考任务后自动接续；模型声画观察未经人工核对，不是商品事实或生成批准')
+            record.pop('confirmed_at', None)
         manifest['observations'].append(record)
         encoded = json.dumps(manifest, ensure_ascii=False, indent=2) + '\n'
         if len(encoded.encode('utf-8')) > MAX_MANIFEST_BYTES:
@@ -151,7 +174,8 @@ def confirm_candidate(store, run_id, analysis_id, *, expected_candidate_sha256,
         return material_workspace(store, run_id)
 
 
-def prepare_analysis(store, pipeline, connections, settings, request, *, client_factory=None, video=False):
+def prepare_analysis(store, pipeline, connections, settings, request, *, client_factory=None, video=False,
+                     _native_frozen=None, _reference_id=None, _reference_instruction=''):
     """Freeze actual bytes and only the selected credential before creating a job."""
     run_id, payload = request
     if payload.consent is not True:
@@ -165,22 +189,46 @@ def prepare_analysis(store, pipeline, connections, settings, request, *, client_
             raw, mime = read_video(store, run_id, payload.name, payload.expected_sha256), None
         else:
             raw, mime = read_image(store, run_id, payload.name, payload.expected_sha256)
-    snapshot = connections.snapshot(image_connection=payload.connection_id, image_model=payload.model,
-                                    expected_revision=payload.expected_revision)
-    job_settings = snapshot.settings(settings)
+    from .agents import bailian_omni
+    native = payload.connection_id == bailian_omni.CONNECTION
+    if native:
+        if not video or payload.model != bailian_omni.MODEL:
+            raise ObservationError('百炼 Omni 入口仅支持所展示模型的视频声画分析。')
+        if _native_frozen is None and payload.expected_revision != connections.public()['revision']:
+            raise ObservationConflict('模型设置已变化，请重新打开分析。')
+        try:
+            job_settings, native_client, connection = _native_frozen or bailian_omni.freeze(settings, payload.expected_endpoint)
+        except SafePreflightError as exc:
+            raise ObservationError(str(exc)) from None
+        model = bailian_omni.MODEL
+        public = {'revision': payload.expected_revision}
+    else:
+        snapshot = connections.snapshot(image_connection=payload.connection_id, image_model=payload.model,
+                                        expected_revision=payload.expected_revision)
+        job_settings = snapshot.settings(settings)
+        public = snapshot.public()
+        connection = next(c for c in public['connections'] if c['id'] == payload.connection_id)
+        model = public['roles']['material']['model']
     ledger = Ledger(store, job_settings)
     ledger.ensure_within_budget()
-    public = snapshot.public()
-    connection = next(c for c in public['connections'] if c['id'] == payload.connection_id)
-    model = public['roles']['material']['model']
     summary = {'connection_id': connection['id'], 'connection_name': connection['name'],
                'provider': connection['provider'], 'model': model, 'revision': public['revision']}
+    if native:
+        summary.update(endpoint=connection['base_url'], pricing=connection['pricing'][model])
+    if _reference_id:
+        summary['reference_task_id'] = _reference_id
 
     def run(_text, emit, check_cancel):
         check_cancel()
-        emit({'type': 'status', 'role': 'material', 'message': '正在提取视频画面，不分析音频。' if video else '正在观察这张图片，结果将等待你的确认。'})
+        emit({'type': 'status', 'role': 'material', 'message': '正在准备百炼声画输入，保留并检查原音轨。' if native else '正在提取视频画面，不分析音频。' if video else '正在观察这张图片，结果将等待你的确认。'})
         packet = None
-        if video:
+        if native:
+            from .audiovisual_observation import SYSTEM as AV_SYSTEM, prepare_video, parse_result
+            sent, packet = prepare_video(raw, check_cancel)
+            blocks = [{'type': 'text', 'text': '素材用途：' + payload.purpose + '\n实际输入范围：' + json.dumps(packet, ensure_ascii=False)},
+                      {'type': 'video', 'source': {'type': 'base64', 'data': base64.b64encode(sent).decode('ascii')}}]
+            system = AV_SYSTEM
+        elif video:
             from .video_observation import SYSTEM as VIDEO_SYSTEM, sample_video, public_packet, parse_result
             try:
                 packet = sample_video(raw, check_cancel)
@@ -197,8 +245,12 @@ def prepare_analysis(store, pipeline, connections, settings, request, *, client_
                         'data': base64.b64encode(raw).decode('ascii')}},
                       {'type': 'text', 'text': '素材用途：' + ('商品素材' if payload.purpose == 'product' else '创意参考')}]
             system = SYSTEM
+        if _reference_id and _reference_instruction:
+            blocks.append({'type': 'text', 'text': '用户本次参考分析重点（只按片内证据回答）：' + _reference_instruction})
         check_cancel()
-        client = client_factory() if client_factory is not None else snapshot.client(check_cancel=check_cancel, max_tokens=4096 if video else 2048)
+        if native:
+            native_client.check_cancel = check_cancel
+        client = client_factory() if client_factory is not None else native_client if native else snapshot.client(check_cancel=check_cancel, max_tokens=4096 if video else 2048)
         before = {c.call_id for c in ledger.entries(run_id)}
         turn = BudgetedClient(client, ledger, run_id=run_id, role='material', stage='video_analysis' if video else 'image_analysis').complete(
             model=model, system=system, tools=[], messages=[{'role': 'user', 'content': blocks}])
@@ -223,15 +275,18 @@ def prepare_analysis(store, pipeline, connections, settings, request, *, client_
         candidate = dict(analysis_id=str(uuid.uuid4()), name=payload.name, sha256=payload.expected_sha256,
                          purpose=payload.purpose, findings=findings, limitations=limitations if video else limitations + [LIMITATION],
                          observed_at=utcnow(), call_id=row.call_id, actual_model=turn.model,
-                         usage_status=row.usage_status, estimated_usd=row.estimated_usd, **summary)
-        if video:
+                         usage_status=row.usage_status, estimated_usd=row.estimated_usd, estimated_cny=row.estimated_cny, **summary)
+        if native:
+            candidate.update(media_kind='video', audiovisual=packet,
+                             timeline=parsed['timeline'], reference_methods=parsed['reference_methods'])
+        elif video:
             candidate.update(media_kind='video', sampling=public_packet(packet),
                              timeline=parsed['timeline'], reference_methods=parsed['reference_methods'])
         with store.run_lock(run_id):
             store.append_event(run_id, 'video_analysis_candidate' if video else 'image_analysis_candidate', candidate=candidate)
         emit({'type': 'image_analysis_ready', 'analysis_id': candidate['analysis_id'],
-              'message': '素材分析已保存。请打开项目素材，核对并选择要采用的观察。'})
-        return SimpleNamespace(stopped_because='done', text='素材分析已保存，等待确认。', rounds=1, used_tools=[])
+              'message': '参考分析已保存，正在接续本次参考任务。' if _reference_id else '素材分析已保存。请打开项目素材，核对并选择要采用的观察。'})
+        return SimpleNamespace(stopped_because='done', text='素材分析已保存，等待确认。', rounds=1, used_tools=[], analysis_id=candidate['analysis_id'])
 
     return run, summary
 
@@ -245,10 +300,12 @@ def install_image_analysis_routes(app, jobs, require_run, connections, settings,
         try:
             doc = connections.public()
             from .video_observation import available, MAX_SECONDS, MAX_FRAMES
+            from .agents.bailian_omni import connection_info
             return {'candidates': candidates(store, run_id), 'revision': doc['revision'],
                     'connections': [{**c, 'suggested_model': next((b['model'] for b in doc['roles'].values()
                         if b['connection'] == c['id'] and b['model']), '')}
                         for c in doc['connections'] if c['provider'] in VISION_PROVIDERS and c['has_key']],
+                    'bailian_omni': connection_info(),
                     'max_bytes': MAX_IMAGE_BYTES, 'video': {'available': available(), 'max_seconds': MAX_SECONDS,
                         'max_frames': MAX_FRAMES, 'audio_observed': False}}
         except ObservationError as exc:
@@ -283,7 +340,7 @@ def install_image_analysis_routes(app, jobs, require_run, connections, settings,
     def analyze_video(run_id: str, payload: AnalysisIn):
         require_run(run_id)
         try:
-            return jobs.submit(run_id, f'分析视频画面：{payload.name}', payload.request_id,
+            return jobs.submit(run_id, f'分析视频：{payload.name}', payload.request_id,
                 kind='video_analysis', payload=payload.model_dump(exclude={'request_id'}),
                 prepare=lambda _: prepare_analysis(store, jobs.pipeline, connections, settings,
                     (run_id, payload), client_factory=client_factory, video=True))

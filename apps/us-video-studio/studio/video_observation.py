@@ -161,6 +161,9 @@ def parse_result(result, packet, purpose):
 def record_details(record):
     """Validate optional timeline data before it is made visible as evidence."""
     import re
+    if 'audiovisual' in record:
+        from .audiovisual_observation import record_details as audiovisual_details
+        return audiovisual_details(record)
     if not any(k in record for k in ('sampling', 'timeline', 'reference_methods')):
         return {}
     packet = record.get('sampling')

@@ -5,13 +5,22 @@ async function loadMaterialWorkspace() {
   if (!runId || !state.materialsOpen) return;
   const grid = $('materials-grid');
   try {
-    const [data, images] = await Promise.all([
+    const [data, images, references] = await Promise.all([
       api(`/api/runs/${encodeURIComponent(runId)}/material-observations`),
       api(`/api/runs/${encodeURIComponent(runId)}/image-analysis`).catch(err=>{if(err.status===404)return null;throw err;}),
+      api(`/api/runs/${encodeURIComponent(runId)}/reference-videos`).catch(err=>{if(err.status===404)return null;throw err;}),
     ]);
     if (runId !== state.runId || request !== materialWorkspaceRequest || !state.materialsOpen) return;
     grid.innerHTML = StudioMaterials.render(StudioImages.enrich(data, images));
     attachImageActions(grid, runId, data, images);
+    const referenceList=$('reference-video-results');
+    if(referenceList) {
+      referenceList.innerHTML=references?StudioReferenceVideo.tasks({...references,runId}):'';
+      for(const button of referenceList.querySelectorAll('[data-reference-resume]')) button.onclick=()=>
+        openReferenceVideo(runId,references.tasks.find(t=>t.reference_id===button.dataset.referenceResume),button).catch(err=>toast(err.message,true));
+    }
+    const referenceButton=$('reference-video-open');
+    if(referenceButton)referenceButton.onclick=()=>openReferenceVideo(runId,null,referenceButton).catch(err=>toast(err.message,true));
     for (const button of grid.querySelectorAll('[data-material-observe]')) button.onclick = () => {
       const material = data.materials.find(m=>m.name === button.dataset.materialObserve);
       if (material) openObservationEditor(runId, material, data, button);

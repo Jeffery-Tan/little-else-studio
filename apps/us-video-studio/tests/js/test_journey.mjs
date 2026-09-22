@@ -8,7 +8,9 @@ const {questionCardHtml,journeyGateHtml,journeyStatus}=require('../../studio/web
 test('clarification supports recommendation and free text without implicit selection',()=>{
   const html=questionCardHtml({id:'abc',question:'<script>?</script>',options:[{label:'A',description:'one'},{label:'B'}],recommended:0});
   assert.ok(html.includes('推荐'));
-  assert.ok(html.includes('textarea'));
+  assert.ok(html.includes('data-question-choice'));
+  assert.ok(!html.includes('<form'));
+  assert.ok(html.includes('下方对话'));
   assert.ok(!html.includes(' checked'));
   assert.ok(!html.includes('<script>'));
   assert.ok(!html.includes('data-act="approve"'));

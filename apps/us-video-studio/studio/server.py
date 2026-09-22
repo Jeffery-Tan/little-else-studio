@@ -70,6 +70,7 @@ class MessageIn(BaseModel):
 class JobIn(MessageIn):
     request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
     question_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
+    reference_consent: bool = Field(default=False, strict=True)
 
 
 class ReviewActionIn(BaseModel):
@@ -176,7 +177,7 @@ def build_app(
         if not current.can_review:
             raise PipelineError('review', '这一版当前不能发起审核，请刷新项目状态。')
 
-    def prepare_job(run_id, review=None):
+    def prepare_job(run_id, review=None, reference_consent=False):
         if review is not None:
             require_review_version(run_id, review)
         if client_factory is not None:
@@ -188,6 +189,13 @@ def build_app(
             snapshot = connections.snapshot()
             job_settings = snapshot.settings(settings)
             summary = snapshot.public()
+
+        from .agents.bailian_omni import connection_info
+        reference_connection = connection_info() if reference_consent else None
+        reference_revision = connections.public()['revision']
+        if reference_consent:
+            summary['reference_analysis'] = {'connection': reference_connection, 'revision': reference_revision,
+                'notice': '仅本轮明确参考要求才按需调用；非图片/视频生成授权'}
 
         def run(text, emit, check_cancel):
             job_client = client if client_factory is not None else snapshot.client(
@@ -217,9 +225,21 @@ def build_app(
                          f'「{label}」第 {review.expected_version} 版审核提出了修改意见。请在创作板查看关键问题，再决定调整方向。')
                 store.append_chat(run_id, 'assistant', reply)
                 return OrchestratorTurn(reply, 'done', outcome.rounds)
+            def observe_reference(source, instruction, reference_emit, reference_cancel):
+                if not reference_connection:
+                    raise PipelineError('reference_connection', '参考观察连接未就绪，请检查当前百炼连接。')
+                return app.state.observe_reference(run_id, source, instruction, reference_emit, reference_cancel,
+                    endpoint=reference_connection['base_url'], revision=reference_revision)
+            def observe_images(items, image_emit, image_cancel):
+                if not reference_connection:
+                    raise PipelineError('image_connection', '图片观察连接未就绪，请检查当前百炼连接。')
+                from .agent_images import observe
+                return observe(store, job_settings, run_id, items, endpoint=reference_connection['base_url'],
+                    emit=image_emit, check_cancel=image_cancel, client_factory=client_factory)
             return Orchestrator(store, pipeline, job_settings, job_client,
                 Ledger(store, job_settings), run_id, on_event=emit, check_cancel=check_cancel,
-                learning_service=learning, production_review=production_review).send(text)
+                learning_service=learning, production_review=production_review,
+                reference_observer=observe_reference, image_observer=observe_images).send(text)
         return run, summary
 
     jobs = JobManager(store, pipeline, ledger, prepare_job)
@@ -288,6 +308,9 @@ def build_app(
             raise HTTPException(404, str(exc)) from exc
         if not include_deleted and store.deletion_state(run_id):
             raise HTTPException(410, '项目已移入回收站，请先恢复后再继续。')
+
+    from .reference_video import install_reference_video_routes
+    install_reference_video_routes(app, jobs, require_run, connections, settings, prepare_job, client_factory=client_factory)
 
     install_recovery_routes(app, jobs, require_run)
     install_codex_auth_routes(app, codex_auth)
@@ -562,7 +585,10 @@ def build_app(
         """
         require_run(run_id)
         with store.run_lock(run_id):
-            return build_timeline(store, pipeline, ledger, run_id, latest_execution(store, run_id))
+            result = build_timeline(store, pipeline, ledger, run_id, latest_execution(store, run_id))
+            from .creation_mode import current
+            result['creation_mode'] = current(store, run_id)
+            return result
 
     # -------------------------------------------------------------- materials --
 
@@ -751,10 +777,12 @@ def build_app(
                 from .interactions import check_answer
                 def prepare_answer(rid):
                     check_answer(store, rid, payload.question_id)
-                    return prepare_job(rid)
+                    return prepare_job(rid, reference_consent=payload.reference_consent)
                 return present_job(jobs.submit(run_id, payload.text, payload.request_id,
-                    payload={'question_id': payload.question_id}, prepare=prepare_answer))
-            return present_job(jobs.submit(run_id, payload.text, payload.request_id))
+                    payload={'question_id': payload.question_id, **({'reference_consent': True} if payload.reference_consent else {})}, prepare=prepare_answer))
+            return present_job(jobs.submit(run_id, payload.text, payload.request_id,
+                payload={'reference_consent': True} if payload.reference_consent else None,
+                prepare=lambda rid: prepare_job(rid, reference_consent=payload.reference_consent)))
         except (PipelineError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 

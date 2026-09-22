@@ -55,6 +55,10 @@ def evidence_snapshot(store: Store, run_id: str) -> dict[str, Any]:
         },
     }
     imported_sources = run / "evidence" / "content-input-sources.json"
+    from .creation_mode import current
+    selected_mode = current(store, run_id)
+    if selected_mode and selected_mode['mode'] != 'autonomous':
+        result['creation_mode'] = selected_mode
     from .project_history import evidence_binding
     try:
         history = evidence_binding(store, run_id)
@@ -92,6 +96,13 @@ def evidence_snapshot(store: Store, run_id: str) -> dict[str, Any]:
                     label=imported['label'],
                     origin_notice=('历史生成素材，不是商品实拍；旧图审不授予本轮生成权限。'
                                    if imported['origin'] == 'generated' else '迁入的商家原始素材；具体尺码、真实性与观察范围仍按来源记录核对。'))
+    from .agent_images import saved_observations
+    observed = saved_observations(store, run_id)
+    for material in result['materials']:
+        for item in observed:
+            if item['name'] == material['name'] and item['sha256'] == material['sha256']:
+                material['observations'].append(item)
+                material['observation_level'] = 'model_observed'
     manifest = run / "evidence" / "observations.json"
     if not manifest.exists():
         return result
@@ -137,7 +148,7 @@ def evidence_snapshot(store: Store, run_id: str) -> dict[str, Any]:
                 key: record[key] for key in ("level", "observer", "method", "coverage", "observed_at", "findings", "limitations")
             })
             material["observations"][-1].update(details)
-            for key in ("purpose", "source_kind", "analysis_id", "call_id", "candidate_sha256", "confirmed_at"):
+            for key in ("purpose", "source_kind", "analysis_id", "call_id", "candidate_sha256", "confirmed_at", "reference_task_id"):
                 if isinstance(record.get(key), str):
                     material["observations"][-1][key] = record[key]
             # Multiple modes are preserved independently; no numeric rank can

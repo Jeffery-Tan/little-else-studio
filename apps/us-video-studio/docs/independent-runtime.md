@@ -15,7 +15,7 @@
       → connections.py：DPAPI 凭据、角色路由、每轮配置快照
       → agents/orchestrator.py → tools/dispatch.py → 独立角色上下文
       → pipeline.py / store.py：尝试、不可变产物、审核、用户批准、依赖失效
-      → ledger.py：调用 intent → settlement，未知用量阻止新调用
+      → ledger.py：调用 intent → settlement，未知用量留作诊断，不阻止新调用
       → image_analysis.py / revisions.py：分析候选及采用、局部修改新版本
       → learning.py / references.py：唯一学习库、实际输入快照、差异入库
       → production.py → codex_image.py / wan_video.py：显式制作、原任务回收
@@ -27,7 +27,7 @@
 
 ### 存储
 
-默认数据根 `J:/E-Business-Video-Data/us-video-studio/`，由 `STUDIO_DATA_ROOT` 覆盖，全部在 Git 外：
+数据根由 `STUDIO_DATA_ROOT` 指定，未设置时才回退到历史默认值 `J:/E-Business-Video-Data/us-video-studio/`。当前机器的操作入口见 README，不能把旧盘符当作已恢复目录。全部运行数据在 Git 外：
 
 | 路径 | 含义 |
 | --- | --- |
@@ -37,6 +37,7 @@
 | `runs/<id>/ledger.jsonl` | intent 与 settlement；按 call_id 合并，不能删历史清除未知用量 |
 | `runs/<id>/materials/`、`evidence/observations.json` | 原字节素材与准确 hash 绑定的观察；生成来源单独标记 |
 | `runs/<id>/learning/`、`creative-packages/` | 输入和提案快照 / 确定性编译的本地审阅包 |
+| `runs/<id>/requests/` | 每次模型调用的不可变逻辑输入快照；可能包含业务资料，不是提供方网络请求已发送的证明 |
 | `runs/<id>/history/manifest.json`、`history/archive/` | 显式迁入清单与只读原件；仅精选文本可站内读取 |
 | `import-staging/` | 迁移暂存，全部复制校验后才发布新 run；失败保留供核查 |
 
@@ -45,12 +46,13 @@
 ### 执行与恢复
 
 1. **浏览器不拥有任务生命周期。** 服务先保存任务事件，再执行；相同 request_id 与相同参数重试不重复提交。刷新、关闭窗口或切换页面不取消已接受任务，页面用 jobs API 重连。
-2. **中断不自动重发。** 服务启动将遗留任务标为 interrupted。用户核对已保存产物与提供方回执后明确继续；未知用量先核账。停止是协作取消，在途模型或远端视频仍可能完成和计费。
+2. **中断不自动重发。** 服务启动将遗留任务标为 interrupted。用户查看已保存产物后明确继续，开放阶段尝试仍需处理；未知用量不要求手工核账。停止是协作取消，在途模型或远端视频仍可能完成和计费。媒体提交结果不明须找回原任务，不能将其与用量未知混为一谈。
 3. **输入与批准固定版本。** artifact-v2 绑定正文、结构、证据、限制及依赖。审批针对页面实际展示的版本/hash/方向；body-v1 只回放，不继承旧批准。上游、图片、观察或参考变化使受影响产物失效。
 4. **角色和凭据隔离。** 每轮冻结连接/模型/价格，审核不读生产者完整对话。Codex 每次使用独立临时线程，不注入开发对话；仍可能加载用户全局 AGENTS.md，不宣称 OS 级完全隔离。API Key 只在服务端按用途解密，不进模型、日志或浏览器存储；地址变化不转交旧 Key。
-5. **费用不虚构。** 文字 token 与媒体 images/video_seconds 共享台账；美元与人民币估算分列，未知金额不补零。未知媒体用量不能通过文字 token 核账解除；报价不等于账单，也不代表硬性支出上限。
-6. **制作单独授权。** 主控只能读取/准备方案；用户分别完成制作检查、准确图审和费用确认。百炼保存原 endpoint/task_id，恢复只查询原任务；Codex 图片不提供可靠的原生计费量，输出存在也可能仍待核账。协议和能力限制见 [Codex](codex-image-capability.md)、[Wan](wan-video-provider.md)。
+5. **费用不虚构。** 文字 token 与媒体 images/video_seconds 共享台账；美元与人民币估算分列，未知金额不补零。未知用量仅作诊断，个人工作台没有手工核账待办；实际账单在提供方平台查看。报价不等于账单，也不代表硬性支出上限。
+6. **制作单独授权。** 主控准备方案并调用独立文字制作检查，用户在同一工作台核对输入、准确图审和费用后明确生成。百炼保存原 endpoint/task_id，恢复只查询原任务；Codex 图片可能没有可靠的原生计费量，保持未知也不阻止继续。协议和能力限制见 [Codex](codex-image-capability.md)、[Wan](wan-video-provider.md)。
 7. **迁移不恢复执行。** history_import 只读来源，在隔离目录复制/校验后创建新 intake 与 pause；不复制有效审批或费用台账，不运行旧脚本。用户在站内明确继续，新一轮重新经过版本、审核与费用边界。
+8. **删除可恢复。** 项目删除/恢复追加到原事件流，不移动或清除目录。删除项目从列表隐藏、禁止新任务，原台账仍计入汇总；活动任务未结束时不能删除。回收站恢复原身份和内容，不启动模型。
 
 ## 接口与集成入口
 
@@ -59,9 +61,10 @@
 | 领域 | 入口与职责 |
 | --- | --- |
 | 项目/产物 | `/api/runs`；run 的 `/state`、`/timeline`、`/chat`、`/events`、`/ledger`、`/artifacts`；GET 指定版本，POST `/nonce` 与 `/decision` 执行用户决定 |
+| 对话入口/回收站 | POST `/api/conversations` 幂等建立项目；DELETE `/api/runs/{run_id}` 移入回收站，GET `/api/trash` 列表，POST run 的 `/restore` 恢复 |
 | 连接/任务 | GET/PUT `/api/connections`；POST `/api/connections/deepseek/check` 只读验密钥；run 的 POST `/jobs`、GET `/jobs/latest` 或 `/jobs/{job_id}`、POST `/jobs/{job_id}/cancel` |
 | Codex 登录 | GET `/api/connections/codex/status`；POST `/api/connections/codex/login` 显式启动官方浏览器登录，POST `/api/connections/codex/login/cancel` 取消对应 attempt_id；与模型任务互斥，不读取凭据或自动登出 |
-| 恢复 | GET `/recovery`；POST `/recovery/reconcile` 核对文字用量；POST `/recovery/abandon` 关闭准确遗留尝试，不清除未知账 |
+| 恢复 | GET `/recovery`；POST `/recovery/abandon` 关闭准确遗留尝试。`/recovery/reconcile` 仅为保留的开发兼容入口，不是用户继续前置条件 |
 | 素材/分析 | GET/POST `/materials`、`/material-observations`、`/image-analysis`；GET `/materials/{name}`；POST `/image-analysis/{analysis_id}/confirm` 逐条采用 |
 | 修订 | GET/POST `/edits/{stage}`，POST `/edits/{stage}/{draft_id}/generate`；GET `/artifacts/{stage}/compare` |
 | 学习/参考 | `/api/learning` 与 run 的 `/learning`；POST `/learning/proposals` 和 `/learning/proposals/{proposal_id}/apply`；GET/POST `/references`，POST `/references/{case_id}/remove` |
@@ -70,7 +73,7 @@
 | 制作 | GET `/production`；POST `/production/drafts`、`/production/material-approvals`、`/production/{draft_id}/review`、`/production/{draft_id}/generate`、`/production/attempts/{attempt_id}/refresh` 和 `/recover` |
 | 历史 | GET `/history`、`/history/{document_id}`；没有 HTTP 导入或任意文件读取入口 |
 
-变更接口要求准确版本或修订号，状态冲突通常返回 409，输入不合契约为 400/422；不要把冲突重试成新业务请求。审批、生成和核账是页面的人类操作，不开放给 Agent 工具。每种接口的字段以对应模块 Pydantic 类型及 README 为准。
+变更接口要求准确版本或修订号，状态冲突通常返回 409，输入不合契约为 400/422，已删除项目返回 410；不要把冲突重试成新业务请求。审批与生成是页面的人类操作，不开放给 Agent 工具。每种接口的字段以对应模块 Pydantic 类型及 README 为准。新增参考视频任务的协议见 [声画与参考任务](bailian-omni-and-tiktok-import.md)，是否已加载须核对 [当前状态](product-improvements.md)。
 
 ## 本机运维
 
@@ -92,7 +95,7 @@ Invoke-RestMethod "http://127.0.0.1:4760/api/runs/$studioRunId/history"
 | --- | --- |
 | 页面新版但接口 404 | 核对端口和后端启动版本；静态资源刷新不等于 Python 进程加载新代码 |
 | writer 锁冲突 | 确认是否已有服务/导入占用该数据根；不删除锁文件伪造解锁，不并行启动 |
-| 未知用量阻止发送 | 进入所属项目恢复；按提供方证据核账，媒体任务走制作页；不能凭部分结果猜零用量 |
+| 页面仍要求核账后继续 | 核对是否加载旧服务/旧静态文件；当前未知用量不阻断。分别检查开放阶段尝试、正在执行的任务和媒体提交歧义，不填猜测用量解锁 |
 | 提交结果不明 | 保留同一 request_id，确认原请求状态；视频按原 endpoint/task_id 查询，不新建任务重试 |
 | 历史内容指纹冲突 | 检查归档完整性，保留失败现场；不改 hash 让校验通过，不读其他任意路径替代 |
 | 模型服务不可用 | 核对当前角色连接和准确模型 ID；密钥列表验证通过不代表余额、生成或完整创作质量通过 |

@@ -252,6 +252,8 @@ class LedgerEntry:
     usage_unit: str = "tokens"
     usage_quantity: float | None = None
     estimated_cny: float | None = None
+    input_cny_per_mtok: float | None = None
+    output_cny_per_mtok: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -277,6 +279,8 @@ class LedgerEntry:
             "usage_unit": self.usage_unit,
             "usage_quantity": self.usage_quantity,
             "estimated_cny": self.estimated_cny,
+            "input_cny_per_mtok": self.input_cny_per_mtok,
+            "output_cny_per_mtok": self.output_cny_per_mtok,
             "stop_reason": self.stop_reason,
             "request_id": self.request_id,
             "ok": self.ok,

@@ -4,6 +4,15 @@ import {createRequire} from 'node:module';
 const costs=createRequire(import.meta.url)('../../studio/web/project-costs.js');
 const row=(extra={})=>({at:'2026-09-19T01:00:00Z',role:'writer',stage:'writing',provider:'deepseek',model:'deepseek-chat',actual_model:'',input_tokens:100,output_tokens:20,usage_status:'known',call_status:'settled',ok:true,estimated_usd:0.002,...extra});
 
+test('Omni token costs retain RMB in summary detail and export',()=>{
+  const rows=[row({provider:'bailian_omni',stage:'video_analysis',estimated_usd:null,estimated_cny:.0198256})];
+  const html=costs.render({rows});
+  assert.match(html,/百炼声画分析 · 人民币/);
+  assert.match(html,/CNY 0.019826/);
+  assert.equal(costs.summarize(rows).knownCost,0);
+  assert.match(costs.csv(rows),/"0.0198256","CNY"/);
+});
+
 test('mixed known and unknown costs remain a known subtotal, never a complete total',()=>{
   const s=costs.summarize([row(),row({estimated_usd:null,provider:'codex_cli'}),row({input_tokens:null,output_tokens:5,estimated_usd:null,usage_status:'partial',ok:false})]);
   assert.deepEqual(s,{calls:3,input:200,output:45,knownCost:0.002,knownCostCalls:1,unknownCost:2,unknownUsage:1,pending:0,incomplete:1});

@@ -56,7 +56,7 @@ def material_workspace(store: Store, run_id: str) -> dict[str, Any]:
                               "生成素材 · 待验收" if material.get('origin') == 'generated' else "已上传 · 待补充观察"})
         return {"materials": items, "expected_manifest_sha256": snapshot["manifest_sha256"],
                 "errors": snapshot["errors"], "automatic_analysis_available": False,
-                "notice": "上传仅保存文件。图片可单独发起模型分析，核对后采用；视频可分析带时间点的画面；声音与完整声画仍需实际查看后记录。"}
+                "notice": ""}
 
 
 def _text(value: Any, label: str, limit: int = 2000) -> str:

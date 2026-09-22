@@ -147,6 +147,11 @@ async function loadRuns() {
 
 async function selectRun(runId) {
   if (state.decisionBusy) { $('run-select').value = state.runId; return false; }
+  toggleMaterials(false);
+  $('materials-grid').innerHTML = '';
+  $('reference-video-results').innerHTML = '';
+  $('reference-video-open').onclick = null;
+  $('materials-project-name').textContent = '';
   if (typeof closeEmbeddedProduction === 'function') closeEmbeddedProduction();
   state.canvasTab = 'plan';
   $('stage').hidden=false;$('journey-media').hidden=true;
@@ -715,6 +720,7 @@ function closeViewer() {
 
 function renderMaterials() {
   const list = state.materials;
+  $('materials-project-name').textContent = state.runs.find(r=>r.run_id===state.runId)?.title || '';
   const usable = list.filter((m) => m.usable);
   // The count rides on the chip as well as in the panel. A shelf he has to open
   // to find out whether anything is on it is a shelf he will forget about.
@@ -756,11 +762,14 @@ function materialTile(m) {
 }
 
 function toggleMaterials(open) {
-  if (!state.runId && open !== false) {newRunDialog();return;}
+  if ((!state.runId || state.view !== 'project') && open !== false) return;
   state.materialsOpen = open == null ? !state.materialsOpen : open;
   $("materials").hidden = !state.materialsOpen;
   $("materials-toggle").setAttribute("aria-expanded", String(state.materialsOpen));
-  if (state.materialsOpen) loadMaterialWorkspace();
+  if (state.materialsOpen) {
+    $('materials-project-name').textContent = state.runs.find(r=>r.run_id===state.runId)?.title || '';
+    loadMaterialWorkspace();
+  }
 }
 
 /* Dropping files on the shelf.
@@ -1243,13 +1252,26 @@ async function send(text) {
   if (state.busy || state.decisionBusy || state.recoveryBlocked || !state.runId) return;
   state.atBottom = true;
   setConversationOpen(true);
-  await submitJob(state.runId, { text, request_id: crypto.randomUUID() });
+  const runId=state.runId;
+  try {
+    if(typeof StudioComposer!=='undefined' && StudioComposer.files(runId).length){
+      state.busy=true;$('send').disabled=true;StudioComposer.render();
+      const names=await StudioComposer.upload(runId,fetch);
+      if(state.runId!==runId)throw Error('项目已切换，未发送对话。');
+      text += '\n本次附上的素材：'+names.join('、');
+      StudioComposer.clear(runId);state.busy=false;StudioComposer.render();
+    }
+    await submitJob(runId, { text, request_id: crypto.randomUUID() });
+  } catch(error){
+    state.busy=false;$('send').disabled=false;$('chat-input').value=text;
+    toast(error.message,true);if(typeof StudioComposer!=='undefined')StudioComposer.render();
+  }
 }
 
 /* ---------------------------------------------------------------- input -- */
 
 function submit() {
-  const value = $("chat-input").value.trim();
+  const value = $("chat-input").value.trim() || (typeof StudioComposer!=='undefined' && StudioComposer.files(state.runId).length ? '我附上了素材，请先确认我想如何使用。' : '');
   if (!value || !state.runId || state.busy || state.decisionBusy || state.recoveryBlocked) return;
   $("chat-input").value = "";
   $("chat-input").style.height = "auto";

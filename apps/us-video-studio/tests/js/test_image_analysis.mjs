@@ -6,6 +6,27 @@ const ui=require('../../studio/web/image-analysis.js');
 const candidate={analysis_id:'a1',name:'bag.png',connection_name:'Fixture',model:'vision',status:'pending',
   findings:['Handle visible','Zipper visible'],limitations:['Size unknown'],estimated_usd:null};
 
+test('native Omni setup transmits video and audio with a fixed model and explicit consent',()=>{
+  const c={id:'bailian_omni',name:'百炼北京',suggested_model:'qwen3.8-omni-flash',native_video:true,
+    base_url:'https://fixture.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    pricing:{'qwen3.8-omni-flash':{input_cny_per_mtok:.8,output_cny_per_mtok:2.7}}};
+  const html=ui.setup({name:'reference.mp4',kind:'video'},{connections:[],bailian_omni:c,video:{available:true}});
+  assert.match(html,/视频及可用音轨/);
+  assert.match(html,/readonly/);
+  assert.match(html,/开始声画分析/);
+  assert.doesNotMatch(html,/checked|不发送原视频|没有发送或听取/);
+  assert.match(ui.costText(c,c.suggested_model,'video'),/输入 ¥0.8/);
+  assert.match(ui.costText(c,c.suggested_model,'video'),/含思考/);
+});
+
+test('native review presents audio scope and CNY instead of a false silent-frame report',()=>{
+  const html=ui.review({...candidate,media_kind:'video',estimated_cny:.014,
+    audiovisual:{duration_seconds:30,audio_sent:true,audio_ranges:[[0,30]]}});
+  assert.match(html,/可用音轨/);
+  assert.match(html,/¥0.014000/);
+  assert.doesNotMatch(html,/没有发送或听取|实际分析 undefined|\$0.014/);
+});
+
 test('a current pending analysis replaces the uploaded label without changing adopted evidence',()=>{
   const data={materials:[{name:'bag.png',sha256:'same',observations:[],status_label:'uploaded'}]};
   const result=ui.enrich(data,{candidates:[{...candidate,sha256:'same'}]});

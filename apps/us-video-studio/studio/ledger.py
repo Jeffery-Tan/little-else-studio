@@ -176,6 +176,9 @@ class Ledger:
         entry = LedgerEntry(at=utcnow(), run_id=run_id, role=role, stage=stage, model=model,
                             input_tokens=input_tokens, output_tokens=output_tokens,
                             estimated_usd=cost, pricing_source=pricing.source,
+                            estimated_cny=pricing.estimate_cny(input_tokens, output_tokens) if status == 'known' else None,
+                            input_cny_per_mtok=pricing.input_cny_per_mtok,
+                            output_cny_per_mtok=pricing.output_cny_per_mtok,
                             provider=provider if provider is not None else self.settings.provider_by_role.get(role, 'legacy'),
                             connection_id=connection_id if connection_id is not None else self.settings.connection_by_role.get(role, ''),
                             pricing_as_of=pricing.as_of, input_usd_per_mtok=pricing.input_usd_per_mtok,
@@ -213,7 +216,8 @@ class Ledger:
 
     @staticmethod
     def _row_pricing(row):
-        return Pricing(row.pricing_source, row.input_usd_per_mtok, row.output_usd_per_mtok, row.pricing_as_of)
+        return Pricing(row.pricing_source, row.input_usd_per_mtok, row.output_usd_per_mtok, row.pricing_as_of,
+                       row.input_cny_per_mtok, row.output_cny_per_mtok)
 
     def reconcile(self, run_id: str, call_id: str, *, input_tokens: int,
                   output_tokens: int, evidence_note: str) -> LedgerEntry:

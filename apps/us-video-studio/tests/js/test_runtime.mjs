@@ -4,6 +4,21 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const source = fs.readFileSync(new URL('../../studio/web/team-progress.js', import.meta.url), 'utf8') + '\n' + fs.readFileSync(new URL('../../studio/web/runtime.js', import.meta.url), 'utf8');
+test('uncertain reference submission preserves source and intent on the dedicated route',async()=>{
+  const calls=[];
+  const h=harness(async(url,options)=>{
+    if(!options)return {can_continue:true,revision:'r'};
+    calls.push({url,body:JSON.parse(options.body)});
+    if(calls.length===1)throw new TypeError('offline');
+    return {job_id:'ref',request_id:'same-ref',job_kind:'reference_video',status:'succeeded',events:[]};
+  });
+  const payload={request_kind:'reference_video',request_id:'same-ref',reference_id:'source-ref',intent:'recreate',source_url:'https://vm.tiktok.com/ABC/'};
+  await h.context.submitJob('run-a',payload);
+  await h.nodes.get('job-status').children.at(-1).onclick();
+  assert.equal(calls.length,2);
+  assert.ok(calls.every(c=>c.url==='/api/runs/run-a/reference-videos'));
+  assert.deepEqual(calls[0].body,calls[1].body);
+});
 test('project brief outranks successful job status and historical missing usage',()=>{
   const h=harness(async()=>{throw new Error('no request on render');});
   const brief={title:'创意方向第 3 版 · 审核未完成',detail:'原方案已保留',phase:'review_failed'};
@@ -129,7 +144,7 @@ test('uncertain acceptance retries the same request id and preserves the user me
   assert.equal(h.storage.size, 1);
   const retry = h.nodes.get('job-status').children.at(-1);
   await retry.onclick();
-  assert.deepEqual(calls.map((c) => c.body), [payload, payload]);
+  assert.deepEqual(calls.map((c) => c.body), [{...payload,reference_consent:true}, {...payload,reference_consent:true}]);
   assert.equal(h.storage.size, 0);
   assert.equal(h.context.state.busy, false);
 });

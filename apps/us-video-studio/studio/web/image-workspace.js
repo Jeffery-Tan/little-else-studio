@@ -16,12 +16,12 @@ function imageDialog(runId, material, title, content, opener) {
 }
 function openImageSetup(runId, material, data, opener) {
   if (state.runId !== runId) return;
-  const dialog = imageDialog(runId, material, material.kind === 'video' ? '分析视频画面' : '让模型看懂这张图', StudioImages.setup(material, data), opener);
+  const dialog = imageDialog(runId, material, material.kind === 'video' ? '分析视频' : '让模型看懂这张图', StudioImages.setup(material, data), opener);
   const settings = dialog.querySelector('[data-model-settings]');
   if (settings) {settings.onclick=()=>{dialog.close();$('connections-open').click();};return;}
   const form = dialog.querySelector('form');
   if (!form) return;
-  const connection = () => data.connections.find(c=>c.id === form.elements.connection_id.value);
+  const connection = () => [...data.connections, ...(data.bailian_omni ? [data.bailian_omni] : [])].find(c=>c.id === form.elements.connection_id.value);
   function updateCost() {dialog.querySelector('[data-analysis-cost]').textContent = StudioImages.costText(connection(),form.elements.model.value.trim(),material.kind);form.elements.consent.checked = false;}
   form.elements.connection_id.onchange = () => {form.elements.model.value = connection()?.suggested_model || '';updateCost();};
   form.elements.model.oninput = updateCost;
@@ -33,14 +33,15 @@ function openImageSetup(runId, material, data, opener) {
     if (state.busy || state.decisionBusy || state.recoveryBlocked) {error.textContent='请先结束当前任务，或在制片对话中处理待恢复事项。';return;}
     const payload = {request_kind:material.kind === 'video' ? 'video_analysis' : 'image_analysis',request_id:crypto.randomUUID(),name:material.name,
       expected_sha256:material.sha256,expected_revision:data.revision,connection_id:form.elements.connection_id.value,
-      model:form.elements.model.value.trim(),purpose:form.elements.purpose.value,consent:form.elements.consent.checked};
+      model:form.elements.model.value.trim(),purpose:form.elements.purpose.value,consent:form.elements.consent.checked,
+      expected_endpoint:connection()?.native_video ? connection().base_url : null};
     dialog.close(); toggleMaterials(false); setProjectFocus('chat');
     submitJob(runId,payload);
   };
 }
 function openImageReview(runId, material, candidate, data, opener) {
   if (state.runId !== runId) return;
-  const dialog = imageDialog(runId, material, candidate.media_kind === 'video' ? '核对视频画面观察' : '核对图片观察', StudioImages.review(candidate), opener);
+  const dialog = imageDialog(runId, material, candidate.media_kind === 'video' ? '核对视频观察' : '核对图片观察', StudioImages.review(candidate), opener);
   const form = dialog.querySelector('form'), button = form.querySelector('[type="submit"]');
   if (!button) return;
   let saving = false;
@@ -70,7 +71,7 @@ function attachImageActions(grid, runId, data, images) {
     if (!['image','video'].includes(material?.kind)) continue;
     const card = observe.closest('.material-evidence-card');
     const hasAnalysis = images.candidates.some(c=>c.name === material.name);
-    const analyze = box('button',hasAnalysis ? 'ghost small' : 'primary small',hasAnalysis ? '重新分析' : material.kind === 'video' ? '分析视频画面' : '分析图片');
+    const analyze = box('button',hasAnalysis ? 'ghost small' : 'primary small',hasAnalysis ? '重新分析' : material.kind === 'video' ? '分析视频' : '分析图片');
     analyze.onclick=()=>openImageSetup(runId,material,images,analyze);
     observe.before(analyze);
     for (const candidate of images.candidates.filter(c=>c.name === material.name).reverse()) {

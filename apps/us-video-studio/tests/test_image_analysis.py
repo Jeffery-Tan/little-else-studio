@@ -44,7 +44,7 @@ class VisionFixture:
 
 
 @pytest.fixture
-def scene(tmp_path, monkeypatch):
+def scene(tmp_path, monkeypatch, request):
     # Test-only key protection, never an application fallback.
     monkeypatch.setattr('studio.connections._dpapi', lambda value, **_: value)
     store = Store(tmp_path)
@@ -59,7 +59,7 @@ def scene(tmp_path, monkeypatch):
     config['roles'] = connections.public()['roles']
     connections.save(config)
     model = VisionFixture()
-    settings = settings_for(tmp_path)
+    settings = settings_for(tmp_path, max_tool_rounds=getattr(request, 'param', 6))
     app = build_app(settings, client_factory=lambda: model)
     payload = dict(request_id='vision-1', name='fixture.png', expected_sha256=hashlib.sha256(raw).hexdigest(),
                    expected_revision=1, connection_id='test-api', model='custom-model', purpose='product', consent=True)

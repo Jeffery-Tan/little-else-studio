@@ -11,6 +11,7 @@ const section = (start, end) => {
   return app.slice(from, to);
 };
 const effects = section('async function selectRun(', 'async function refreshTimeline(')
+  + section('function toggleMaterials(', '/* Dropping files')
   + section('function newRunDialog(', 'function autoRunId(');
 
 function harness({ post, list, loadRuns } = {}) {
@@ -18,7 +19,7 @@ function harness({ post, list, loadRuns } = {}) {
   let nextId = 0, listLoads = 0;
   const get = selector => {
     const key = selector.replace(/^#/, '');
-    if (!nodes.has(key)) nodes.set(key, { value: '', disabled: false, textContent: '', style: {}, focus() {} });
+    if (!nodes.has(key)) nodes.set(key, { value: '', disabled: false, textContent: '', style: {}, focus() {}, setAttribute(name,value) {this[name]=value;} });
     return nodes.get(key);
   };
   const state = { runId: 'old-run', decisionBusy: false, busy: false, chatDrafts: new Map(),
@@ -62,6 +63,7 @@ function harness({ post, list, loadRuns } = {}) {
     toast: message => messages.push(message),
     sessionStorage: { setItem() {} },
     loadDraft() {}, refreshTimeline: async () => {}, restoreJob: async () => { state.busy = false; },
+    loadMaterialWorkspace() { calls.push({materialRun:state.runId}); },
   });
   vm.runInContext(effects, context);
   function open(format = 'video') {
@@ -213,6 +215,34 @@ test('successful project switches keep chat drafts separate', async () => {
   assert.equal(await h.context.selectRun('old-run'), true);
   assert.equal(h.get('chat-input').value, 'Draft for old run');
   assert.equal(h.state.chatDrafts.get('other-run'), 'Draft for other run');
+});
+
+test('home cannot open remembered project materials; project panel names its owner', () => {
+  const h = harness();
+  h.state.runs = [{run_id:'old-run',title:'项目 A'}];
+  h.context.toggleMaterials(true);
+  assert.equal(h.calls.length,0);
+  assert.ok(!h.state.materialsOpen);
+  h.state.view='project';
+  h.context.toggleMaterials(true);
+  assert.equal(h.state.materialsOpen,true);
+  assert.equal(h.get('materials-project-name').textContent,'项目 A');
+  assert.equal(h.calls[0].materialRun,'old-run');
+});
+
+test('switching project clears old material content before the new request finishes', async () => {
+  const h=harness();
+  h.state.view='project';h.state.materialsOpen=true;
+  h.get('materials-grid').innerHTML='Old project assets';
+  h.get('reference-video-results').innerHTML='Old project references';
+  let finish;
+  h.context.refreshTimeline=()=>new Promise(resolve=>{finish=resolve;});
+  const switching=h.context.selectRun('other-run');
+  assert.equal(h.state.materialsOpen,false);
+  assert.equal(h.get('materials').hidden,true);
+  assert.equal(h.get('materials-grid').innerHTML,'');
+  assert.equal(h.get('reference-video-results').innerHTML,'');
+  finish();await switching;
 });
 
 test('duplicate submit and Escape cannot abandon an in-flight creation', async () => {

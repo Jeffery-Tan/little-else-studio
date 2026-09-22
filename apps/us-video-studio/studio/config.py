@@ -54,6 +54,16 @@ class Pricing:
     input_usd_per_mtok: float | None
     output_usd_per_mtok: float | None
     as_of: str
+    input_cny_per_mtok: float | None = None
+    output_cny_per_mtok: float | None = None
+
+    def estimate_cny(self, input_tokens: int, output_tokens: int) -> float | None:
+        rates = (self.input_cny_per_mtok, self.output_cny_per_mtok)
+        if not all(type(v) in (int, float) and math.isfinite(v) and v >= 0 for v in rates):
+            return None
+        if not any(rates) or 'placeholder' in self.source.lower():
+            return None
+        return (input_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000
 
     @property
     def known(self) -> bool:

@@ -14,11 +14,10 @@ function journeyStatus(brief, pending, interaction) {
 
 function questionCardHtml(q) {
   if (!q) return '';
-  return `<form class="conversation-question" data-question="${escapeHtml(q.id)}"><h3>${escapeHtml(q.question)}</h3>` +
+  return `<section class="conversation-question" data-question="${escapeHtml(q.id)}"><h3>${escapeHtml(q.question)}</h3>` +
     (q.context ? `<p>${escapeHtml(q.context)}</p>` : '') +
-    `<fieldset><legend>选择一个方向，或直接补充你的想法</legend>${q.options.map((o,i)=>
-      `<label class="conversation-choice"><input type="radio" name="answer" value="${i}"><span><strong>${escapeHtml(o.label)}${i===q.recommended?'<small>推荐</small>':''}</strong>${o.description?`<span>${escapeHtml(o.description)}</span>`:''}</span></label>`).join('')}</fieldset>` +
-    '<textarea name="note" rows="2" maxlength="6000" aria-label="补充想法" placeholder="也可以直接说你的想法…"></textarea><button type="submit" class="primary">告诉制片团队</button><p role="status" data-feedback></p></form>';
+    `<div class="reference-quick-choices">${q.options.map((o,i)=>`<button type="button" class="ghost" data-question-choice="${i}"><strong>${escapeHtml(o.label)}${i===q.recommended?' · 推荐':''}</strong>${o.description?`<span> ${escapeHtml(o.description)}</span>`:''}</button>`).join('')}</div>` +
+    '<p class="muted">点一个选项，或直接在下方对话中回答。</p><p role="status" data-feedback></p></section>';
 }
 
 function journeyGateHtml(pending, step) {
@@ -41,6 +40,9 @@ function journeyGateHtml(pending, step) {
 function renderJourneyStatus() {
   const tl=state.timeline, brief=state.projectBrief || tl?.brief;
   $('project-progress').innerHTML=`<div class="journey-status"><span class="small-dot"></span><span>${escapeHtml(journeyStatus(brief,tl?.pending,tl?.interaction))}</span><span class="journey-path">想法 → 方案 → 分镜 → 成片</span></div>`;
+  const mode=tl?.creation_mode;
+  if(mode){const label=box('span','attachment-chip',({autonomous:'自主创作',recreate:'按参考复刻',inspiration:'局部借鉴'})[mode.mode]||'');label.title=mode.scope||'可以直接在对话中调整';$('project-progress').append(label);}
+  if(typeof StudioComposer!=='undefined')StudioComposer.render();
 }
 
 function renderJourneyDecision() {
@@ -54,18 +56,11 @@ function renderJourneyDecision() {
   if (state.busy) return;
   if (q) {
     host.innerHTML=questionCardHtml(q);
-    const form=host.querySelector('form'),draftKey=`studio-question:${state.runId}:${q.id}`,runId=state.runId;
-    let draft={};try{draft=JSON.parse(sessionStorage.getItem(draftKey)||'{}');}catch(_){}
-    form.elements.note.value=draft.note || '';
-    if(draft.answer!==undefined)for(const radio of form.querySelectorAll('[name="answer"]'))radio.checked=radio.value===draft.answer;
-    form.oninput=()=>sessionStorage.setItem(draftKey,JSON.stringify({note:form.elements.note.value,answer:new FormData(form).get('answer')}));
-    form.onsubmit=async e=>{
-      e.preventDefault();if(state.busy||state.runId!==runId)return;
-      const data=new FormData(form),selected=data.get('answer'),note=String(data.get('note')||'').trim();
-      if(selected===null&&!note){form.querySelector('[data-feedback]').textContent='选一个选项，或直接写下你的想法。';return;}
-      const choice=selected===null?'':q.options[Number(selected)]?.label;
-      const text=`关于「${q.question}」：${[choice,note].filter(Boolean).join('。')}`;
-      await submitJob(runId,{text,question_id:q.id,request_id:crypto.randomUUID()});
+    const runId=state.runId;
+    for(const button of host.querySelectorAll('[data-question-choice]'))button.onclick=async()=>{
+      if(state.busy||state.runId!==runId)return;
+      const choice=q.options[Number(button.dataset.questionChoice)];if(!choice)return;
+      await submitJob(runId,{text:`关于「${q.question}」：${choice.label}`,question_id:q.id,request_id:crypto.randomUUID()});
     };
   } else if (pending) {
     host.innerHTML=journeyGateHtml(pending,tl.rail.find(s=>s.stage===pending.stage));
@@ -103,7 +98,8 @@ function startFromConversation(){
 
 function initJourney() {
   for(const button of document.querySelectorAll('[data-journey-tab]'))button.onclick=()=>showJourneyTab(button.dataset.journeyTab);
-  $('chat-attach').onclick=()=>toggleMaterials(true);
+  $('chat-attach').onclick=()=>{if(!state.busy)$('chat-files').click();};
+  $('chat-files').onchange=()=>{if(!state.busy){StudioComposer.setFiles(state.runId,$('chat-files').files);StudioComposer.render();}$('chat-files').value='';};
   const form=$('start-conversation'),input=$('start-prompt'),files=$('start-files'),tray=$('start-attachments'),status=$('start-status');
   let selected=[],frozen=null,sending=false;
   try {frozen=JSON.parse(sessionStorage.getItem('studio-first-message')||'null');}catch(_){}
@@ -118,7 +114,7 @@ function initJourney() {
   form.onsubmit=async e=>{
     e.preventDefault();if(sending||state.decisionBusy)return;
     if(frozen&&!sessionStorage.getItem('studio-first-message'))frozen=null;
-    const text=input.value.trim();if(!text){status.textContent='说一句你想做什么，再把参考素材附上就可以。';input.focus();return;}
+    const text=input.value.trim() || (selected.length?'我附上了素材，请先确认我想如何使用。':'');if(!text){status.textContent='说一句想法，或附上素材就可以。';input.focus();return;}
     if(frozen&&frozen.text!==text){status.textContent='上次发送还未确认，请保留原文字重试，避免重复创建。';return;}
     sending=true;for(const control of form.querySelectorAll('button,input,textarea'))control.disabled=true;
     try{
@@ -133,7 +129,7 @@ function initJourney() {
         if(!response.ok){const failure=await response.json();throw new Error(failure.detail||'附件尚未上传完成，请重试。');}
       }
       await loadRuns();await selectRun(run.run_id);setStudioView('project');setProjectFocus('chat');
-      const request={text:frozen.text,request_id:frozen.request_id};
+      const request={text:frozen.text+(manifest.length?'\n本次附上的素材：'+manifest.map(f=>f.name).join('、'):''),request_id:frozen.request_id};
       await submitJob(run.run_id,request);
       // submitJob durably retains uncertain requests under this run's own key.
       sessionStorage.removeItem('studio-first-message');frozen=null;selected=[];input.value='';drawFiles();status.textContent='';

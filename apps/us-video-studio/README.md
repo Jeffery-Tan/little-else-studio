@@ -1,6 +1,10 @@
 ﻿# US 视频制片室（us-video-studio）
 
-US 视频与图文前期策划的本地独立工作台：用户在应用内与主 Agent 对话，主 Agent 调配角色 Agent，独立审核 Agent 给出评审，再由用户决定方向与脚本。支持策划、本地审阅包，以及由用户在「制作」页明确提交的 Codex 图片与百炼 Wan 视频任务；不自动发布或判断市场效果。
+US 视频与图文前期策划的本地独立工作台：用户在应用内与主 Agent 对话，主 Agent 调配角色 Agent，独立审核 Agent 给出评审，再由用户决定方向与脚本。支持策划、本地审阅包，以及由用户在同一工作台「分镜 / 成片」中明确提交的 Codex 图片与百炼 Wan 视频任务；不自动发布或判断市场效果。
+
+功能代码、当前服务加载和真实能力验收分开记录，统一见 [实现与验收状态](docs/product-improvements.md)。本页描述工作树功能，不能单凭页面出现按钮判断对应后端已加载。
+
+**直接在对话中说想做什么，附上视频或粘贴TK链接。** 主制片承接明确的分析、参考复刻或局部借鉴；自主创作无需参考，目标不清才问一句。通过[百炼北京 Omni](docs/bailian-omni-and-tiktok-import.md)复用现有Wan连接，只分析保存报告并停止；复刻绑定指定观察后接续主制片文字策划。链接失败可上传原视频续接，已完成分析会复用。当前代码已接通，真实链接成功率与模型识别质量待验收。
 
 [Codex 驱动工作台](../video-workbench/README.md) 与本应用分别维护、互不写入运行状态；不自动迁移历史批准。业务采用状态仍以 [US 线路](../../tracks/us/README.md)、[午餐包当前状态](../../tracks/us/docs/lunch-video-current-state.md)及飞书 Tasks 为准。开发约束见 [CLAUDE.md](CLAUDE.md)，架构与运维见 [独立运行说明](docs/independent-runtime.md)。业务操作在本应用完成，Codex 桌面开发对话不作为后台执行器。
 
@@ -20,21 +24,27 @@ US 视频与图文前期策划的本地独立工作台：用户在应用内与�
 
 左侧「灵感与方法」已接入三项 Skill、原案例与方法库、研究来源和反馈迭代。实际角色输入保存快照；反馈绑定准确版本，先看差异再应用。视频输入与图文审阅包可在「本轮参考」打开，见 [学习迁移说明](docs/learning-migration.md)。
 
-真实运行数据默认位于仓库外 `J:/E-Business-Video-Data/us-video-studio/`，素材、台账、配置与凭据不得提交 Git。一个数据根只允许一个 Studio 写入进程；离线导入或恢复前停止该数据根的服务。
+真实运行数据必须位于 Git 外，使用 `STUDIO_DATA_ROOT` 明确选择。未设置时代码沿用历史 J 盘默认目录，它不代表当前电脑实际使用的位置；素材、台账、配置与凭据不得提交 Git。一个数据根只允许一个 Studio 写入进程；离线导入或恢复前停止该数据根的服务。
 
-以下在仓库根执行。依赖文件仅补充本机已有 Python 环境，不能当作完整生产安装清单：
+以下在仓库根执行。使用完整运行依赖；测试另安装开发依赖。更新已有服务前先确认没有正在执行的任务，并正常停止该服务。此示例的数据根对应 2026-09-20 恢复目录，其他电脑须改为其实际恢复目录；不存在时先按跨电脑恢复说明操作，不直接启动空目录：
 
 ```powershell
-python -m venv --system-site-packages 'J:/E-Business-Video-Data/us-video-studio/runtime-venv'
-& 'J:/E-Business-Video-Data/us-video-studio/runtime-venv/Scripts/python.exe' -m pip install -r apps/us-video-studio/requirements-local.txt
+$studioRuntime = Join-Path $env:LOCALAPPDATA 'LittleElse/Studio/runtime-venv'
+$studioPython = Join-Path $studioRuntime 'Scripts/python.exe'
+$studioData = Join-Path $env:LOCALAPPDATA 'LittleElse/Studio/restored-20260920'
+if (!(Test-Path -LiteralPath $studioData)) { throw '请先恢复项目，或设置实际数据根' }
+if (!(Test-Path -LiteralPath $studioPython)) { py -3.12 -m venv $studioRuntime }
+& $studioPython -m pip install -r apps/us-video-studio/requirements-runtime.txt
+& $studioPython -m pip install -r apps/us-video-studio/requirements-local.txt
 
 # 离线测试：不连接模型，不产生费用
-& 'J:/E-Business-Video-Data/us-video-studio/runtime-venv/Scripts/python.exe' -m pytest apps/us-video-studio/tests -q
+& $studioPython -m pytest apps/us-video-studio/tests -q
 node --test apps/us-video-studio/tests/js/*.mjs
 
 # studio 是应用目录内的 Python 包，启动前切换目录
 Set-Location apps/us-video-studio
-& 'J:/E-Business-Video-Data/us-video-studio/runtime-venv/Scripts/python.exe' -m studio.server --port 4760
+$env:STUDIO_DATA_ROOT = $studioData
+& $studioPython -m studio.server --port 4760
 ```
 
 默认仅绑定 `127.0.0.1`，访问 `http://127.0.0.1:4760/`。本应用没有公网身份验证，未配置开机启动或公网部署；不要直接暴露服务。
@@ -87,9 +97,11 @@ Set-Location apps/us-video-studio
 在应用目录、专用 PowerShell 会话执行，下例目标目录必须尚不存在：
 
 ```powershell
-& 'J:/E-Business-Video-Data/us-video-studio/runtime-venv/Scripts/python.exe' scripts/seed_preview.py 'J:/E-Business-Video-Data/us-video-studio-preview-new'
-$env:STUDIO_DATA_ROOT = 'J:/E-Business-Video-Data/us-video-studio-preview-new'
-& 'J:/E-Business-Video-Data/us-video-studio/runtime-venv/Scripts/python.exe' -m studio.server --port 4762
+$studioPython = Join-Path $env:LOCALAPPDATA 'LittleElse/Studio/runtime-venv/Scripts/python.exe'
+$studioPreview = Join-Path $env:TEMP ('studio-preview-' + [guid]::NewGuid().ToString('N'))
+& $studioPython scripts/seed_preview.py $studioPreview
+$env:STUDIO_DATA_ROOT = $studioPreview
+& $studioPython -m studio.server --port 4762
 ```
 
 新版预览种子写入无凭据的 loopback 测试连接，全部角色都指向它，发送消息会在调用前阻断。旧预览目录不自动迁移；请使用新目录。不要在预览根添加真实端点配置或切换到 Codex。三个 fixture 分别展示方向待采用、脚本审核退回和全部完成；包含一个故意引用不存在文件的镜头，用于检查降级提示。停止服务后保留或按明确授权清理预览，不能据此删除其他运行数据。
@@ -100,7 +112,7 @@ $env:STUDIO_DATA_ROOT = 'J:/E-Business-Video-Data/us-video-studio-preview-new'
 
 四个阶段为 `intake → direction → material_plan → writing`。需求整理呈现事实、约束和未知项；创意方向展示多个选项与推荐依据；素材计划说明可用素材与缺口；脚本呈现镜头时长、画面、台词和声音。`direction` 与 `writing` 必须经过独立审核及用户决定；本应用尚无 `layout_preview` / `ad_preview` 渲染阶段。
 
-- 桌面阅读与决策分栏，窄屏把决策放到正文之后；原文阅读器支持版本切换，素材抽屉支持预览和上传。
+- 桌面左侧查看成果、右侧持续对话和就地决定；窄屏切换创作板与制片对话。原文阅读器支持版本切换，素材抽屉支持预览和上传。
 - 推荐不等于采用。用户明确选中方向再提交，批准记录保存 `selected_option_id`；后续角色读取实际选择。
 - 退回修改需要意见；覆盖审核退回需要明确理由，记录为 `approved_override`。批准仅覆盖该版策划，不授予生成、费用或发布权限。
 - 决策草稿按运行、阶段和产物摘要保存在本机浏览器。保存中阻止重复提交；冲突保留草稿，要求重新阅读最新版本。审核退回和上游失效不显示为完成。
@@ -136,6 +148,8 @@ $env:STUDIO_DATA_ROOT = 'J:/E-Business-Video-Data/us-video-studio-preview-new'
 | 端点 | 用途 |
 | --- | --- |
 | `GET/POST /api/runs` | 列出或创建运行 |
+| `POST /api/conversations` | 一句话与素材开始创作，幂等建立项目及首轮任务 |
+| `DELETE /api/runs/{id}`；`GET /api/trash`；`POST /api/runs/{id}/restore` | 移入回收站、查看回收站、恢复原项目；不删除运行文件 |
 | `GET /api/runs/{id}/state`、`/timeline` | 领域状态或界面投影；只读推导 |
 | `GET /api/runs/{id}/chat`、`/events`、`/ledger` | 对话、历史事件、按调用合并后的台账 |
 | `GET /api/runs/{id}/artifacts` | 产物列表，可按 `stage` 筛选 |
@@ -152,7 +166,7 @@ $env:STUDIO_DATA_ROOT = 'J:/E-Business-Video-Data/us-video-studio-preview-new'
 | `GET/POST /api/runs/{id}/materials` | 查看素材列表或上传素材 |
 | `GET /api/runs/{id}/materials/{name}` | 读取素材文件 |
 | `GET/POST /api/runs/{id}/material-observations` | 读取或追加准确素材观察；保存不调用模型 |
-| `GET /api/runs/{id}/recovery`；`POST .../recovery/reconcile`、`.../recovery/abandon` | 读取恢复状态、凭提供方证据核对文字用量、关闭指定开放尝试 |
+| `GET /api/runs/{id}/recovery`；`POST .../recovery/reconcile`、`.../recovery/abandon` | 读取恢复状态及保留的管理员兼容操作；未知用量不需要核账，也不阻断继续使用 |
 | `GET /api/runs/{id}/history`、`/history/{document_id}` | 读取迁入历史目录或登记的精选文本；无在线导入入口 |
 | `GET /api/learning`；`GET /api/runs/{id}/learning`；`POST .../learning/proposals`、`.../learning/proposals/{proposal_id}/apply` | 共用方法库、实际快照、候选差异与用户明确入库 |
 | `GET /api/runs/{id}/delivery`、`/delivery/download`；`GET .../creative-packages`、`.../creative-packages/{package_id}/files/{filename}` | 当前交付、只读策划 ZIP 和本地创意包文件 |
@@ -196,7 +210,7 @@ python -m studio.recovery --data-root <DATA_ROOT> abandon <RUN_ID> <STAGE> --att
 
 首页保留已有创作记录与下一步，默认入口为对话。工作台依据同一份项目状态呈现正在做什么、需要用户决定什么以及已保存的成果；确认卡片绑定实际展示内容，普通澄清选项不代替方案或媒体批准。桌面同时展示成果与对话，窄窗口只展示所选视图。
 
-「项目素材」区分已上传与已记录观察。用户查看后可填写用途（商品/参考）、实际覆盖、发现与限制，保存到原有 `evidence/observations.json`，绑定素材 SHA 和观察清单版本；冲突拒绝覆盖，旧记录保留。保存会使依赖旧证据快照的阶段失效。角色上下文明确标注人工来源，参考不能被当作本商品事实。人工观察入口不调用模型。独立图片分析及逐条采用见下文；视频自动分析尚未接入。
+「项目素材」区分已上传与已记录观察。用户查看后可填写用途（商品/参考）、实际覆盖、发现与限制，保存到原有 `evidence/observations.json`，绑定素材 SHA 和观察清单版本；冲突拒绝覆盖，旧记录保留。保存会使依赖旧证据快照的阶段失效。角色上下文明确标注人工来源，参考不能被当作本商品事实。人工观察入口不调用模型。独立图片分析及逐条采用见下文；视频支持百炼声画分析与兼容视觉模型抽帧观察；统一参考任务见本文开头。
 
 「查看交付」集中列出当前阶段版本、采用情况、缺项及既有制作文件。下载策划资料 ZIP 只读打包版本清单与策划原文，不包含媒体，不调用模型或改变批准；文件指纹异常时拒绝导出。编译制作文件仍沿用既有 `compile_creative_package` 工具，不能把策划 ZIP 当成已生成成片。
 
@@ -218,11 +232,11 @@ python -m studio.input_import --data-root <DATA_ROOT> --run-id <RUN_ID> --path <
 
 已完成一次明确授权的最小真实 Codex 文本连通测试，只使用合成文本，未走业务工具或素材生成。该授权已使用；本机协议可用、模型列表可读、离线测试通过都不代表真实生成或创意质量通过。
 
-尚未完成真实图片/视频生成的连通、扣费与内容质量验收、图片分析的真实视觉质量、修改后的完整实端点创作流程、独立搜索/参考发现、视频声画理解及同模型生产与审核的独立质量评估。人工观察和外部观察导入仍可使用。主控仅能准备制作方案，不能提交生成或批准图片；策划批准不自动扩展为制作及费用授权。
+尚未完成真实图片/视频生成的连通、扣费与内容质量验收、素材理解的真实模型质量验收、修改后的完整实端点创作流程、独立搜索/参考发现及同模型生产与审核的独立质量评估。百炼声画和明确参考链接任务属于新增实现，服务加载状态与实测缺口见状态文档；它们不等于完整成片自动验收。人工观察和外部观察导入仍可使用。主控仅能准备制作方案，不能提交生成或批准图片；策划批准不自动扩展为制作及费用授权。
 
 ## 图片分析与采用
 
-项目素材 → 分析图片 → 选择服务、视觉模型及用途 → 确认一次调用 → 核对结果 → 采用所选观察。上传文件本身不调用模型。已有 OpenAI/Anthropic 兼容连接可用于图片输入，但具体模型必须支持视觉；DeepSeek、Codex CLI 和视频分析尚未接入本入口。支持静态 PNG/JPEG/WebP，最多 4 MB、单边 8000 像素、2000 万总像素；先验证真实文件内容及非动画属性，再传输原图。
+项目素材 → 分析图片 → 选择服务、视觉模型及用途 → 确认一次调用 → 核对结果 → 采用所选观察。上传文件本身不调用模型。已有 OpenAI/Anthropic 兼容连接可用于图片输入，但具体模型必须支持视觉；DeepSeek和Codex CLI尚未接入此图片入口；视频使用独立声画/抽帧观察入口。支持静态 PNG/JPEG/WebP，最多 4 MB、单边 8000 像素、2000 万总像素；先验证真实文件内容及非动画属性，再传输原图。
 
 采用现有 `/api/runs/{run_id}/jobs/{job_id}` 查询与取消；创建入口为 `POST /api/runs/{run_id}/image-analysis`，包含 `request_id`、文件名和 `expected_sha256`、连接 `expected_revision`、`connection_id`、视觉 `model`、`purpose`（product/reference）及显式 `consent: true`。同请求标识与同参数只执行一次，不自动重试、不修改角色配置、不把图片字节或密钥记入事件日志。调用复用 Ledger，未知用量不阻止再次调用；无准确价格时保留金额 null。
 
@@ -268,12 +282,12 @@ python -m studio.input_import --data-root <DATA_ROOT> --run-id <RUN_ID> --path <
 - `POST /api/runs/{run_id}/outcomes/{publication_id}/snapshots`：绑定 `request_id`、`expected_latest_id`，保存统计区间、指标及来源。拒绝未来日期、非法数字、旧记录并发覆盖和无法核对的源稿；相同请求幂等。浏览器保存未确认时保留冻结请求，重开后先识别已保存结果。
 
 作品和表现继续使用原 run 的不可变事件记录，不另起采集器或经营数据库；不会回填 Product Intel 或覆盖线路内业务事实源。该作品记录模块不自动采集平台数据或判断经营效果；媒体制作的独立入口见下文。
-## 图片与视频制作（2026-09-19）
+## 图片与视频制作
 
-项目右上角「制作」承接媒体执行。可以请主制片通过 `read_production` / `prepare_production` 准备实际生成描述，也可在制作页编辑。Agent 只有读取和免费保存能力；图审、提交与核账接口没有进入工具注册表。
+同一工作台的「分镜」「成片」承接媒体执行。主制片通过 `read_production` / `prepare_production` 准备实际生成描述，通过 `review_production` 完成内部文字制作检查；高级面板保留手动编辑。方案保存不调用模型，文字审核属于模型调用；图审和媒体生成提交仍由用户完成。
 
-1. 选择已经批准的准确脚本，保存不可变制作方案；修改会生成新方案。
-2. 单独确认一次文字制作检查。审核角色只获得当前 brief、准确脚本、实际 prompt、参数、素材证据与适用方法，不能读取生产者对话，也不会谎称看到图片像素。准备问题退回修改；检查通过仍不是生成授权。
+1. 主制片依据已经批准的准确脚本准备制作方案；内部保留不可变版本，修改不会覆盖原记录。
+2. 团队完成独立文字制作检查。审核角色只获得当前 brief、准确脚本、实际 prompt、参数、素材证据与适用方法，不能读取生产者对话，也不会谎称看到图片像素。准备问题由团队修正；检查通过仍不是生成授权。
 3. 视频参考图须在大图界面由用户确认。批准绑定原始文件名与 SHA256；换图后旧批准不能沿用，可明确撤回。
 4. 核对实际 prompt、图、时长、清晰度和费用后，用户勾选同意并启动一个生成任务。保存、打开页面和轮询不触发生成。
 5. 输出校验后写入本 run 的 `materials/`，保持原记录、任务与费用。生成成功仅表示文件已保存，实际画面、声音与创意效果仍待验收。
@@ -288,7 +302,7 @@ python -m studio.input_import --data-root <DATA_ROOT> --run-id <RUN_ID> --path <
 
 制作基线：首份方案必须来自完整且批准的当前 writing。之后同一制作基线可接收本流程生成的派生媒体，不让每次输出迫使脚本重写；原素材、观察、脚本、上游版本、方向选择、参考选择或审批变化仍使该基线失效。创作板的原有素材依赖机制不被放宽。新基线仍需要更新稿件并明确批准。
 
-接口位于 `/api/runs/{run_id}/production`：GET 读取能力/方案/素材与状态；POST `/drafts` 免费保存；`/material-approvals` 为浏览器图片决策；`/{draft_id}/review` 独立检查；`/{draft_id}/generate` 明确生成；`/attempts/{attempt_id}/refresh` 查询原视频任务；`/attempts/{attempt_id}/recover` 凭据核账或绑定原任务。浏览器专属确认 nonce 不进入模型上下文。真实生成未在本轮离线验收中执行，不能以 mock 返回宣称提供方连通或质量通过。
+接口位于 `/api/runs/{run_id}/production`：GET 读取能力/方案/素材与状态；POST `/drafts` 免费保存；`/material-approvals` 为浏览器图片决策；`/{draft_id}/review` 独立检查；`/{draft_id}/generate` 明确生成；`/attempts/{attempt_id}/refresh` 查询原视频任务；`/attempts/{attempt_id}/recover` 绑定原任务或依据提供方证据登记提交状态。未知计费用量不要求手工补齐。浏览器专属确认 nonce 不进入模型上下文。真实生成未在本轮离线验收中执行，不能以 mock 返回宣称提供方连通或质量通过。
 ## 显式接续旧案例
 
 项目顶部「项目历史」读取迁入的准确原文、未采用草稿、用户反馈、历史批准及费用说明。主制片使用 `read_project_history` 按登记 ID 读取相关文本；独立审核角色不读取旧生产者对话。历史原件只作资料，不带执行权限。

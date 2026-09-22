@@ -160,7 +160,8 @@ def test_capabilities_match_actual_role_tools_and_observation_limits(env, role):
     assert value["tools"] == list(tool_names_for(role))
     assert "read_method_document" in value["tools"]
     assert ("read_conversation_history" in value["tools"]) == (role == "orchestrator")
-    assert not value["image_analysis"]["agent_can_execute"]
+    assert value["image_analysis"]["agent_can_execute"] == (role == "orchestrator")
+    assert ('observe_images' in value['tools']) == (role == 'orchestrator')
     assert not value["video_understanding"]["agent_can_execute"]
     assert not value["production"]["agent_can_approve_or_generate"]
 

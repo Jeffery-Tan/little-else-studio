@@ -36,4 +36,13 @@ def creative_evidence(store, run_id, *, source=None):
             if 'audiovisual_review' not in modes:
                 result['gaps'].append({'name': material['name'], 'reason': '尚无完整声画观察；抽帧与转写不能合并冒充完整看听',
                     'observed_modes': sorted(modes), 'owner': 'team'})
+    from .creation_mode import context
+    try:
+        selected = context(store, run_id)
+        if selected:
+            result['creation_mode'] = {k: v for k, v in selected.items() if k != 'observation'}
+            result['reference_observations'] = [selected['observation']] if 'observation' in selected else []
+    except ValueError as exc:
+        result['reference_observations'] = []
+        result['errors'] = [*result['errors'], str(exc)]
     return result

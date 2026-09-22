@@ -239,6 +239,11 @@ class LearningService:
         if intent == "feedback" and active:
             wanted = {"us-commerce-strategy"}
         skills = [s for s in self._skills() if s["id"] in wanted]
+        from .creation_mode import context as creation_context
+        creation = creation_context(self.store, run_id) if active else None
+        if creation and creation['mode'] in ('recreate', 'inspiration') and format == 'video':
+            skills.append(self._text('reference-adaptation', '指定参考的视频改编方法',
+                self.repository_root / '.agents/skills/us-creator-video/reference-adaptation.md'))
         run_feedback = []
         if active and not reviewer:
             for case in original["cases"]:
@@ -249,6 +254,8 @@ class LearningService:
                     if event["run"] == run_id:
                         run_feedback.append(dict(event, case_id=case["id"]))
         text = "\n\n".join(s["text"] for s in skills)
+        if creation:
+            text += '\n\n本次作品方式与指定参考（不授予本轮执行权限）：\n' + _json(creation)
         text += "\n\n" + core.render(doc, seeds, effective_purpose)
         text += "\n\n来源材料仅作表达方法观察，不能迁移他品规格、卖点、价格、身份或未经核验的市场效果。依赖案例不因此获得当前用途资格。"
         if selected_references:
@@ -258,7 +265,8 @@ class LearningService:
         result = {"role": role, "intent": intent, "format": format, "purpose": purpose, "tags": list(tags),
                   "library_sha256": _sha(raw), "library_version": original.get("library_version", 1),
                   "skills": skills, "seed_case_ids": [c["id"] for c in seeds], "case_ids": [c["id"] for c in subset["cases"]],
-                  "library": subset, "run_feedback": run_feedback, "selected_references": selected_references, "text": text}
+                  "library": subset, "run_feedback": run_feedback, "selected_references": selected_references, "text": text,
+                  "creation_mode": creation}
         digest = _sha(_json(result))
         result.update(snapshot_sha256=digest, evidence_ref=f"learning/contexts/{digest}.json")
         with self.store.run_lock(run_id):
