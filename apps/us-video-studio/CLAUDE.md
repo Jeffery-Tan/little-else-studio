@@ -73,6 +73,13 @@ BOM**，**代码与配置（`.py`/`.json`/`.yaml`）用 UTF-8 不带 BOM**。加
    失效判定用**事件世代（generation）单调前进**，不依赖内容哈希回等：产物写入时冻结
    当前证据/参考世代，世代前进即永久 stale；即使内容回到历史哈希（A→B→A）也不得使
    旧批准复活。素材上传须写入 `material_uploaded` 事件以推进证据世代。
+   推进世代与改变证据指纹的只有**源事实**（素材上传/导入、观察、非自主的创作模式选择）；
+   本 run 自己生成的产物是派生物：出片时它会同时写入 `material_uploaded` 与
+   `production_output`（两者同一 `(name, sha256)`），这两条都不推进证据世代、也不进入
+   证据指纹——否则一次成功出片会作废授权它的脚本。判定按 `(name, sha256)` 成对匹配，
+   生成文件事后被改字节即重新算源事实。派生物仍保留在 `evidence_snapshot` 的 agent
+   上下文里并标注 `origin='generated'`；过滤只有一处（`evidence.derived_outputs` /
+   `evidence_source_snapshot`），制作基线与阶段失效共用，不得由两个模块分别定义。
 8. **审批绑定用户实际阅读的版本。** `expected_version` 与 `expected_artifact_sha256`
    必须对应展示内容，不得静默换成最新版；`selected_option_id` 是正式选择，推荐不是选择。
    `artifact-v2` 覆盖正文、结构、证据、限制及依赖；`body-v1` 只回放，不继承旧批准继续制作。

@@ -26,7 +26,7 @@ from PIL import Image
 
 from .agents.budget import BudgetedClient
 from .agents.client import JobCancelled
-from .evidence import evidence_snapshot
+from .evidence import evidence_snapshot, evidence_source_snapshot
 from .ledger import Ledger
 from .materials import accept_upload, material_url, resolve
 from .models import PipelineError, STAGES, utcnow
@@ -113,15 +113,12 @@ def read_image(store, run_id, name, expected_sha256):
 def source_snapshot(store, run_id):
     """A production baseline may gain derived outputs, never new source facts.
 
-    Pipeline evidence still sees every material. Production alone can continue
-    its frozen approved script after its own generated files arrive. Mutations
-    to originals, observations, references, scripts or decisions invalidate it.
+    The filtered evidence form is shared with the pipeline fingerprint, so a
+    run's own generated files cannot invalidate either the approved script or
+    the baseline that continues it (CLAUDE.md red line 7). Mutations to
+    originals, observations, references, scripts or decisions still invalidate.
     """
-    events = store.read_events(run_id)
-    generated = {(e['output']['name'], e['output']['sha256']) for e in events
-                 if e.get('kind') == 'production_output'}
-    evidence = evidence_snapshot(store, run_id)
-    evidence['materials'] = [m for m in evidence['materials'] if (m['name'], m['sha256']) not in generated]
+    evidence = evidence_source_snapshot(store, run_id)
     artifacts = []
     for stage in STAGES:
         item = store.latest_artifact(run_id, stage)

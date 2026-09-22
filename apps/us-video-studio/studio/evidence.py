@@ -21,14 +21,29 @@ MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 #: Event kinds that advance the evidence generation. Append-only: once a kind
 #: is listed here it must stay, or historical events would renumber old freezes.
 #: A generation is the highest ``seq`` among these kinds (0 if none yet).
+#: Only source facts advance it. A run's own generated files are excluded below
+#: (CLAUDE.md red line 7).
 EVIDENCE_GENERATION_KINDS = frozenset({
     "material_uploaded",
     "material_imported",
-    "production_output",
     "agent_images_observed",
     "creation_mode_selected",
     "observation_saved",
 })
+
+
+def derived_outputs(events: list[dict[str, Any]]) -> set[tuple[str, str]]:
+    """``(name, sha256)`` of the files this run generated itself.
+
+    A successful generation registers its output as a material, so the same
+    pair also appears on a ``material_uploaded`` event. Both records are
+    derived: matching on the pair means a generated file whose bytes later
+    change is no longer this run's own output and counts as a source fact
+    again. One home for this rule — the fingerprint and the generation both
+    read it (CLAUDE.md red line 7).
+    """
+    return {(event['output']['name'], event['output']['sha256']) for event in events
+            if event.get('kind') == 'production_output'}
 
 
 def _sha(path: Path) -> str:
@@ -212,8 +227,28 @@ def _input_sources(run: Path, manifest: Path, errors: list[str]) -> dict[str, An
     return result
 
 
+def evidence_source_snapshot(store: Store, run_id: str) -> dict[str, Any]:
+    """Evidence snapshot minus this run's own generated outputs.
+
+    Generated files are derived products, not new source facts. Fingerprinting
+    them would let a successful generation invalidate the very script that
+    authorized it, so both the pipeline and the production baseline read this
+    one filtered form (CLAUDE.md red line 7). ``evidence_snapshot`` keeps them
+    for agent context, where they are labelled ``origin='generated'``.
+
+    Matching is on ``(name, sha256)``: a generated file whose bytes later
+    change is no longer this run's output and stays a source fact.
+    """
+    derived = derived_outputs(store.read_events(run_id))
+    snapshot = evidence_snapshot(store, run_id)
+    snapshot['materials'] = [m for m in snapshot['materials']
+                             if (m['name'], m['sha256']) not in derived]
+    return snapshot
+
+
 def evidence_fingerprint(store: Store, run_id: str) -> str:
-    payload = json.dumps(evidence_snapshot(store, run_id), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(evidence_source_snapshot(store, run_id), ensure_ascii=False,
+                         sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -226,11 +261,17 @@ def evidence_generation(store: Store, run_id: str) -> int:
 
     ``creation_mode_selected`` only counts when the mode is not
     ``autonomous``: autonomous selections do not enter the evidence
-    snapshot, so they must not freeze-bump dependents either.
+    snapshot, so they must not freeze-bump dependents either. A generated
+    file registered as a material is skipped for the same reason it is kept
+    out of the fingerprint: it is this run's own product, not a source fact.
     """
+    events = store.read_events(run_id)
+    derived = derived_outputs(events)
     generation = 0
-    for event in store.read_events(run_id):
+    for event in events:
         kind = event.get("kind")
+        if kind == "material_uploaded" and (event.get("name"), event.get("sha256")) in derived:
+            continue
         if kind not in EVIDENCE_GENERATION_KINDS:
             continue
         if kind == "creation_mode_selected":

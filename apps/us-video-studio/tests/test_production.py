@@ -217,6 +217,30 @@ def test_video_result_saved_media_units_cny_and_retry_does_not_resubmit(scene):
     assert output['origin'] == 'generated' and '不是商品实拍' in output['origin_notice']
 
 
+def test_successful_output_never_stales_the_script_that_authorized_it(scene):
+    """CLAUDE.md red line 7: a derived output is not a new source fact.
+
+    Generation used to advance the evidence generation and enter the fingerprint
+    while the production baseline excluded it, so one successful run left the
+    approved script permanently stale and impossible to re-confirm.
+    """
+    from studio.evidence import evidence_generation
+
+    store, pipe = scene[1], scene[2]
+    d = ready(scene)
+    frozen = int(pipe.stage_state(RUN, 'writing').latest.inputs['evidence:generation'])
+    assert not pipe.stage_state(RUN, 'writing').stale
+    assert wait(scene, action(scene, d, 'generate'))['status'] == 'succeeded'
+    attempt = workspace(scene)['drafts'][0]['attempts'][0]
+    assert attempt['status'] == 'succeeded'
+    assert evidence_generation(store, RUN) == frozen
+    state = pipe.stage_state(RUN, 'writing')
+    assert not state.stale and state.status == 'approved' and not state.can_approve
+    # The generated file is still offered as a usable material, not hidden.
+    generated = next(m for m in workspace(scene)['materials'] if m['name'] == attempt['output']['name'])
+    assert generated['url'] and generated['sha256'] == attempt['output']['sha256']
+
+
 def test_image_preserves_unknown_bill_and_text_tokens_then_explicit_recovery(scene):
     d = ready(scene, 'image'); wait(scene, action(scene, d, 'generate'))
     data = workspace(scene); a = data['drafts'][0]['attempts'][0]
