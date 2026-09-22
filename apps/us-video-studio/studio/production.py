@@ -87,6 +87,22 @@ def done(message):
     return SimpleNamespace(stopped_because='done', text=message, rounds=1, used_tools=[])
 
 
+def outcome(attempt, message):
+    """How this job actually ended, read back from the attempt it wrote.
+
+    The submit helpers record provider trouble as an attempt status rather than
+    an exception, so returning ``done`` unconditionally made the job say the
+    round finished while nothing had been produced. Red line 4: a job that ran
+    is not a job that delivered. The attempt's own message is what the user
+    gets to read, because it is the one that says whether a resubmission is
+    safe.
+    """
+    if attempt['status'] == 'succeeded':
+        return done(message)
+    return SimpleNamespace(stopped_because='incomplete', rounds=1, used_tools=[],
+                           text=attempt.get('message') or '本次制作没有完成，请在制作页查看状态。')
+
+
 def read_image(store, run_id, name, expected_sha256):
     path = resolve(store, run_id, name)
     if not path or path.suffix.lower() not in {'.png', '.jpg', '.jpeg', '.webp'}:
@@ -431,7 +447,8 @@ class Production:
                     self.submit_video(run_id, attempt_id, d, raw, client, check_cancel)
                 else:
                     self.submit_image(run_id, attempt_id, d, raw, client, check_cancel)
-            return done('本次制作状态已保存，请在制作页查看结果与用量。')
+                attempt = self.attempts(run_id)[attempt_id]
+            return outcome(attempt, '本次制作状态已保存，请在制作页查看结果与用量。')
         return run, {'provider': 'dashscope' if d['kind'] == 'video' else 'codex_cli',
                      'model': d['model'], 'draft_id': draft_id, 'draft_sha256': d['draft_sha256'], 'estimate': d['estimate']}
 
@@ -462,8 +479,11 @@ class Production:
             self.status(run_id, attempt_id, status='unknown' if exc.submission_unknown else 'failed',
                         message='提交结果待核实，请先核对百炼任务，不能重复提交。' if exc.submission_unknown else str(exc))
             return
-        except Exception:
-            self.status(run_id, attempt_id, status='unknown', message='提交结果待核实，请先核对百炼任务，不能重复提交。')
+        except Exception as exc:
+            # Class name only. A provider error can carry a signed URL, and this
+            # message is written to the run journal and shown on the page.
+            self.status(run_id, attempt_id, status='unknown',
+                        message=f'提交结果待核实，请先核对百炼任务，不能重复提交。（{type(exc).__name__}）')
             return
         self.status(run_id, attempt_id, status='submitted', task_id=result.task_id, endpoint=result.endpoint,
                     message='百炼已接收任务，正在等待视频。')
@@ -549,8 +569,10 @@ class Production:
             self.jobs.ledger.settle_media_call(run_id, attempt_id, quantity=0, ok=False,
                 note='Codex 本机预检未通过，尚未发起模型请求。')
             self.status(run_id, attempt_id, status='failed', message='图片连接预检未通过，没有发起模型请求。请检查本机 Codex。')
-        except Exception:
-            self.status(run_id, attempt_id, status='unknown', message='图片任务未完整返回，调用状态待核实，没有自动重试。')
+        except Exception as exc:
+            # Class name only, for the same reason as the video path above.
+            self.status(run_id, attempt_id, status='unknown',
+                        message=f'图片任务未完整返回，调用状态待核实，没有自动重试。（{type(exc).__name__}）')
 
     def prepare_refresh(self, run_id, attempt_id):
         a = self.attempts(run_id).get(attempt_id)
@@ -561,7 +583,8 @@ class Production:
         def run(_text, emit, check_cancel):
             with self.jobs.ledger.call_guard():
                 self.poll_video(run_id, attempt_id, d, client, check_cancel)
-            return done('原视频任务查询完成，没有提交新的生成请求。')
+                attempt = self.attempts(run_id)[attempt_id]
+            return outcome(attempt, '原视频任务查询完成，没有提交新的生成请求。')
         return run, {'provider': 'dashscope', 'task_id': a['task_id'], 'new_generation': False}
 
 

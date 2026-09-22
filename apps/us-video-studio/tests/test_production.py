@@ -332,6 +332,39 @@ def test_failed_provider_does_not_fabricate_zero_usage(scene):
     assert a['status'] == 'failed' and a['usage_status'] == 'unknown'
 
 
+def done_text(item):
+    return next(event for event in item['events'] if event['type'] == 'done')['text']
+
+
+def test_failed_generation_is_not_reported_as_a_finished_round(scene):
+    """CLAUDE.md red line 4: a round that ran is not a round that delivered."""
+    scene[5].status = 'FAILED'
+    d = ready(scene)
+    item = wait(scene, action(scene, d, 'generate'))
+    assert item['status'] == 'blocked' and 'incomplete' in item['reason']
+    attempt = workspace(scene)['drafts'][0]['attempts'][0]
+    assert attempt['status'] == 'failed'
+    assert done_text(item) == attempt['message']
+
+
+def test_partial_image_result_is_not_reported_as_a_finished_round(scene):
+    scene[4].result_status = 'unknown'
+    d = ready(scene, 'image')
+    item = wait(scene, action(scene, d, 'generate'))
+    assert item['status'] == 'blocked'
+    assert workspace(scene)['drafts'][0]['attempts'][0]['status'] == 'unknown'
+
+
+def test_unexpected_provider_error_records_only_its_class_name(scene):
+    """The journal is served to the page; a provider error can carry a URL."""
+    scene[5].error = ValueError('https://signed.example.invalid/?token=SECRET')
+    d = ready(scene)
+    item = wait(scene, action(scene, d, 'generate'))
+    assert item['status'] == 'blocked'
+    assert 'ValueError' in done_text(item)
+    assert 'SECRET' not in json.dumps(item)
+
+
 def test_provider_explicit_rejection_reconciles_no_invocation(scene):
     scene[5].error = WanVideoError('Synthetic HTTP 400', submission_unknown=False)
     d = ready(scene); wait(scene, action(scene, d, 'generate'))
