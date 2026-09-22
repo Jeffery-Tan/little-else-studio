@@ -18,6 +18,18 @@ from .store import Store
 LEVELS = {"image_observed", "frames_observed", "transcript_only", "audiovisual_review"}
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 
+#: Event kinds that advance the evidence generation. Append-only: once a kind
+#: is listed here it must stay, or historical events would renumber old freezes.
+#: A generation is the highest ``seq`` among these kinds (0 if none yet).
+EVIDENCE_GENERATION_KINDS = frozenset({
+    "material_uploaded",
+    "material_imported",
+    "production_output",
+    "agent_images_observed",
+    "creation_mode_selected",
+    "observation_saved",
+})
+
 
 def _sha(path: Path) -> str:
     digest = hashlib.sha256()
@@ -203,3 +215,29 @@ def _input_sources(run: Path, manifest: Path, errors: list[str]) -> dict[str, An
 def evidence_fingerprint(store: Store, run_id: str) -> str:
     payload = json.dumps(evidence_snapshot(store, run_id), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def evidence_generation(store: Store, run_id: str) -> int:
+    """Highest event ``seq`` that advanced evidence, or 0 if none.
+
+    Frozen into artifact inputs at write time. Staleness compares
+    ``current > frozen`` so A→B→A stays stale even when the content
+    fingerprint returns to a prior hash (CLAUDE.md red line 7).
+
+    ``creation_mode_selected`` only counts when the mode is not
+    ``autonomous``: autonomous selections do not enter the evidence
+    snapshot, so they must not freeze-bump dependents either.
+    """
+    generation = 0
+    for event in store.read_events(run_id):
+        kind = event.get("kind")
+        if kind not in EVIDENCE_GENERATION_KINDS:
+            continue
+        if kind == "creation_mode_selected":
+            selection = event.get("selection") or {}
+            if selection.get("mode") == "autonomous":
+                continue
+        seq = event.get("seq")
+        if isinstance(seq, int) and seq > generation:
+            generation = seq
+    return generation

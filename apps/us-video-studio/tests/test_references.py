@@ -9,7 +9,7 @@ from test_learning import env, _json
 from studio.learning import LearningConflict
 from studio.pipeline import Pipeline
 from studio.references import (SelectIn, RemoveIn, change_reference, install_reference_routes,
-                               reference_state, reference_fingerprint)
+                               reference_state, reference_fingerprint, reference_generation)
 
 
 def choose(service, case_id='seed-case', purpose='message', request_id='request-one', **changes):
@@ -164,3 +164,28 @@ def test_http_busy_and_unfinished_attempts_prevent_selection(env):
         assert view['references'][0]['case_id'] == 'seed-case'
         removal = {'request_id':'remove-http','expected_snapshot':view['snapshot']}
         assert client.post('/api/runs/run-one/references/seed-case/remove',json=removal).json()['references'] == []
+
+
+def test_reference_abba_return_to_prior_selection_stays_stale(env):
+    """A→B→A on references: frozen generation beats hash equality."""
+    service, store, _ = env
+    pipeline = Pipeline(store)
+    attempt = pipeline.start_attempt('run-one', 'intake')
+    pipeline.submit('run-one', 'intake', attempt.token, content='brief', summary='brief')
+    change_reference(service, 'run-one', choose(service))
+    attempt = pipeline.start_attempt('run-one', 'direction')
+    pipeline.submit('run-one', 'direction', attempt.token, content='direction', summary='direction')
+    assert not pipeline.stage_state('run-one', 'direction').stale
+    frozen = int(pipeline.stage_state('run-one', 'direction').latest.inputs['references:generation'])
+    first_snapshot = pipeline.stage_state('run-one', 'direction').latest.inputs['references:snapshot']
+
+    removal = RemoveIn(request_id='remove-abba', expected_snapshot=reference_fingerprint(store, 'run-one'))
+    change_reference(service, 'run-one', removal, remove_case='seed-case')
+    assert pipeline.stage_state('run-one', 'direction').stale
+
+    change_reference(service, 'run-one', choose(service, request_id='reselect-abba'))
+    state = pipeline.stage_state('run-one', 'direction')
+    assert state.latest.inputs['references:snapshot'] == first_snapshot
+    assert state.stale
+    assert reference_generation(store, 'run-one') > frozen
+    assert not state.can_approve

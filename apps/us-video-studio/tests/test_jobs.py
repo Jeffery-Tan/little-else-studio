@@ -134,6 +134,26 @@ def test_restart_marks_interrupted_and_preserves_unknown_call(tmp_path):
         assert Ledger(store, settings).totals().unknown_calls == 1
 
 
+def test_unresolved_calls_are_limited_to_this_run(tmp_path):
+    """Another run's pending ledger row must not appear in this run's job view."""
+    settings = settings_for(tmp_path)
+    store = Store(tmp_path)
+    store.create_run(RUN, '本 run', '测试')
+    store.create_run('other-run', '另一 run', '测试')
+    other_call = Ledger(store, settings).begin_call(
+        'other-run', role='orchestrator', stage='intake', model='synthetic')
+    store.append_event(RUN, 'job_created', job_id='job-a', request_id='r1', text='hi',
+                       model_config={}, context_refs={})
+    store.append_event(RUN, 'job_status', job_id='job-a', status='interrupted')
+    with TestClient(build_app(settings, client_factory=lambda: ScriptedModel([final_turn('x')]))) as http:
+        job = http.get(f'/api/runs/{RUN}/jobs/latest').json()
+        assert job['status'] == 'interrupted'
+        assert all(row['call_id'] != other_call for row in job['unresolved_calls'])
+        assert job['unresolved_calls'] == []
+        assert [r.call_id for r in Ledger(store, settings).entries(RUN)] == []
+        assert other_call in [r.call_id for r in Ledger(store, settings).entries('other-run')]
+
+
 def test_writer_lease_refuses_second_service_and_releases(tmp_path):
     first = WriterLease(tmp_path)
     second = WriterLease(tmp_path)

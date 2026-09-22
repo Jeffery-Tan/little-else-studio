@@ -42,6 +42,25 @@ def reference_fingerprint(store, run_id):
     return fingerprint(chosen)
 
 
+#: Append-only kinds that advance the reference generation (CLAUDE.md red line 7).
+#: ``learning_applied`` is included because applying a proposal can change the
+#: source case content folded into ``reference_fingerprint`` without a new
+#: select/remove — same freeze-bump rule as hand-editing observations.
+REFERENCE_GENERATION_KINDS = frozenset({'reference_selected', 'reference_removed', 'learning_applied'})
+
+
+def reference_generation(store, run_id):
+    """Highest event ``seq`` among reference choices, or 0 if none yet."""
+    generation = 0
+    for event in store.read_events(run_id):
+        if event.get('kind') not in REFERENCE_GENERATION_KINDS:
+            continue
+        seq = event.get('seq')
+        if isinstance(seq, int) and seq > generation:
+            generation = seq
+    return generation
+
+
 class SelectIn(BaseModel):
     request_id: str = Field(pattern=r'^[a-zA-Z0-9_-]{8,100}$')
     case_id: str = Field(min_length=1, max_length=160)

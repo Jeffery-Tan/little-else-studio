@@ -142,6 +142,26 @@ def test_nonce_is_single_use(pipe):
         pipe.record_approval(RUN, "direction", nonce=nonce, decision="returned", note="different decision")
 
 
+def test_same_version_cannot_be_approved_twice(pipe):
+    """A second nonce must not re-decide one already-approved artifact."""
+    submit_intake(pipe)
+    submit_direction(pipe)
+    review_pass(pipe, "direction")
+
+    first = approve(pipe, "direction")
+    assert first.decision == "approved"
+    with pytest.raises(PipelineError) as err:
+        pipe.issue_nonce(RUN, "direction")
+    assert "already has decision" in str(err.value)
+    with pytest.raises(PipelineError) as err:
+        approve(pipe, "direction")
+    assert "already has decision" in str(err.value) or "not valid" in str(err.value)
+    state = pipe.stage_state(RUN, "direction")
+    assert state.approval is not None
+    assert state.approval.decision == first.decision
+    assert state.approval.nonce_sha256 == first.nonce_sha256
+
+
 def test_nonce_is_bound_to_its_stage(pipe):
     submit_intake(pipe)
     submit_direction(pipe)
@@ -215,6 +235,14 @@ def test_returning_a_stage_needs_a_note_the_writer_can_act_on(pipe):
     )
     assert approval.decision == "returned"
     assert approval.note == "开场缺了容量对比"
+    # One decision per version: return freezes this artifact; a new version
+    # is required before another decision (CLAUDE.md red line 8).
+    with pytest.raises(PipelineError) as err:
+        pipe.issue_nonce(RUN, "direction")
+    assert "already has decision" in str(err.value)
+    with pytest.raises(PipelineError) as err:
+        approve(pipe, "direction")
+    assert "already has decision" in str(err.value) or "not valid" in str(err.value)
 
 
 def test_a_returning_review_does_not_open_the_gate(pipe):

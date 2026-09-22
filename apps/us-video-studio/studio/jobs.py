@@ -127,7 +127,7 @@ class JobManager:
         out['unresolved_calls'] = [
             {'run_id': r.run_id, 'call_id': r.call_id, 'role': r.role,
              'call_status': r.call_status, 'usage_status': r.usage_status}
-            for r in self.ledger.entries() if r.call_status == 'pending' or r.usage_status != 'known'
+            for r in self.ledger.entries(run_id) if r.call_status == 'pending' or r.usage_status != 'known'
         ]
         out['can_continue'] = out['status'] in TERMINAL
         with self.store.run_lock(run_id):

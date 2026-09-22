@@ -283,7 +283,7 @@ test('unknown usage alone never disables sending or creates an accounting form',
 
 test('abandon binds the viewed attempt, retains typed reason on conflict, and cannot target another selected project', async () => {
   const writes = [];
-  const snap = { ...recoverySnapshot, unresolved_calls: [], open_attempts: [{ stage: 'direction', token: 'attempt-exact' }] };
+  const snap = { ...recoverySnapshot, unresolved_calls: [], open_attempts: [{ stage: 'direction', token: null }] };
   const h = harness(async (url, options) => {
     if (options) { writes.push(JSON.parse(options.body)); throw new Error('state changed'); }
     return url.endsWith('/recovery') ? snap : null;
@@ -295,7 +295,8 @@ test('abandon binds the viewed attempt, retains typed reason on conflict, and ca
   const button = descendants(form, (node) => node.type === 'submit')[0];
   reason.value = '服务中断，保留已有版本'; confirm.checked = true;
   await form.onsubmit({ preventDefault() {} });
-  assert.equal(writes[0].attempt_token, 'attempt-exact');
+  assert.equal(writes[0].stage, 'direction');
+  assert.equal(writes[0].attempt_token, undefined);
   assert.equal(reason.value, '服务中断，保留已有版本');
   assert.equal(button.disabled, false);
   h.context.state.runId = 'run-b';

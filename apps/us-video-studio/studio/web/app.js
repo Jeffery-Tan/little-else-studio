@@ -329,8 +329,10 @@ function renderPane() {
     // Every question the run has. `stageHtml` keeps the ones belonging to this
     // stage — the rule lives there so it has one home and one test.
     questions: tl.questions || [],
-    // `stageHtml` draws the gate only when it names this stage.
-    pending: null,
+    // The gate is the server's pending decision for this stage (stageHtml
+    // draws only when it names this stage). Journey has its own card with a
+    // separate radio group name so the two never share one document group.
+    pending: tl.pending || null,
     drafts: state.draft,
   });
   wireGate(host);
@@ -1002,12 +1004,19 @@ function wireGate(host) {
   const gate = host.querySelector(".gate");
   if (!gate) return;
   const reason = gate.querySelector(".reason");
-  const key = `studio-decision:${state.runId}:${gate.dataset.stage}:${gate.dataset.sha}`;
+  const surface = gate.dataset.journey === "1" ? "journey" : "stage";
+  const key = `studio-decision:${state.runId}:${gate.dataset.stage}:${gate.dataset.sha}:${surface}`;
   const status = gate.querySelector(".gate-feedback");
   let draft = { note: "", option: null, nonce: null };
   try { draft = { ...draft, ...JSON.parse(localStorage.getItem(key) || "{}") }; } catch {}
   reason.value = draft.note || "";
-  for (const radio of gate.querySelectorAll('input[name="direction-choice"]')) {
+  // Scope to this gate. Journey and stage use different radio `name`s so two
+  // open gates never form one document-level group (P0-4). Match any option
+  // radio inside the gate, not only fieldset-wrapped ones.
+  const optionRadios = () => gate.querySelectorAll(
+    'fieldset input[type="radio"], input[name^="direction-choice"]'
+  );
+  for (const radio of optionRadios()) {
     radio.checked = radio.value === draft.option;
     radio.onchange = () => { draft.option = radio.value; draft.nonce = null; save(); };
   }
@@ -1025,7 +1034,7 @@ function wireGate(host) {
     if ((decision === "returned" || gate.dataset.passed !== "1") && !note) {
       status.textContent = "请写明需要调整的地方，或覆盖审核的具体理由。"; reason.focus(); return;
     }
-    if (decision === "approved" && gate.querySelector('input[name="direction-choice"]') && !draft.option) {
+    if (decision === "approved" && optionRadios().length && !draft.option) {
       status.textContent = "请先选择一个方向；推荐不代表已选。"; return;
     }
     const runId = state.runId;

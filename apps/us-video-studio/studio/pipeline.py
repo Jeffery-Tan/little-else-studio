@@ -224,18 +224,37 @@ class Pipeline:
                 stale = True
                 stale_reason = "; ".join(reasons)
         if latest is not None and latest.digest_algorithm == "artifact-v2":
-            from .evidence import evidence_fingerprint
+            from .evidence import evidence_fingerprint, evidence_generation
             if "__evidence_snapshot__" not in memo:
                 memo["__evidence_snapshot__"] = evidence_fingerprint(self.store, run_id)
-            if latest.inputs.get("evidence:snapshot") != memo["__evidence_snapshot__"]:
+                memo["__evidence_generation__"] = evidence_generation(self.store, run_id)
+            hash_stale = latest.inputs.get("evidence:snapshot") != memo["__evidence_snapshot__"]
+            # Generation is frozen at write; once it advances the artifact is
+            # permanently stale even if content later returns to the same hash
+            # (A→B→A). Legacy inputs without the key keep hash-only checks.
+            frozen_gen = latest.inputs.get("evidence:generation")
+            gen_stale = (
+                frozen_gen is not None
+                and isinstance(memo["__evidence_generation__"], int)
+                and memo["__evidence_generation__"] > int(frozen_gen)
+            )
+            if hash_stale or gen_stale:
                 stale = True
                 stale_reason = "source materials or observation records changed after this version was produced"
 
         if latest is not None and stage != 'intake':
-            from .references import reference_fingerprint
+            from .references import reference_fingerprint, reference_generation
             if '__references_snapshot__' not in memo:
                 memo['__references_snapshot__'] = reference_fingerprint(self.store, run_id)
-            if latest.inputs.get('references:snapshot') != memo['__references_snapshot__']:
+                memo['__references_generation__'] = reference_generation(self.store, run_id)
+            hash_stale = latest.inputs.get('references:snapshot') != memo['__references_snapshot__']
+            frozen_gen = latest.inputs.get('references:generation')
+            gen_stale = (
+                frozen_gen is not None
+                and isinstance(memo['__references_generation__'], int)
+                and memo['__references_generation__'] > int(frozen_gen)
+            )
+            if hash_stale or gen_stale:
                 stale = True
                 stale_reason = '项目选择的灵感参考已调整，请根据当前参考更新这一版。'
 
@@ -383,13 +402,15 @@ class Pipeline:
         spec = STAGE_SPEC[stage]
         memo: dict = {}
         inputs: dict[str, str] = {}
-        from .evidence import evidence_fingerprint
+        from .evidence import evidence_fingerprint, evidence_generation
         inputs["evidence:snapshot"] = evidence_fingerprint(self.store, run_id)
+        inputs["evidence:generation"] = str(evidence_generation(self.store, run_id))
         if stage != 'intake':
-            from .references import reference_fingerprint
+            from .references import reference_fingerprint, reference_generation
             selected_references = reference_fingerprint(self.store, run_id)
             if selected_references is not None:
                 inputs['references:snapshot'] = selected_references
+                inputs['references:generation'] = str(reference_generation(self.store, run_id))
         for up in self.upstream_stages(stage):
             self.stage_state(run_id, up, memo)
             if not memo.get(f"__complete__{up}"):
@@ -637,6 +658,15 @@ class Pipeline:
         self._expect_version(state, expected_artifact_sha256, expected_version)
         if state.latest.digest_algorithm != "artifact-v2":
             raise PipelineError("approval", "legacy body-only artifacts are read-only; produce a fully bound new version before approving")
+        # One decision per version (approved, override, or returned).
+        # A second nonce would let a new click overwrite the recorded decision
+        # or `selected_option_id`. After return, produce a new version.
+        if state.approval is not None:
+            raise PipelineError(
+                "approval",
+                f"{stage}-v{state.latest.version} already has decision "
+                f"{state.approval.decision!r}; a new link cannot replace it",
+            )
         nonce = secrets.token_urlsafe(24)
         self.store.append_event(
             run_id, "nonce_issued", stage=stage, nonce_sha256=sha256_text(nonce),
@@ -716,6 +746,14 @@ class Pipeline:
         if state.latest is None:
             raise PipelineError("approval", f"{stage} has nothing to approve")
         self._expect_version(state, expected_artifact_sha256, expected_version)
+        # A different nonce cannot re-decide an already-decided version
+        # (approved or returned); same-nonce idempotent retries returned above.
+        if state.approval is not None:
+            raise PipelineError(
+                "approval",
+                f"{stage}-v{state.latest.version} already has decision "
+                f"{state.approval.decision!r}; this version cannot be decided again",
+            )
         if not self._nonce_usable(run_id, stage, nonce, state.latest):
             raise PipelineError(
                 "approval",

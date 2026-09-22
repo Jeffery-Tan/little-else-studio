@@ -1,6 +1,6 @@
 import pytest
 
-from studio.evidence import evidence_fingerprint
+from studio.evidence import evidence_fingerprint, evidence_generation
 from studio.material_observations import (
     ObservationConflict, ObservationError, material_workspace, save_human_observation,
 )
@@ -43,6 +43,16 @@ def test_uploaded_is_not_observed_and_saved_human_record_is_byte_bound(store):
     assert item["observations"][0]["purpose"] == "reference"
     assert item["observations"][0]["source_kind"] == "human_observation"
     assert before != evidence_fingerprint(store, "material-test")
+
+
+def test_human_observation_advances_evidence_generation(store):
+    """observation_saved must freeze-bump dependents even if content returns."""
+    before = evidence_generation(store, "material-test")
+    save(store)
+    events = [e for e in store.read_events("material-test")
+              if e["kind"] == "observation_saved"]
+    assert len(events) == 1
+    assert evidence_generation(store, "material-test") > before
 
 
 def test_revision_conflict_preserves_existing_and_append_keeps_history(store):

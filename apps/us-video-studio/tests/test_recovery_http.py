@@ -39,10 +39,13 @@ def test_recover_without_job_preserves_artifacts_costs_and_approval(tmp_path):
         assert before["saved_artifacts"][0]["version"] == artifact.version
         close = http.post(f"/api/runs/{RUN}/recovery/abandon", json={
             "expected_revision": before["revision"], "stage": "direction",
-            "attempt_token": attempt.token, "reason": "服务中断后决定另开新尝试",
+            "reason": "服务中断后决定另开新尝试",
         })
         assert close.status_code == 200, close.text
         assert close.json()["open_attempts"] == []
+        assert attempt.token not in close.text
+        assert before["open_attempts"][0]["token"] is None
+        assert attempt.token not in http.get(f"/api/runs/{RUN}/recovery").text
         assert close.json()["can_continue"]  # unknown usage remains diagnostic only
         assert close.json()["unresolved_calls"][0]["input_tokens"] is None
         assert (store.run_dir(RUN) / "ledger.jsonl").read_bytes() == original
@@ -65,12 +68,15 @@ def test_exact_attempt_and_snapshot_reject_stale_recovery(tmp_path):
     app, store, pipe, ledger, call, attempt, artifact = fixture(tmp_path)
     with TestClient(app) as http:
         before = snapshot(http)
-        payload = {"expected_revision": before["revision"], "stage": "direction",
-                   "attempt_token": "wrong", "reason": "test"}
+        # Wrong stage: there is no open attempt for writing yet.
+        payload = {"expected_revision": before["revision"], "stage": "writing",
+                   "reason": "test"}
         assert http.post(f"/api/runs/{RUN}/recovery/abandon", json=payload).status_code == 409
         pipe.reject(RUN, "direction", attempt.token, "another operator")
         next_attempt = pipe.start_attempt(RUN, "direction")
-        payload["attempt_token"] = attempt.token
+        # Stale revision after the attempt changed.
+        payload = {"expected_revision": before["revision"], "stage": "direction",
+                   "reason": "test"}
         assert http.post(f"/api/runs/{RUN}/recovery/abandon", json=payload).status_code == 409
         assert pipe.stage_state(RUN, "direction").open_attempt.token == next_attempt.token
 
@@ -100,14 +106,16 @@ def test_cross_project_settlement_and_blank_evidence_rejected(tmp_path):
         assert http.post(f"/api/runs/{RUN}/recovery/reconcile", json=payload).status_code == 409
         payload.update(call_id=call, evidence_note="   ")
         assert http.post(f"/api/runs/{RUN}/recovery/reconcile", json=payload).status_code == 409
-        assert len(snapshot(http)["unresolved_calls"]) == 2
+        # Unresolved calls are limited to this run (not the other project's).
+        assert len(snapshot(http)["unresolved_calls"]) == 1
+        assert snapshot(http)["unresolved_calls"][0]["call_id"] == call
 
 
 def test_any_active_job_and_inflight_call_block_recovery(tmp_path):
     app, store, pipe, ledger, call, attempt, artifact = fixture(tmp_path)
     with TestClient(app) as http:
         payload = {"expected_revision": snapshot(http)["revision"], "stage": "direction",
-                   "attempt_token": attempt.token, "reason": "test"}
+                   "reason": "test"}
         app.state.jobs.active = ("other-run", "active-job")
         try:
             assert not snapshot(http)["can_recover"]
@@ -124,7 +132,7 @@ def test_recovery_obeys_local_origin_boundary(tmp_path):
     with TestClient(app) as http:
         response = http.post(f"/api/runs/{RUN}/recovery/abandon", headers={"origin": "https://evil.example"}, json={
             "expected_revision": snapshot(http)["revision"], "stage": "direction",
-            "attempt_token": attempt.token, "reason": "test"})
+            "reason": "test"})
         assert response.status_code == 403
         assert pipe.stage_state(RUN, "direction").open_attempt is not None
 

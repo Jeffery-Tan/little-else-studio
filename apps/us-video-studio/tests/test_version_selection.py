@@ -97,7 +97,7 @@ def test_sidecar_tampering_is_detected(pipe, field, value):
     assert not pipe.stage_state(RUN, "direction").can_approve
 
 
-def test_choice_b_is_consumed_and_change_of_choice_invalidates_dependents(pipe):
+def test_choice_b_is_consumed_and_second_approval_is_refused(pipe):
     art = direction(pipe)
     decision = approve(pipe)
     assert decision.selected_option_id == "B" and decision.artifact_version == art.version
@@ -111,8 +111,12 @@ def test_choice_b_is_consumed_and_change_of_choice_invalidates_dependents(pipe):
     writing = pipe.start_attempt(RUN, "writing")
     assert writing.inputs["direction:selection"] == material.inputs["direction:selection"]
     assert writing.inputs["intake"] == material.inputs["intake"]
-    approve(pipe, option="A")
-    assert pipe.stage_state(RUN, "material_plan").stale
+    # One version, one decision: A cannot replace B on the same artifact.
+    with pytest.raises(PipelineError, match="already has decision"):
+        approve(pipe, option="A")
+    assert len(pipe.store.list_approvals(RUN)) == 1
+    assert pipe.stage_state(RUN, "direction").approval.selected_option_id == "B"
+    assert not pipe.stage_state(RUN, "material_plan").stale
 
 
 def test_selection_requires_explicit_unique_existing_option(pipe):
@@ -125,18 +129,32 @@ def test_selection_requires_explicit_unique_existing_option(pipe):
 
 def test_returned_selection_and_tampered_upstream_invalidate_downstream(pipe):
     direction(pipe)
+    # Return first (no prior approval), then dependents only after a later approve.
+    returned = pipe.record_approval(RUN, "direction", nonce=pipe.issue_nonce(RUN, "direction"),
+                                    decision="returned", note="change the ending")
+    assert returned.decision == "returned"
+    # Returned decision is not a completion: dependents cannot proceed.
+    with pytest.raises(PipelineError, match="not complete"):
+        pipe.start_attempt(RUN, "material_plan")
+    # Produce a new direction version and approve it.
+    submit(pipe, "direction", content="direction after return", structured=OPTIONS)
+    pipe.record_review(RUN, "direction", verdict="pass", findings=[])
     approve(pipe)
     submit(pipe, "material_plan")
     writing = submit(pipe, "writing")
     pipe.record_review(RUN, "writing", verdict="pass", findings=[])
+    # Writing can be approved while direction is approved and complete.
     nonce = pipe.issue_nonce(RUN, "writing")
-    pipe.record_approval(RUN, "direction", nonce=pipe.issue_nonce(RUN, "direction"),
-                         decision="returned", note="change the ending")
-    assert pipe.stage_state(RUN, "writing").stale
-    with pytest.raises(PipelineError):
-        pipe.record_approval(RUN, "writing", nonce=nonce, decision="approved")
-    approve(pipe)
+    approval = pipe.record_approval(RUN, "writing", nonce=nonce, decision="approved")
+    assert approval.decision == "approved"
+    # Approved writing cannot be re-approved or returned on the same version.
+    with pytest.raises(PipelineError, match="already has decision"):
+        pipe.issue_nonce(RUN, "writing")
     assert not pipe.stage_state(RUN, "writing").stale
+    # Tampered upstream intake still invalidates writing.
+    intake = pipe.store.run_dir(RUN) / "artifacts" / "intake-v1.md"
+    intake.write_text("tampered facts", encoding="utf-8")
+    assert pipe.stage_state(RUN, "writing").stale
     intake = pipe.store.run_dir(RUN) / "artifacts" / "intake-v1.md"
     intake.write_text("tampered facts", encoding="utf-8")
     assert pipe.stage_state(RUN, "writing").stale
@@ -151,6 +169,19 @@ def test_same_nonce_retry_is_idempotent_but_cannot_change_selection(pipe):
     assert len(pipe.store.list_approvals(RUN)) == 1
     with pytest.raises(PipelineError, match="different decision"):
         approve(pipe, option="A", nonce=nonce)
+
+
+def test_second_approval_cannot_overwrite_selected_option(pipe):
+    """One version, one decision: a fresh nonce cannot swap A for B."""
+    direction(pipe)
+    first = approve(pipe, option="B")
+    assert first.selected_option_id == "B"
+    with pytest.raises(PipelineError, match="already has decision"):
+        pipe.issue_nonce(RUN, "direction")
+    with pytest.raises(PipelineError, match="already has decision"):
+        approve(pipe, option="A")
+    assert len(pipe.store.list_approvals(RUN)) == 1
+    assert pipe.stage_state(RUN, "direction").approval.selected_option_id == "B"
 
 
 def test_concurrent_same_nonce_records_one_decision_across_pipeline_instances(pipe):

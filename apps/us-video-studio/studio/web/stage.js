@@ -89,6 +89,28 @@ function teamIssuesHtml(issues) {
 
 /* --------------------------------------------------------------- the gate -- */
 
+/* Shared decision copy for stage and journey gates (CLAUDE.md red line 12).
+ *
+ * One home for approve/reject labels so a journey details button cannot drift
+ * from the stage gate or from wireGate/server semantics: whether a note or
+ * override reason is required lives in wireGate only; these helpers only word
+ * the buttons. ``surface`` is ``'stage'`` (default) or ``'journey'``.
+ */
+function gateApproveLabel(pending, surface) {
+  const journey = surface === "journey";
+  if (!pending.passed) {
+    return journey ? "填写理由，仍按此方案继续" : "明确覆盖审核并通过";
+  }
+  if (journey) {
+    return pending.stage === "direction" ? "按此方向完善方案" : "确认方案，准备分镜";
+  }
+  return "提交采用决定";
+}
+
+function gateRejectLabel(surface) {
+  return surface === "journey" ? "按补充意见调整" : "退回修改";
+}
+
 /* Read the work before deciding. A top link reaches this exact-version card;
  * findings and historical usage remain available without overtaking the work.
  */
@@ -107,8 +129,8 @@ function gateHtml(pending) {
     `<label class="gate-note-label">补充意见<textarea class="reason" rows="3" maxlength="8000" aria-label="决定意见" placeholder="想保留什么，哪里需要调整？"></textarea></label>` +
     `<p class="gate-feedback" role="status">选择不会立即提交</p>` +
     `<div class="gate-actions"><button type="button" class="good small" data-act="approve" data-stage="${escapeHtml(pending.stage)}">` +
-    `${pending.passed ? '提交采用决定' : '明确覆盖审核并通过'}</button>` +
-    `<button type="button" class="bad small" data-act="reject" data-stage="${escapeHtml(pending.stage)}">退回修改</button></div>` +
+    `${escapeHtml(gateApproveLabel(pending, "stage"))}</button>` +
+    `<button type="button" class="bad small" data-act="reject" data-stage="${escapeHtml(pending.stage)}">${escapeHtml(gateRejectLabel("stage"))}</button></div>` +
     `<details class="gate-next"><summary>后续阶段与历史用量</summary>` +
     (pending.next_stage_label ? `<div>下一步：${escapeHtml(pending.next_stage_label)} · ${escapeHtml(pending.next_owner)}</div>` : '') +
     `<div class="gate-next-cost">${escapeHtml(pending.next_cost_sentence || '')}</div></details>` +
@@ -277,5 +299,5 @@ function askHtml(step, questions, drafts) {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { stageHtml, answerKey };
+  module.exports = { stageHtml, answerKey, gateApproveLabel, gateRejectLabel };
 }

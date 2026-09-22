@@ -471,6 +471,30 @@ def test_the_timeline_is_read_only(client_factory):
     assert http.get(f"/api/runs/{RUN}/state").json() == before
 
 
+def test_events_http_never_returns_attempt_token(client, tmp_path):
+    """Attempt tokens stay on disk for submit; HTTP must not leak them."""
+    make_run(client)
+    store = Store(tmp_path)
+    pipeline = Pipeline(store)
+    attempt = pipeline.start_attempt(RUN, "intake")
+    body = client.get(f"/api/runs/{RUN}/events")
+    assert body.status_code == 200
+    assert attempt.token not in body.text
+    started = next(e for e in body.json() if e.get("kind") == "attempt_started")
+    assert started.get("token") is None
+    disk = next(e for e in store.read_events(RUN) if e.get("kind") == "attempt_started")
+    assert disk["token"] == attempt.token
+    # /state must not leak the same token either.
+    state = client.get(f"/api/runs/{RUN}/state")
+    assert attempt.token not in state.text
+    open_attempt = next(
+        (s.get("open_attempt") for s in state.json()["stages"] if s.get("open_attempt")),
+        None,
+    )
+    assert open_attempt is not None
+    assert open_attempt.get("token") is None
+
+
 # --------------------------------------------------------------------------- #
 # Materials — the third write entry point
 #
@@ -502,18 +526,22 @@ def test_uploading_a_photo_puts_it_on_the_shelf(client, tmp_path):
 def test_uploading_does_not_change_the_run(client, tmp_path):
     """What makes this a third *entry point* rather than a third *gate*.
 
-    It writes a file and nothing else: no event is appended, so no derived
-    state can move because of it, and no artifact appears.
+    It writes a file and a ``material_uploaded`` event (so the evidence
+    generation advances and A→B→A cannot revive an old approval), but it
+    still creates no artifact and cannot approve anything.
     """
     make_run(client)
     store = Store(tmp_path)
-    events_before = len(store.read_events(RUN))
+    events_before = store.read_events(RUN)
     artifacts_before = len(store.list_artifacts(RUN))
 
     client.post(f"/api/runs/{RUN}/materials",
                 files={"file": ("shot.jpg", b"x", "image/jpeg")})
 
-    assert len(store.read_events(RUN)) == events_before
+    events_after = store.read_events(RUN)
+    assert len(events_after) == len(events_before) + 1
+    assert events_after[-1]["kind"] == "material_uploaded"
+    assert events_after[-1]["name"] == "shot.jpg"
     assert len(store.list_artifacts(RUN)) == artifacts_before
 
 

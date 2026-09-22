@@ -355,7 +355,10 @@ def test_agent_registry_has_preparation_but_no_execution_approval_or_recovery():
 
 def test_unapproved_script_cannot_become_production_plan(scene):
     pipe = scene[2]
-    pipe.record_approval(RUN, 'writing', nonce=pipe.issue_nonce(RUN, 'writing'), decision='returned', note='Fixture return')
+    # Latest writing version is not approved; production requires an approved script.
+    attempt = pipe.start_attempt(RUN, 'writing')
+    pipe.submit(RUN, 'writing', attempt.token, content='Unapproved rewrite', summary='rewrite')
+    assert pipe.stage_state(RUN, 'writing').approval is None
     assert draft(scene).status_code == 409
 
 

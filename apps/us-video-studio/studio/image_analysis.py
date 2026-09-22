@@ -171,6 +171,14 @@ def confirm_candidate(store, run_id, analysis_id, *, expected_candidate_sha256,
         if len(encoded.encode('utf-8')) > MAX_MANIFEST_BYTES:
             raise ObservationError('素材记录达到容量上限，原记录已保留。')
         _atomic_write_text(path, encoded)
+        # Same freeze-bump as save_human_observation (CLAUDE.md red line 7):
+        # adopting a model/reference observation must advance evidence generation
+        # so A→B→A on the sidecar cannot revive an old approval.
+        store.append_event(
+            run_id, "observation_saved",
+            name=record["name"], sha256=record["sha256"],
+            purpose=record["purpose"], level=record["level"],
+        )
         return material_workspace(store, run_id)
 
 

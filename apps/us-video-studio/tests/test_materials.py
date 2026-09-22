@@ -368,3 +368,46 @@ def test_a_failed_write_leaves_nothing_behind(store, monkeypatch):
 
 def test_the_size_limit_is_the_one_the_readme_states():
     assert MAX_UPLOAD_BYTES == 64 * 1024 * 1024
+
+
+def test_upload_writes_material_uploaded_event(store):
+    """Evidence generation advances only when an event is on the log."""
+    from studio.evidence import evidence_generation
+
+    before = evidence_generation(store, RUN)
+    accept_upload(store, RUN, "shot.jpg", b"jpeg-bytes")
+    events = [e for e in store.read_events(RUN) if e["kind"] == "material_uploaded"]
+    assert len(events) == 1
+    assert events[0]["name"] == "shot.jpg"
+    assert evidence_generation(store, RUN) > before
+
+
+def test_evidence_return_to_prior_bytes_stays_stale(tmp_path):
+    """A→B→A: hash equality alone must not revive the old approval path."""
+    from studio.evidence import evidence_generation
+    from studio.pipeline import Pipeline
+
+    store = Store(tmp_path)
+    store.create_run(RUN, "Lunch bag", "brief")
+    pipeline = Pipeline(store)
+
+    accept_upload(store, RUN, "shot.jpg", b"bytes-a")
+    attempt = pipeline.start_attempt(RUN, "intake")
+    pipeline.submit(RUN, "intake", attempt.token, content="brief", summary="brief")
+    attempt = pipeline.start_attempt(RUN, "direction")
+    pipeline.submit(RUN, "direction", attempt.token, content="direction", summary="direction")
+    assert not pipeline.stage_state(RUN, "direction").stale
+    frozen = int(pipeline.stage_state(RUN, "direction").latest.inputs["evidence:generation"])
+
+    target = materials_dir(store, RUN) / "shot.jpg"
+    target.unlink()
+    accept_upload(store, RUN, "shot.jpg", b"bytes-b")
+    assert pipeline.stage_state(RUN, "direction").stale
+
+    target.unlink()
+    accept_upload(store, RUN, "shot.jpg", b"bytes-a")
+
+    state = pipeline.stage_state(RUN, "direction")
+    assert state.stale
+    assert evidence_generation(store, RUN) > frozen
+

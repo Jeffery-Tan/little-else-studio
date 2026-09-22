@@ -8,8 +8,8 @@
 
 - 2026-09-21 后续交互实现：参考入口并入自然对话，支持文件/TK链接、仅分析停止、复刻/局部借鉴来源绑定、自主创作隔离，以及直接点选或对话回答的简短追问。主制片和专业角色按模式读取同一参考及项目内改编方法；详见 [创作模式](creation-modes-design.md#本轮实现)。下方早先核对记录不覆盖这次后续实现；真实理解质量及自动成片声画验收仍未完成。
 
-- Git 已提交基线为 `78e8bb8`（对话式工作台、项目生命周期及 Agent 配套改进），另有 `8b4863a` 调研文档提交；本次收口将百炼 Omni、人民币 token 估算、统一参考视频任务、创作模式与自然参考入口的工作树改动一并提交。`main` 仍领先 `origin/main`，是否推送以用户指令为准。
-- 对应说明见 [声画与参考任务](bailian-omni-and-tiktok-import.md) 与 [创作模式](creation-modes-design.md)。这是开发实现，不是已发布或真实模型验收。收口离线验证：**1135 Python passed / 2 skipped、276 JavaScript passed**。
+- Git 已提交基线为 `ad7ba0b`（百炼 Omni、人民币 token 估算、统一参考视频任务、创作模式与自然参考入口）。P0/P1/P2 修复（失效世代、批准独占、ledger 限 run、HTTP attempt token 统一脱敏、参考世代与观察同构、统一确认入口）在本轮工作树改完并离线回归后单独提交。`main` 领先 `origin/main`，是否推送以用户指令为准。
+- 对应说明见 [声画与参考任务](bailian-omni-and-tiktok-import.md) 与 [创作模式](creation-modes-design.md)。这是开发实现，不是已发布或真实模型验收。P0/P1/P2 离线验证：**1143 Python passed / 2 skipped、277 JavaScript passed**。
 - 2026-09-21 只读复核 `http://127.0.0.1:4760/openapi.json`：已提供 `/api/conversations`、`/api/trash`、项目 `/restore`、图片分析及新 `/reference-videos` 接口，参考任务静态文件返回 200。核对期间另一项开发工作已更新服务，当前监听进程启动于当日 20:50:42；未提供可验证的构建提交标记，不能断言它等于整个当前工作树。
 - 静态资源直接来自工作目录，页面更新不能单独证明 Python 服务已加载。此次以服务接口及运行依赖共同核对：PyAV 18.1.0、yt-dlp 2026.8.19 已安装；真实下载成功率、声画识别及费用准确性仍为 **pending**。本次知识收尾没有安装依赖、重启服务或发模型请求。
 - 当前 Windows 实例沿用 `%LOCALAPPDATA%/LittleElse/Studio/restored-20260920`，运行环境为同级 `runtime-venv`；J 盘只是未设置环境变量时的历史默认值。开始操作前仍须核对实际服务与 `STUDIO_DATA_ROOT`。
@@ -18,11 +18,11 @@
 
 | 事实面 | 状态 | 依据与边界 |
 | --- | --- | --- |
-| 已提交代码 | verified-current | 基线离线回归 1056 Python 通过、2 跳过；263 JavaScript 通过；留有 1 条 Starlette 弃用警告；不是新增工作树的验收 |
-| 新增代码与运行态 | pending | 新工作未提交；接口已加载，真实声画、下载成功率、媒体生成和内容质量未验收 |
-| 文档与规则 | changed-and-verified | 同步启动路径、对话导航、未知用量与删除恢复；Codex 子目录入口指向唯一 CLAUDE 约定；本地链接与编码核验 |
+| 已提交代码 | changed-and-verified | P0/P1/P2 与文档同步后离线回归 1143 Python / 2 skipped、277 JavaScript；1 条 Starlette 弃用警告 |
+| 新增代码与运行态 | pending | 真实声画、下载成功率、媒体生成和内容质量未验收；本机服务是否已加载当前工作树未在本轮重启后复核 |
+| 文档与规则 | changed-and-verified | CLAUDE.md 红线 7/8/11/12 与代码一致；本状态文档同步测试数与基线；Codex 子目录入口指向唯一 CLAUDE 约定；编码核验 |
 | 宿主记忆 | not-applicable | 当前宿主未发现本地 memories 目录，未提供本次可写记忆控制面；没有创建或修改记忆 |
-| 工作区 | pending | 保留新增功能及文档修订；只有主工作树，无额外分支/worktree 待合并；测试数据和截图保留供复核 |
+| 工作区 | changed-and-verified | 无 PLAN/TODO/备份残留；只有主工作树，无额外分支/worktree；测试与截图不入库 |
 
 发布与业务效果验收为 **out-of-scope**。本次不发布、不清场；外部 Release 仍是其标注日期的快照。回收站/未知用量下的在线备份限制见 [跨电脑恢复](portable-projects.md#从当前电脑导出下一份备份)。
 
@@ -51,6 +51,8 @@
 迁移只建立接档 intake 和 pause 路由，没有自动改稿、模型对话或制作调用。用户可直接在本站制片对话明确继续改进，先诊断原问题、形成新版本，再按本站门禁审阅。旧六图制作方式不能直接套用当前单首帧入口；多参考图或分镜制作能力仍需另行实现与验收。
 
 ## 验证证据
+
+2026-09-21 P0/P1/P2 离线回归：**1143 Python passed / 2 skipped、277 JavaScript passed**。覆盖失效世代、批准独占、ledger 限 run、HTTP attempt token 统一脱敏、参考世代与观察同构、统一确认入口。未发真实模型或媒体生成请求。
 
 2026-09-21 的 Git 整理复验：基线 `78e8bb8` 对应 **1056 Python passed / 2 skipped、263 JavaScript passed**；编码、差异空白和依赖检查通过。期间补齐本机已声明的 PyAV 18.1.0。未发真实模型或媒体生成请求。新增 Omni/参考任务的开发验证记录见其专项文档，不能与已运行服务的结果合并为一次验收。
 

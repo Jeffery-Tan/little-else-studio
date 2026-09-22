@@ -198,7 +198,7 @@ function renderRecoveryPanel(host, snapshot) {
     form.onsubmit = async (event) => {
       event.preventDefault();
       if (!confirm.checked || !reason.value.trim()) return;
-      await saveRecovery(snapshot, "abandon", { stage: attempt.stage, attempt_token: attempt.token, reason: reason.value.trim() }, save);
+      await saveRecovery(snapshot, "abandon", { stage: attempt.stage, reason: reason.value.trim() }, save);
     };
     card.append(form); panel.append(card);
   }

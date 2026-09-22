@@ -56,6 +56,28 @@ from .codex_auth import CodexAuth, install_codex_auth_routes
 WEB_DIR = Path(__file__).parent / "web"
 
 
+def redact_http_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Strip attempt tokens before any HTTP/SSE/timeline payload (red line 11).
+
+    One rule, one function: /events, SSE, job events and state snapshots all
+    call this so a new read surface cannot reintroduce the plaintext token.
+    Nested open_attempt rows (state/recovery style) are redacted in place and
+    the same dict is returned so callers can use either style.
+    """
+    if not isinstance(event, dict):
+        return event
+    if "token" in event:
+        event["token"] = None
+    attempt = event.get("open_attempt")
+    if isinstance(attempt, dict) and "token" in attempt:
+        attempt["token"] = None
+    return event
+
+
+def redact_http_events(events: Any) -> list[dict[str, Any]]:
+    return [redact_http_event(e) if isinstance(e, dict) else e for e in events]
+
+
 class RunIn(BaseModel):
     run_id: str = Field(min_length=1, max_length=64)
     title: str = Field(min_length=1, max_length=200)
@@ -509,6 +531,10 @@ def build_app(
     def state(run_id: str) -> dict[str, Any]:
         require_run(run_id)
         out = pipeline.state(run_id).to_dict()
+        # Attempt tokens stay on disk for submit checks; HTTP must not return
+        # them (CLAUDE.md red line 11). Same rule as /events, SSE and jobs.
+        for stage_row in out.get("stages") or []:
+            redact_http_event(stage_row)
         totals = ledger.totals(run_id)
         out["spend"] = totals.to_dict()
         out["budget"] = {
@@ -574,7 +600,9 @@ def build_app(
     @app.get("/api/runs/{run_id}/events")
     def events(run_id: str, limit: int = 200) -> list[dict[str, Any]]:
         require_run(run_id)
-        return store.read_events(run_id)[-limit:]
+        # Attempt tokens stay on disk for server-side submit checks; HTTP must
+        # not return the plaintext (CLAUDE.md red line 11).
+        return redact_http_events(store.read_events(run_id)[-limit:])
 
     @app.get("/api/runs/{run_id}/timeline")
     def timeline(run_id: str) -> dict[str, Any]:
@@ -586,6 +614,17 @@ def build_app(
         require_run(run_id)
         with store.run_lock(run_id):
             result = build_timeline(store, pipeline, ledger, run_id, latest_execution(store, run_id))
+            # Shared redact across the whole view payload (red line 11): any
+            # nested open_attempt/token is stripped the same way as /events.
+            def _redact_tree(node):
+                if isinstance(node, dict):
+                    redact_http_event(node)
+                    for value in node.values():
+                        _redact_tree(value)
+                elif isinstance(node, list):
+                    for item in node:
+                        _redact_tree(item)
+            _redact_tree(result)
             from .creation_mode import current
             result['creation_mode'] = current(store, run_id)
             return result
@@ -642,10 +681,11 @@ def build_app(
     def material_upload(run_id: str, file: UploadFile = File(...), retry_sha256: str | None = None) -> dict[str, Any]:
         """Put one file into `materials/`.
 
-        The third write entry point, and the only one that touches no state. It
-        appends no event, produces no artifact, and cannot approve anything — the
-        two gates in `CLAUDE.md` red line 2 are exactly as they were. What it can
-        do is bounded by `studio.materials`, and every bound is a test.
+        The third write entry point. It appends a ``material_uploaded`` event
+        (so the evidence generation advances) but still produces no artifact
+        and cannot approve anything — the two gates in `CLAUDE.md` red line 2
+        are exactly as they were. What it can do is bounded by
+        `studio.materials`, and every bound is a test.
         """
         require_run(run_id)
         try:
@@ -718,11 +758,12 @@ def build_app(
         the reloaded timeline say the same thing — both go through
         ``vocabulary``. The raw fields travel alongside, because the
         "机器细节" panel needs them; ``say`` is what gets shown by default.
+        Attempt tokens are stripped first (CLAUDE.md red line 11).
         """
         for event in events:
             if event is None:
                 break
-            payload = dict(event)
+            payload = redact_http_event(dict(event))
             payload["say"] = vocabulary.describe_event(event)
             yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -754,6 +795,8 @@ def build_app(
     def present_job(job):
         if job is not None:
             for event in job["events"]:
+                # Shared redaction: job polling must not return attempt tokens.
+                redact_http_event(event)
                 event["say"] = vocabulary.describe_event(event)
             job['brief'] = project_brief(pipeline.state(job['run_id']).to_dict(), latest_execution(store, job['run_id']))
         return job

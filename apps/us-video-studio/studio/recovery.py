@@ -42,18 +42,20 @@ class ReconcileAction(RecoveryAction):
 
 class AbandonAction(RecoveryAction):
     stage: str = Field(min_length=1, max_length=40)
-    attempt_token: str = Field(min_length=1, max_length=200)
+    # Token never leaves HTTP (CLAUDE.md red line 11); the server looks up
+    # the open attempt for this stage after the revision check.
     reason: str = Field(min_length=1, max_length=2000)
 
 
 def recovery_snapshot(jobs, run_id):
-    """Current root-wide accounting blockers and this project's open work.
+    """This project's accounting blockers and open work.
 
-    The revision binds a human action to exactly the state they saw. Other
-    projects' pending calls are shown for navigation, never settled here.
+    The revision binds a human action to exactly the state they saw. Unresolved
+    calls are limited to this run_id; attempt tokens are never returned over
+    HTTP — abandon looks them up server-side after the revision check.
     """
     with jobs.lock, jobs.store.run_lock(run_id):
-        calls = [row.to_dict() for row in jobs.ledger.entries()
+        calls = [row.to_dict() for row in jobs.ledger.entries(run_id)
                  if row.usage_status != "known" or row.call_status == "pending"]
         attempts = [state.open_attempt.to_dict() for stage in STAGES
                     if (state := jobs.pipeline.stage_state(run_id, stage)).open_attempt]
@@ -62,8 +64,9 @@ def recovery_snapshot(jobs, run_id):
         basis = {"run_id": run_id, "calls": calls, "attempts": attempts,
                  "active": jobs.active, "jobs": jobs.list(run_id)}
         revision = hashlib.sha256(json.dumps(basis, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        public_attempts = [{**row, "token": None} for row in attempts]
         return {"run_id": run_id, "revision": revision, "unresolved_calls": calls,
-                "open_attempts": attempts, "saved_artifacts": saved,
+                "open_attempts": public_attempts, "saved_artifacts": saved,
                 "active_run_id": jobs.active[0] if jobs.active else None,
                 "can_recover": jobs.active is None,
                 "can_continue": jobs.active is None and not attempts}
@@ -106,14 +109,20 @@ def install_recovery_routes(app, jobs, require_run):
         try:
             with jobs.lock:
                 snapshot = validate_action(run_id, payload.expected_revision)
-                if not any(row["stage"] == payload.stage and row["token"] == payload.attempt_token
-                           for row in snapshot["open_attempts"]):
+                open_for_stage = next(
+                    (row for row in snapshot["open_attempts"] if row["stage"] == payload.stage),
+                    None,
+                )
+                if open_for_stage is None:
                     raise ValueError("此制作步骤已变化，请刷新后重新核对。")
                 reason = payload.reason.strip()
                 if not reason:
                     raise ValueError("请填写关闭原因，方便之后核对恢复记录。")
+                open_attempt = jobs.pipeline.stage_state(run_id, payload.stage).open_attempt
+                if open_attempt is None:
+                    raise ValueError("此制作步骤已变化，请刷新后重新核对。")
                 with jobs.ledger.call_guard():
-                    jobs.pipeline.reject(run_id, payload.stage, payload.attempt_token,
+                    jobs.pipeline.reject(run_id, payload.stage, open_attempt.token,
                                          "站内恢复：" + reason)
                 return recovery_snapshot(jobs, run_id)
         except (PipelineError, ValueError) as exc:

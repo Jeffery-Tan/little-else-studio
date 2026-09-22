@@ -29,11 +29,11 @@ function journeyGateHtml(pending, step) {
     (options.length?`<fieldset class="gate-options"><legend>选择方向</legend>${options.map(o=>{
       const card=cards.find(c=>c.head===o.key || String(c.head).startsWith(o.key));
       const claim=card?.fields?.find(f=>f.label==='主张')?.value || `方向 ${o.key}`;
-      return `<label class="conversation-choice"><input type="radio" name="direction-choice" value="${escapeHtml(o.key)}"><span><strong>${escapeHtml(o.key)}${o.recommended?'<small>推荐</small>':''}</strong><span>${escapeHtml(claim)}</span></span></label>`;
+      return `<label class="conversation-choice"><input type="radio" name="direction-choice-journey" value="${escapeHtml(o.key)}"><span><strong>${escapeHtml(o.key)}${o.recommended?'<small>推荐</small>':''}</strong><span>${escapeHtml(claim)}</span></span></label>`;
     }).join('')}</fieldset>`:'') +
     '<textarea class="reason" aria-label="决定意见" rows="2" maxlength="6000" placeholder="有其他想法？在这里补充…"></textarea><p class="gate-feedback" role="status"></p>' +
-    `<div class="gate-actions">${pending.passed?`<button class="primary" data-act="approve">${pending.stage==='direction'?'按此方向完善方案':'确认方案，准备分镜'}</button>`:''}<button class="ghost" data-act="reject">按补充意见调整</button></div>` +
-    (!pending.passed?`<details><summary>查看检查意见与其他决定</summary>${(pending.findings||[]).map(f=>`<p>${escapeHtml(f.issue)}</p>`).join('')}<button class="ghost" data-act="approve">填写理由，仍按此方案继续</button></details>`:'') +
+    `<div class="gate-actions">${pending.passed?`<button class="primary" data-act="approve">${escapeHtml(gateApproveLabel(pending,'journey'))}</button>`:''}<button class="ghost" data-act="reject">${escapeHtml(gateRejectLabel('journey'))}</button></div>` +
+    (!pending.passed?`<details><summary>查看检查意见与其他决定</summary>${(pending.findings||[]).map(f=>`<p>${escapeHtml(f.issue)}</p>`).join('')}<button class="ghost" data-act="approve">${escapeHtml(gateApproveLabel(pending,'journey'))}</button></details>`:'') +
     '<small>图片和视频生成前，会另行展示内容与费用供你确认。</small></section>';
 }
 

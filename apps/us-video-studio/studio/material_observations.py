@@ -112,4 +112,10 @@ def save_human_observation(store: Store, run_id: str, *, name: str,
         if len(encoded.encode("utf-8")) > MAX_MANIFEST_BYTES:
             raise ObservationError("素材记录达到容量上限，原记录已保留。")
         _atomic_write_text(manifest, encoded)
+        # Advances evidence generation so A→B→A on the manifest cannot revive
+        # an old approval that only compared content hashes (CLAUDE.md red line 7).
+        store.append_event(
+            run_id, "observation_saved",
+            name=name, sha256=actual, purpose=purpose, level=level,
+        )
         return material_workspace(store, run_id)

@@ -35,6 +35,7 @@ Nothing here touches the network, and nothing here writes outside
 """
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -213,6 +214,19 @@ def accept_upload(store: Store, run_id: str, filename: str, data: bytes) -> dict
         partial.replace(target)
     finally:
         partial.unlink(missing_ok=True)
+
+    # Advances the evidence generation (CLAUDE.md red line 7). Without this
+    # event an A→B→A return of file bytes could silently revive an old
+    # approval that only compares content hashes.
+    with store.run_lock(run_id):
+        store.append_event(
+            run_id,
+            "material_uploaded",
+            name=safe,
+            media_kind=kind,
+            bytes=len(data),
+            sha256=hashlib.sha256(data).hexdigest(),
+        )
 
     return {
         "name": safe,
