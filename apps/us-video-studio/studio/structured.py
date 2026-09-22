@@ -340,6 +340,26 @@ def normalize(stage: str, payload: Any) -> Outcome:
 # --------------------------------------------------------------------------- #
 
 
+def is_user_question(row: Any) -> bool:
+    """The one place that decides whether an open question is his to answer.
+
+    A row is addressed to him only when it names him as owner, asks for *now*,
+    and says why the answer has to come from him. Everything else — no owner, a
+    team owner, "later", or a missing reason — is still shown, but as something
+    for the team to triage rather than a question put to him.
+
+    Two surfaces read this rule: the stage's own card (``open_questions``) and
+    the run-wide standing list (``project_brief.stage_issues``). They used to
+    spell it out separately, which meant a change to the rule could land in one
+    and leave the card and the list disagreeing about the same document.
+    """
+    if not isinstance(row, dict) or not row.get("question"):
+        return False
+    reason = row.get("reason")
+    return (row.get("owner") == "user" and row.get("timing") == "now"
+            and isinstance(reason, str) and bool(reason.strip()))
+
+
 def open_questions(structured: dict[str, Any], stage: str) -> list[dict[str, str]]:
     """This stage's unanswered questions, tagged with where they came from.
 
@@ -352,8 +372,7 @@ def open_questions(structured: dict[str, Any], stage: str) -> list[dict[str, str
     return [
         {"stage": stage, "question": r.get("question", ""), "blocks": r.get("blocks", "")}
         for r in rows
-        if isinstance(r, dict) and r.get("question") and r.get("owner") == "user"
-        and r.get("timing") == "now" and r.get("reason", "").strip()
+        if is_user_question(r)
     ]
 
 

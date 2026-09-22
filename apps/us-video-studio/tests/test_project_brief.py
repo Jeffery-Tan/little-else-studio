@@ -8,6 +8,7 @@ from studio.models import PipelineError
 from studio.pipeline import Pipeline
 from studio.project_brief import project_brief
 from studio.server import build_app
+from studio.structured import is_user_question, open_questions
 from studio.store import Store
 from test_server import settings_for, RUN
 from test_jobs import wait_job
@@ -58,6 +59,37 @@ def test_only_explicit_current_user_questions_become_tasks(tmp_path, row, expect
     out = project_brief(pipeline.state(RUN).to_dict())
     assert len(out['questions']) == expected
     assert len(out['issues']) == 1  # Nothing was silently discarded.
+
+
+@pytest.mark.parametrize('row,expected', [
+    (question(), True),
+    (question('team'), False),
+    (question(timing='later'), False),
+    (question(reason=''), False),
+    (question(reason=7), False),          # malformed reason: triage, never a crash
+    ({'question': 'Who reads the images?', 'blocks': 'Creative work'}, False),
+    ({'blocks': 'Only the consequence was filled in'}, False),
+    ('not a row', False),
+])
+def test_the_card_and_the_standing_list_answer_from_one_rule(tmp_path, row, expected):
+    """The stage card and the run-wide list must never disagree.
+
+    Both surfaces used to spell the row-level rule out separately, so a change
+    to it could land in one and leave the card and the standing list saying
+    different things about the same document. They now share
+    ``structured.is_user_question``; this pins the two together on the same
+    payloads the live screens read.
+    """
+    _, pipeline = project(tmp_path)
+    direction(pipeline, [row])
+    state = pipeline.state(RUN).to_dict()
+    stage = next(s for s in state['stages'] if s['stage'] == 'direction')
+
+    card = open_questions(stage['latest']['structured'], 'direction')
+    listed = project_brief(state)['questions']
+    assert [q['question'] for q in card] == [q['question'] for q in listed]
+    assert len(card) == int(expected)
+    assert is_user_question(row) is expected
 
 
 def test_stale_questions_are_not_current_user_work(tmp_path):

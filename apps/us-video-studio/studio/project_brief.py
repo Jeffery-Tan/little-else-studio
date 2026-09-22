@@ -29,6 +29,8 @@ def latest_execution(store, run_id: str) -> dict | None:
 
 
 def stage_issues(stage: dict) -> list[dict]:
+    from .structured import is_user_question
+
     artifact = stage.get("latest") or {}
     active = (not stage.get("stale") and stage.get("integrity_ok", True)
               and artifact.get("digest_algorithm") == "artifact-v2"
@@ -43,8 +45,10 @@ def stage_issues(stage: dict) -> list[dict]:
                        "owner": row.get("owner") if explicit else "team",
                        "timing": row.get("timing") if explicit else "later",
                        "needs_triage": not explicit, "active": active,
-                       "ask_user": bool(active and explicit and row["owner"] == "user"
-                                        and row["timing"] == "now" and row.get("reason", "").strip())})
+                       # The row-level rule lives in `structured`; only the
+                       # stage-level question ("is this the stage to ask now?")
+                       # belongs here.
+                       "ask_user": bool(active and is_user_question(row))})
     return issues
 
 
