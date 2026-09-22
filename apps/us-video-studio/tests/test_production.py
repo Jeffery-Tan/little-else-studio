@@ -272,6 +272,29 @@ def test_image_preflight_has_no_phantom_usage_blocker(scene):
     assert row.usage_status == 'known' and row.usage_quantity == 0 and not row.ok
 
 
+def test_a_failed_image_probe_is_retried_not_cached_for_the_process(scene, monkeypatch):
+    """One hiccup must not disable image generation until the service restarts."""
+    service, images = scene[0].app.state.production, scene[4]
+    calls, real = [], images.capability
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise CodexUnavailable('fixture CLI is busy')
+        return real()
+
+    monkeypatch.setattr(images, 'capability', flaky)
+    d = ready(scene, 'image')
+    blocked = action(scene, d, 'generate')
+    assert blocked.status_code == 409 and '图片连接暂未通过能力检查' in blocked.text
+    assert 'CodexUnavailable' in blocked.text
+    assert len(calls) == 1
+    # The window stands between renders, then the probe runs again and works.
+    monkeypatch.setattr('studio.production.IMAGE_PROBE_RETRY_SECONDS', 0)
+    assert wait(scene, action(scene, d, 'generate'))['status'] == 'succeeded'
+    assert len(calls) == 2 and images.calls
+
+
 def test_submit_timeout_retains_fixed_endpoint_and_manual_binding_only_queries(scene):
     scene[5].error = WanVideoError('timeout', submission_unknown=True)
     d = ready(scene); wait(scene, action(scene, d, 'generate'))

@@ -220,6 +220,12 @@ def validate_video(raw):
             raise ValueError('返回的视频不能完整解码，保留任务供查询，没有重新生成。')
 
 
+#: How long a failed image-capability probe stands before it is retried. The
+#: probe spawns the Codex CLI, so a page render should not pay for it every
+#: time, but a probe that failed describes this moment, not the machine.
+IMAGE_PROBE_RETRY_SECONDS = 15
+
+
 class Production:
     def __init__(self, jobs, connections, settings, learning, *, client_factory=None,
                  image_factory=None, video_factory=None, poll_delay=3, poll_count=200):
@@ -230,6 +236,8 @@ class Production:
         self.poll_delay, self.poll_count = poll_delay, poll_count
         self.nonces = {}
         self._image_capability = None
+        self._image_probe_at = None
+        self._image_probe_failure = None
 
     def image_client(self):
         if self.image_factory:
@@ -243,14 +251,33 @@ class Production:
         from .agents.wan_video import WanVideoClient
         return WanVideoClient()
 
+    def image_probe(self):
+        """The image capability answer, re-checked after a failure.
+
+        Only an answer that came back is kept for the life of the process. A
+        probe that raised used to be cached the same way, so one hiccup — a
+        busy machine, a CLI mid-upgrade — disabled image generation until the
+        service restarted, and nothing on the page distinguished that from a
+        connection that had genuinely never worked. A failed probe is retried
+        after ``IMAGE_PROBE_RETRY_SECONDS``; the reason carries the exception
+        class name only, because the page shows it.
+        """
+        if self._image_capability is not None:
+            return self._image_capability
+        now = time.monotonic()
+        if self._image_probe_at is not None and now - self._image_probe_at < IMAGE_PROBE_RETRY_SECONDS:
+            return self._image_probe_failure
+        self._image_probe_at = now
+        try:
+            self._image_capability = self.image_client().capability()
+        except Exception as exc:
+            self._image_probe_failure = {'available': False, 'verified': False,
+                'reason': '本机 Codex 图片连接暂未通过能力检查，请检查 CLI 安装和登录状态；'
+                          f'重新打开制作页会再检查一次。（{type(exc).__name__}）'}
+        return self._image_capability or self._image_probe_failure
+
     def capabilities(self):
-        if self._image_capability is None:
-            try:
-                self._image_capability = self.image_client().capability()
-            except Exception:
-                self._image_capability = {'available': False, 'verified': False,
-                    'reason': '本机 Codex 图片连接暂未通过能力检查，请检查 CLI 安装和登录状态。'}
-        image = {**self._image_capability, 'label': 'Codex 图片生成'}
+        image = {**self.image_probe(), 'label': 'Codex 图片生成'}
         if image.get('available'):
             image['reason'] = '本机原生图片协议可用；尚未完成真实出图验收。'
         from .agents.wan_video import existing_credentials_available
