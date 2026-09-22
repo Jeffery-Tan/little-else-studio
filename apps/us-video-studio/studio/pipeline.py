@@ -333,6 +333,15 @@ class Pipeline:
         # ``review is not None`` still holds: with no review recorded there is
         # nothing on screen to weigh, and approving the unreviewed thing is a
         # different feature.
+        # ``approval is None`` is the difference between "the gate is waiting on
+        # him" and "this version has already been decided". ``issue_nonce`` and
+        # ``record_approval`` refuse a second decision on one version (red line
+        # 8), so a projection that still offered the button would be advertising
+        # a click the server rejects — and after his own ``returned`` the card
+        # went on saying he could approve or send it back again.
+        #
+        # A *reviewer's* ``return`` deliberately leaves ``approval`` empty, so
+        # that path is untouched: the named override below stays reachable.
         can_approve = (
             spec.gated
             and latest is not None
@@ -340,6 +349,7 @@ class Pipeline:
             and integrity_ok
             and latest.digest_algorithm == "artifact-v2"
             and not approved
+            and approval is None
             and review is not None
         )
 

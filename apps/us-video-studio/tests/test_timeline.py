@@ -251,6 +251,29 @@ def test_the_pending_decision_names_the_stage_and_rides_the_last_turn(env):
     assert out["turns"][-1]["items"][-1] is pending
 
 
+def test_his_own_return_does_not_leave_a_decision_card_behind(env):
+    """Red line 8 on screen: one version, one decision — including his return.
+
+    The card used to stay up after he sent a version back, still offering
+    「提交采用决定 / 退回修改」 for a version the server now refuses. What he
+    needs instead is the sentence saying the next version is the team's job.
+    """
+    store, pipeline, ledger = env
+    store.append_chat(RUN, "user", "出个方向。")
+    write_intake(pipeline)
+    write_direction(pipeline)
+    pipeline.record_review(RUN, "direction", verdict="pass", findings=[])
+    pipeline.record_approval(RUN, "direction", nonce=pipeline.issue_nonce(RUN, "direction"),
+                             decision="returned", note="开场先换掉")
+
+    out = timeline(store, pipeline, ledger)
+    assert out["pending"] is None, "a decided version must not ask again"
+    assert out["progress"]["action"] == "draft"
+    assert out["progress"]["title"] == "「创意方向」已退回，等团队出新版"
+    assert "新版" in out["progress"]["prompt"]
+    assert not next(s for s in out["rail"] if s["stage"] == "direction")["needs_you"]
+
+
 def test_a_returned_stage_asks_him_in_its_own_words(env):
     """A return reaches him as a decision, worded so the override is not free.
 

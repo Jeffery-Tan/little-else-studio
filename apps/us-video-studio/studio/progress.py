@@ -41,6 +41,14 @@ def project_progress(state):
     elif target['can_approve']:
         out.update(title=f'「{label}」等你决定', detail='阅读这一版和审核意见，再选择采用或退回修改。',
                    action='review', label='阅读并决定')
+    elif (target.get('approval') or {}).get('decision') == 'returned':
+        # His own return already stands on this version, and one version takes
+        # one decision (red line 8) — so the next thing that can happen is a new
+        # version from the team, not another click on this one.
+        out.update(title=f'「{label}」已退回，等团队出新版', label='准备继续',
+                   detail='你退回了这一版；旧稿保留，团队按你的意见整理新版后再由你确认。',
+                   prompt=(f'我退回了「{label}」的当前版本，请按我的意见整理新版本；保留未受影响的内容，'
+                           '完成后重新内部审核再让我看，不改写其他阶段，也不代替我批准。'))
     elif target['can_review']:
         out.update(title=f'「{label}」等待审核', label='准备审核',
                    detail='内容已保存，还需要独立审核后再由你决定。',

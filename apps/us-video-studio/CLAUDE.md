@@ -78,7 +78,9 @@ BOM**，**代码与配置（`.py`/`.json`/`.yaml`）用 UTF-8 不带 BOM**。加
    `artifact-v2` 覆盖正文、结构、证据、限制及依赖；`body-v1` 只回放，不继承旧批准继续制作。
    **同一版本只允许一次决定**：当前最新版已有 `approved`/`approved_override`/`returned`
    时，拒发新 nonce、拒绝新决定（不得覆盖 `selected_option_id`）；同一 nonce 的重试保持幂等。
-   退回后须产出新版本才能再次决定。
+   退回后须产出新版本才能再次决定。**界面与该规则同源**：同一版本已有决定时 `can_approve` 为假，
+   决定卡片与 journey/stage 两个 gate 都不再提供第二次决定，不得给出服务端必然拒绝的按钮；
+   审核退回不属于该规则，它刻意不写 `approval`，用户仍可用具名理由覆盖。
 9. **同一数据根只运行一个写入进程。** 现有锁不代表多服务写入支持；本地输入导入与阶段
    恢复前停止对应服务。使用 README 中的显式恢复入口（CLI或站内运行控制），不删除历史或清零台账解锁。
 10. **角色上下文保持隔离。** 编剧与审核读取必要事实、真实所选方向及素材证据；审核不得
@@ -88,9 +90,10 @@ BOM**，**代码与配置（`.py`/`.json`/`.yaml`）用 UTF-8 不带 BOM**。加
     attempt `token` 可留在服务端事件日志供提交校验，但 HTTP 读接口（`/events`、SSE、
     timeline、job 事件、`/state`、`/recovery` 等）一律经共用 `redact_http_event` 脱敏，
     不得在任一出口返回该明文；台账/未决调用查询必须按 `run_id` 过滤，不得跨 run 汇总。
-    参考选择与源案例内容的世代与观察同构：凡绕 API 改动参考侧车/源案例而未写入
-    `reference_selected`/`reference_removed` 等世代事件的路径，须在读路径检测到源变化时
-    补写世代事件，使 A→B→A 永久 stale；不得仅依赖内容哈希。
+   参考选择与源案例内容的世代与观察同构：凡绕 API 改动参考侧车/源案例而未写入
+   `reference_selected`/`reference_removed` 等世代事件的路径，须在读路径检测到源变化时
+    补写世代事件，使 A→B→A 永久 stale；不得仅依赖内容哈希（当前由 `reference_source_changed`
+    承担：按 `(case_id, current_sha256)` 幂等，只记本 run 自己选中的案例，不牵连未选择该案例的其他项目）。
 12. **阶段确认按钮文案只维护一处。** journey details 与 stage gate 的 approve/reject
     按钮标签、是否要求 note/override、以及与服务端 `record_approval` 的语义对齐，
     统一由 `wireGate` 及其共享文案源维护；journey/stage 渲染只负责布局，不各自硬编码

@@ -46,11 +46,72 @@ def reference_fingerprint(store, run_id):
 #: ``learning_applied`` is included because applying a proposal can change the
 #: source case content folded into ``reference_fingerprint`` without a new
 #: select/remove — same freeze-bump rule as hand-editing observations.
-REFERENCE_GENERATION_KINDS = frozenset({'reference_selected', 'reference_removed', 'learning_applied'})
+#: ``reference_source_changed`` is written by the read path itself: a library
+#: edit made from another run (or straight on disk) leaves no event in *this*
+#: run's journal, and CLAUDE.md red line 11 requires the read path that notices
+#: the change to record it, so A→B→A stays stale instead of leaning on hashes.
+REFERENCE_GENERATION_KINDS = frozenset({'reference_selected', 'reference_removed',
+                                        'learning_applied', 'reference_source_changed'})
+
+
+def source_changes(store, run_id):
+    """Selected source cases whose current library content no longer matches.
+
+    One row per selection; ``current_sha256`` is ``None`` when the case is gone.
+    A missing or unreadable library is not a change here — the fingerprint
+    already reports that, and there is no exact hash worth recording.
+    """
+    service = getattr(store, 'reference_learning', None)
+    chosen = selections(store, run_id)
+    if not chosen or service is None:
+        return []
+    try:
+        _, doc = service._read()
+    except (OSError, ValueError):
+        return []
+    current = {c['id']: fingerprint(c) for c in doc['cases']}
+    return [{'case_id': s['case_id'], 'selected_sha256': s['case_sha256'],
+             'current_sha256': current.get(s['case_id'])}
+            for s in chosen if current.get(s['case_id']) != s['case_sha256']]
+
+
+def note_source_changes(store, run_id):
+    """Record a source-case change this run's journal never saw (red line 11).
+
+    Idempotent per ``(case_id, current_sha256)``: repeated reads of an unchanged
+    library append nothing, while a second edit that produces a different hash
+    advances the generation again. Only cases *this* run selected are recorded,
+    so one project's library edit does not invalidate unrelated projects. The
+    fingerprint may also report a change it cannot hash exactly; that case is
+    left to the existing hash comparison rather than guessed at.
+    """
+    changes = source_changes(store, run_id)
+    if not changes:
+        return []
+    with store.run_lock(run_id):
+        # The journal is re-read under the lock: two readers noticing the same
+        # edit must not each write a row for it.
+        recorded = {(event.get('case_id'), event.get('current_sha256'))
+                    for event in store.read_events(run_id)
+                    if event.get('kind') == 'reference_source_changed'}
+        appended = []
+        for change in changes:
+            key = (change['case_id'], change['current_sha256'])
+            if key in recorded:
+                continue
+            store.append_event(run_id, 'reference_source_changed', actor='system', **change)
+            recorded.add(key)
+            appended.append(change)
+    return appended
 
 
 def reference_generation(store, run_id):
-    """Highest event ``seq`` among reference choices, or 0 if none yet."""
+    """Highest event ``seq`` among reference choices, or 0 if none yet.
+
+    Records an out-of-run source change first (``note_source_changes``) so the
+    freeze-bump rule holds for a library edit no event in this run covers.
+    """
+    note_source_changes(store, run_id)
     generation = 0
     for event in store.read_events(run_id):
         if event.get('kind') not in REFERENCE_GENERATION_KINDS:
@@ -76,6 +137,10 @@ class RemoveIn(BaseModel):
 
 
 def reference_state(learning, run_id):
+    # Reading the project's references is itself a read path for red line 11: a
+    # source case edited outside this run is recorded here even if nobody has
+    # asked the pipeline for a stage state.
+    note_source_changes(learning.store, run_id)
     _, doc = learning._read()
     current = {c['id']: c for c in doc['cases']}
     items = []

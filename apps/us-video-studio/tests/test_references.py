@@ -1,5 +1,6 @@
 """Project references use an isolated learning library; never call a model."""
 from concurrent.futures import ThreadPoolExecutor
+import json
 import threading
 from types import SimpleNamespace
 
@@ -189,3 +190,86 @@ def test_reference_abba_return_to_prior_selection_stays_stale(env):
     assert state.stale
     assert reference_generation(store, 'run-one') > frozen
     assert not state.can_approve
+
+
+def _approved_direction(service, store):
+    """intake + a selected reference + an approved direction, the real shape."""
+    pipeline = Pipeline(store)
+    attempt = pipeline.start_attempt('run-one', 'intake')
+    pipeline.submit('run-one', 'intake', attempt.token, content='brief', summary='brief')
+    change_reference(service, 'run-one', choose(service))
+    attempt = pipeline.start_attempt('run-one', 'direction')
+    pipeline.submit('run-one', 'direction', attempt.token, content='direction', summary='direction')
+    pipeline.record_review('run-one', 'direction', verdict='pass', findings=[])
+    pipeline.record_approval('run-one', 'direction',
+                             nonce=pipeline.issue_nonce('run-one', 'direction'), decision='approved')
+    assert pipeline.stage_state('run-one', 'direction').status == 'approved'
+    return pipeline
+
+
+def _edit_case(service, note):
+    document = json.loads(service.library_path.read_bytes().decode('utf-8-sig'))
+    document['cases'][0]['strategy']['proof'] = note
+    service.library_path.write_text(_json(document), encoding='utf-8')
+
+
+def _source_events(store):
+    return [e for e in store.read_events('run-one') if e['kind'] == 'reference_source_changed']
+
+
+def test_a_source_case_edit_outside_the_run_is_recorded_by_the_read_path(env):
+    """Red line 11: A→B→A must stay stale even for an edit no run event covers.
+
+    Changing a case from another run — or straight on disk — writes nothing in
+    *this* run's journal, so only the read path that notices the change can keep
+    the old approval from coming back when the bytes do.
+    """
+    service, store, _ = env
+    pipeline = _approved_direction(service, store)
+    original = service.library_path.read_bytes()
+
+    _edit_case(service, 'edited outside this run')
+    # The staleness check itself is the read path that must record it.
+    assert pipeline.stage_state('run-one', 'direction').stale
+    recorded = _source_events(store)
+    assert [e['case_id'] for e in recorded] == ['seed-case']
+    assert recorded[0]['selected_sha256'] != recorded[0]['current_sha256']
+
+    # Repeated reads of the same edit append nothing more.
+    reference_state(service, 'run-one')
+    pipeline.stage_state('run-one', 'direction')
+    assert len(_source_events(store)) == len(recorded)
+
+    # A→B→A on the source case: the bytes come back, the approval does not.
+    service.library_path.write_bytes(original)
+    state = pipeline.stage_state('run-one', 'direction')
+    assert state.stale and state.status == 'stale'
+    assert state.approval is not None, 'the old record is kept, not erased'
+    assert state.can_approve is False
+
+    # Landing on the same bytes again is the same change, not a second one.
+    _edit_case(service, 'edited outside this run')
+    assert pipeline.stage_state('run-one', 'direction').stale
+    assert len(_source_events(store)) == len(recorded)
+
+    # The references panel is a read path too: an edit nobody has asked the
+    # pipeline about is recorded when he opens it.
+    service.library_path.write_bytes(original)
+    _edit_case(service, 'a second, different edit')
+    reference_state(service, 'run-one')
+    assert len(_source_events(store)) == len(recorded) + 1
+
+
+def test_a_source_case_edit_never_invalidates_a_project_that_did_not_select_it(env):
+    """Only this run's own selections are recorded; the library is shared."""
+    service, store, _ = env
+    store.create_run('run-two', 'Other', 'brief')
+    pipeline = Pipeline(store)
+    attempt = pipeline.start_attempt('run-two', 'intake')
+    pipeline.submit('run-two', 'intake', attempt.token, content='brief', summary='brief')
+    attempt = pipeline.start_attempt('run-two', 'direction')
+    pipeline.submit('run-two', 'direction', attempt.token, content='direction', summary='direction')
+
+    _edit_case(service, 'edited outside this run')
+    assert not pipeline.stage_state('run-two', 'direction').stale
+    assert [e for e in store.read_events('run-two') if e['kind'] == 'reference_source_changed'] == []

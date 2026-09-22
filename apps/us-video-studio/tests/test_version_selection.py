@@ -184,6 +184,48 @@ def test_second_approval_cannot_overwrite_selected_option(pipe):
     assert pipe.stage_state(RUN, "direction").approval.selected_option_id == "B"
 
 
+def test_his_own_return_also_closes_the_gate(pipe):
+    """One version, one decision — his return counts as the decision too.
+
+    The projection the screen reads (``can_approve``, which becomes
+    ``_pending_action``) has to agree with the server rule in ``issue_nonce``.
+    Otherwise the gate keeps drawing an approve button it has just refused, and
+    the pending card goes on saying he may still decide this version.
+    """
+    direction(pipe)
+    returned = pipe.record_approval(RUN, "direction", nonce=pipe.issue_nonce(RUN, "direction"),
+                                    decision="returned", note="开场先换掉")
+    assert returned.decision == "returned"
+    state = pipe.stage_state(RUN, "direction")
+    assert state.approval.decision == "returned"
+    assert state.can_approve is False
+    assert not any(s.can_approve for s in pipe.state(RUN).stages.values())
+    with pytest.raises(PipelineError, match="already has decision"):
+        pipe.issue_nonce(RUN, "direction")
+
+
+def test_a_reviewer_return_still_offers_him_the_named_override(pipe):
+    """The other meaning of "returned": the reviewer's, which he may overrule.
+
+    A reviewer's ``return`` leaves ``approval`` empty on purpose, so this path
+    must survive the rule above — otherwise the override becomes unreachable
+    from the screen and the only way past a return would be to rewrite the work.
+    """
+    submit(pipe, "intake", content="facts")
+    submit(pipe, "direction", structured=OPTIONS)
+    pipe.record_review(RUN, "direction", verdict="return",
+                       findings=[{"stage": "direction", "issue": "没有证据支持这个钩子"}])
+    state = pipe.stage_state(RUN, "direction")
+    assert state.approval is None
+    assert state.can_approve is True
+
+    approval = pipe.record_approval(
+        RUN, "direction", nonce=pipe.issue_nonce(RUN, "direction"),
+        decision="approved", selected_option_id="A", override_reason="证据下周补齐，先按这条推进",
+    )
+    assert approval.decision == "approved_override"
+
+
 def test_concurrent_same_nonce_records_one_decision_across_pipeline_instances(pipe):
     direction(pipe)
     nonce = pipe.issue_nonce(RUN, "direction")
