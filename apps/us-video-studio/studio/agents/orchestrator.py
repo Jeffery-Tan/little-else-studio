@@ -116,7 +116,7 @@ class Orchestrator:
 
     # -------------------------------------------------------------- public -- #
 
-    def send(self, message: str) -> OrchestratorTurn:
+    def send(self, message: str, *, feedback_context: dict | None = None) -> OrchestratorTurn:
         """One turn of conversation. The user's message is logged first."""
         message = message.strip()
         if not message:
@@ -163,7 +163,12 @@ class Orchestrator:
             return self._execute(name, args, workspace)
 
         try:
-            system = ORCHESTRATOR.system(self.store.read_run(self.run_id), extra=self._system_extra(),
+            extra = self._system_extra()
+            if feedback_context:
+                extra += ('\n# 本轮反馈的准确对象\n' +
+                    json.dumps(feedback_context, ensure_ascii=False, sort_keys=True) +
+                    '\n这只是本轮定位依据。先读取对应产物或制作记录，确认目标仍存在；只按用户当前意见处理，不把内部标识写进对用户的回复。')
+            system = ORCHESTRATOR.system(self.store.read_run(self.run_id), extra=extra,
                                          format="none")
             self._emit({'type': 'context_ready', 'role': 'orchestrator',
                         'system_sha256': hashlib.sha256(system.encode('utf-8')).hexdigest(),
@@ -206,8 +211,14 @@ class Orchestrator:
         if getattr(self, '_reference_report', None):
             result.text = self._reference_report
             self._reference_report = None
-        if result.text:
-            self.store.append_chat(self.run_id, "assistant", result.text)
+        # A correction is accepted under the same run lock. If this final text
+        # wins the lock it was committed before the correction; otherwise the
+        # old goal cannot leak a late reply into the next turn's chat context.
+        with self.store.run_lock(self.run_id):
+            if self.check_cancel:
+                self.check_cancel()
+            if result.text:
+                self.store.append_chat(self.run_id, "assistant", result.text)
         delivery = self._deliverable_status()
         return OrchestratorTurn(
             text=result.text,

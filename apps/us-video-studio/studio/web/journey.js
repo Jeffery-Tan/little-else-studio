@@ -28,10 +28,50 @@ function journeyGateHtml(pending, step) {
 
 function renderJourneyStatus() {
   const tl=state.timeline, brief=state.projectBrief || tl?.brief;
-  $('project-progress').innerHTML=`<div class="journey-status"><span class="small-dot"></span><span>${escapeHtml(tl?.pending_continuation?'决定已保存，待继续准备':journeyStatus(brief,tl?.pending,tl?.interaction))}</span><span class="journey-path">想法 → 方案 → 分镜 → 成片</span></div>`;
-  const mode=tl?.creation_mode;
-  if(mode){const label=box('span','attachment-chip',({autonomous:'自主创作',recreate:'按参考复刻',inspiration:'局部借鉴'})[mode.mode]||'');label.title=mode.scope||'可以直接在对话中调整';$('project-progress').append(label);}
+  const run=(state.runs || []).find(item=>item.run_id===state.runId) || tl?.run || {};
+  const format=run.content_format;
+  const status=tl?.pending_continuation?'决定已保存，下一步尚未启动':journeyStatus(brief,tl?.pending,tl?.interaction);
+  const kind=format==='photo'?'图文作品':format==='video'?'视频作品':'创作目标待确认';
+  const next=state.busy?'':tl?.pending_continuation?'继续保存的决定':tl?.pending?'查看并决定':tl?.interaction?'回答当前问题'
+    :brief?.action?.kind==='activity'?'':brief?.action?.label||'';
+  $('project-progress').innerHTML=`<section class="creator-goal" aria-label="当前作品与下一步">`+
+    `<div class="creator-goal-main"><div class="creator-goal-heading"><span class="creator-kicker">当前作品 · ${escapeHtml(kind)}</span><h1>${escapeHtml(run.title||'未命名作品')}</h1></div>`+
+    `<p class="creator-goal-request"><strong>你的要求</strong> ${escapeHtml(run.brief||'创作目标仍待确认')}</p>`+
+    `<p class="creator-goal-current"><span class="small-dot"></span><strong>${escapeHtml(status)}</strong>`+
+    (brief?.detail?`<span>${escapeHtml(brief.detail)}</span>`:'')+`</p></div>`+
+    (next?`<button type="button" class="primary creator-next" data-creator-next>${escapeHtml(next)}</button>`:'')+
+    `</section>`;
+  const button=$('project-progress').querySelector('[data-creator-next]');
+  if(button)button.onclick=()=>{
+    if(tl?.pending_continuation){$('journey-decision')?.querySelector('[data-resume-decision]')?.click();return;}
+    if(tl?.pending){showJourneyTab('plan');selectStage(tl.pending.stage);setProjectFocus('canvas');
+      document.getElementById('stage-decision')?.scrollIntoView({block:'nearest'});return;}
+    if(tl?.interaction){setProjectFocus('chat');$('journey-decision')?.scrollIntoView({block:'nearest'});return;}
+    const action=brief?.action||{};
+    if(action.kind==='review_stage'){
+      button.disabled=true;
+      submitJob(state.runId,{request_kind:'stage_review',request_id:crypto.randomUUID(),stage:action.stage,
+        expected_version:action.version,expected_artifact_sha256:action.sha256});return;
+    }
+    if(action.kind==='delivery'){openDelivery();return;}
+    if(action.kind==='recovery'){setProjectFocus('chat');$('job-status')?.scrollIntoView({block:'nearest'});return;}
+    if(action.stage){showJourneyTab('plan');selectStage(action.stage);}
+    if(action.kind==='draft')prepareProjectDraft(action.prompt);
+    else setProjectFocus('canvas');
+  };
   if(typeof StudioComposer!=='undefined')StudioComposer.render();
+}
+
+function configureJourneyTabs() {
+  const run=(state.runs || []).find(item=>item.run_id===state.runId);
+  const photo=run?.content_format==='photo';
+  const analysis=!run?.content_format && state.currentJob?.job_kind==='reference_video';
+  $('journey-tab-plan').textContent=analysis?'分析与参考':photo?'创意与文案':'创意与脚本';
+  $('journey-tab-storyboard').textContent=photo?'图片':'画面';
+  $('journey-tab-storyboard').hidden=analysis;
+  $('journey-tab-video').hidden=photo||analysis;
+  if (((photo || analysis) && state.canvasTab === 'video') || (analysis && state.canvasTab === 'storyboard'))
+    showJourneyTab('plan');
 }
 
 function renderJourneyDecision() {
@@ -68,9 +108,6 @@ function renderJourneyDecision() {
   } else if (pending) {
     host.innerHTML=journeyGateHtml(pending,tl.rail.find(s=>s.stage===pending.stage));
     host.querySelector('[data-view-plan]').onclick=()=>{showJourneyTab('plan');selectStage(pending.stage);setProjectFocus('canvas');};
-  } else if (['review_failed','interrupted'].includes((state.projectBrief||tl.brief)?.phase)) {
-    host.innerHTML='<section class="conversation-question"><h3>方案已经保留</h3><p>本轮内部检查没能完成。你可以先看方案、直接说修改意见，或让团队接着处理。</p><button class="primary" data-resume>让团队继续处理</button></section>';
-    host.querySelector('[data-resume]').onclick=()=>submitJob(state.runId,{text:'请继续处理当前方案未完成的内部检查，保留当前内容，不重复改写。完成后展示我需要决定的内容。',request_id:crypto.randomUUID()});
   }
 }
 
@@ -83,6 +120,7 @@ function scrollToJourneyDecision(host) {
 }
 function closeEmbeddedProduction(){document.querySelector('.production-embedded')?.studioClose?.();}
 function showJourneyTab(tab) {
+  if($(`journey-tab-${tab}`)?.hidden)return;
   closeEmbeddedProduction();
   state.canvasTab=tab;
   for(const button of document.querySelectorAll('[data-journey-tab]')){
@@ -100,12 +138,13 @@ function showJourneyTab(tab) {
 
 function bindJourneyTabs(){
   const tabs=[...document.querySelectorAll('[data-journey-tab]')];
-  for(const [index,button] of tabs.entries()){
+  for(const button of tabs){
     button.onclick=()=>showJourneyTab(button.dataset.journeyTab);
     button.onkeydown=event=>{
-      const next=event.key==='ArrowRight'?tabs[(index+1)%tabs.length]
-        :event.key==='ArrowLeft'?tabs[(index+tabs.length-1)%tabs.length]
-        :event.key==='Home'?tabs[0]:event.key==='End'?tabs[tabs.length-1]:null;
+      const visible=tabs.filter(tab=>!tab.hidden),index=visible.indexOf(button);
+      const next=event.key==='ArrowRight'?visible[(index+1)%visible.length]
+        :event.key==='ArrowLeft'?visible[(index+visible.length-1)%visible.length]
+        :event.key==='Home'?visible[0]:event.key==='End'?visible[visible.length-1]:null;
       if(!next)return;
       event.preventDefault();next.focus();showJourneyTab(next.dataset.journeyTab);
     };
@@ -149,7 +188,7 @@ function initJourney() {
         const response=await fetch(`/api/runs/${run.run_id}/materials?retry_sha256=${manifest[i].sha256}`,{method:'POST',body});
         if(!response.ok){const failure=await response.json();throw new Error(failure.detail||'附件尚未上传完成，请重试。');}
       }
-      await loadRuns();await selectRun(run.run_id);setStudioView('project');setProjectFocus('chat');
+      await loadRuns();await selectRun(run.run_id);setStudioView('project');setProjectFocus('canvas');
       const request={text:frozen.text+(manifest.length?'\n本次附上的素材：'+manifest.map(f=>f.name).join('、'):''),request_id:frozen.request_id};
       await submitJob(run.run_id,request);
       // submitJob durably retains uncertain requests under this run's own key.

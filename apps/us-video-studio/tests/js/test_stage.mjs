@@ -445,3 +445,19 @@ test("the selected direction stays visible after the gate closes", () => {
   assert.match(html, /pane-decision/);
   assert.match(html, /已选方向 A/);
 });
+
+test('structured direction cards carry the same explicit version-bound choice', () => {
+  const hash='b'.repeat(64);
+  const cards=threeOptions.map(o=>({head:`方向 ${o.key}`,fields:[
+    {label:'主张',value:`主张 ${o.key}`},
+    {label:'前 3 秒',value:`开场 ${o.key}`},
+  ]}));
+  const html=stageHtml(step({blocks:[{type:'cards',cards}]}),
+    {pending:pending({options:threeOptions,artifact_sha256:hash})});
+  assert.equal((html.match(/class="gate creator-direction-gate"/g)||[]).length,1);
+  assert.equal((html.match(/data-option-key=/g)||[]).length,3);
+  assert.match(html,/data-needs-choice="1"/);
+  assert.match(html,new RegExp(`data-sha="${hash}"`));
+  assert.match(html,/开场 B/);
+  assert.doesNotMatch(html,/name="direction-choice"/);
+});

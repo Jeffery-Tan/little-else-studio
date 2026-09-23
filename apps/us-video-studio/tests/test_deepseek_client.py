@@ -58,6 +58,43 @@ def test_fixed_official_endpoint_enabled_high_and_provider_output_default(monkey
     assert turn.raw_blocks[0] == {"type": REASONING_BLOCK, "reasoning_content": "private reasoning"}
 
 
+def test_streamed_public_progress_never_exposes_reasoning_or_partial_tool_args(monkeypatch):
+    def chunk(delta, finish=None, usage=None):
+        return 'data: ' + json.dumps({'model': 'deepseek-flash',
+            'choices': [{'index': 0, 'delta': delta, 'finish_reason': finish}], 'usage': usage}) + '\n\n'
+    wire = (
+        chunk({'reasoning_content': 'private reasoning '}) +
+        chunk({'content': '正在核对商品证据。' * 11}) +
+        chunk({'tool_calls': [{'index': 0, 'id': 'one', 'type': 'function',
+               'function': {'name': 'read_artifact', 'arguments': '{"stage":'}}]}) +
+        chunk({'tool_calls': [{'index': 0, 'function': {'arguments': '"intake"}'}}]},
+              finish='tool_calls', usage={'prompt_tokens': 13, 'completion_tokens': 19}) +
+        'data: [DONE]\n\n')
+    seen = transport(monkeypatch, [httpx.Response(200, text=wire,
+                                       headers={'content-type': 'text/event-stream'})])
+    progress = []
+    turn = DeepSeekClient('synthetic-only').complete_with_progress(model='deepseek-flash',
+        system='role', messages=[{'role': 'user', 'content': 'check'}], tools=TOOLS,
+        on_progress=progress.append)
+    assert json.loads(seen[0].content)['stream'] is True
+    assert turn.tool_calls[0].input == {'stage': 'intake'}
+    assert turn.raw_blocks[0] == {'type': REASONING_BLOCK, 'reasoning_content': 'private reasoning '}
+    assert turn.usage.input_tokens == 13 and turn.usage.output_tokens == 19
+    assert progress and all(p['type'] == 'agent_narration_preview' for p in progress)
+    assert 'private reasoning' not in str(progress) and 'intake' not in str(progress)
+
+
+def test_stream_without_done_is_not_dispatched_or_accounted_as_final(monkeypatch):
+    wire = 'data: ' + json.dumps({'choices': [{'index': 0, 'delta': {'content': 'partial'},
+                                                'finish_reason': 'stop'}],
+                                    'usage': {'prompt_tokens': 4, 'completion_tokens': 6}}) + '\n\n'
+    transport(monkeypatch, [httpx.Response(200, text=wire)])
+    with pytest.raises(ModelError) as caught:
+        DeepSeekClient('synthetic-only').complete_with_progress(model='deepseek-flash',
+            system='role', messages=[{'role': 'user', 'content': 'check'}], tools=TOOLS)
+    assert caught.value.usage_status == 'unknown'
+
+
 def test_multi_tool_rounds_replay_exact_reasoning_and_never_display_it(monkeypatch):
     reasoning = "  私有协议字段\nsecond line\t保持字节  "
     seen = transport(monkeypatch, [

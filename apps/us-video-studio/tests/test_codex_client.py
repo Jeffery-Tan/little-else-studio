@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from studio.agents import codex_client as codex
-from studio.agents.client import ModelError, Usage
+from studio.agents.client import JobCancelled, ModelError, Usage
 
 
 TOOLS = [{"name": "dispatch", "description": "Delegate a Studio role",
@@ -195,6 +195,45 @@ def test_unknown_usage_stays_unknown(client):
 def test_unphased_legacy_answer_is_checked_only_after_completed_turn(client):
     FakeSession.events = finished(phase=None)
     assert complete(client).text == "Prepared."
+
+
+def test_only_public_commentary_is_reported_during_codex_turn(client):
+    FakeSession.events = [
+        event('item/completed', item={'id': 'thinking', 'type': 'reasoning', 'text': 'private'}),
+        event('item/completed', item={'id': 'unknown', 'type': 'agentMessage', 'phase': None,
+                                      'text': 'unphased'}),
+        event('item/started', item={'id': 'progress', 'type': 'agentMessage', 'phase': 'commentary'}),
+        event('item/agentMessage/delta', itemId='progress', delta='正在核对已保存方案。' * 5),
+        event('item/completed', item={'id': 'progress', 'type': 'agentMessage',
+                                      'phase': 'commentary', 'text': '正在核对已保存方案。'}),
+    ] + finished()
+    progress = []
+    turn = complete(client, on_progress=progress.append)
+    assert turn.text == 'Prepared.'
+    assert progress[0]['type'] == 'agent_narration_preview'
+    assert 'private' not in str(progress) and 'unphased' not in str(progress)
+    assert progress[-1] == {'type': 'agent_narration', 'text': '正在核对已保存方案。'}
+
+
+def test_user_stop_sends_native_turn_interrupt_and_never_dispatches_answer(client, monkeypatch):
+    stopped = {'value': False}
+    def check():
+        if stopped['value']:
+            raise JobCancelled('stop')
+    def poll(session, interval=0.25):
+        if not stopped['value']:
+            stopped['value'] = True
+            raise TimeoutError()
+        return event('turn/completed', turn={'id':'one-turn', 'status':'interrupted'})
+    monkeypatch.setattr(FakeSession, 'event_poll', poll, raising=False)
+    monkeypatch.setattr(FakeSession, 'next_id', 0, raising=False)
+    monkeypatch.setattr(FakeSession, 'send', lambda session, message: session.sent.append(
+        (message['method'], message['params'])), raising=False)
+    client.check_cancel = check
+    with pytest.raises(JobCancelled):
+        complete(client)
+    assert ('turn/interrupt', {'threadId':'isolated-thread', 'turnId':'one-turn'}) in FakeSession.instances[0].sent
+    assert FakeSession.instances[0].closed
 
 
 def test_partial_usage_survives_protocol_failure_and_does_not_retry(client):

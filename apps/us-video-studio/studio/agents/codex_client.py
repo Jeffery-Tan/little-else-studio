@@ -248,6 +248,26 @@ class _StdioSession:
                 continue
             return message
 
+    def event_poll(self, interval=0.25):
+        """Read one event without hiding a user cancellation behind a long wait."""
+        while True:
+            if self.pending:
+                message = self.pending.pop(0)
+            else:
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ModelError(0, "Codex request timed out; usage unconfirmed")
+                try:
+                    message = self.messages.get(timeout=min(interval, remaining))
+                except queue.Empty:
+                    raise TimeoutError() from None
+                if message is None:
+                    raise ModelError(0, "Codex process or protocol ended unexpectedly; usage unconfirmed")
+            if "id" in message and "method" in message:
+                self._deny(message)
+                continue
+            return message
+
     def initialize(self):
         result = self.request("initialize", {
             "clientInfo": {"name": "us_video_studio", "version": "0.1.0"},
@@ -480,7 +500,13 @@ class CodexClient:
             raise CodexUnavailable("Codex did not return any selectable text models")
         return {"models": models, "source": "codex_cli", "model_invoked": False}
 
-    def complete(self, *, model: str, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> Turn:
+    def complete_with_progress(self, *, model: str, system: str, messages: list[dict[str, Any]],
+                               tools: list[dict[str, Any]], on_progress=None) -> Turn:
+        return self.complete(model=model, system=system, messages=messages, tools=tools,
+                             on_progress=on_progress)
+
+    def complete(self, *, model: str, system: str, messages: list[dict[str, Any]],
+                 tools: list[dict[str, Any]], on_progress=None) -> Turn:
         self._check()
         schema = _schema(tools)
         if self._mcp_names is None:
@@ -537,8 +563,31 @@ class CodexClient:
                 answer, seen_final, forbidden = "", False, False
                 unphased_answer = None
                 actual_model = resolved_model
+                commentary_items = {}
+                commentary_preview_size = {}
+                interrupt_requested = False
+                interrupt_deadline = None
                 while True:
-                    event = session.event()
+                    if self.check_cancel and not interrupt_requested:
+                        try:
+                            self.check_cancel()
+                        except JobCancelled:
+                            interrupt_requested = True
+                            interrupt_deadline = time.monotonic() + 5
+                            # The CLI's own turn stays isolated. The Studio
+                            # goal revision is handled above this adapter.
+                            try:
+                                session.next_id += 1
+                                session.send({"id": session.next_id, "method": "turn/interrupt",
+                                              "params": {"threadId": thread_id, "turnId": turn_id}})
+                            except ModelError:
+                                raise JobCancelled('停止已请求；提供方中断回执未确认。', usage=usage) from None
+                    if interrupt_requested and time.monotonic() >= interrupt_deadline:
+                        raise JobCancelled('停止已请求；提供方中断回执未确认。', usage=usage)
+                    try:
+                        event = session.event_poll() if self.check_cancel and hasattr(session, 'event_poll') else session.event()
+                    except TimeoutError:
+                        continue
                     method, params = event.get("method"), event.get("params", {})
                     if params.get("threadId") != thread_id or params.get("turnId", params.get("turn", {}).get("id")) != turn_id:
                         continue
@@ -550,10 +599,30 @@ class CodexClient:
                                 setattr(usage, target, value)
                     elif method == "model/rerouted":
                         actual_model = params.get("toModel") or actual_model
+                    elif method == "item/agentMessage/delta":
+                        item_id, fragment = params.get('itemId'), params.get('delta')
+                        if item_id in commentary_items and isinstance(fragment, str):
+                            commentary_items[item_id] += fragment
+                            visible = commentary_items[item_id]
+                            shown = commentary_preview_size.get(item_id, 0)
+                            if (on_progress is not None and len(visible) - shown >= 12
+                                    and (visible.endswith(('。', '！', '？', '.', '!', '?', '\n'))
+                                         or len(visible) - shown >= 120)
+                                    and shown < 1600):
+                                on_progress({'type': 'agent_narration_preview', 'text': visible[-500:]})
+                                commentary_preview_size[item_id] = len(visible)
                     elif method in {"item/started", "item/completed"}:
                         item = params.get("item", {})
                         if item.get("type") not in {"userMessage", "agentMessage", "reasoning"}:
                             forbidden = True
+                        if (method == 'item/started' and item.get('type') == 'agentMessage'
+                                and item.get('phase') == 'commentary' and isinstance(item.get('id'), str)):
+                            commentary_items[item['id']] = ''
+                        if (method == "item/completed" and item.get("type") == "agentMessage"
+                                and item.get("phase") == "commentary" and isinstance(item.get("text"), str)
+                                and item["text"].strip() and on_progress is not None):
+                            commentary_items.pop(item.get('id'), None)
+                            on_progress({"type": "agent_narration", "text": item["text"].strip()[:1000]})
                         if method == "item/completed" and item.get("type") == "agentMessage" and item.get("phase") == "final_answer":
                             if seen_final:
                                 raise ModelError(200, "Codex returned multiple final answers", usage=usage)
@@ -564,6 +633,8 @@ class CodexClient:
                             # completed turn is a candidate structured answer.
                             unphased_answer = item.get("text")
                     elif method == "turn/completed":
+                        if interrupt_requested:
+                            raise JobCancelled('旧轮已中断；用量按已收到的记录保留。', usage=usage)
                         if params.get("turn", {}).get("status") != "completed":
                             raise ModelError(200, "Codex turn did not complete; no tools dispatched", usage=usage)
                         break

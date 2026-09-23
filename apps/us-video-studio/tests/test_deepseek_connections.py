@@ -199,6 +199,14 @@ def test_routed_orchestrator_two_jobs_preserves_only_current_private_protocol(tm
         else:
             msg = {'content':'资料已保存，请确认下一步。','reasoning_content':'private-final'}
             reason = 'stop'
+        if incoming.get('stream'):
+            delta = {'content': msg['content'], 'reasoning_content': msg['reasoning_content']}
+            if msg.get('tool_calls'):
+                delta['tool_calls'] = [dict(index=i, **call) for i, call in enumerate(msg['tool_calls'])]
+            chunk = {'model':'deepseek-flash', 'choices':[{'index':0, 'delta':delta,
+                'finish_reason':reason}], 'usage':{'prompt_tokens':50,'completion_tokens':20}}
+            return httpx.Response(200, text='data: ' + json.dumps(chunk) + '\n\ndata: [DONE]\n\n',
+                                  headers={'content-type':'text/event-stream'})
         return httpx.Response(200, json={'model':'deepseek-flash','choices':[{'finish_reason':reason,'message':msg}],
                                          'usage':{'prompt_tokens':50,'completion_tokens':20}})
     monkeypatch.setattr(httpx, 'Client', lambda **kw: real_client(**kw, transport=httpx.MockTransport(handler)))

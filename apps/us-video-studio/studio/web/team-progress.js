@@ -48,11 +48,16 @@ function teamProgress(job) {
     const action = last.type === 'agent_activity' && last.phase === 'tool' ? teamAction(last)
       : last.type === 'agent_activity' && last.phase === 'thinking' ? TEAM_WORK[currentRole]
       : '继续处理本轮内容（等待下一条进展）';
-    current = `${TEAM_ROLES[currentRole]} · ${action}`;
+    current = `${TEAM_ROLES[currentRole]} · ${['agent_narration','agent_narration_preview'].includes(last.type) && typeof last.text === 'string'
+      ? last.text.trim().slice(0, 220) : action}`;
   } else if (active) current = job.status === 'queued' ? '等待制作团队开始' : job.status === 'cancelling'
     ? '等待当前调用结束，随后停止' : '正在准备本轮工作，等待角色进展';
   const history = [];
   for (const event of events) {
+    if (event.type === 'agent_narration' && typeof event.text === 'string' && event.text.trim()) {
+      history.push({role:TEAM_ROLES[event.role] || '制片团队', text:event.text.trim().slice(0, 500), at:event.at});
+      continue;
+    }
     if (event.type !== 'agent_tool') continue;
     history.push({role:TEAM_ROLES[event.role] || '制片团队', text:teamAction(event, true), at:event.at,
       failed:event.ok === false, stage:event.ok && ['write_stage','submit_stage'].includes(event.tool)

@@ -86,7 +86,7 @@ def build_app(
         if not current.can_review:
             raise PipelineError('review', '这一版当前不能发起审核，请刷新项目状态。')
 
-    def prepare_job(run_id, review=None, reference_consent=False):
+    def prepare_job(run_id, review=None, reference_consent=False, feedback_target=None):
         if review is not None:
             require_review_version(run_id, review)
         if client_factory is not None:
@@ -108,7 +108,8 @@ def build_app(
 
         def run(text, emit, check_cancel):
             job_client = client if client_factory is not None else snapshot.client(
-                check_cancel=check_cancel, max_tokens=job_settings.max_tokens)
+                check_cancel=check_cancel, max_tokens=job_settings.max_tokens,
+                cancel_event=jobs.cancelled)
             def production_review(args):
                 from .production import ActionIn
                 service = app.state.production
@@ -148,7 +149,8 @@ def build_app(
             return Orchestrator(store, pipeline, job_settings, job_client,
                 Ledger(store, job_settings), run_id, on_event=emit, check_cancel=check_cancel,
                 learning_service=learning, production_review=production_review,
-                reference_observer=observe_reference, image_observer=observe_images).send(text)
+                reference_observer=observe_reference, image_observer=observe_images).send(
+                    text, feedback_context=feedback_target)
         return run, summary
 
     jobs = JobManager(store, pipeline, ledger, prepare_job)

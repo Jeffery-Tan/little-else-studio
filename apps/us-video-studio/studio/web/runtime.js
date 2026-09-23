@@ -3,6 +3,7 @@
 function detachProjectJob() {
   jobWatch++;
   clearTimeout(jobTimer);
+  closeJobSource();
   currentJob=null;
   currentRecovery=null;
 }
@@ -59,10 +60,55 @@ function jobPresentation(job, recovery = null) {
 
 let jobWatch = 0;
 let jobTimer = null;
+let jobSource = null;
+let jobSourceJobId = null;
 let currentJob = null;
 let currentRecovery = null;
 let jobRenderKey = "";
+let steerPosting = false;
+function canSteerJob(job) {
+  return Boolean(job && job.job_kind === 'conversation' &&
+    (job.status === 'running' || (job.status === 'cancelling' && job.steer_status === 'received')));
+}
 function pendingJobKey(runId) { return `studio-job-pending:${runId}`; }
+function closeJobSource() {
+  jobSource?.close();
+  jobSource = null;
+  jobSourceJobId = null;
+}
+function followJobEvents(runId, job, generation) {
+  if (typeof EventSource === 'undefined' || jobSourceJobId === job.job_id) return;
+  closeJobSource();
+  const source = new EventSource(`/api/runs/${runId}/jobs/${job.job_id}/events?after_seq=${job.cursor || 0}`);
+  jobSource = source;
+  jobSourceJobId = job.job_id;
+  let loading = false, newer = false;
+  source.onmessage = async () => {
+    if (generation !== jobWatch || runId !== state.runId || jobSource !== source) return;
+    if (loading) { newer = true; return; }
+    loading = true;
+    try {
+      do {
+        newer = false;
+        const updated = await api(`/api/runs/${runId}/jobs/${job.job_id}`);
+        if (generation !== jobWatch || runId !== state.runId || jobSource !== source) return;
+        await watchJob(runId, updated, generation);
+      } while (newer && jobSource === source);
+    } catch (_) { /* The safety poll retries after a transient read failure. */ }
+    finally { loading = false; }
+  };
+  source.onerror = () => {
+    if (jobSource !== source) return;
+    closeJobSource();
+    clearTimeout(jobTimer);
+    jobTimer = setTimeout(() => watchJob(runId, job, generation), 1000);
+  };
+}
+function pendingSteerKey(runId) { return `studio-steer-pending:${runId}`; }
+function readPendingSteer(runId) {
+  try { return JSON.parse(sessionStorage.getItem(pendingSteerKey(runId)) || "null"); }
+  catch (_) { return null; }
+}
 function readPendingJob(runId) {
   try { return JSON.parse(sessionStorage.getItem(pendingJobKey(runId)) || "null"); }
   catch (_) { return null; }
@@ -70,18 +116,26 @@ function readPendingJob(runId) {
 function clearPendingJob(runId) { sessionStorage.removeItem(pendingJobKey(runId)); }
 
 function showJob(job, notice = "") {
+  if (job && currentJob?.job_id === job.job_id && Number(currentJob.cursor || 0) > Number(job.cursor || 0)) return;
   currentJob = job;
+  state.currentJob = job;
+  if (typeof configureJourneyTabs === 'function') configureJourneyTabs();
   if (job?.brief) state.projectBrief = job.brief;
   const view = jobPresentation(job, currentRecovery);
   state.busy = view.active || Boolean(readPendingJob(state.runId));
   state.recoveryBlocked = Boolean((currentRecovery && !currentRecovery.can_continue)
     || (!currentRecovery && (job?.open_attempts?.length)));
-  $("send").disabled = state.busy || state.decisionBusy || state.recoveryBlocked;
+  const adjusting = canSteerJob(job);
+  $("send").disabled = (state.busy && !adjusting) || steerPosting || state.decisionBusy || state.recoveryBlocked;
+  $("send").textContent = adjusting ? '调整任务 ↑' : '发送 ↑';
+  $("send").setAttribute?.('aria-label', adjusting ? '调整当前任务' : '发送消息');
   if (typeof renderProjectProgress === 'function') renderProjectProgress();
   if (typeof renderJourneyDecision === 'function') renderJourneyDecision();
   const host = $("job-status");
   const lastMessage = [...(job?.events || [])].reverse().find((event) => event.say || event.message);
-  const renderKey = JSON.stringify([state.runId, job?.job_id, job?.status, job?.events?.length, view.detail, view.guidance, job?.reason, lastMessage?.say, lastMessage?.message, notice, job?.recovery, job?.unresolved_calls, job?.open_attempts, currentRecovery?.revision]);
+  const renderKey = JSON.stringify([state.runId, job?.job_id, job?.status, job?.events?.length, job?.goal_revision,
+    job?.steer_status, job?.successor_job_id, view.detail, view.guidance, job?.reason,
+    lastMessage?.say, lastMessage?.message, notice, job?.recovery, job?.unresolved_calls, job?.open_attempts, currentRecovery?.revision]);
   updateTeamDialog();
   if (renderKey === jobRenderKey) return;
   jobRenderKey = renderKey;
@@ -94,11 +148,31 @@ function showJob(job, notice = "") {
   // observer; historical usage cannot turn it back into a second status panel.
   if (job?.brief && !notice && !state.recoveryBlocked && ['conversation','stage_review'].includes(job.job_kind || 'conversation')) {
     if (view.active) copy.append(box('span','job-live',teamProgress(job).current || '团队正在处理当前步骤'));
+    if (job.steer_status === 'received' && view.active)
+      copy.append(box('span','job-live','调整已收到，等待旧步骤结束后继续'));
+    if (job.steer_status === 'blocked') {
+      copy.append(box('span','job-warning',job.steer_reason || '调整已保存，暂时不能自动继续'));
+      if (job.steer_latest_text) copy.append(box('span','muted',`最近的调整：${job.steer_latest_text.slice(0, 200)}`));
+      const resumeAdjustment = box('button','ghost small','继续保存的调整');
+      resumeAdjustment.onclick = async () => {
+        resumeAdjustment.disabled = true;
+        const runId = state.runId, generation = ++jobWatch;
+        closeJobSource(); clearTimeout(jobTimer);
+        try {
+          const next = await api(`/api/runs/${runId}/jobs/${job.job_id}/resume-steer`,
+            {method:'POST',body:'{}'});
+          if (runId === state.runId && generation === jobWatch) await watchJob(runId, next, generation);
+        } catch (err) {
+          if (runId === state.runId) { resumeAdjustment.disabled = false; toast(err.message, true); await restoreJob(runId); }
+        }
+      };
+      copy.append(resumeAdjustment);
+    }
     const activity = box('button','text-button','团队工作记录 ↗');
     activity.onclick = openTeamProgress;
     copy.append(activity);
-    if (view.active && job.status !== 'cancelling') {
-      const stop = box('button','ghost small','停止本轮');
+    if (view.active && (job.status !== 'cancelling' || job.steer_status === 'received')) {
+      const stop = box('button','ghost small',job.steer_status === 'received' ? '停止接续' : '停止本轮');
       stop.onclick = async () => {
         const runId=state.runId, jobId=job.job_id;
         stop.disabled=true;
@@ -223,8 +297,25 @@ async function saveRecovery(snapshot, action, payload, button) {
 
 async function watchJob(runId, job, generation) {
   if (generation !== jobWatch || runId !== state.runId) return;
+  if (job && currentJob?.job_id === job.job_id && Number(currentJob.cursor || 0) > Number(job.cursor || 0))
+    job = currentJob;
   showJob(job);
+  if (job?.successor_job_id) {
+    closeJobSource();
+    let next;
+    try { next = await api(`/api/runs/${runId}/jobs/${job.successor_job_id}`); }
+    catch (_) {
+      if (generation === jobWatch && runId === state.runId)
+        jobTimer = setTimeout(() => watchJob(runId, job, generation), 1000);
+      return;
+    }
+    if (generation !== jobWatch || runId !== state.runId) return;
+    await watchJob(runId, next, generation);
+    await refreshTimeline();
+    return;
+  }
   if (!jobPresentation(job).active) {
+    closeJobSource();
     try {
       const recovery = await api(`/api/runs/${runId}/recovery`);
       if (generation !== jobWatch || runId !== state.runId) return;
@@ -235,6 +326,8 @@ async function watchJob(runId, job, generation) {
     catch (_) { toast("执行状态已保存，项目内容暂时未刷新。", true); }
     return;
   }
+  followJobEvents(runId, job, generation);
+  clearTimeout(jobTimer);
   jobTimer = setTimeout(async () => {
     try {
       const updated = await api(`/api/runs/${runId}/jobs/${job.job_id}`);
@@ -244,7 +337,7 @@ async function watchJob(runId, job, generation) {
       showJob(job, "连接暂时断开，正在找回进度…");
       jobTimer = setTimeout(() => watchJob(runId, job, generation), 2500);
     }
-  }, 1000);
+  }, jobSource ? 8000 : 1000);
 }
 
 function showUncertainSubmission(runId, payload) {
@@ -257,6 +350,7 @@ function showUncertainSubmission(runId, payload) {
 async function restoreJob(runId) {
   const generation = ++jobWatch;
   clearTimeout(jobTimer);
+  closeJobSource();
   currentJob = null;
   currentRecovery = null;
   state.busy = true;
@@ -267,6 +361,17 @@ async function restoreJob(runId) {
     const pending = readPendingJob(runId);
     if (pending && job?.request_id === pending.request_id) clearPendingJob(runId);
     else if (pending) { showUncertainSubmission(runId, pending); return; }
+    const steer = readPendingSteer(runId);
+    if (steer && (job?.parent_job_id === steer.job_id ||
+        (job?.job_id === steer.job_id && Number(job.goal_revision || 0) > steer.expected_goal_revision))) {
+      sessionStorage.removeItem(pendingSteerKey(runId));
+    } else if (steer) {
+      showJob(job, '调整是否收到尚未确认。请确认提交状态。');
+      const retry = box('button','ghost small','确认调整状态');
+      retry.onclick = () => submitSteer(runId, steer.job_id, steer);
+      $('job-status').append(retry);
+      return;
+    }
     await watchJob(runId, job, generation);
   } catch (_) {
     if (runId !== state.runId || generation !== jobWatch) return;
@@ -274,6 +379,29 @@ async function restoreJob(runId) {
     state.busy = true;
     $("send").disabled = true;
     jobTimer = setTimeout(() => restoreJob(runId), 3000);
+  }
+}
+
+async function submitSteer(runId, jobId, payload) {
+  if (runId !== state.runId || steerPosting) return;
+  steerPosting = true;
+  sessionStorage.setItem(pendingSteerKey(runId), JSON.stringify({...payload, job_id:jobId}));
+  if (currentJob?.job_id === jobId) showJob(currentJob, '正在提交调整…');
+  try {
+    const updated = await api(`/api/runs/${runId}/jobs/${jobId}/steer`,
+      {method:'POST', body:JSON.stringify(payload)});
+    sessionStorage.removeItem(pendingSteerKey(runId));
+    if (runId === state.runId && currentJob?.job_id === jobId) showJob(updated);
+  } catch (err) {
+    if (err.status >= 400 && err.status < 500) {
+      sessionStorage.removeItem(pendingSteerKey(runId));
+      if (runId === state.runId) { $('chat-input').value = payload.text; toast(err.message, true); }
+    } else if (runId === state.runId) {
+      showJob(currentJob, '调整结果尚未确认。刷新后可以用相同请求标识核对。');
+    }
+  } finally {
+    steerPosting = false;
+    if (runId === state.runId && currentJob) showJob(currentJob);
   }
 }
 
@@ -285,6 +413,7 @@ async function submitJob(runId, payload) {
   if (!payload.request_kind && payload.reference_consent === undefined) payload={...payload,reference_consent:true};
   const generation = ++jobWatch;
   clearTimeout(jobTimer);
+  closeJobSource();
   currentRecovery = null;
   state.busy = true;
   $("send").disabled = true;
@@ -310,6 +439,8 @@ async function submitJob(runId, payload) {
   }
   clearPendingJob(runId);
   if (runId !== state.runId || generation !== jobWatch) return;
+  if (payload.feedback_target && JSON.stringify(state.feedbackTarget) === JSON.stringify(payload.feedback_target))
+    clearFeedbackTarget();
   await watchJob(runId, job, generation);
   try { await refreshTimeline(); }
   catch (_) { toast("任务已接受，正在运行；对话暂时未刷新。", true); }

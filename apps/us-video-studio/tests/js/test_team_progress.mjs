@@ -62,3 +62,17 @@ test('queued jobs and records without role evidence do not invent a working role
   assert.ok(view.participants.every(r=>r.status==='本轮未参与'));
   assert.match(teamProgress({status:'running',events:[]}).current,/等待角色进展/);
 });
+
+test('public preview updates the live line and settled narration enters history once',()=>{
+  const events = [
+    {type:'agent_activity',role:'orchestrator',phase:'thinking'},
+    {type:'agent_narration_preview',role:'orchestrator',text:'先核对当前方案和你的调整。'},
+  ];
+  const live = teamProgress({status:'running',events});
+  assert.match(live.current,/先核对当前方案/);
+  assert.equal(live.history.length,0);
+  events.push({type:'agent_narration',role:'orchestrator',text:'先核对当前方案和你的调整。'});
+  const settled = teamProgress({status:'running',events});
+  assert.equal(settled.history.length,1);
+  assert.match(settled.history[0].text,/先核对当前方案/);
+});

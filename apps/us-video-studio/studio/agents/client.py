@@ -57,6 +57,11 @@ class ModelError(RuntimeError):
 class JobCancelled(RuntimeError):
     """Cancellation observed at a safe model/tool boundary, never an API failure."""
 
+    def __init__(self, message='', *, usage=None, usage_final=False):
+        super().__init__(message)
+        self.usage = usage
+        self.usage_final = usage_final
+
 
 class SafePreflightError(RuntimeError):
     """Non-retryable connection setup failure with safe user-facing text."""
@@ -365,6 +370,8 @@ def run_agent_loop(
     text_seen: list[str] = []
     continuations_left = max_continuations
     completion_reminders = 1
+    if hasattr(client, 'public_progress'):
+        client.public_progress = on_activity
 
     for round_index in range(1, max_rounds + 1):
         if check_cancel is not None:
@@ -374,6 +381,10 @@ def run_agent_loop(
         turn = client.complete(model=model, system=system, messages=convo, tools=tools)
         if on_turn is not None:
             on_turn(turn)
+        # Cancellation may arrive while complete() is blocked. Its late final
+        # text and tool batch belong to the old goal and must not be committed.
+        if check_cancel is not None:
+            check_cancel()
         if turn.tool_calls:
             # Operational narration belongs to the execution journal, not the
             # final answer (or the next conversational context window).

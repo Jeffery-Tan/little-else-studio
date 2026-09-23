@@ -1,6 +1,6 @@
 """HTTP request contracts and one shared event redaction rule."""
 from __future__ import annotations
-from typing import Any
+from typing import Any, Literal
 from pydantic import BaseModel, Field
 from .product_cards import CardBinding
 
@@ -38,10 +38,33 @@ class MessageIn(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
 
 
+class FeedbackTarget(BaseModel):
+    kind: Literal['writing'] = 'writing'
+    run_id: str = Field(min_length=1, max_length=64)
+    stage: str = Field(pattern=r'^writing$')
+    version: int = Field(ge=1, strict=True)
+    artifact_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    quote: str = Field(min_length=1, max_length=240)
+
+
+class MediaFeedbackTarget(BaseModel):
+    kind: Literal['media']
+    run_id: str = Field(min_length=1, max_length=64)
+    attempt_id: str = Field(min_length=1, max_length=160)
+    output_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    at_seconds: float | None = Field(default=None, ge=0, le=3600)
+
+
 class JobIn(MessageIn):
     request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
     question_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
     reference_consent: bool = Field(default=False, strict=True)
+    feedback_target: FeedbackTarget | MediaFeedbackTarget | None = None
+
+
+class SteerIn(MessageIn):
+    request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
+    expected_goal_revision: int = Field(ge=0, strict=True)
 
 
 class ReviewActionIn(BaseModel):

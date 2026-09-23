@@ -310,15 +310,18 @@ class ConnectionSnapshot:
             pricing_by_route=MappingProxyType({(c['id'], model): Pricing(**price)
                                               for c in connections.values() for model, price in c['pricing'].items()}))
 
-    def client(self, check_cancel=None, *, max_tokens=16384):
-        return RoutedClient(self, check_cancel=check_cancel, max_tokens=max_tokens)
+    def client(self, check_cancel=None, *, max_tokens=16384, cancel_event=None):
+        return RoutedClient(self, check_cancel=check_cancel, max_tokens=max_tokens,
+                            cancel_event=cancel_event)
 
 
 class RoutedClient:
-    def __init__(self, snapshot: ConnectionSnapshot, *, check_cancel=None, max_tokens=16384):
+    def __init__(self, snapshot: ConnectionSnapshot, *, check_cancel=None, max_tokens=16384,
+                 cancel_event=None):
         self._snapshot = snapshot
         self.check_cancel = check_cancel or (lambda: None)
         self.max_tokens = max_tokens
+        self.cancel_event = cancel_event
 
     def validate_model(self, role, model):
         if self._snapshot.public()['roles'][role]['model'] != model:
@@ -344,7 +347,8 @@ class RoutedClient:
                     raise ValueError('Invalid local DeepSeek key')
                 # The shared legacy cap is for compatibility transports. Native
                 # DeepSeek uses its provider default, including on restored jobs.
-                return DeepSeekClient(token)
+                return DeepSeekClient(token, check_cancel=self.check_cancel,
+                                      cancel_event=self.cancel_event)
             except (ValueError, TypeError):
                 # This happens before the budget wrapper opens a call intent.
                 # Stop a dispatched role without turning a local setup problem

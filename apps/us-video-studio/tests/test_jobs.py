@@ -3,14 +3,19 @@ from __future__ import annotations
 
 import threading
 import time
+import hashlib
+import io
 
 import pytest
 from local_http import TestClient
+from PIL import Image
 
 from fakes import ScriptedModel, final_turn, tool_turn
 from studio.jobs import WriterLease
 from studio.ledger import Ledger
 from studio.models import PipelineError
+from studio.materials import accept_upload
+from studio.pipeline import Pipeline
 from studio.server import build_app
 from studio.store import Store
 from test_server import RUN, make_run, settings_for
@@ -32,6 +37,65 @@ def post_job(http, request_id='one', text='本次测试'):
     result = http.post(f'/api/runs/{RUN}/jobs', json={'text': text, 'request_id': request_id})
     assert result.status_code == 200, result.text
     return result.json()
+
+
+def test_inline_script_feedback_rejects_changed_version_before_model_call(tmp_path):
+    model = ScriptedModel([final_turn('收到。')])
+    with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: model)) as http:
+        make_run(http)
+        pipe = Pipeline(Store(tmp_path))
+        for stage in ('intake', 'direction', 'material_plan', 'writing'):
+            attempt = pipe.start_attempt(RUN, stage)
+            artifact = pipe.submit(RUN, stage, attempt.token,
+                content='这一句需要核对。' if stage == 'writing' else f'{stage} fixture', summary=stage)
+            if stage == 'direction':
+                pipe.record_review(RUN, stage, verdict='pass', findings=[])
+                nonce = pipe.issue_nonce(RUN, stage)
+                pipe.record_approval(RUN, stage, nonce=nonce, decision='approved')
+        target = {'run_id': RUN, 'stage': 'writing', 'version': 1,
+                  'artifact_sha256': artifact.sha256, 'quote': '这一句需要核对。'}
+        wrong = http.post(f'/api/runs/{RUN}/jobs', json={'text': '请修改', 'request_id': 'bad',
+            'feedback_target': {**target, 'artifact_sha256': 'b' * 64}})
+        assert wrong.status_code == 409
+        invented = http.post(f'/api/runs/{RUN}/jobs', json={'text': '请修改', 'request_id': 'invented',
+            'feedback_target': {**target, 'quote': '不存在的台词'}})
+        assert invented.status_code == 409
+        assert not model.calls
+        accepted = http.post(f'/api/runs/{RUN}/jobs', json={'text': '请修改', 'request_id': 'good',
+            'feedback_target': target})
+        assert accepted.status_code == 200, accepted.text
+        assert '这一句需要核对。' in accepted.json()['text']
+        assert accepted.json()['job_payload']['feedback_target']['artifact_sha256'] == artifact.sha256
+        wait_job(http, accepted.json()['job_id'])
+        assert artifact.sha256 in model.calls[0]['system']
+
+
+def test_media_feedback_requires_the_saved_result_bytes(tmp_path):
+    model = ScriptedModel([final_turn('收到。')])
+    with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: model)) as http:
+        make_run(http)
+        raw = io.BytesIO()
+        Image.new('RGB', (240, 240), (20, 40, 60)).save(raw, 'PNG')
+        accept_upload(Store(tmp_path), RUN, 'production-fixture.png', raw.getvalue())
+        sha = hashlib.sha256(raw.getvalue()).hexdigest()
+        service = http.app.state.production
+        service.event(RUN, 'production_attempt', attempt_id='made-output', draft_id='fixture',
+                      media_kind='image', status='succeeded')
+        service.event(RUN, 'production_output', attempt_id='made-output',
+                      output={'name': 'production-fixture.png', 'sha256': sha,
+                              'url': f'/api/runs/{RUN}/materials/production-fixture.png'})
+        target = {'kind': 'media', 'run_id': RUN, 'attempt_id': 'made-output', 'output_sha256': sha}
+        rejected = http.post(f'/api/runs/{RUN}/jobs', json={'text': '画面需要调整',
+            'request_id': 'wrong-media', 'feedback_target': {**target, 'output_sha256': 'a' * 64}})
+        assert rejected.status_code == 409
+        assert not model.calls
+        accepted = http.post(f'/api/runs/{RUN}/jobs', json={'text': '画面需要调整',
+            'request_id': 'right-media', 'feedback_target': target})
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()['job_payload']['feedback_target']['attempt_id'] == 'made-output'
+        assert 'made-output' not in accepted.json()['text']
+        wait_job(http, accepted.json()['job_id'])
+        assert 'made-output' in model.calls[0]['system']
 
 
 def test_job_replay_idempotency_and_context_refs(tmp_path):
@@ -126,6 +190,127 @@ def test_cancel_waits_for_inflight_settlement_then_blocks_tool(tmp_path):
         assert len(rows) == 1 and rows[0]['usage_status'] == 'known'
 
 
+def test_cancelled_late_final_never_enters_chat(tmp_path):
+    entered, release = threading.Event(), threading.Event()
+    class Slow:
+        def complete(self, **kwargs):
+            entered.set()
+            assert release.wait(4)
+            return final_turn('旧目标的迟到回复')
+    with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: Slow())) as http:
+        make_run(http)
+        job = post_job(http)
+        assert entered.wait(2)
+        assert http.post(f'/api/runs/{RUN}/jobs/{job["job_id"]}/cancel').json()['status'] == 'cancelling'
+        release.set()
+        assert wait_job(http, job['job_id'])['status'] == 'cancelled'
+        assert all('旧目标的迟到回复' not in row['text'] for row in http.get(f'/api/runs/{RUN}/chat').json())
+
+
+def test_inflight_steer_settles_old_job_then_continues_once(tmp_path):
+    entered, release = threading.Event(), threading.Event()
+    class Slow:
+        def __init__(self):
+            self.calls = []
+        def complete(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                entered.set()
+                assert release.wait(4)
+                return final_turn('旧方向不应保存')
+            return final_turn('已按调整后的目标处理')
+    model = Slow()
+    with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: model)) as http:
+        make_run(http)
+        first = post_job(http, text='先做完整视频方向')
+        assert entered.wait(2)
+        path = f'/api/runs/{RUN}/jobs/{first["job_id"]}/steer'
+        change = {'request_id': 'adjust-1', 'text': '先只分析，不写脚本', 'expected_goal_revision': 0}
+        accepted = http.post(path, json=change)
+        assert accepted.status_code == 200
+        assert accepted.json()['goal_revision'] == 1
+        assert accepted.json()['steer_status'] == 'received'
+        assert http.post(path, json=change).status_code == 200
+        assert http.post(path, json={**change, 'text': '另一条'}).status_code == 409
+        second = {'request_id': 'adjust-2', 'text': '保留已有观察', 'expected_goal_revision': 1}
+        assert http.post(path, json=second).json()['goal_revision'] == 2
+        release.set()
+        old = wait_job(http, first['job_id'])
+        assert old['status'] == 'cancelled'
+        assert old['successor_job_id']
+        successor = wait_job(http, old['successor_job_id'])
+        assert successor['status'] == 'succeeded'
+        assert successor['parent_job_id'] == first['job_id']
+        assert len(model.calls) == 2
+        request = str(model.calls[1]['messages'])
+        assert '先做完整视频方向' in request
+        assert '先只分析，不写脚本' in request
+        assert '保留已有观察' in request
+        chat = http.get(f'/api/runs/{RUN}/chat').json()
+        assert not any('旧方向不应保存' in row['text'] for row in chat)
+        assert chat[-1]['text'] == '已按调整后的目标处理'
+        assert http.post(path, json=change).json()['successor_job_id'] == successor['job_id']
+
+
+def test_stop_after_steer_discards_automatic_continuation(tmp_path):
+    entered, release = threading.Event(), threading.Event()
+    class Slow:
+        def complete(self, **kwargs):
+            entered.set()
+            assert release.wait(4)
+            return final_turn('旧回复')
+    with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: Slow())) as http:
+        make_run(http)
+        first = post_job(http)
+        assert entered.wait(2)
+        path = f'/api/runs/{RUN}/jobs/{first["job_id"]}'
+        http.post(path + '/steer', json={
+            'text': '改目标', 'request_id': 'change', 'expected_goal_revision': 0})
+        assert http.post(path + '/cancel').json()['steer_status'] == 'discarded'
+        release.set()
+        old = wait_job(http, first['job_id'])
+        assert old['status'] == 'cancelled' and old['successor_job_id'] is None
+        assert http.get(f'/api/runs/{RUN}/jobs/latest').json()['job_id'] == first['job_id']
+
+
+def test_stop_cannot_be_reinterpreted_as_new_steering(tmp_path):
+    entered, release = threading.Event(), threading.Event()
+    class Slow:
+        def complete(self, **kwargs):
+            entered.set()
+            assert release.wait(4)
+            return final_turn('旧回复')
+    with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: Slow())) as http:
+        make_run(http)
+        first = post_job(http)
+        assert entered.wait(2)
+        path = f'/api/runs/{RUN}/jobs/{first["job_id"]}'
+        assert http.post(path + '/cancel').json()['status'] == 'cancelling'
+        rejected = http.post(path + '/steer', json={
+            'text': '现在改目标', 'request_id': 'after-stop', 'expected_goal_revision': 0})
+        assert rejected.status_code == 409
+        release.set()
+        old = wait_job(http, first['job_id'])
+        assert old['successor_job_id'] is None
+
+
+def test_job_event_subscription_replays_durable_marks_without_private_payloads(tmp_path):
+    model = ScriptedModel([final_turn('完成')])
+    with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: model)) as http:
+        make_run(http)
+        first = post_job(http)
+        ended = wait_job(http, first['job_id'])
+        response = http.get(f'/api/runs/{RUN}/jobs/{first["job_id"]}/events')
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'data: {"seq":' in response.text
+        assert '"kind": "job_status"' in response.text
+        assert '完成' not in response.text
+        after = http.get(f'/api/runs/{RUN}/jobs/{first["job_id"]}/events',
+                         params={'after_seq': ended['cursor']})
+        assert after.text == ''
+
+
 def test_restart_marks_interrupted_and_preserves_unknown_call(tmp_path):
     settings = settings_for(tmp_path)
     store = Store(tmp_path)
@@ -147,6 +332,57 @@ def test_restart_marks_interrupted_and_preserves_unknown_call(tmp_path):
         assert len(model.calls) == 1
         assert (store.run_dir(RUN) / 'ledger.jsonl').read_bytes().startswith(original_ledger)
         assert Ledger(store, settings).totals().unknown_calls == 1
+
+
+@pytest.mark.parametrize(('before', 'after'), [
+    ('running', 'interrupted'), ('cancelled', 'cancelled'),
+])
+def test_restart_keeps_steer_receipt_without_replaying_model(tmp_path, before, after):
+    settings = settings_for(tmp_path)
+    store = Store(tmp_path)
+    store.create_run(RUN, '测试', '测试')
+    store.append_event(RUN, 'job_created', job_id='old-job', request_id='original',
+                       text='先做方向', model_config={}, context_refs={}, job_kind='conversation')
+    store.append_event(RUN, 'job_status', job_id='old-job', status=before)
+    store.append_event(RUN, 'job_steer_received', job_id='old-job', request_id='adjust',
+                       text='改成分析', expected_goal_revision=0, goal_revision=1)
+    with TestClient(build_app(settings, client_factory=lambda: pytest.fail('no replay model'))) as http:
+        job = http.get(f'/api/runs/{RUN}/jobs/old-job').json()
+        assert job['status'] == after
+        assert job['steer_status'] == 'blocked'
+        assert '未自动接续' in job['steer_reason']
+        assert job['successor_job_id'] is None
+        assert http.get(f'/api/runs/{RUN}/jobs/latest').json()['job_id'] == 'old-job'
+
+
+@pytest.mark.parametrize(('before', 'after'), [
+    ('running', 'interrupted'), ('cancelled', 'cancelled'),
+])
+def test_restart_resumes_saved_steer_only_after_explicit_action(tmp_path, before, after):
+    settings = settings_for(tmp_path)
+    store = Store(tmp_path)
+    store.create_run(RUN, '测试', '测试')
+    store.append_event(RUN, 'job_created', job_id='old-job', request_id='original',
+                       text='先做方向', model_config={}, context_refs={}, job_kind='conversation')
+    store.append_event(RUN, 'job_status', job_id='old-job', status=before)
+    store.append_event(RUN, 'job_steer_received', job_id='old-job', request_id='adjust',
+                       text='改成分析', expected_goal_revision=0, goal_revision=1)
+    model = ScriptedModel([final_turn('按新目标完成')])
+    with TestClient(build_app(settings, client_factory=lambda: model)) as http:
+        old = http.get(f'/api/runs/{RUN}/jobs/old-job').json()
+        assert old['status'] == after and old['steer_status'] == 'blocked'
+        assert old['steer_latest_text'] == '改成分析'
+        assert model.calls == []
+        resumed = http.post(f'/api/runs/{RUN}/jobs/old-job/resume-steer', json={})
+        assert resumed.status_code == 200, resumed.text
+        child = wait_job(http, resumed.json()['job_id'])
+        assert child['status'] == 'succeeded'
+        assert child['parent_job_id'] == 'old-job'
+        assert '先做方向' in child['text'] and '改成分析' in child['text']
+        assert len(model.calls) == 1
+        retry = http.post(f'/api/runs/{RUN}/jobs/old-job/resume-steer', json={})
+        assert retry.status_code == 200 and retry.json()['job_id'] == child['job_id']
+        assert len(model.calls) == 1
 
 
 def test_unresolved_calls_are_limited_to_this_run(tmp_path):

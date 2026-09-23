@@ -14,7 +14,7 @@ import json
 from typing import Any
 
 from ..ledger import Ledger
-from .client import ModelClient, ModelError, SafePreflightError, Turn, Usage
+from .client import JobCancelled, ModelClient, ModelError, SafePreflightError, Turn, Usage
 from .requests import encode, save_request
 
 
@@ -33,6 +33,7 @@ class BudgetedClient:
         self.run_id = run_id
         self.role = role
         self.stage = stage
+        self.public_progress = None
 
     def complete(
         self,
@@ -83,14 +84,25 @@ class BudgetedClient:
                                    usage_status='known', ok=False, error='cancelled before provider invocation')
             raise
         try:
-            turn = target.complete(**request)
+            progress_call = getattr(target, 'complete_with_progress', None)
+            turn = (progress_call(**request, on_progress=self.public_progress)
+                    if callable(progress_call) else target.complete(**request))
         except Exception as exc:
-            usage = exc.usage if isinstance(exc, ModelError) else Usage(None, None)
+            if isinstance(exc, ModelError):
+                usage, usage_status = exc.usage, exc.usage_status
+            elif isinstance(exc, JobCancelled):
+                usage = exc.usage or Usage(None, None)
+                observed = (usage.input_tokens, usage.output_tokens)
+                usage_status = ('known' if exc.usage_final and all(
+                    type(value) is int and value >= 0 for value in observed) else
+                    'partial' if any(value is not None for value in observed) else 'unknown')
+            else:
+                usage, usage_status = Usage(None, None), 'unknown'
             self.ledger.settle_call(
                 self.run_id, call_id,
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
-                usage_status=exc.usage_status if isinstance(exc, ModelError) else "unknown",
+                usage_status=usage_status,
                 ok=False,
                 error=str(exc)[:300] if isinstance(exc, ModelError) else f"{type(exc).__name__}: call failed; usage unconfirmed",
             )

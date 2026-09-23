@@ -21,6 +21,13 @@ from .store import Store
 TERMINAL = frozenset({'succeeded', 'failed', 'blocked', 'cancelled', 'interrupted'})
 
 
+def _continuation_text(original, corrections):
+    return ('调整上一条正在执行的任务。原要求：\n' + original +
+            '\n执行中收到的补充要求（按顺序，以后者为准）：\n' +
+            '\n'.join(f'{i}. {row["text"]}' for i, row in enumerate(corrections, 1)) +
+            '\n先核对已保存成果和当前权限，再按最新要求继续。')
+
+
 class WriterLease:
     def __init__(self, root: Path):
         self.root = root
@@ -90,10 +97,18 @@ class JobManager:
             self.lease.acquire()
             try:
                 for run in self.store.list_runs():
+                    all_rows = self.store.read_events(run.run_id)
                     for job in self.list(run.run_id):
                         if job['status'] not in TERMINAL:
                             self._event(run.run_id, job['job_id'], 'job_status', status='interrupted',
                                         reason='服务曾中断；未自动重发。先检查调用台账，再发送新的继续指令。')
+                        rows = [r for r in all_rows if r.get('job_id') == job['job_id']]
+                        if (any(r['kind'] == 'job_steer_received' for r in rows)
+                                and not any(r['kind'] in {'job_steer_discarded', 'job_steer_blocked'} for r in rows)
+                                and not any(r.get('kind') == 'job_created'
+                                            and r.get('parent_job_id') == job['job_id'] for r in all_rows)):
+                            self._event(run.run_id, job['job_id'], 'job_steer_blocked',
+                                        reason='服务中断，调整已保存但未自动接续；检查进度后请明确接续。')
                 self.initialized = True
             except Exception:
                 self.lease.close()
@@ -111,13 +126,22 @@ class JobManager:
         return list(jobs.values())
 
     def get(self, run_id, job_id, after_seq=0):
+        # A terminal old job and its queued successor must be observed as one
+        # transition; otherwise a polling browser can stop watching between them.
+        with self.lock:
+            return self._get_locked(run_id, job_id, after_seq)
+
+    def _get_locked(self, run_id, job_id, after_seq=0):
         with self.store.run_lock(run_id):
-            rows = [e for e in self.store.read_events(run_id) if e.get('job_id') == job_id]
+            all_rows = self.store.read_events(run_id)
+            rows = [e for e in all_rows if e.get('job_id') == job_id]
         created = next((r for r in rows if r['kind'] == 'job_created'), None)
         if created is None:
             raise PipelineError('job_missing', '没有找到这次执行。')
         out = {k: v for k, v in created.items() if k not in ('kind', 'seq')}
-        out.update(run_id=run_id, status='queued', events=[], cursor=created['seq'], reason='', deliverable=None)
+        out.update(run_id=run_id, status='queued', events=[], cursor=created['seq'], reason='',
+                   deliverable=None, goal_revision=0, steer_status=None, successor_job_id=None)
+        corrections = []
         for row in rows:
             out['cursor'] = row['seq']
             if row['kind'] == 'job_status':
@@ -126,6 +150,23 @@ class JobManager:
                 out['deliverable'] = row['deliverable']
             if row['kind'] == 'job_progress' and row['seq'] > after_seq:
                 out['events'].append({**row['event'], 'seq': row['seq'], 'at': row['at']})
+            if row['kind'] == 'job_steer_received':
+                corrections.append(row)
+                out['goal_revision'] = row['goal_revision']
+                out['steer_status'] = 'received'
+            if row['kind'] == 'job_steer_blocked':
+                out['steer_status'] = 'blocked'
+                out['steer_reason'] = row['reason']
+            if row['kind'] == 'job_steer_discarded':
+                out['steer_status'] = 'discarded'
+        successor = next((r for r in all_rows if r.get('kind') == 'job_created'
+                          and r.get('parent_job_id') == job_id), None)
+        if successor is not None:
+            out['successor_job_id'] = successor['job_id']
+            out['steer_status'] = 'continued'
+        out['steer_count'] = len(corrections)
+        if corrections:
+            out['steer_latest_text'] = corrections[-1]['text']
         out['unresolved_calls'] = [
             {'run_id': r.run_id, 'call_id': r.call_id, 'role': r.role,
              'call_status': r.call_status, 'usage_status': r.usage_status}
@@ -155,7 +196,8 @@ class JobManager:
             self.changed.notify_all()
         return row
 
-    def submit(self, run_id, text, request_id, *, kind='conversation', payload=None, prepare=None):
+    def submit(self, run_id, text, request_id, *, kind='conversation', payload=None,
+               prepare=None, parent_job_id=None):
         with self.lock:
             self.initialize()
             if self.closing:
@@ -181,16 +223,76 @@ class JobManager:
                         'run_brief_sha256': hashlib.sha256(self.store.read_run(run_id).brief.encode('utf-8')).hexdigest(),
                         'artifacts': [{'stage': a.stage, 'version': a.version, 'sha256': a.sha256} for a in artifacts]}
                 self._event(run_id, job_id, 'job_created', request_id=request_id, text=text,
-                            model_config=config, context_refs=refs, job_kind=kind, job_payload=payload)
+                            model_config=config, context_refs=refs, job_kind=kind,
+                            job_payload=payload, parent_job_id=parent_job_id)
             self.active = (run_id, job_id)
             self.cancelled = threading.Event()
             self._event(run_id, job_id, 'job_status', status='running')
             threading.Thread(target=self._work, args=(run_id, job_id, text, runner), daemon=True).start()
             return self.get(run_id, job_id)
 
+    def steer(self, run_id, job_id, text, request_id, expected_goal_revision):
+        """Durably accept an in-flight correction, then stop the old model turn.
+
+        The successor starts only after the old worker has settled. Retried
+        requests return their original receipt even after that worker exits.
+        """
+        text = text.strip()
+        if not text:
+            raise PipelineError('steer_empty', '请填写调整内容。')
+        with self.lock:
+            self.initialize()
+            current = self.get(run_id, job_id)
+            rows = [r for r in self.store.read_events(run_id)
+                    if r.get('job_id') == job_id and r.get('kind') == 'job_steer_received']
+            prior = next((r for r in rows if r['request_id'] == request_id), None)
+            if prior is not None:
+                if prior['text'] != text or prior['expected_goal_revision'] != expected_goal_revision:
+                    raise PipelineError('request_conflict', '相同 request_id 对应另一条调整指令。')
+                return current
+            if self.active != (run_id, job_id) or current['status'] not in {'running', 'cancelling'}:
+                raise PipelineError('job_not_active', '原任务已经结束，请刷新后发送新的指令。')
+            if current['status'] == 'cancelling' and current['steer_status'] != 'received':
+                raise PipelineError('steer_scope', '当前任务已经要求停止；请等待结束后发送新指令。')
+            if current.get('job_kind', 'conversation') != 'conversation':
+                raise PipelineError('steer_scope', '当前任务不能在执行中调整；请停止后从对应入口重新发起。')
+            if current['steer_status'] == 'discarded':
+                raise PipelineError('steer_scope', '当前任务已要求停止，请等待结束后重新发送。')
+            if expected_goal_revision != current['goal_revision']:
+                raise PipelineError('goal_conflict', '任务目标已更新，请刷新后按当前目标调整。')
+            if len(rows) >= 8 or sum(len(r['text']) for r in rows) + len(text) > 12000:
+                raise PipelineError('steer_limit', '这轮补充内容已经较长，请等当前任务结束后发起新对话。')
+            with self.store.run_lock(run_id):
+                self._event(run_id, job_id, 'job_steer_received', text=text, request_id=request_id,
+                            expected_goal_revision=expected_goal_revision,
+                            goal_revision=expected_goal_revision + 1)
+                self._event(run_id, job_id, 'job_progress', event={
+                    'type': 'agent_control', 'message': '已收到调整，等待当前调用结束后按新要求继续。'})
+                self.cancelled.set()
+            if current['status'] != 'cancelling':
+                self._event(run_id, job_id, 'job_status', status='cancelling',
+                            reason='正在停止旧任务，随后按调整后的目标继续。')
+            return self.get(run_id, job_id)
+
     def check_cancel(self):
         if self.cancelled.is_set():
             raise JobCancelled('用户已请求停止；未启动下一次模型调用或工具。')
+
+    def resume_steer(self, run_id, job_id):
+        """Explicitly continue a correction left behind by recovery or restart."""
+        with self.lock:
+            self.initialize()
+            current = self.get(run_id, job_id)
+            if current['successor_job_id']:
+                return self.get(run_id, current['successor_job_id'])
+            if current['steer_status'] != 'blocked' or current['status'] not in TERMINAL:
+                raise PipelineError('steer_state', '当前没有待接续的调整，请刷新任务状态。')
+            if current['open_attempts']:
+                raise PipelineError('steer_recovery', '请先在恢复面板处理未完成阶段。')
+            corrections = [r for r in self.store.read_events(run_id)
+                           if r.get('job_id') == job_id and r.get('kind') == 'job_steer_received']
+            return self.submit(run_id, _continuation_text(current['text'], corrections),
+                               f'steer:{job_id}', parent_job_id=job_id)
 
     def _work(self, run_id, job_id, text, runner):
         def emit(event):
@@ -225,6 +327,22 @@ class JobManager:
             with self.lock:
                 self._event(run_id, job_id, 'job_status', status=status, reason=reason)
                 self.active = None
+                corrections = [r for r in self.store.read_events(run_id)
+                               if r.get('job_id') == job_id and r.get('kind') == 'job_steer_received']
+                discarded = any(r.get('job_id') == job_id and r.get('kind') == 'job_steer_discarded'
+                                for r in self.store.read_events(run_id))
+                if corrections and not discarded and not self.closing:
+                    # The old user's instruction is included even if cancellation
+                    # happened before Orchestrator.send could write it to chat.
+                    revised = _continuation_text(self.get(run_id, job_id)['text'], corrections)
+                    try:
+                        if self.get(run_id, job_id)['open_attempts']:
+                            raise PipelineError('steer_recovery', '原任务留下未完成阶段，请先在恢复面板处理，再发送调整要求。')
+                        self.submit(run_id, revised, f'steer:{job_id}', parent_job_id=job_id)
+                    except (PipelineError, ValueError, CodexUnavailable, ConnectionUnavailable) as exc:
+                        self._event(run_id, job_id, 'job_steer_blocked', reason=str(exc))
+                        self._event(run_id, job_id, 'job_progress', event={
+                            'type': 'agent_control', 'message': '调整已保存，但未能自动接续；请查看恢复提示。'})
                 if self.closing:
                     self.lease.close()
 
@@ -232,10 +350,15 @@ class JobManager:
         with self.lock:
             current = self.get(run_id, job_id)
             if current['status'] in TERMINAL:
+                successor = current.get('successor_job_id')
+                if successor and self.active == (run_id, successor):
+                    return self.cancel(run_id, successor)
                 return current
             if self.active != (run_id, job_id):
                 raise PipelineError('job_not_active', '任务不在此进程运行；请重新加载中断记录。')
             self.cancelled.set()
+            if current['steer_status'] == 'received':
+                self._event(run_id, job_id, 'job_steer_discarded')
             if current['status'] != 'cancelling':
                 self._event(run_id, job_id, 'job_status', status='cancelling',
                             reason=('停止本地制作等待；提供方可能仍在生成并计费。请从制作记录查询原任务并核实用量。'
@@ -246,6 +369,17 @@ class JobManager:
     def busy(self, run_id):
         with self.lock:
             return self.active is not None and self.active[0] == run_id
+
+    def event_marks(self, run_id, job_id, after_seq=0):
+        """Small, redaction-safe subscription cursor; details stay on GET job."""
+        with self.lock:
+            with self.store.run_lock(run_id):
+                rows = [row for row in self.store.read_events(run_id)
+                        if row.get('job_id') == job_id]
+            if not any(row['kind'] == 'job_created' for row in rows):
+                raise PipelineError('job_missing', '没有找到这次执行。')
+            return [{'seq': row['seq'], 'kind': row['kind']}
+                    for row in rows if row['seq'] > after_seq]
 
     def stream(self, run_id, job_id):
         cursor = 0

@@ -62,6 +62,7 @@ function harness({ post, list, loadRuns } = {}) {
     setStudioView: view => { state.view = view; },
     toast: message => messages.push(message),
     sessionStorage: { setItem() {} },
+    clearFeedbackTarget() { state.feedbackTarget = null; },
     loadDraft() {}, refreshTimeline: async () => {}, restoreJob: async () => { state.busy = false; },
     loadMaterialWorkspace() { calls.push({materialRun:state.runId}); },
   });

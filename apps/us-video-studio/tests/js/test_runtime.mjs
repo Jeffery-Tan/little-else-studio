@@ -209,6 +209,65 @@ test('unchanged polling preserves the stop button and keyboard focus target', ()
   assert.equal(h.nodes.get('job-status').children.at(-1), stopButton);
 });
 
+test('conversation stays correctable while running and old poll cannot undo cancellation', () => {
+  const h = harness(async () => {});
+  const job = {job_id:'j1', job_kind:'conversation', status:'running', cursor:10, events:[]};
+  h.context.showJob(job);
+  assert.equal(h.nodes.get('send').disabled, false);
+  assert.match(h.nodes.get('send').textContent, /调整任务/);
+  h.context.showJob({...job, status:'cancelling', cursor:12, goal_revision:1, steer_status:'received'});
+  h.context.showJob({...job, cursor:11});
+  assert.equal(vm.runInContext('currentJob.status', h.context), 'cancelling');
+  assert.equal(vm.runInContext('currentJob.goal_revision', h.context), 1);
+});
+
+test('a stopped task does not offer adjustment unless a saved adjustment is settling', () => {
+  const h = harness(async () => {});
+  h.context.showJob({job_id:'j1', job_kind:'conversation', status:'cancelling', cursor:12, events:[]});
+  assert.equal(h.nodes.get('send').disabled, true);
+  h.context.showJob({job_id:'j1', job_kind:'conversation', status:'cancelling', cursor:13,
+    steer_status:'received', events:[]});
+  assert.equal(h.nodes.get('send').disabled, false);
+});
+
+test('steering uses one stable request receipt and does not start a concurrent job', async () => {
+  const calls = [];
+  const h = harness(async (url, options) => {
+    calls.push([url, JSON.parse(options.body)]);
+    return {job_id:'j1', job_kind:'conversation', status:'cancelling', cursor:9,
+      goal_revision:1, steer_status:'received', events:[]};
+  });
+  h.context.showJob({job_id:'j1', job_kind:'conversation', status:'running', cursor:5, events:[]});
+  const payload = {text:'只缩短口播', request_id:'same-id', expected_goal_revision:0};
+  await h.context.submitSteer('run-a','j1',payload);
+  assert.deepEqual(calls, [['/api/runs/run-a/jobs/j1/steer', payload]]);
+  assert.equal(h.storage.size, 0);
+  assert.equal(vm.runInContext('currentJob.steer_status', h.context), 'received');
+});
+
+test('saved adjustment stays visible after interruption and resumes only on click', async () => {
+  const calls = [];
+  const child = {job_id:'child', parent_job_id:'old', job_kind:'conversation', status:'succeeded',
+    cursor:21, events:[], brief:{title:'已接续',detail:'新目标已处理'}};
+  const h = harness(async (url, options) => {
+    calls.push({url, options});
+    if (url.endsWith('/resume-steer')) return child;
+    if (url.endsWith('/recovery')) return {revision:'r1',can_continue:true,open_attempts:[]};
+    return child;
+  });
+  h.context.showJob({job_id:'old', job_kind:'conversation', status:'interrupted', cursor:20,
+    steer_status:'blocked', steer_latest_text:'改成分析', steer_reason:'服务中断，未自动接续',
+    events:[], brief:{title:'服务中断',detail:'已保存'}});
+  assert.equal(calls.length, 0);
+  assert.match(visibleText(h.nodes.get('job-status')), /改成分析/);
+  const button = descendants(h.nodes.get('job-status'), n => n.text === '继续保存的调整')[0];
+  assert.ok(button);
+  await button.onclick();
+  assert.equal(calls.filter(call => call.options).length, 1);
+  assert.equal(calls[0].url, '/api/runs/run-a/jobs/old/resume-steer');
+  assert.equal(vm.runInContext('currentJob.job_id', h.context), 'child');
+});
+
 test('timeline failure after acceptance does not lose the running job or enable a second submission', async () => {
   const h = harness(async () => ({ job_id: 'accepted', status: 'running', events: [] }));
   h.context.refreshTimeline = async () => { throw new TypeError('timeline offline'); };

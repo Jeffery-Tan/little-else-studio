@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import httpx
 
-from .client import ModelError
+from .client import JobCancelled, ModelError
 from .openai_compat import _messages as openai_messages, _parse as openai_parse
 
 ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
@@ -66,8 +67,101 @@ def _parse(data, model, *, require_reasoning=False):
     return turn
 
 
+def _stream_turn(lines, model, *, require_reasoning, on_progress=None, check_cancel=None):
+    """Assemble public text and private replay fields from one complete SSE turn.
+
+    Only `delta.content` can produce observer progress. Partial tool JSON and
+    reasoning remain local until the complete response validates in `_parse`.
+    """
+    content, reasoning, calls = [], [], {}
+    finish, usage, actual_model, done = None, None, model, False
+    preview_count, last_preview_size = 0, 0
+    try:
+        for line in lines:
+            if check_cancel:
+                check_cancel()
+            if not line.startswith('data:'):
+                continue
+            value = line[5:].strip()
+            if value == '[DONE]':
+                done = True
+                break
+            chunk = json.loads(value)
+            choices = chunk['choices']
+            if not isinstance(choices, list) or len(choices) != 1 or choices[0].get('index') != 0:
+                raise ValueError('invalid stream choice')
+            choice = choices[0]
+            delta = choice.get('delta') or {}
+            if not isinstance(delta, dict):
+                raise ValueError('invalid stream delta')
+            public = delta.get('content')
+            private = delta.get('reasoning_content')
+            if public is not None:
+                if not isinstance(public, str):
+                    raise ValueError('invalid public delta')
+                content.append(public)
+                rendered = ''.join(content)
+                if (on_progress and preview_count < 16 and len(rendered) - last_preview_size >= 12
+                        and (rendered.endswith(('。', '！', '？', '.', '!', '?', '\n'))
+                             or len(rendered) - last_preview_size >= 120)):
+                    on_progress({'type': 'agent_narration_preview', 'text': rendered[-500:]})
+                    preview_count += 1
+                    last_preview_size = len(rendered)
+            if private is not None:
+                if not isinstance(private, str):
+                    raise ValueError('invalid private delta')
+                reasoning.append(private)
+            for piece in delta.get('tool_calls') or []:
+                index = piece.get('index')
+                if type(index) is not int or not 0 <= index < 16:
+                    raise ValueError('invalid tool index')
+                assembled = calls.setdefault(index, {'id': '', 'type': 'function',
+                                                       'function': {'name': '', 'arguments': ''}})
+                if piece.get('type') not in (None, 'function'):
+                    raise ValueError('invalid tool type')
+                for field in ('id',):
+                    fragment = piece.get(field)
+                    if fragment is not None:
+                        if not isinstance(fragment, str) or (assembled[field] and assembled[field] != fragment):
+                            raise ValueError('invalid tool id')
+                        assembled[field] = fragment
+                function = piece.get('function') or {}
+                for field in ('name', 'arguments'):
+                    fragment = function.get(field)
+                    if fragment is not None:
+                        if not isinstance(fragment, str):
+                            raise ValueError('invalid tool fragment')
+                        if field == 'name':
+                            if assembled['function'][field] and assembled['function'][field] != fragment:
+                                raise ValueError('invalid tool name')
+                            assembled['function'][field] = fragment
+                        else:
+                            assembled['function'][field] += fragment
+                            if len(assembled['function'][field]) > 1_000_000:
+                                raise ValueError('tool arguments too large')
+            if choice.get('finish_reason') is not None:
+                if finish is not None:
+                    raise ValueError('duplicate stream finish')
+                finish = choice['finish_reason']
+            if chunk.get('usage') is not None:
+                usage = chunk['usage']
+            if isinstance(chunk.get('model'), str) and chunk['model']:
+                actual_model = chunk['model']
+    except (ValueError, KeyError, TypeError, AttributeError, IndexError) as exc:
+        raise ModelError(200, 'invalid DeepSeek stream; usage unconfirmed') from None
+    if not done or finish is None:
+        raise ModelError(0, 'DeepSeek stream ended before a complete response; usage unconfirmed')
+    if calls and sorted(calls) != list(range(len(calls))):
+        raise ModelError(200, 'invalid DeepSeek tool stream; usage unconfirmed')
+    return _parse({'model': actual_model, 'choices': [{'finish_reason': finish,
+        'message': {'content': ''.join(content), 'reasoning_content': ''.join(reasoning),
+                    'tool_calls': [calls[i] for i in sorted(calls)]}}], 'usage': usage or {}},
+        model, require_reasoning=require_reasoning)
+
+
 class DeepSeekClient:
-    def __init__(self, token, *, max_tokens=None, timeout=180.0):
+    def __init__(self, token, *, max_tokens=None, timeout=180.0, check_cancel=None,
+                 cancel_event=None):
         if (not isinstance(token, str) or not token or not token.isascii()
                 or any(character.isspace() or ord(character) < 33 or ord(character) == 127 for character in token)):
             raise ValueError("DeepSeek API key must contain ASCII characters without whitespace or control characters")
@@ -76,8 +170,58 @@ class DeepSeekClient:
         self._token = token
         self.max_tokens = max_tokens
         self.timeout = timeout
+        self.check_cancel = check_cancel
+        self.cancel_event = cancel_event
 
-    def complete(self, *, model, system, messages, tools):
+    def complete_with_progress(self, *, model, system, messages, tools, on_progress=None):
+        payload = self._payload(model, system, messages, tools)
+        payload['stream'] = True
+        if self.check_cancel:
+            self.check_cancel()
+        try:
+            with httpx.Client(timeout=self.timeout, follow_redirects=False, trust_env=False) as client:
+                with client.stream('POST', ENDPOINT,
+                                   headers={'Authorization': f'Bearer {self._token}'}, json=payload) as response:
+                    if response.status_code != 200:
+                        raise ModelError(response.status_code, 'request rejected; usage unconfirmed')
+                    done = threading.Event()
+                    def stop_reader():
+                        while not done.wait(.1):
+                            if self.cancel_event.is_set():
+                                try:
+                                    response.close()
+                                except (RuntimeError, httpx.TransportError):
+                                    pass
+                                return
+                    monitor = (threading.Thread(target=stop_reader, daemon=True)
+                               if self.cancel_event is not None else None)
+                    if monitor:
+                        monitor.start()
+                    try:
+                        turn = _stream_turn(response.iter_lines(), model, require_reasoning=bool(tools),
+                                            on_progress=on_progress, check_cancel=self.check_cancel)
+                        if self.check_cancel:
+                            try:
+                                self.check_cancel()
+                            except JobCancelled as exc:
+                                raise JobCancelled(str(exc), usage=turn.usage, usage_final=True) from exc
+                        return turn
+                    finally:
+                        done.set()
+                        if monitor:
+                            monitor.join(timeout=.2)
+        except httpx.TransportError as exc:
+            if self.check_cancel:
+                self.check_cancel()
+            raise ModelError(0, f'transport failed ({type(exc).__name__}); usage unconfirmed') from None
+        except (ModelError, JobCancelled):
+            raise
+        except RuntimeError as exc:
+            if self.check_cancel:
+                self.check_cancel()
+            raise ModelError(0, f'stream failed ({type(exc).__name__}); usage unconfirmed') from None
+
+    def _payload(self, model, system, messages, tools):
         # The provider's discovered model list may grow or retain an existing
         # alias. Validate the wire identifier, not a frozen release catalog.
         if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", model):
@@ -95,6 +239,10 @@ class DeepSeekClient:
                     "parameters": tool["input_schema"]}} for tool in tools]
         except (KeyError, TypeError, ValueError, AttributeError):
             raise ModelError(0, "invalid DeepSeek request structure; request not sent", provider_invoked=False) from None
+        return payload
+
+    def complete(self, *, model, system, messages, tools):
+        payload = self._payload(model, system, messages, tools)
         try:
             with httpx.Client(timeout=self.timeout, follow_redirects=False, trust_env=False) as client:
                 response = client.post(ENDPOINT, headers={"Authorization": f"Bearer {self._token}"}, json=payload)

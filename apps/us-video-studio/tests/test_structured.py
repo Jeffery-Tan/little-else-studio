@@ -408,3 +408,15 @@ def test_a_writing_block_with_no_shot_keeps_the_assumptions():
     blocks = s.view("writing", data)
     assert len(blocks) == 1
     assert blocks[0]["title"] == "这份脚本做了哪些假设"
+
+
+def test_optional_caption_comes_from_the_same_versioned_writing_artifact():
+    data = s.normalize("writing", {
+        "segments": [{"tc": "0:00–0:03", "line": "Lunch is ready."}],
+        "caption": "A compact lunch bag for the commute.",
+    }).data
+    assert data["caption"] == "A compact lunch bag for the commute."
+    assert s.view("writing", data)[-1] == {
+        "type": "text", "title": "发布文案", "text": data["caption"],
+    }
+    assert "## 发布文案" in s.canonical_document("writing", data)

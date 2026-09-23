@@ -63,21 +63,70 @@ function stageHtml(step, ctx) {
   // not this stage's business, and drawing an empty gate strip here would put a
   // box with no question in it above a document nobody is being asked about.
   const pending = ctx.pending && ctx.pending.stage === step.stage ? ctx.pending : null;
+  const inlineDirection = pending && step.stage === 'direction'
+    ? directionGateHtml(step, pending) : '';
 
   return (
     `<div class="pane${pending ? " has-gate" : ""}" data-stage="${escapeHtml(step.stage)}">` +
-    (pending ? `<a class="decision-jump" href="#stage-decision">阅读后提交决定 ↓</a>` : "") +
+    (pending && !inlineDirection ? `<a class="decision-jump" href="#stage-decision">阅读后提交决定 ↓</a>` : "") +
     titleHtml(step) +
     warnHtml(step) +
     headHtml(step) +
     (step.decision_sentence ? `<div class="pane-decision">${escapeHtml(step.decision_sentence)}</div>` : "") +
-    docHtml(step, ctx) +
+    (inlineDirection || docHtml(step, ctx)) +
     (step.review ? reviewHtml(step.review) : "") +
-    (pending ? gateHtml(pending) : "") +
+    (pending && !inlineDirection ? gateHtml(pending) : "") +
     askHtml(step, questions, drafts) +
     teamIssuesHtml(step.team_issues || []) +
     `</div>`
   );
+}
+
+function directionGateHtml(step, pending) {
+  const cards = (step.blocks || []).find(block => block.type === 'cards')?.cards || [];
+  const options = pending.options || [];
+  if (!cards.length || !options.length || cards.length !== options.length) return '';
+  const matching = options.map(option => cards.find(card => {
+    const head = String(card.head || '').trim();
+    return head === option.key || head === `方向 ${option.key}`;
+  }));
+  if (matching.some(card => !card) || new Set(matching).size !== matching.length) return '';
+  const findField = (card, names) => (card.fields || []).find(field => names.includes(field.label))?.value || '';
+  const optionCard = (option, card) => {
+    const title = findField(card, ['名称', '标题', '创意名称']) || `方向 ${option.key}`;
+    const claim = findField(card, ['主张', '故事概述', '创意主张']);
+    const opening = findField(card, ['前 3 秒', '开场', '开场句']);
+    const fields = (card.fields || []).filter(field =>
+      !field.secondary && !['名称', '标题', '创意名称', '主张', '故事概述', '创意主张', '前 3 秒', '开场', '开场句'].includes(field.label));
+    const details = (card.fields || []).filter(field => field.secondary);
+    return `<article class="creator-direction-card" data-direction-card="${escapeHtml(option.key)}">` +
+      (card.media ? `<div class="creator-direction-media" data-media="${escapeHtml(card.media)}"></div>` : '') +
+      `<div class="creator-direction-body"><span class="creator-kicker">${option.recommended ? '团队推荐 · ' : ''}方向 ${escapeHtml(option.key)}</span>` +
+      `<h3>${escapeHtml(title)}</h3>` +
+      (claim ? `<p class="creator-direction-claim">${escapeHtml(claim)}</p>` : '') +
+      (opening ? `<div class="creator-opening"><span>开场表达</span><p>${escapeHtml(opening)}</p></div>` : '') +
+      (fields.length ? `<dl class="creator-direction-fields">${fields.map(field => `<dt>${escapeHtml(field.label)}</dt><dd>${escapeHtml(field.value)}</dd>`).join('')}</dl>` : '') +
+      (details.length ? `<details class="creator-direction-details"><summary>取舍、依据与执行条件</summary><dl>${details.map(field => `<dt>${escapeHtml(field.label)}</dt><dd>${escapeHtml(field.value)}</dd>`).join('')}</dl></details>` : '') +
+      `<button type="button" class="good creator-direction-choose" data-act="approve" data-option-key="${escapeHtml(option.key)}">采用这个方向并继续</button></div></article>`;
+  };
+  const other = (step.blocks || []).filter(block => block.type !== 'cards');
+  const findings = pending.findings?.length ? (pending.passed
+    ? `<details class="gate-findings"><summary>审核提的 ${pending.findings.length} 点</summary>${pending.findings.map(findingHtml).join('')}</details>`
+    : `<div class="gate-findings creator-review-warning"><strong>审核尚未通过，采用前请核对</strong>${pending.findings.map(findingHtml).join('')}</div>`) : '';
+  return `<section id="stage-decision" class="gate creator-direction-gate" role="group" aria-label="选择这一版创意方向" ` +
+    `data-stage="direction" data-version="${escapeHtml(pending.version)}" data-sha="${escapeHtml(pending.artifact_sha256 || '')}" ` +
+    `data-passed="${pending.passed ? '1' : '0'}" data-needs-choice="1">` +
+    `<div class="creator-decision-intro"><span class="creator-kicker">现在需要你决定</span><h2>选一个方向，继续写成方案</h2><p>${escapeHtml(pending.headline)}</p></div>` +
+    `<div class="creator-direction-grid">${options.map((option, index) => optionCard(option, matching[index])).join('')}</div>` +
+    `<div class="creator-direction-footer">${findings}<label class="gate-note-label">${pending.passed ? '补充意见' : '覆盖审核或退回的具体理由'}<textarea class="reason" rows="3" maxlength="8000" aria-label="决定意见" placeholder="想保留什么，哪里需要调整？"></textarea></label>` +
+    `<p class="gate-feedback" role="status">选择方向才会提交；推荐不代表已选</p>` +
+    `<button type="button" class="bad small" data-act="reject">都不合适，退回修改</button>` +
+    `<p class="gate-limit">仅确认这一版策划，不开始图片或视频生成。</p>` +
+    `<details class="gate-next"><summary>后续阶段与历史用量</summary>` +
+    (pending.next_stage_label ? `<div>下一步：${escapeHtml(pending.next_stage_label)} · ${escapeHtml(pending.next_owner)}</div>` : '') +
+    `<div class="gate-next-cost">${escapeHtml(pending.next_cost_sentence || '')}</div></details>` +
+    (other.length ? `<details class="creator-direction-support"><summary>完整依据与其他内容</summary>${blocksHtml(other)}</details>` : '') +
+    `</div></section>`;
 }
 
 function teamIssuesHtml(issues) {

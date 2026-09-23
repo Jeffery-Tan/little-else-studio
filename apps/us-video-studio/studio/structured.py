@@ -124,6 +124,7 @@ SHAPES: dict[str, Shape] = {
         # `file` names the material this shot would use, when one exists.
         Field("segments", "rows", ("tc", "picture", "line", "sound", "duration", "file")),
         Field("total_duration", "text"),
+        Field("caption", "text"),
         Field("assumptions", "texts"),
         Field("open_questions", "rows", QUESTION_COLUMNS),
     )),
@@ -187,6 +188,7 @@ BRIEF: dict[str, str] = {
   文件名**；没有就先别填——这一段还没到能配画面的地步。
   `tc` 请写成 `0:00–0:03` 这样的区间，界面按它画时间条的长度。
 - `total_duration`：总时长，要和各段对得上。
+- `caption`：可直接用于美国平台发布的英文文案；只写稿件支持的商品事实，缺少依据时留空。
 - `assumptions`：你在时长、可执行性上做的假设，一条一行。""",
 }
 
@@ -386,7 +388,7 @@ def canonical_document(stage: str, data: dict[str, Any]) -> str:
         "facts": "已知事实", "constraints": "制作要求", "open_questions": "待处理事项",
         "options": "方向方案", "recommended": "推荐方向", "recommended_because": "推荐理由",
         "prerequisites": "需要验证的前提", "dependency_matrix": "方案依赖", "items": "素材安排",
-        "gaps": "素材缺口", "segments": "分镜内容", "total_duration": "总时长", "assumptions": "时长假设",
+        "gaps": "素材缺口", "segments": "分镜内容", "total_duration": "总时长", "caption": "发布文案", "assumptions": "时长假设",
         "label": "事实", "value": "内容", "source": "来源", "key": "方案", "claim": "主张",
         "audience_moment": "观众与处境", "hook": "开场", "story": "画面与表达", "gives_up": "方案取舍",
         "evidence_strength": "依据", "difficulty": "执行难度", "asset_needs": "素材需求",
@@ -826,6 +828,8 @@ def _writing(data: dict[str, Any]) -> list[dict[str, Any]]:
                 "items": [{"text": t} for t in data["assumptions"]],
             }
         )
+    if data.get("caption"):
+        blocks.append({"type": "text", "title": "发布文案", "text": data["caption"]})
     return blocks
 
 

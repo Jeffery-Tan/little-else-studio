@@ -2,13 +2,14 @@
 from __future__ import annotations
 import asyncio
 import json
+import re
 import uuid
 from typing import Any, Iterator
 from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 from .connection_checks import ConnectionCheckError
 from .connections import ConnectionConflict
-from .http_contracts import DeepSeekCheckIn, ReviewActionIn, JobIn, MessageIn, redact_http_event
+from .http_contracts import DeepSeekCheckIn, ReviewActionIn, JobIn, MessageIn, SteerIn, MediaFeedbackTarget, redact_http_event
 from .models import PipelineError
 from .project_brief import project_brief, latest_execution
 from . import vocabulary
@@ -93,6 +94,46 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
     def create_job(run_id: str, payload: JobIn):
         require_run(run_id)
         try:
+            target = payload.feedback_target
+            if target and payload.question_id:
+                raise ValueError('逐句反馈不能同时回答待决问题。')
+            def prepare_target(rid):
+                if target:
+                    if target.run_id != rid:
+                        raise ValueError('反馈所属项目已变化，请重新选择当前稿件。')
+                    if isinstance(target, MediaFeedbackTarget):
+                        attempt = app.state.production.attempts(rid).get(target.attempt_id)
+                        output = attempt.get('output') if attempt else None
+                        if (not attempt or attempt.get('status') not in {'succeeded', 'completed'}
+                                or not output or output.get('sha256') != target.output_sha256):
+                            raise ValueError('媒体结果已变化，请重新打开作品后选择反馈位置。')
+                        from .evidence import evidence_snapshot
+                        materials = evidence_snapshot(store, rid)['materials']
+                        if not any(m['name'] == output.get('name') and m['sha256'] == target.output_sha256
+                                   for m in materials):
+                            raise ValueError('媒体文件暂时无法核对，请重新打开作品。')
+                        if target.at_seconds is not None and attempt.get('media_kind') != 'video':
+                            raise ValueError('只有视频可以标记播放时间。')
+                    else:
+                        stage = pipeline.stage_state(rid, target.stage)
+                        if (not stage.latest or stage.latest.version != target.version
+                                or stage.latest.sha256 != target.artifact_sha256
+                                or not stage.integrity_ok or stage.stale):
+                            raise ValueError('脚本版本已变化，请重新选择当前稿件中的句子。')
+                        quote = re.sub(r'\s+', ' ', target.quote).strip()
+                        sources = (store.read_artifact_text(rid, target.stage, target.version),
+                                   json.dumps(stage.latest.structured, ensure_ascii=False))
+                        if not any(quote in re.sub(r'\s+', ' ', source) for source in sources):
+                            raise ValueError('所选句子不在当前脚本中，请重新选择。')
+                return prepare_job(rid, reference_consent=payload.reference_consent,
+                                   feedback_target=target.model_dump(exclude_none=True) if target else None)
+            target_meta = {'feedback_target': target.model_dump(exclude_none=True)} if target else {}
+            if isinstance(target, MediaFeedbackTarget):
+                location = f'第 {target.at_seconds:.1f} 秒' if target.at_seconds is not None else '这张图片'
+                message = f'针对项目中这次已保存媒体结果的{location}：{payload.text}'
+            else:
+                message = (f'针对脚本第 {target.version} 版的这段内容「{target.quote}」：{payload.text}'
+                           if target else payload.text)
             if payload.question_id:
                 from .interactions import check_answer
                 def prepare_answer(rid):
@@ -100,9 +141,9 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
                     return prepare_job(rid, reference_consent=payload.reference_consent)
                 return present_job(jobs.submit(run_id, payload.text, payload.request_id,
                     payload={'question_id': payload.question_id, **({'reference_consent': True} if payload.reference_consent else {})}, prepare=prepare_answer))
-            return present_job(jobs.submit(run_id, payload.text, payload.request_id,
-                payload={'reference_consent': True} if payload.reference_consent else None,
-                prepare=lambda rid: prepare_job(rid, reference_consent=payload.reference_consent)))
+            return present_job(jobs.submit(run_id, message, payload.request_id,
+                payload={**target_meta, **({'reference_consent': True} if payload.reference_consent else {})} or None,
+                prepare=prepare_target))
         except (PipelineError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -119,11 +160,51 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
         except PipelineError as exc:
             raise HTTPException(404, str(exc)) from exc
 
+    @app.get("/api/runs/{run_id}/jobs/{job_id}/events")
+    def follow_job_events(run_id: str, job_id: str, request: Request, after_seq: int = 0):
+        require_run(run_id)
+        try:
+            jobs.get(run_id, job_id)
+        except PipelineError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        last_id = request.headers.get('last-event-id', '')
+        cursor = max(0, after_seq, int(last_id) if last_id.isdecimal() else 0)
+
+        async def observe():
+            nonlocal cursor
+            while not await request.is_disconnected():
+                for mark in jobs.event_marks(run_id, job_id, cursor):
+                    cursor = mark['seq']
+                    yield f"id: {cursor}\ndata: {json.dumps(mark)}\n\n"
+                if jobs.get(run_id, job_id)['status'] in {'succeeded', 'failed', 'blocked', 'cancelled', 'interrupted'}:
+                    return
+                await asyncio.sleep(.2)
+
+        return StreamingResponse(observe(), media_type='text/event-stream', headers={
+            'cache-control': 'no-store', 'x-accel-buffering': 'no'})
+
     @app.post("/api/runs/{run_id}/jobs/{job_id}/cancel")
     def cancel_job(run_id: str, job_id: str):
         require_run(run_id)
         try:
             return present_job(jobs.cancel(run_id, job_id))
+        except PipelineError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/runs/{run_id}/jobs/{job_id}/steer")
+    def steer_job(run_id: str, job_id: str, payload: SteerIn):
+        require_run(run_id)
+        try:
+            return present_job(jobs.steer(run_id, job_id, payload.text,
+                                          payload.request_id, payload.expected_goal_revision))
+        except PipelineError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/runs/{run_id}/jobs/{job_id}/resume-steer")
+    def resume_steer(run_id: str, job_id: str):
+        require_run(run_id)
+        try:
+            return present_job(jobs.resume_steer(run_id, job_id))
         except PipelineError as exc:
             raise HTTPException(409, str(exc)) from exc
 
