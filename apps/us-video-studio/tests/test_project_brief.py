@@ -1,6 +1,6 @@
 """Creator workflow contracts, using temporary data and scripted models only."""
 import pytest
-from fastapi.testclient import TestClient
+from local_http import TestClient
 
 from fakes import ScriptedModel, final_turn, tool_turn
 from studio.agents.client import ModelError, run_agent_loop

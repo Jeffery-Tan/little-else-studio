@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from studio.learning import LearningService, LearningConflict, SKILLS, DOCUMENTS, REPOSITORY, core, _json, _sha
+from studio.learning import (LearningService, LearningConflict, SKILLS, DOCUMENTS,
+                             METHOD_CARDS, REPOSITORY, validate_method_packages, core, _json, _sha)
 from studio.store import Store
 from studio.models import PipelineError
 
@@ -48,6 +49,10 @@ def env(tmp_path):
         target = repo / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(title + " raw historical report", encoding="utf-8")
+    for ident, spec in METHOD_CARDS.items():
+        target = repo / spec['file']
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('Fixture method card ' + ident, encoding='utf-8')
     store = Store(tmp_path / "external")
     store.create_run("run-one", "Fixture", "US brief")
     artifact = store.write_artifact("run-one", "direction", 1, "Exact fixture creative", summary="Fixture", author_role="director", attempt=1)
@@ -77,6 +82,22 @@ def test_catalog_is_full_human_audit_but_model_directory_is_safe(env):
     with pytest.raises(ValueError):
         service.read_method_document("baseline-001", role="orchestrator")
     assert service.read_method_document(SKILLS[0])["text"] == "FULL " + SKILLS[0]
+
+
+def test_method_packages_are_registered_and_role_scoped(env):
+    service, store, _ = env
+    assert validate_method_packages() == []
+    assert set(METHOD_CARDS) <= {d['id'] for d in service.skill_catalog('orchestrator')['documents']}
+    assert 'video-recovery' not in {d['id'] for d in service.skill_catalog('reviewer')['documents']}
+    card = service.read_method_document('video-recovery', role='writer', run_id='run-one')
+    assert card['source'] == 'tracks/us/docs/ai-video-recovery-policy.md'
+    assert card['text'] == 'Fixture method card video-recovery'
+    assert card['sha256'] and card['snapshot_sha256']
+    assert store.read_events('run-one')[-1]['document_id'] == 'video-recovery'
+    with pytest.raises(ValueError):
+        service.read_method_document('video-recovery', role='reviewer')
+    with pytest.raises(ValueError):
+        service.read_method_document('batch-001', role='writer')
 
 
 def test_context_persists_actual_text_and_dependency_purpose_without_holdout(env):

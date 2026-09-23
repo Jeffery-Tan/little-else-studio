@@ -717,6 +717,7 @@ class Pipeline:
         selected_option_id: str | None = None,
         expected_artifact_sha256: str | None = None,
         expected_version: int | None = None,
+        continue_after: bool = False,
     ) -> Approval:
         """Record a user decision. Only the server calls this, only after a click.
 
@@ -747,6 +748,7 @@ class Pipeline:
             if (prior.decision in (decision, "approved_override" if decision == "approved" else decision)
                     and prior.note == final_note
                     and prior.selected_option_id == selected_option_id
+                    and prior.continue_after == continue_after
                     and (expected_artifact_sha256 is None or prior.artifact_sha256 == expected_artifact_sha256)
                     and (expected_version is None or prior.artifact_version == expected_version)):
                 return prior
@@ -837,6 +839,7 @@ class Pipeline:
             nonce_sha256=sha256_text(nonce),
             artifact_version=state.latest.version,
             selected_option_id=selected_option_id,
+            continue_after=continue_after,
         )
         self.store.append_approval(run_id, approval)
         self.store.append_event(

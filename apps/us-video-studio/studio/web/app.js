@@ -148,14 +148,17 @@ async function loadRuns() {
 async function selectRun(runId) {
   if (state.decisionBusy) { $('run-select').value = state.runId; return false; }
   toggleMaterials(false);
+  $('reader').hidden = true;
   $('materials-grid').innerHTML = '';
   $('reference-video-results').innerHTML = '';
   $('reference-video-open').onclick = null;
   $('materials-project-name').textContent = '';
   if (typeof closeEmbeddedProduction === 'function') closeEmbeddedProduction();
   state.canvasTab = 'plan';
-  $('stage').hidden=false;$('journey-media').hidden=true;
-  for(const tab of document.querySelectorAll('[data-journey-tab]'))tab.setAttribute('aria-selected',String(tab.dataset.journeyTab==='plan'));
+  $('stage').hidden=false;$('journey-storyboard').hidden=true;$('journey-video').hidden=true;
+  for(const tab of document.querySelectorAll('[data-journey-tab]')){
+    const selected=tab.dataset.journeyTab==='plan';tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;
+  }
   $('spend-panel').hidden = true;
   $('spend-panel').costRequest = null;
   if (state.runId) state.chatDrafts.set(state.runId, $('chat-input').value);
@@ -1004,15 +1007,14 @@ function wireGate(host) {
   const gate = host.querySelector(".gate");
   if (!gate) return;
   const reason = gate.querySelector(".reason");
-  const surface = gate.dataset.journey === "1" ? "journey" : "stage";
-  const key = `studio-decision:${state.runId}:${gate.dataset.stage}:${gate.dataset.sha}:${surface}`;
+  const key = `studio-decision:${state.runId}:${gate.dataset.stage}:${gate.dataset.sha}:stage`;
+  const legacyJourneyKey = `studio-decision:${state.runId}:${gate.dataset.stage}:${gate.dataset.sha}:journey`;
   const status = gate.querySelector(".gate-feedback");
   let draft = { note: "", option: null, nonce: null };
-  try { draft = { ...draft, ...JSON.parse(localStorage.getItem(key) || "{}") }; } catch {}
+  try { draft = { ...draft, ...JSON.parse(localStorage.getItem(key) || localStorage.getItem(legacyJourneyKey) || "{}") }; } catch {}
   reason.value = draft.note || "";
-  // Scope to this gate. Journey and stage use different radio `name`s so two
-  // open gates never form one document-level group (P0-4). Match any option
-  // radio inside the gate, not only fieldset-wrapped ones.
+  // Scope choices to the sole version-bound gate; legacy drafts from the old
+  // conversation form are restored here without reusing its second submit path.
   const optionRadios = () => gate.querySelectorAll(
     'fieldset input[type="radio"], input[name^="direction-choice"]'
   );
@@ -1043,7 +1045,7 @@ function wireGate(host) {
     gate.dataset.saving = "1";
     for (const control of gate.querySelectorAll('button,input,textarea')) control.disabled = true;
     const shown = { stage: gate.dataset.stage, expected_version: Number(gate.dataset.version), expected_artifact_sha256: gate.dataset.sha };
-    let continueText = null;
+    let startedJob = false;
     save(); status.textContent = "正在保存…";
     try {
       if (!draft.nonce || draft.decision !== decision) {
@@ -1051,19 +1053,17 @@ function wireGate(host) {
         draft.nonce = (await api(`/api/runs/${runId}/nonce?${query}`, { method: "POST" })).nonce;
         draft.decision = decision; save();
       }
-      await api(`/api/runs/${runId}/decision`, {method:"POST",body:JSON.stringify({
+      const result = await api(`/api/runs/${runId}/decision`, {method:"POST",body:JSON.stringify({
         ...shown, nonce:draft.nonce, decision, note,
         override_reason: decision === "approved" && gate.dataset.passed !== "1" ? note : "",
         selected_option_id: decision === "approved" ? draft.option : null,
+        continue_after: true,
       })});
-      try { localStorage.removeItem(key); } catch {}
-      if (gate.dataset.journey === '1') continueText = decision === 'returned'
-        ? `请按我的补充意见调整当前方案：${note}。完成内部检查后让我看方案。`
-        : shown.stage === 'direction'
-          ? `我已在界面选择方向 ${draft.option}。${note} 请继续完成素材安排和完整方案，完成内部审核后展示给我确认。`
-          : `我已在界面确认完整方案。${note} 请准备对应的分镜参考图制作方案，在工作区展示实际输入和费用供我确认。先不提交图片或视频生成。`;
-      toast(decision === "approved" ? "已确认，正在接续下一步。" : "已收到调整意见。");
-      await refreshTimeline();
+      try { localStorage.removeItem(key); localStorage.removeItem(legacyJourneyKey); } catch {}
+      startedJob = result.continuation?.status === 'started';
+      toast(startedJob ? "决定已保存，团队正在继续。" : "决定已保存，下一步尚未启动。请检查连接后点击继续。", !startedJob);
+      try { await refreshTimeline(); }
+      catch { toast("决定已保存，但页面暂时无法刷新。请重新打开项目查看接续状态。", true); }
     } catch (err) {
       const message = String(err.message || err);
       const explanation = message.includes("version_conflict") ? "这份方案已更新，当前页面不能批准新版本。" : message.includes("in progress") ? "正在生成内容，请完成后再决定。" : message;
@@ -1078,7 +1078,7 @@ function wireGate(host) {
       gate.dataset.saving = "0";
       for (const control of gate.querySelectorAll('button,input,textarea')) control.disabled = false;
     }
-    if (continueText) await submitJob(runId, {text:continueText,request_id:crypto.randomUUID()});
+    if (startedJob && runId === state.runId) void restoreJob(runId);
   };
 }
 
@@ -1125,28 +1125,34 @@ function renderMachineDetail(detail) {
 
 /* --------------------------------------------------------------- reader -- */
 
-let readerState = { stage: null, version: null };
+let readerState = { stage: null, version: null, runId: null };
+let readerRequestId = 0;
 
 async function openReader(stage, version) {
-  readerState = { stage, version };
+  readerState = { stage, version, runId: state.runId };
   $("reader").hidden = false;
   await loadReader();
 }
 
 async function loadReader() {
-  const { stage, version } = readerState;
+  const { stage, version, runId } = readerState;
+  const requestId = ++readerRequestId;
+  const current = () => requestId === readerRequestId && runId === state.runId && !$("reader").hidden;
   const body = $("reader-body");
   body.innerHTML = "<p class='muted'>正在打开…</p>";
 
-  let record;
+  let record, versions;
   try {
-    record = await api(`/api/runs/${state.runId}/artifacts/${stage}/${version}`);
+    record = await api(`/api/runs/${runId}/artifacts/${stage}/${version}`);
+    if (!current()) return;
+    versions = await api(`/api/runs/${runId}/artifacts?stage=${stage}`);
   } catch (err) {
+    if (!current()) return;
     body.innerHTML = "";
     body.appendChild(box("p", "muted", String(err.message || err)));
     return;
   }
-  const versions = await api(`/api/runs/${state.runId}/artifacts?stage=${stage}`);
+  if (!current()) return;
 
   $("reader-title").textContent = `${record.numbered} · ${record.version_label}`;
   const sub = `${record.author}写于 ${record.created_at}`;

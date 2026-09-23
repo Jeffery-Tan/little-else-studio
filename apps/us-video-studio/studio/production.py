@@ -141,9 +141,13 @@ def source_snapshot(store, run_id):
         if item:
             artifacts.append({'stage': stage, 'version': item.version, 'sha256': item.sha256,
                               'intact': store.verify_artifact(run_id, stage, item.version)})
+    # Continuation is a job-control preference, not a source fact. Excluding it
+    # also preserves baselines made before Approval gained that optional field.
+    approvals = [{k: v for k, v in a.to_dict().items() if k != 'continue_after'}
+                 for stage in STAGES for a in store.list_approvals(run_id, stage)]
     return digest({'artifacts': artifacts, 'evidence': evidence,
         'brief': store.read_run(run_id).brief, 'references': reference_fingerprint(store, run_id),
-        'approvals': [a.to_dict() for stage in STAGES for a in store.list_approvals(run_id, stage)]})
+        'approvals': approvals})
 
 
 def draft_records(store, run_id):

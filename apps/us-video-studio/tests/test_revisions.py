@@ -4,7 +4,7 @@ import threading
 import time
 
 import pytest
-from fastapi.testclient import TestClient
+from local_http import TestClient
 
 from studio.agents.client import Turn, Usage, ModelError
 from studio.ledger import Ledger

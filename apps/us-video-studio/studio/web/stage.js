@@ -89,12 +89,9 @@ function teamIssuesHtml(issues) {
 
 /* --------------------------------------------------------------- the gate -- */
 
-/* Shared decision copy for stage and journey gates (CLAUDE.md red line 12).
- *
- * One home for approve/reject labels so a journey details button cannot drift
- * from the stage gate or from wireGate/server semantics: whether a note or
- * override reason is required lives in wireGate only; these helpers only word
- * the buttons. ``surface`` is ``'stage'`` (default) or ``'journey'``.
+/* Decision copy lives with the sole version-bound stage gate. Legacy journey
+ * labels remain for old renderer tests; the conversation now only navigates
+ * to this card. Note and override requirements live in wireGate and the server.
  */
 function gateApproveLabel(pending, surface) {
   const journey = surface === "journey";
@@ -104,11 +101,11 @@ function gateApproveLabel(pending, surface) {
   if (journey) {
     return pending.stage === "direction" ? "按此方向完善方案" : "确认方案，准备分镜";
   }
-  return "提交采用决定";
+  return pending.stage === "direction" ? "采用并继续完善方案" : "确认并准备分镜";
 }
 
 function gateRejectLabel(surface) {
-  return surface === "journey" ? "按补充意见调整" : "退回修改";
+  return surface === "journey" ? "按补充意见调整" : "退回并继续修改";
 }
 
 /* Read the work before deciding. A top link reaches this exact-version card;

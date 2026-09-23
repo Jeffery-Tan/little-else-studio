@@ -10,6 +10,7 @@ from studio.agents.roles import DIRECTOR, readable_stages
 from studio.config import Settings
 from studio.evidence import evidence_fingerprint, evidence_snapshot
 from studio.input_import import import_content_input, prepare_content_input
+import studio.input_import as input_import_module
 from studio.ledger import Ledger
 from studio.pipeline import Pipeline
 from studio.store import Store
@@ -210,7 +211,23 @@ def test_content_input_import_preserves_unknown_and_tracks_changed_sources(env, 
         import_content_input(store, pipeline, RUN, path=package, repository_root=root, allowed_roots=[root])
 
 
-def test_content_input_import_rejects_outside_root_before_shared_reader(tmp_path):
+def test_content_input_import_is_independent_of_sibling_workbench(tmp_path, monkeypatch):
+    root, package, source = input_package(tmp_path)
+    monkeypatch.setattr(input_import_module, '__file__', str(tmp_path / 'detached' / 'input_import.py'))
+    prepared = prepare_content_input(package, root, [root])
+    assert prepared['dependencies'][1]['sha256'] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+def test_content_input_import_rejects_missing_source_hash(tmp_path):
+    root, package, _ = input_package(tmp_path)
+    data = json.loads(package.read_text())
+    del data['sources'][0]['sha256']
+    package.write_text(json.dumps(data), encoding='utf-8')
+    with pytest.raises(ValueError, match='sha256'):
+        prepare_content_input(package, root, [root])
+
+
+def test_content_input_import_rejects_outside_root_before_local_reader(tmp_path):
     root, package, source = input_package(tmp_path)
     data = json.loads(package.read_text())
     outside = tmp_path / "not-authorized.txt"

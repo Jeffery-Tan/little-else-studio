@@ -168,8 +168,8 @@ test("both structured and prose-only gates require an explicit submit action", (
   for (const options of [threeOptions, []]) {
     const html = stageHtml(step(), { pending: pending({options}) });
     assert.ok(html.includes('data-act="approve"'));
-    assert.ok(html.includes('提交采用决定'));
-    assert.ok(html.includes('退回修改'));
+    assert.ok(html.includes('采用并继续完善方案'));
+    assert.ok(html.includes('退回并继续修改'));
   }
 });
 

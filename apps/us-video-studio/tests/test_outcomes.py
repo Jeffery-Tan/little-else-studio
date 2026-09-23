@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, HTTPException
-from fastapi.testclient import TestClient
+from local_http import TestClient
 
 from studio.outcomes import install_outcome_routes
 from studio.store import Store

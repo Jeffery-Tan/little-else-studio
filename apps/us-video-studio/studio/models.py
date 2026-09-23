@@ -204,6 +204,7 @@ class Approval:
     nonce_sha256: str
     selected_option_id: str | None = None
     artifact_version: int | None = None
+    continue_after: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -215,6 +216,7 @@ class Approval:
             "nonce_sha256": self.nonce_sha256,
             "selected_option_id": self.selected_option_id,
             "artifact_version": self.artifact_version,
+            "continue_after": self.continue_after,
         }
 
 

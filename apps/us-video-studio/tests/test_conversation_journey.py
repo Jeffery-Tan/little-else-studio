@@ -1,7 +1,7 @@
 import hashlib
 import time
 
-from fastapi.testclient import TestClient
+from local_http import TestClient
 import pytest
 from fakes import ScriptedModel, tool_turn, final_turn
 from studio.server import build_app

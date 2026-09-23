@@ -145,7 +145,7 @@ def test_concurrent_choices_conflict_instead_of_overwriting(env):
 
 def test_http_busy_and_unfinished_attempts_prevent_selection(env):
     from fastapi import FastAPI, HTTPException
-    from fastapi.testclient import TestClient
+    from local_http import TestClient
     service, store, _ = env
     jobs = SimpleNamespace(store=store, pipeline=Pipeline(store), lock=threading.RLock(), active=object())
     app = FastAPI()

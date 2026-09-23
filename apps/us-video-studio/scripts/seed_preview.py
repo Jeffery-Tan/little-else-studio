@@ -8,14 +8,15 @@ free. Re-run it after every UI change.
 WHAT IS REAL HERE: `Store`, `Pipeline`, `Ledger`, `STAGE_SPEC`, the artifact
 files, the event log, the nonce gate, and every line of `timeline.py` /
 `vocabulary.py` / `structured.py` / `materials.py` that turns them into a screen.
-The images and the clip copied into `materials/` are his real product files. This
-writes to its own data root and never touches
+With `--media-root`, the images and clip are copied from an explicitly chosen
+product folder. Without it, the fixture keeps its material references empty and
+shows the missing-file state. This writes to its own data root and never touches
 `J:/E-Business-Video-Data/us-video-studio`.
 
 WHAT IS NOT REAL: the content. No model ran. The four documents, the reviews and
 the ledger rows below are written by hand, so the numbers in the header are
-fixture numbers, not spend. The product the prose describes is a 保温午餐包 while
-the pictures are his 多功能包 — stand-ins, present to prove the pictures draw.
+fixture numbers, not spend. The product the prose describes is a 保温午餐包; if
+media is supplied, those files are only stand-ins for testing the layout.
 
 ONE DELIBERATE FAILURE: the last storyboard segment names a `.jpg` where the file
 on disk is `.png` — a filename the model half-remembered instead of looked up,
@@ -46,11 +47,12 @@ and no one of them can stand in for another:
     preview-direction-01   ② 的门禁开着（审核通过）— 选项按钮在这里
     preview-done-01        四个阶段都完成、两个门都批过 — 没有任何东西在等你
 
-    python scripts/seed_preview.py [data-root]
+    python scripts/seed_preview.py [data-root] [--media-root PRODUCT-DIRECTORY]
 """
 from __future__ import annotations
 
 import copy
+import argparse
 import shutil
 import sys
 from pathlib import Path
@@ -66,10 +68,6 @@ from studio.config import ROLES, Pricing, Settings  # noqa: E402
 from studio.ledger import Ledger, LedgerEntry  # noqa: E402
 from studio.pipeline import Pipeline  # noqa: E402
 from studio.store import Store  # noqa: E402
-
-#: His real product folder. Copied, never referenced: the run must keep working
-#: after he moves or renames the original.
-PRODUCT = Path("C:/Users/Jeffery/OneDrive/桌面/商品素材/多功能包")
 
 #: Name on disk -> what it stands in for. Copied verbatim. The names are
 #: deliberately ugly, because a real marketplace export is.
@@ -87,9 +85,16 @@ SHOTS = {
 SHOT_TWO, SHOT_FULL, SHOT_BAG, SHOT_COLORS, SHOT_DETAIL, SHOT_PNG, SHOT_CLIP = SHOTS
 
 RUN = "preview-layout-01"
-ROOT = Path(
-    sys.argv[1] if len(sys.argv) > 1 else "J:/E-Business-Video-Data/us-video-studio-preview"
-)
+parser = argparse.ArgumentParser(description="Create a disposable offline Studio preview")
+parser.add_argument("data_root", nargs="?", default="J:/E-Business-Video-Data/us-video-studio-preview")
+parser.add_argument("--media-root", type=Path, help="optional local product folder containing every SHOTS file")
+args = parser.parse_args()
+ROOT = Path(args.data_root)
+PRODUCT = args.media_root
+if PRODUCT is not None:
+    missing = [name for name in SHOTS if not (PRODUCT / name).is_file()]
+    if missing:
+        raise SystemExit(f"media root is missing {len(missing)} preview files: {PRODUCT}")
 
 if ROOT.exists():
     raise SystemExit(f"Refusing to replace existing preview data: {ROOT}; choose a new directory")
@@ -108,12 +113,10 @@ ConnectionStore(ROOT).save({
 # upload. So a folder he filled himself has to be here first.
 shelf = ROOT / "runs" / RUN / "materials"
 shelf.mkdir(parents=True)
-for name in SHOTS:
-    src = PRODUCT / name
-    if not src.is_file():
-        raise SystemExit(f"missing product file: {src}")
-    shutil.copy2(src, shelf / name)
-print(f"materials: {len(SHOTS)} files -> {shelf}")
+if PRODUCT is not None:
+    for name in SHOTS:
+        shutil.copy2(PRODUCT / name, shelf / name)
+print(f"materials: {len(SHOTS) if PRODUCT is not None else 0} files -> {shelf}")
 
 settings = Settings(
     data_root=ROOT,
@@ -402,8 +405,9 @@ for role, stage, tokens in [
 RUN_TWO = "preview-direction-01"
 SHELF_TWO = ROOT / "runs" / RUN_TWO / "materials"
 SHELF_TWO.mkdir(parents=True)
-for name in SHOTS:
-    shutil.copy2(PRODUCT / name, SHELF_TWO / name)
+if PRODUCT is not None:
+    for name in SHOTS:
+        shutil.copy2(PRODUCT / name, SHELF_TWO / name)
 
 store.create_run(RUN_TWO, "保温午餐包 15 秒（②门禁预览）",
                  "给已采购的保温午餐包做一条 15 秒短视频，投 TikTok Shop 美国线。")
@@ -487,8 +491,9 @@ for role, stage, tokens in [
 RUN_THREE = "preview-done-01"
 SHELF_THREE = ROOT / "runs" / RUN_THREE / "materials"
 SHELF_THREE.mkdir(parents=True)
-for name in SHOTS:
-    shutil.copy2(PRODUCT / name, SHELF_THREE / name)
+if PRODUCT is not None:
+    for name in SHOTS:
+        shutil.copy2(PRODUCT / name, SHELF_THREE / name)
 
 store.create_run(RUN_THREE, "保温午餐包 15 秒（全部完成）",
                  "给已采购的保温午餐包做一条 15 秒短视频，投 TikTok Shop 美国线。")

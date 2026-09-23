@@ -10,7 +10,8 @@
 
 ```text
 浏览器 studio/web：明确请求 + request_id，读取进度与已保存版本
-  → server.py：本机 API、输入和来源检查、路由安装
+  → server.py：依赖组合、生命周期、本机请求边界与路由安装
+      → http_*.py：学习交付、项目、素材、决定、连接与任务接口
       → jobs.py：任务持久化、单 writer、取消、重启中断、幂等
       → connections.py：DPAPI 凭据、角色路由、每轮配置快照
       → agents/orchestrator.py → tools/dispatch.py → 独立角色上下文
@@ -32,6 +33,7 @@
 | 路径 | 含义 |
 | --- | --- |
 | `config.json` / `connections.json` | 预算与循环限制 / 站内角色路由、价格及 Windows DPAPI 加密凭据 |
+| `.studio-root.json` | 显式新建空工作台时留下的初始化标识；不能用 writer 锁文件代替项目身份 |
 | `runs/<id>/run.json`、`events.jsonl` | 初始项目及追加事件；任务、修订、制作、反馈等状态从事件推导 |
 | `runs/<id>/artifacts/`、`reviews/`、`approvals.jsonl` | 不可变正文与 sidecar、独立审核、用户决定 |
 | `runs/<id>/ledger.jsonl` | intent 与 settlement；按 call_id 合并，不能删历史清除未知用量 |
@@ -60,9 +62,9 @@
 
 | 领域 | 入口与职责 |
 | --- | --- |
-| 项目/产物 | `/api/runs`；run 的 `/state`、`/timeline`、`/chat`、`/events`、`/ledger`、`/artifacts`；GET 指定版本，POST `/nonce` 与 `/decision` 执行用户决定 |
+| 项目/产物 | `/api/runs`；run 的 `/state`、`/timeline`、`/chat`、`/events`、`/ledger`、`/artifacts`；GET 指定版本，POST `/nonce` 与 `/decision` 执行用户决定；决定已保存但后续任务未创建时 POST `/decision-continuation` 幂等接续 |
 | 对话入口/回收站 | POST `/api/conversations` 幂等建立项目；DELETE `/api/runs/{run_id}` 移入回收站，GET `/api/trash` 列表，POST run 的 `/restore` 恢复 |
-| 连接/任务 | GET/PUT `/api/connections`；POST `/api/connections/deepseek/check` 只读验密钥；run 的 POST `/jobs`、GET `/jobs/latest` 或 `/jobs/{job_id}`、POST `/jobs/{job_id}/cancel` |
+| 连接/任务 | GET/PUT `/api/connections`；GET `/api/capabilities` 与 `/api/runtime` 分别给出声明能力和已加载进程信息；POST `/api/connections/deepseek/check` 只读验密钥；run 的 POST `/jobs`、GET `/jobs/latest` 或 `/jobs/{job_id}`、POST `/jobs/{job_id}/cancel` |
 | Codex 登录 | GET `/api/connections/codex/status`；POST `/api/connections/codex/login` 显式启动官方浏览器登录，POST `/api/connections/codex/login/cancel` 取消对应 attempt_id；与模型任务互斥，不读取凭据或自动登出 |
 | 恢复 | GET `/recovery`；POST `/recovery/abandon` 关闭准确遗留尝试。`/recovery/reconcile` 仅为保留的开发兼容入口，不是用户继续前置条件 |
 | 素材/分析 | GET/POST `/materials`、`/material-observations`、`/image-analysis`；GET `/materials/{name}`；POST `/image-analysis/{analysis_id}/confirm` 逐条采用 |
@@ -77,7 +79,7 @@
 
 ## 本机运维
 
-启动、依赖和离线测试命令见 [README](../README.md#启动与检查)。环境兼容项：`STUDIO_DATA_ROOT` 选择数据根；旧客户端的 `STUDIO_BASE_URL` / `ANTHROPIC_BASE_URL` 与 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` 不会自动导入站内连接。Codex 优先从服务进程 PATH 定位；Windows 未配置 PATH 时使用当前用户桌面应用安装目录内的 CLI（具体优先顺序见 README），无需打开桌面客户端；百炼通过 `%LOCALAPPDATA%/E-commerce/credentials/` 使用原用户 DPAPI 凭据，只在明确提交或查询原任务时解密。
+启动、依赖和离线测试命令见 [README](../README.md#启动与检查)。`start.ps1 -CheckOnly` 不写业务状态；首次显式 `-AllowNew` 启动空工作台会写 `.studio-root.json`，之后可正常重启。环境兼容项：`STUDIO_DATA_ROOT` 选择数据根；旧客户端的 `STUDIO_BASE_URL` / `ANTHROPIC_BASE_URL` 与 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` 不会自动导入站内连接。Codex 优先从服务进程 PATH 定位；Windows 未配置 PATH 时使用当前用户桌面应用安装目录内的 CLI（具体优先顺序见 README），无需打开桌面客户端；百炼通过 `%LOCALAPPDATA%/E-commerce/credentials/` 使用原用户 DPAPI 凭据，只在明确提交或查询原任务时解密。
 
 服务更新前先确认目标端口、对应 studio.server 进程和数据根；查看各项目 recovery，确认活动任务、开放尝试、未知用量，保留原记录再正常停止对应服务。不要因更新而清空 ledger、覆盖运行目录或启动第二个 writer。若执行工具拒绝停止/启动，记录实际拒绝，不宣称已加载；再次操作前重新查端口与进程，不使用过期 PID。服务重新启动只恢复本地状态，不自动重发模型或视频请求。
 

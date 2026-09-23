@@ -2,7 +2,7 @@ import json
 import shutil
 
 import pytest
-from fastapi.testclient import TestClient
+from local_http import TestClient
 
 from fakes import ScriptedModel, final_turn
 from studio.learning import LearningService

@@ -3,6 +3,8 @@
 US 视频与图文前期策划的本地独立工作台：用户在应用内与主 Agent 对话，主 Agent 调配角色 Agent，独立审核 Agent 给出评审，再由用户决定方向与脚本。支持策划、本地审阅包，以及由用户在同一工作台「分镜 / 成片」中明确提交的 Codex 图片与百炼 Wan 视频任务；不自动发布或判断市场效果。
 
 功能代码、当前服务加载和真实能力验收分开记录，统一见 [实现与验收状态](docs/product-improvements.md)。本页描述工作树功能，不能单凭页面出现按钮判断对应后端已加载。
+HTTP 入口在 [server.py](studio/server.py) 组合依赖和本机安全边界，学习交付、项目、素材、决定、连接与任务路由分别在 `studio/http_*.py`；测试客户端使用环回地址，与正式 Host 规则一致。
+创意与声画验收按[分层任务集](docs/creative-quality-validation.md)开展；离线工程测试只覆盖状态与安全，不代表真实模型或成片质量已验证。
 
 **直接在对话中说想做什么，附上视频或粘贴TK链接。** 主制片承接明确的分析、参考复刻或局部借鉴；自主创作无需参考，目标不清才问一句。通过[百炼北京 Omni](docs/bailian-omni-and-tiktok-import.md)复用现有Wan连接，只分析保存报告并停止；复刻绑定指定观察后接续主制片文字策划。链接失败可上传原视频续接，已完成分析会复用。当前代码已接通，真实链接成功率与模型识别质量待验收。
 
@@ -12,7 +14,7 @@ US 视频与图文前期策划的本地独立工作台：用户在应用内与�
 
 首页项目卡片的「删除」和工作台顶部「删除项目」会先显示项目名与影响，确认后移入回收站。首页「回收站」可恢复全部对话、素材与成果；删除不清除磁盘文件或历史调用记录。正在执行的项目需先停止并等待结束，删除操作不会暗中取消任务。已删除项目从列表和切换器中隐藏，并拒绝新任务。
 
-首页从一句话和可选参考图片/视频开始，自动建立创作记录；素材上传完成后才发送第一轮对话。Agent 在对话中用简短推荐选项和自由补充确认重要意图。桌面工作台左侧查看方案、分镜和成片，右侧保持连续对话；窄屏可切换画面与对话。确认方向后自动接续完整方案，确认完整方案后接续分镜输入准备；实际媒体生成仍需明确确认。版本、哈希与内部审核保留在后台和折叠记录中，旧项目与准确版本审批保持兼容。
+首页从一句话和可选参考图片/视频开始，自动建立创作记录；素材上传完成后才发送第一轮对话。Agent 在对话中用简短推荐选项和自由补充确认重要意图。桌面工作台左侧查看方案、分镜和成片，右侧保持连续对话；窄屏可切换画面与对话。创作板是准确版本的唯一决定入口，对话区可直接定位过去。确认方向后接续完整方案，确认完整方案后接续分镜输入准备；若决定已保存但任务未启动，项目会显示“继续准备”入口。已创建任务的重试只读取原任务，不自动重发模型调用；实际媒体生成仍需明确确认。版本、哈希与内部审核保留在后台和折叠记录中，旧项目与准确版本审批保持兼容。
 
 任务状态卡展示当前角色、正在处理的操作与最近进展；「团队工作记录」按时间列出本轮分工、已完成操作和阶段内容入口，技术诊断默认折叠。角色处理开始事件在模型等待与工具执行前记录；只展示真实事件，不推算完成百分比或补造旧记录。
 
@@ -22,7 +24,7 @@ US 视频与图文前期策划的本地独立工作台：用户在应用内与�
 
 ## 启动与检查
 
-左侧「灵感与方法」已接入三项 Skill、原案例与方法库、研究来源和反馈迭代。实际角色输入保存快照；反馈绑定准确版本，先看差异再应用。视频输入与图文审阅包可在「本轮参考」打开，见 [学习迁移说明](docs/learning-migration.md)。
+左侧「灵感与方法」已接入三项 Skill、原案例与方法库、研究来源和反馈迭代。Agent 可按角色读取[登记方法卡](studio/learning.py)，补救、视频输入与图文输入卡只提取稳定执行规则，原历史研究和反馈仍限人工审计或原资格过滤。实际角色输入保存快照；反馈绑定准确版本，先看差异再应用。视频输入与图文审阅包可在「本轮参考」打开，见 [学习迁移说明](docs/learning-migration.md)。
 
 真实运行数据必须位于 Git 外，使用 `STUDIO_DATA_ROOT` 明确选择。未设置时代码沿用历史 J 盘默认目录，它不代表当前电脑实际使用的位置；素材、台账、配置与凭据不得提交 Git。一个数据根只允许一个 Studio 写入进程；离线导入或恢复前停止该数据根的服务。
 
@@ -32,7 +34,6 @@ US 视频与图文前期策划的本地独立工作台：用户在应用内与�
 $studioRuntime = Join-Path $env:LOCALAPPDATA 'LittleElse/Studio/runtime-venv'
 $studioPython = Join-Path $studioRuntime 'Scripts/python.exe'
 $studioData = Join-Path $env:LOCALAPPDATA 'LittleElse/Studio/restored-20260920'
-if (!(Test-Path -LiteralPath $studioData)) { throw '请先恢复项目，或设置实际数据根' }
 if (!(Test-Path -LiteralPath $studioPython)) { py -3.12 -m venv $studioRuntime }
 & $studioPython -m pip install -r apps/us-video-studio/requirements-runtime.txt
 & $studioPython -m pip install -r apps/us-video-studio/requirements-local.txt
@@ -41,11 +42,12 @@ if (!(Test-Path -LiteralPath $studioPython)) { py -3.12 -m venv $studioRuntime }
 & $studioPython -m pytest apps/us-video-studio/tests -q
 node --test apps/us-video-studio/tests/js/*.mjs
 
-# studio 是应用目录内的 Python 包，启动前切换目录
-Set-Location apps/us-video-studio
-$env:STUDIO_DATA_ROOT = $studioData
-& $studioPython -m studio.server --port 4760
+# 同一入口先诊断，再启动；失效解释器、依赖、数据根、writer 锁和端口有对应提示
+powershell -NoProfile -ExecutionPolicy Bypass -File apps/us-video-studio/scripts/start.ps1 -DataRoot $studioData -CheckOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File apps/us-video-studio/scripts/start.ps1 -DataRoot $studioData
 ```
+
+已有项目必须选实际恢复的数据根；空目录会被诊断阻止。确实要建立全新空工作台时先建立 Git 外目录，再显式加 `-AllowNew`；首次启动会写入初始化标识，之后的正常重启无需再加。诊断不调用模型或媒体生成；FFmpeg/FFprobe 缺失显示为媒体能力警告。启动脚本可从当前用户已登记的 PATH 补上新安装的 FFmpeg 目录；正在运行的旧进程仍须正常重启才会加载。也可从应用目录运行 `python -m studio.doctor --data-root <DATA_ROOT> --json`。站内「模型设置 → 当前服务版本与环境」及 `/api/runtime` 显示本进程启动时间、后端代码与 US 方法指纹、数据根匿名标识和依赖，不返回原始路径或凭据；这些状态不能证明模型已实际调用成功。
 
 默认仅绑定 `127.0.0.1`，访问 `http://127.0.0.1:4760/`。本应用没有公网身份验证，未配置开机启动或公网部署；不要直接暴露服务。
 
@@ -55,7 +57,9 @@ $env:STUDIO_DATA_ROOT = $studioData
 
 执行架构与优化依据见 [Agent 架构审查](docs/agent-harness-review.md)。角色提交成果、审核记录结论后立即结束该角色本轮，主制片统一说明结果；不额外调用模型补写结束语。工具在执行前按本轮能力集合检查，派工无交付或审核无结论会明确返回失败。
 
-主制片每条新消息重新确定工作范围，可找回本项目的旧对话；专业角色返工时拿到准确上一版与对应责任问题，并可补读登记方法。所有角色可查询实际能力边界；素材目录不等于看过图片，当前角色没有完整视频声画理解工具。每次调用的逻辑输入保存在 Git 外原 run 下的 `requests/<call_id>.json`，供本地指纹校验与诊断；记录失败不调用模型，不把快照用于跨角色或跨任务恢复对话。
+主制片每条新消息重新确定工作范围，可找回本项目的旧对话；专业角色返工时拿到准确上一版与对应责任问题，并可补读登记方法。所有角色与模型设置页共用已声明的能力边界；主制片可按明确任务观察参考视频，素材区可显式做有限声画分析，但各专业角色仍只读来源标明的观察记录，不直接收到原视频像素或音频。模型理解质量仍需实测。每次调用的逻辑输入保存在 Git 外原 run 下的 `requests/<call_id>.json`，供本地指纹校验与诊断；记录失败不调用模型，不把快照用于跨角色或跨任务恢复对话。
+
+本轮明确交付目标可选需求整理、方向、完整方案、制作输入、局部修订或只分析。任务结束时程序分别记录模型执行状态与交付状态：准确产物、相应独立检查或本轮修订计划缺失时列出具体缺项，不能把模型正常结束当作作品已交付。只读跟进不要求新的制作产物；生成仍需原有用户确认。
 
 素材页现支持视频画面分析：本地提取带时间点的画面，单次交给所选视觉模型观察，经采用后进入创作依据；不发送音频、不宣称完整看听。参考解释与商品观察分别整理，导演构思前即可读取。输入限制、评估样本和运行依赖见 [素材理解与参考迁移](docs/material-understanding.md)。
 
@@ -92,7 +96,7 @@ $env:STUDIO_DATA_ROOT = $studioData
 
 ### 隔离界面预览
 
-预览使用手写方案、审核和台账数字；它们不是实际创意结论、用量或批准。`scripts/seed_preview.py` 会从其明确指定的本地产品目录复制素材，素材与演示文案并非同一商品；执行前先检查来源和目标。脚本仅接受不存在的新数据根，拒绝覆盖已有目录。
+预览使用手写方案、审核和台账数字；它们不是实际创意结论、用量或批准。`scripts/seed_preview.py` 默认不复制商品素材，页面会明确显示缺失文件，适合检查决定、流程与降级状态；如需检查真实媒体排版，可显式传 `--media-root <商品素材目录>`，脚本先核对全部文件再复制。素材与演示文案未必是同一商品。脚本仅接受不存在的新数据根，拒绝覆盖已有目录。
 
 在应用目录、专用 PowerShell 会话执行，下例目标目录必须尚不存在：
 
@@ -113,10 +117,11 @@ $env:STUDIO_DATA_ROOT = $studioPreview
 四个阶段为 `intake → direction → material_plan → writing`。需求整理呈现事实、约束和未知项；创意方向展示多个选项与推荐依据；素材计划说明可用素材与缺口；脚本呈现镜头时长、画面、台词和声音。`direction` 与 `writing` 必须经过独立审核及用户决定；本应用尚无 `layout_preview` / `ad_preview` 渲染阶段。
 
 - 桌面左侧查看成果、右侧持续对话和就地决定；窄屏切换创作板与制片对话。原文阅读器支持版本切换，素材抽屉支持预览和上传。
+- 方案、分镜、成片采用关联的标签页与面板；键盘左右方向键、Home、End 可切换并移动焦点，Tab 只进入当前标签。
 - 推荐不等于采用。用户明确选中方向再提交，批准记录保存 `selected_option_id`；后续角色读取实际选择。
 - 退回修改需要意见；覆盖审核退回需要明确理由，记录为 `approved_override`。批准仅覆盖该版策划，不授予生成、费用或发布权限。
 - 同一版本只作一次决定：采用或退回之后，这一版不再出现决定入口，下一页由团队按你的意见产出；审核退回不在此列，它仍保留具名覆盖的入口。
-- 决策草稿按运行、阶段和产物摘要保存在本机浏览器。保存中阻止重复提交；冲突保留草稿，要求重新阅读最新版本。审核退回和上游失效不显示为完成。
+- 决策草稿按运行、阶段和产物摘要保存在本机浏览器；旧对话区草稿可恢复到唯一的创作板决定入口。保存中阻止重复提交；冲突保留草稿，要求重新阅读最新版本。审核退回和上游失效不显示为完成。
 - 费用入口展示真实记录的已知用量与待核实项；历史阶段用量是参考记录，不是下一次费用预测。
 
 领域状态与业务措辞主要由 [vocabulary.py](studio/vocabulary.py) 提供，前端负责呈现与交互校验。审核通过时仍展示注意事项，不把 `pass` 当成内容可用保证。
@@ -156,6 +161,7 @@ $env:STUDIO_DATA_ROOT = $studioPreview
 | `GET /api/runs/{id}/artifacts` | 产物列表，可按 `stage` 筛选 |
 | `GET /api/runs/{id}/artifacts/{stage}/{version}` | 指定版本正文、展示结构与完整性校验 |
 | `GET/PUT /api/connections` | 读取不含凭据的配置；携带 expected_revision 保存配置 |
+| `GET /api/runtime`、`GET /api/capabilities` | 当前已加载进程标识与声明能力；不测试付费模型 |
 | `POST /api/connections/deepseek/check` | 只读验证 DeepSeek 密钥并获取模型列表；不保存配置、不生成内容 |
 | `POST /api/runs/{id}/jobs` | text + request_id 创建持久任务；同 ID 同文本幂等 |
 | `GET /api/runs/{id}/jobs/latest` | 当前项目最后一次任务，无任务为 null |
@@ -225,7 +231,7 @@ python -m studio.recovery --data-root <DATA_ROOT> abandon <RUN_ID> <STAGE> --att
 python -m studio.input_import --data-root <DATA_ROOT> --run-id <RUN_ID> --path <CONTENT_INPUT_JSON> --repository-root <REPOSITORY_ROOT> --allow-root <REPOSITORY_ROOT> --allow-root <MEDIA_ROOT>
 ```
 
-导入器复用仓库 [content_handoff.py](../video-workbench/openmontage/lib/content_handoff.py) 的校验，仅允许读取显式指定根目录中的来源；保留完整输入字节、事实层级、观察覆盖、未知项和来源指纹。拒绝覆盖已有 intake 或输入文件，来源改变会使依赖失效。导入是本地显式入口，不是任意文件读取 HTTP API；包中的授权字段不自动授予本应用生成、费用或发布权限。
+导入器使用本应用独立的 [ContentInput v1 校验](studio/content_input_contract.py)，仅允许读取显式指定根目录中的来源；保留完整输入字节、事实层级、观察覆盖、未知项和来源指纹。拒绝覆盖已有 intake 或输入文件，来源改变会使依赖失效。导入是本地显式入口，不是任意文件读取 HTTP API；包中的授权字段不自动授予本应用生成、费用或发布权限。
 
 ## 验证范围与剩余工作
 

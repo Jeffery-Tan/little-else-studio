@@ -7,7 +7,7 @@ import threading
 import time
 
 import pytest
-from fastapi.testclient import TestClient
+from local_http import TestClient
 from PIL import Image
 
 from studio.agents.client import Turn, Usage
@@ -17,7 +17,8 @@ from studio.agents.wan_video import WanVideoError, WanVideoResult
 from studio.ledger import Ledger
 from studio.materials import accept_upload
 from studio.pipeline import Pipeline
-from studio.production import DraftIn, prepare_draft, read_image
+from studio.models import Approval
+from studio.production import DraftIn, prepare_draft, read_image, source_snapshot
 from studio.server import build_app
 from studio.store import Store
 from test_server import RUN, settings_for
@@ -46,6 +47,17 @@ def seed(store):
             pipe.record_approval(RUN, stage, nonce=pipe.issue_nonce(RUN, stage), decision='approved',
                                  selected_option_id='A' if stage == 'direction' else None)
     return pipe
+
+
+def test_old_approval_rows_keep_their_production_baseline(tmp_path, monkeypatch):
+    store = Store(tmp_path)
+    seed(store)
+    original = Approval.to_dict
+    with monkeypatch.context() as patch:
+        patch.setattr(Approval, 'to_dict', lambda approval: {
+            key: value for key, value in original(approval).items() if key != 'continue_after'})
+        old_snapshot = source_snapshot(store, RUN)
+    assert source_snapshot(store, RUN) == old_snapshot
 
 
 class Reviewer:

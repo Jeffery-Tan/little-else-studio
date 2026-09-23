@@ -5,7 +5,7 @@ import threading
 import time
 
 import pytest
-from fastapi.testclient import TestClient
+from local_http import TestClient
 
 from fakes import ScriptedModel, final_turn, tool_turn
 from studio.jobs import WriterLease
@@ -59,6 +59,21 @@ def test_job_replay_idempotency_and_context_refs(tmp_path):
     with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: pytest.fail('no replay model'))) as http:
         assert http.get(f'/api/runs/{RUN}/jobs/latest').json()['status'] == 'succeeded'
         assert post_job(http)['job_id'] == job['job_id']
+
+
+def test_model_end_turn_does_not_claim_missing_writing_was_delivered(tmp_path):
+    model = ScriptedModel([
+        tool_turn('route', 'prepare_creative_context', {'intent': 'continue', 'format': 'video', 'deliverable': 'writing'}),
+        final_turn('完整方案已经做好。'),
+        final_turn('目前没有写稿，不能称为已交付。'),
+    ])
+    with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: model)) as http:
+        make_run(http)
+        job = wait_job(http, post_job(http, text='继续做完整方案')['job_id'])
+        assert job['status'] == 'blocked'
+        assert job['deliverable']['status'] == 'incomplete'
+        assert 'writing 当前准确版本' in job['reason']
+        assert any(e['type'] == 'done' and e['stopped_because'] == 'incomplete' for e in job['events'])
 
 
 def test_refresh_does_not_own_worker_and_root_busy_is_explicit(tmp_path):
@@ -171,7 +186,7 @@ def test_writer_lease_refuses_second_service_and_releases(tmp_path):
     {'origin': 'https://attacker.invalid'}, {'host': 'attacker.invalid'},
     {'origin': 'null'}, {'sec-fetch-site': 'cross-site'},
     {'host': 'localhost:4760', 'origin': 'http://localhost:9999'},
-    {'origin': 'https://testserver'},
+    {'origin': 'https://testserver'}, {'host': 'testserver'},
 ])
 def test_cross_origin_requests_never_reach_jobs_or_key_save(tmp_path, headers):
     with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: pytest.fail('no model'))) as http:

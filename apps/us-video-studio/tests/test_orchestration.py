@@ -21,7 +21,7 @@ from studio.models import BudgetExceeded, PipelineError
 from studio.pipeline import Pipeline
 from studio.store import Store
 from studio.tools.dispatch import Dispatcher
-from studio.tools.registry import READ, level_of, tool_names_for
+from studio.tools.registry import REGISTRY, tool_names_for
 
 RUN = "lunch-bag-01"
 
@@ -76,7 +76,7 @@ def test_the_reviewer_cannot_produce_or_dispatch_work():
     assert "submit_stage" not in names
     assert "dispatch" not in names
     assert "write_stage" not in names
-    assert level_of("list_materials") == READ
+    assert "reviewer" in REGISTRY["list_materials"].roles
 
 
 def test_only_the_orchestrator_can_dispatch_or_review():

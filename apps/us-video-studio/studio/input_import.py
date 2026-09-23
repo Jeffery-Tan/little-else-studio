@@ -1,14 +1,13 @@
 """Opt-in local ContentInput import; no HTTP file-reader or implicit permissions.
 
 Run with ``python -m studio.input_import --help``. The caller supplies the exact
-package and roots it authorizes the importer to read. Shared contract validation
-is loaded from the fixed sibling adapter in this repository, never a user path.
+package and roots it authorizes the importer to read. The versioned input
+contract is validated within this application.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 from pathlib import Path
 from typing import Any
@@ -16,6 +15,7 @@ from typing import Any
 from .pipeline import Pipeline
 from .jobs import WriterLease
 from .store import Store
+from .content_input_contract import read_content_input
 
 MAX_INPUT_BYTES = 2 * 1024 * 1024
 
@@ -31,7 +31,7 @@ def _allowed(path: Path, roots: list[Path]) -> Path:
 
 def prepare_content_input(path: Path | str, repository_root: Path | str,
                           allowed_roots: list[Path | str]) -> dict[str, Any]:
-    """Validate bytes and every source before letting the shared reader open it."""
+    """Validate bytes and every source before reading the local input contract."""
     roots = [Path(root).resolve() for root in allowed_roots]
     if not roots or any(not root.is_dir() for root in roots):
         raise ValueError("at least one existing allowed root is required")
@@ -52,13 +52,7 @@ def prepare_content_input(path: Path | str, repository_root: Path | str,
                 raise ValueError(f"{collection} requires explicit local source paths")
             source = Path(record["path"])
             _allowed(source if source.is_absolute() else repository_root / source, roots)
-    fixed_adapter = Path(__file__).resolve().parents[2] / "video-workbench" / "openmontage" / "lib" / "content_handoff.py"
-    spec = importlib.util.spec_from_file_location("_studio_shared_content_contract", fixed_adapter)
-    if spec is None or spec.loader is None:
-        raise ValueError("shared ContentInput validator unavailable")
-    contract = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(contract)
-    verified_raw, verified_data, dependencies = contract.input_package(package, repository_root)
+    verified_raw, verified_data, dependencies = read_content_input(package, repository_root)
     if verified_raw != raw:
         raise ValueError("input changed during validation; retry explicitly")
     for dependency in dependencies:

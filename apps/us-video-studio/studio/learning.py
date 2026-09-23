@@ -25,6 +25,26 @@ _spec = importlib.util.spec_from_file_location("studio_creative_learning", REPOS
 core = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(core)
 SKILLS = ("us-commerce-strategy", "us-creator-video", "us-photo-copy")
+METHOD_CARDS = {
+    "video-recovery": {
+        "title": "视频缺陷诊断与补救方法", "file": "apps/us-video-studio/docs/methods/video-recovery.md",
+        "source": "tracks/us/docs/ai-video-recovery-policy.md", "skills": ("us-creator-video",),
+        "roles": ("orchestrator", "director", "material", "writer"),
+        "tools": ("read_production", "plan_revision"),
+    },
+    "video-input": {
+        "title": "视频制作输入与检查", "file": "apps/us-video-studio/docs/methods/video-input.md",
+        "source": "tracks/us/creative/learning/execution.md", "skills": ("us-creator-video",),
+        "roles": ("orchestrator", "material", "writer", "reviewer"),
+        "tools": ("compile_creative_package", "prepare_production"),
+    },
+    "photo-input": {
+        "title": "图文审阅包与成图检查", "file": "apps/us-video-studio/docs/methods/photo-input.md",
+        "source": "tracks/us/creative/photo-copy/README.md", "skills": ("us-photo-copy",),
+        "roles": ("orchestrator", "director", "material", "writer", "reviewer"),
+        "tools": ("compile_creative_package",),
+    },
+}
 DOCUMENTS = {
     "creative-package-contract": ("创作包格式与提交契约", "apps/us-video-studio/docs/creative-package-contract.md"),
     "recovery-policy": ("AI 视频补救与停止规则", "tracks/us/docs/ai-video-recovery-policy.md"),
@@ -43,6 +63,44 @@ DOCUMENTS = {
     "baseline-001": ("基线比较报告", "tracks/us/creative/comparison/baseline-001.md"),
 }
 _LOCK = threading.RLock()
+
+
+def validate_method_packages(repository_root=REPOSITORY):
+    """Validate registered, role-scoped cards without reading human research into a model."""
+    from .tools.registry import REGISTRY
+    root = Path(repository_root).resolve()
+    errors = []
+
+    def links_exist(path, label):
+        for target in re.findall(r'\]\(([^)]+)\)', path.read_text(encoding='utf-8-sig')):
+            if target.startswith(('http://', 'https://', 'mailto:', '#')):
+                continue
+            candidate = (path.parent / target.split('#', 1)[0]).resolve()
+            if not candidate.is_relative_to(root) or not candidate.is_file():
+                errors.append(f'{label}: missing or unsafe link {target}')
+
+    for ident, spec in METHOD_CARDS.items():
+        for field in ('file', 'source'):
+            path = (root / spec[field]).resolve()
+            if not path.is_relative_to(root) or not path.is_file():
+                errors.append(f'{ident}: missing or unsafe {field}')
+            elif field == 'file':
+                links_exist(path, ident)
+        if not set(spec['skills']) <= set(SKILLS):
+            errors.append(f'{ident}: unknown skill')
+        for role in spec['roles']:
+            if role not in ('orchestrator', 'director', 'material', 'writer', 'reviewer'):
+                errors.append(f'{ident}: unknown role {role}')
+        for tool in spec['tools']:
+            if tool not in REGISTRY or not set(spec['roles']) & set(REGISTRY[tool].roles):
+                errors.append(f'{ident}: unavailable tool {tool}')
+    for ident in SKILLS:
+        path = root / '.agents/skills' / ident / 'SKILL.md'
+        if path.is_file():
+            links_exist(path, ident)
+        else:
+            errors.append(f'{ident}: missing Skill entry')
+    return errors
 
 
 class LearningConflict(ValueError):
@@ -124,10 +182,18 @@ class LearningService:
     def _skills(self):
         return [self._text(s, s, self.repository_root / ".agents/skills" / s / "SKILL.md") for s in SKILLS]
 
-    def skill_catalog(self):
+    def skill_catalog(self, role="orchestrator"):
         """Model-safe directory. Never exposes the human audit catalog."""
+        from .tools.registry import REGISTRY
+        if role not in ('orchestrator', 'director', 'material', 'writer', 'reviewer'):
+            raise ValueError('Unknown creative role')
         return {"skills": [{k: s[k] for k in ("id", "title", "sha256", "version")} for s in self._skills()],
-                "documents": [{"id": s, "title": s} for s in SKILLS] + [{"id": "creative-package-contract", "title": "创作包格式与提交契约"}]}
+                "documents": ([{"id": s, "title": s} for s in SKILLS]
+                              + [{"id": "creative-package-contract", "title": "创作包格式与提交契约"}]
+                              + [{"id": ident, "title": spec['title'], "skills": list(spec['skills']),
+                                  "source": spec['source'], "tools": [t for t in spec['tools']
+                                                              if role in REGISTRY[t].roles]}
+                                 for ident, spec in METHOD_CARDS.items() if role in spec['roles']])}
 
     def catalog(self):
         """Human audit view, including pending/holdout; MUST NOT enter model context."""
@@ -153,9 +219,19 @@ class LearningService:
     def read_method_document(self, name, role=None, run_id=None):
         # Raw research/comparison reports contain prior judgments and test answers.
         # Their complete text remains available in the human-only document API.
-        if name not in (*SKILLS, "creative-package-contract"):
-            raise ValueError("Model document access is limited to the three Skills; research is human audit only")
-        result = self.document(name) if name == "creative-package-contract" else next(s for s in self._skills() if s["id"] == name)
+        role = role or 'orchestrator'
+        if role not in ('orchestrator', 'director', 'material', 'writer', 'reviewer'):
+            raise ValueError('Unknown creative role')
+        if name in METHOD_CARDS:
+            spec = METHOD_CARDS[name]
+            if role not in spec['roles']:
+                raise ValueError('Method document is unavailable to this role')
+            result = self._text(name, spec['title'], self.repository_root / spec['file'])
+            result['source'] = spec['source']
+        elif name in (*SKILLS, "creative-package-contract"):
+            result = self.document(name) if name == "creative-package-contract" else next(s for s in self._skills() if s["id"] == name)
+        else:
+            raise ValueError("Model document access is limited to registered Skills and method cards; research is human audit only")
         if run_id is not None:
             root = self._run_root(run_id)
             digest = _sha(_json(result))

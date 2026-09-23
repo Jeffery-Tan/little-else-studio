@@ -63,6 +63,7 @@ function harness(initial = config(), handler = async () => verified()) {
 // Every credential in these tests is synthetic; APIs are in-memory mocks.
 test('service and validation precede role assignment; generic advanced fields remain collapsed', () => {
   const initial = config();
+  initial.runtime = {started_at:'2026-09-23T10:00:00Z',code_fingerprint:'abc123',data_root_id:'root-12',python:'3.12.6',media_tools:{ffmpeg:false},meaning:'仅代表当前进程。'};
   initial.connections.push({id:'generic',name:'创意服务',provider:'openai_compat',base_url:'https://fixture.invalid/v1',has_key:true});
   const h = harness(initial);
   const text = visible(h.body);
@@ -74,6 +75,7 @@ test('service and validation precede role assignment; generic advanced fields re
   assert.ok(keys.every(node => node.value === '' && node.autocomplete === 'new-password'));
   assert.equal(h.calls.length, 0);
   for (const detail of nodes(h.body).filter(node => node.tag === 'details')) detail.open = true;
+  assert.match(visible(h.body), /abc123.*root-12.*FFmpeg：未找到/);
   assert.match(visible(h.card('generic')), /max_completion_tokens/);
   assert.doesNotMatch(visible(h.card('ds')), /max_completion_tokens|输出上限参数|服务地址（/);
 });
@@ -289,13 +291,17 @@ test('role model controls keep an accessible role-specific name across service c
   assert.equal(writer.model()['aria-label'],'编剧模型');
 });
 
-test('capability guidance separates text roles from deliberate image analysis and unavailable generation', () => {
-  const h=harness(), text=visible(h.body);
+test('capability guidance uses the declared image, audio and generation boundaries', () => {
+  const initial=config();
+  initial.capabilities={image_analysis:{ui_summary:'主制片可观察项目图片。'},
+    video_understanding:{ui_summary:'素材区百炼北京可做有限声画分析。'},
+    production:{ui_summary:'用户在制作工作区确认实际生成。'}};
+  const h=harness(initial), text=visible(h.body);
   assert.match(text,/文字策划模型/);
-  assert.match(text,/图片分析在素材区单独选择.*并确认/);
-  assert.match(text,/不会因分配视觉策划角色而自动看图/);
-  assert.match(text,/尚未接入视频声画理解/);
-  assert.match(text,/图片与视频生成在项目「制作」中单独确认/);
+  assert.match(text,/主制片可观察项目图片/);
+  assert.match(text,/有限声画分析/);
+  assert.match(text,/用户在制作工作区确认实际生成/);
+  assert.doesNotMatch(text,/尚未接入视频声画理解/);
   assert.match(text,/不改变正在运行的任务，也不会重写已有稿件/);
   assert.match(text,/5 \/ 5 个角色配置齐全/);
   assert.match(visible(role(h.body,'material').row),/使用本机 Codex 额度/);

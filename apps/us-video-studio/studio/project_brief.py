@@ -11,9 +11,10 @@ from .vocabulary import stage_label
 ACTIVE = {"queued", "running", "cancelling"}
 
 
-def latest_execution(store, run_id: str) -> dict | None:
+def latest_execution(store, run_id: str, rows=None) -> dict | None:
     """Read the same execution journal without the billing/recovery projection."""
-    rows = store.read_events(run_id)
+    if rows is None:
+        rows = store.read_events(run_id)
     created = next((r for r in reversed(rows) if r.get("kind") == "job_created"), None)
     if not created:
         return None

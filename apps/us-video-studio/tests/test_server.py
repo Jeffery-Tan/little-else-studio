@@ -5,11 +5,11 @@ import json
 import threading
 
 import pytest
-from fastapi.testclient import TestClient
+from local_http import TestClient
 
 from fakes import ScriptedModel, final_turn, tool_turn
 from studio.config import Pricing, Settings
-from studio.models import STAGES
+from studio.models import PipelineError, STAGES
 from studio.pipeline import Pipeline
 from studio.server import build_app
 from studio.store import Store
@@ -60,8 +60,36 @@ def test_index_and_static_assets_are_served(client):
     index = client.get("/")
     assert index.status_code == 200
     assert "US 视频制片室" in index.text
+    assert index.headers['content-security-policy'] == "frame-ancestors 'none'"
+    assert index.headers['cache-control'] == 'no-store'
     assert client.get("/static/app.js").status_code == 200
     assert client.get("/static/style.css").status_code == 200
+
+
+def test_core_route_domains_remain_installed(client):
+    routes = {route.path for route in client.app.routes}
+    assert {
+        '/api/learning', '/api/runs', '/api/runs/{run_id}/state',
+        '/api/runs/{run_id}/materials', '/api/runs/{run_id}/decision',
+        '/api/connections', '/api/runs/{run_id}/jobs',
+    } <= routes
+
+
+def test_settings_and_agent_share_declared_media_boundaries(client):
+    data = client.get('/api/capabilities').json()
+    assert data['video_understanding']['agent_can_execute'] is False
+    assert '百炼北京' in data['video_understanding']['ui_summary']
+    assert data['image_analysis']['agent_can_execute'] is True
+    assert data['production']['agent_can_approve_or_generate'] is False
+
+
+def test_runtime_reports_loaded_process_without_data_root_path(client, tmp_path):
+    first = client.get('/api/runtime')
+    second = client.get('/api/runtime')
+    assert first.status_code == 200
+    assert first.json() == second.json()
+    assert first.json()['code_fingerprint']
+    assert str(tmp_path) not in first.text
 
 
 def test_state_exposes_the_pipeline_and_the_budget(client):
@@ -74,6 +102,16 @@ def test_state_exposes_the_pipeline_and_the_budget(client):
     gated = {p["stage"]: p["gated"] for p in data["pipeline"]}
     assert gated == {"intake": False, "direction": True,
                      "material_plan": False, "writing": True}
+
+
+def test_project_list_uses_existing_events_for_format_and_activity(client):
+    make_run(client)
+    store = client.app.state.jobs.store
+    store.append_event(RUN, 'creative_context_selected', selection={'intent': 'new', 'format': 'photo'})
+    row = next(run for run in client.get('/api/runs').json() if run['run_id'] == RUN)
+    assert row['content_format'] == 'photo'
+    assert row['updated_at'] == store.read_events(RUN)[-1]['at']
+    assert row['progress']['title'] == row['project_brief']['title']
 
 
 def test_unknown_run_is_404(client):
@@ -202,6 +240,39 @@ def test_a_nonce_cannot_be_spent_twice(client_factory):
     assert second.status_code == 409
 
 
+def test_decision_continuation_can_resume_without_repeating_approval_or_job(client_factory):
+    box = client_factory
+    drive_intake_and_direction(box)
+    http = box['http']
+    box['model'] = ScriptedModel([final_turn('继续完成方案。')])
+    jobs = box['app'].state.jobs
+    original_check = jobs.before_submit
+
+    def blocked():
+        raise PipelineError('test_connection', '连接暂时不可用')
+
+    jobs.before_submit = blocked
+    payload = {**shown(http), 'stage': 'direction', 'nonce': nonce_for(http),
+               'decision': 'returned', 'note': '请把开场改得更具体', 'continue_after': True}
+    first = http.post(f'/api/runs/{RUN}/decision', json=payload)
+    assert first.status_code == 200
+    assert first.json()['continuation']['status'] == 'not_started'
+    assert http.get(f'/api/runs/{RUN}/timeline').json()['pending_continuation']['stage'] == 'direction'
+    assert len(Store(box['tmp_path']).list_approvals(RUN, 'direction')) == 1
+
+    jobs.before_submit = original_check
+    retry = {**shown(http), 'stage': 'direction'}
+    resumed = http.post(f'/api/runs/{RUN}/decision-continuation', json=retry)
+    assert resumed.status_code == 200, resumed.text
+    again = http.post(f'/api/runs/{RUN}/decision-continuation', json=retry)
+    assert again.status_code == 200
+    assert again.json()['job_id'] == resumed.json()['job_id']
+    events = Store(box['tmp_path']).read_events(RUN)
+    assert sum(e['kind'] == 'job_created' and e.get('request_id', '').startswith('decision:') for e in events) == 1
+    assert http.get(f'/api/runs/{RUN}/timeline').json()['pending_continuation'] is None
+    assert len(Store(box['tmp_path']).list_approvals(RUN, 'direction')) == 1
+
+
 def test_a_return_with_no_note_is_refused_by_the_route(client_factory):
     """The rule reaches the screen as a 400, not only as a Python exception.
 
@@ -237,6 +308,18 @@ def test_an_ungated_stage_has_no_nonce(client_factory):
     http = box["http"]
     make_run(http)
     assert http.post(f"/api/runs/{RUN}/nonce", params={"stage": "intake", "expected_artifact_sha256": "0" * 64, "expected_version": 1}).status_code == 400
+
+
+def test_decision_rejects_non_hex_hash_without_consuming_nonce(client_factory):
+    box = client_factory
+    drive_intake_and_direction(box)
+    http = box['http']
+    nonce = nonce_for(http)
+    request = {**shown(http), 'stage': 'direction', 'nonce': nonce,
+               'decision': 'returned', 'note': '需要重写开场'}
+    bad = http.post(f'/api/runs/{RUN}/decision', json={**request, 'expected_artifact_sha256': 'z' * 64})
+    assert bad.status_code == 422
+    assert http.post(f'/api/runs/{RUN}/decision', json=request).status_code == 200
 
 
 #: ② the shape the gate card grows buttons from: three options, one recommended.
@@ -573,6 +656,18 @@ def test_a_video_is_served_as_a_video(client):
 def test_a_missing_material_is_a_404(client):
     make_run(client)
     assert client.get(f"/api/runs/{RUN}/materials/nope.jpg").status_code == 404
+
+
+def test_a_local_html_file_cannot_be_served_as_a_material(client, tmp_path):
+    make_run(client)
+    folder = Store(tmp_path).run_dir(RUN) / 'materials'
+    folder.mkdir(exist_ok=True)
+    (folder / 'audit.html').write_text('<p>local file</p>', encoding='utf-8')
+    assert client.get(f'/api/runs/{RUN}/materials/audit.html').status_code == 404
+    (folder / 'photo.png').write_bytes(b'\x89PNG\r\n')
+    response = client.get(f'/api/runs/{RUN}/materials/photo.png')
+    assert response.status_code == 200
+    assert response.headers['x-content-type-options'] == 'nosniff'
 
 
 @pytest.mark.parametrize(

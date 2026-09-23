@@ -30,6 +30,7 @@ from ..tools.execution import ToolResult
 from ..tools.workspace import ToolError, Workspace
 from ..revision_scope import work_plan, plan_revision, check_base, patch_payload, record_applied
 from ..creation_mode import current as current_creation_mode
+from ..task_contract import evaluate as evaluate_deliverable
 from .budget import BudgetedClient
 from .client import JobCancelled, ModelClient, ModelError, run_agent_loop
 from .codex_client import CodexUnavailable
@@ -48,6 +49,7 @@ class OrchestratorTurn:
     stopped_because: str
     rounds: int
     tool_log: list[dict[str, Any]] = field(default_factory=list)
+    deliverable: dict[str, Any] = field(default_factory=dict)
 
     @property
     def used_tools(self) -> list[str]:
@@ -87,6 +89,8 @@ class Orchestrator:
         self.image_observer = image_observer
         self._images_used = False
         self._deliverable = None
+        self._production_kind = None
+        self._analysis_completed = False
         self._reference_used = False
         self._reference_report = None
         if learning_service is None:
@@ -137,6 +141,8 @@ class Orchestrator:
         previous = creative_selection(self.store, self.run_id)
         self._images_used = False
         self._deliverable = None
+        self._production_kind = None
+        self._analysis_completed = False
         self._scope_selected = False
         self._revision_scope = None
         self._turn_id = uuid.uuid4().hex
@@ -202,28 +208,33 @@ class Orchestrator:
             self._reference_report = None
         if result.text:
             self.store.append_chat(self.run_id, "assistant", result.text)
+        delivery = self._deliverable_status()
         return OrchestratorTurn(
             text=result.text,
             stopped_because=result.stopped_because,
             rounds=result.rounds,
             tool_log=result.tool_log,
+            deliverable=delivery,
         )
 
     # ------------------------------------------------------------- context -- #
 
     def _completion_check(self):
-        if self._deliverable != 'direction' or not production_allowed(self.selection):
+        if not self._deliverable or (self._deliverable != 'analysis' and not production_allowed(self.selection)):
             return None
-        direction = self.pipeline.stage_state(self.run_id, 'direction')
-        intake = self.pipeline.stage_state(self.run_id, 'intake')
-        if ((intake.can_start and (intake.latest is None or intake.stale)) or
-                (direction.can_start and (direction.latest is None or direction.stale))):
-            return ('本轮约定交付具体创意方向，尚未完成。按已有用户要求继续内部工作：'
-                    '先完成图片观察及需求整理，再形成方向并内部审核；不要以建议下轮派导演结束。'
-                    '若存在真实阻碍请明确说明，不扩大范围、不批准或生成媒体。')
-        if direction.can_review:
-            return '当前创意方向已保存，请在本轮完成内部审核再给出具体方向和推荐；不要把审核派工变成用户下一次指令。'
-        return None
+        delivery = self._deliverable_status()
+        if delivery['status'] != 'incomplete':
+            return None
+        missing = '、'.join(delivery['missing'])
+        heading = '本轮约定交付具体创意方向，尚未完成。' if self._deliverable == 'direction' else '本轮约定的交付尚未完成。'
+        return (f'{heading}仍缺：{missing}。若能在原范围、预算和调用限制内完成，请继续完成并检查；'
+                '真实阻碍请明确说明。不要让用户重新派工，也不要自行批准或生成媒体。')
+
+    def _deliverable_status(self):
+        return evaluate_deliverable(self.store, self.pipeline, self.run_id, self._deliverable,
+                                    revision_scope=self._revision_scope,
+                                    analysis_completed=self._analysis_completed,
+                                    production_kind=self._production_kind)
 
     def _build_messages(self) -> list[dict[str, Any]]:
         """The request history. Only user and assistant turns may come out of it.
@@ -356,10 +367,13 @@ class Orchestrator:
             context = self.learning.prepare_context(self.run_id, "orchestrator", **selection, purpose="message")
             self.store.append_event(self.run_id, "creative_context_selected", selection=selection,
                                     snapshot_sha256=context["snapshot_sha256"], turn_id=self._turn_id,
-                                    deliverable=args.get('deliverable', self._deliverable))
+                                    deliverable=args.get('deliverable', self._deliverable),
+                                    production_kind=args.get('production_kind', self._production_kind))
             self.selection, self.method_context = selection, context
             if args.get('deliverable'):
                 self._deliverable = args['deliverable']
+                if 'production_kind' in args:
+                    self._production_kind = args['production_kind']
             self._scope_selected = True
             self._context_refs.append(context["evidence_ref"])
             self._emit({"type": "learning_context", "role": "orchestrator",
@@ -403,8 +417,13 @@ class Orchestrator:
             self._reference_used = True
             data = self.reference_observer(source, args.get('scope', ''), self._emit, self.check_cancel or (lambda: None))
             if args['action'] == 'analyze':
-                self._reference_report = data['report']
-                return ToolResult(data['report'], concludes_turn=True)
+                report = data['report']
+                if not isinstance(report, str) or not report.strip():
+                    raise ToolError('参考分析没有保存可交付的报告。')
+                self._deliverable = 'analysis'
+                self._analysis_completed = True
+                self._reference_report = report
+                return ToolResult(report, concludes_turn=True)
             from ..creation_mode import select
             select(self.store, self.run_id, args['action'], data['reference_id'], args.get('scope', ''))
             # Analysis may change source context. Re-select the current creation

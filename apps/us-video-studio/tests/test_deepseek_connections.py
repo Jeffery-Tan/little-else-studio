@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+from local_http import TestClient
 
 from studio.config import Settings
 from studio.connections import ConnectionConflict, ConnectionStore, ConnectionUnavailable, DEEPSEEK_BASE_URL

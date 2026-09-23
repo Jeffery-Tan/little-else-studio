@@ -90,7 +90,7 @@ body[data-view="home"] .project-select-wrap {display:none}
 .project-cover-art {display:flex;align-items:center;justify-content:center;gap:18px;width:100%;height:100%;background:repeating-linear-gradient(135deg,transparent,transparent 34px,#ffffff03 35px,#ffffff03 36px),linear-gradient(120deg,#242c26,#23212b)}
 .project-cover-art svg {color:#c5d0bd;width:39px;height:39px;stroke-width:1}
 .project-cover-art span {font-size:9px;letter-spacing:2px;color:#b4b9b0;max-width:65px;line-height:1.8;text-align:left}
-.project-open {position:absolute;inset:auto 10px 9px auto;padding:3px 8px;background:#101014b3;border-radius:4px;font-size:10px;opacity:0;transition:opacity var(--t)}
+.project-open {position:absolute;inset:auto 10px 9px auto;padding:3px 8px;background:#101014cc;border-radius:4px;font-size:10px;opacity:1;transition:opacity var(--t)}
 .project-card:hover .project-open,.project-card:focus-visible .project-open {opacity:1}
 .project-card-copy {padding:14px 16px;display:flex;flex-direction:column;gap:8px;width:100%}
 .project-card-copy strong {font-size:14px;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

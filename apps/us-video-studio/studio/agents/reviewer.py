@@ -183,7 +183,7 @@ def run_review(
                     f"你可以读取的产物：{'、'.join(workspace.readable)}\n\n"
                     "你看不到创作者是谁、怎么想的、怎么自我评价的。这是故意的。\n\n" + context["text"]
                     + "\n登记方法目录（只读，不包含原始研究和旧审核）：\n"
-                    + json.dumps(learning_service.skill_catalog(), ensure_ascii=False)
+                    + json.dumps(learning_service.skill_catalog('reviewer'), ensure_ascii=False)
                 ),
                 format=selection["format"],
             ),

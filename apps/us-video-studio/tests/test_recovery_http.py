@@ -1,6 +1,6 @@
 """Recovery changes only isolated journals, never calls a provider."""
 import pytest
-from fastapi.testclient import TestClient
+from local_http import TestClient
 
 from studio.config import DEFAULT_PRICING
 from studio.ledger import Ledger

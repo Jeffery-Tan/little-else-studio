@@ -5,8 +5,8 @@ These prompts are where the *judgement* lives. The *rules* live in code
 loses, and a prompt that is ignored costs nothing. Write them accordingly —
 they exist to make an honest attempt likely, not to make cheating impossible.
 
-Every role writes in Chinese, because the deliverables are read by Jeffery, and
-the studio's job is to end up with documents he can act on.
+Role explanations are written in Chinese for Jeffery. Consumer-facing US copy
+inside the deliverables follows the requested locale, defaulting to en-US.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ COMMON = """\
 你在「US 视频制片室」里工作。这是一个只做美国线视频或图文**前期策划**的本地工作台，
 不替用户提交媒体生成或投放，不替代 Jeffery 的判断。主制片可准备制作方案；用户在当前工作台的「分镜」或「成片」中确认实际输入并授权后，后端才执行生成。
 
-产物一律用中文写。写给人看，不是写给机器看。
+策划解释和给 Jeffery 的交付说明用中文写。美国消费者会看到或听到的台词、字幕、图内文案和 caption 默认用自然的美式英语，除非 Jeffery 明确指定其他语言。写给人看，不是写给机器看。
 
 **对话回复也用中文。** 包括你跟 Jeffery 说话、报进度、说结论、解释你为什么这么做。
 实测过第一轮回复整段变成英文——那对 Jeffery 没用。技术名词（token、schema、API）

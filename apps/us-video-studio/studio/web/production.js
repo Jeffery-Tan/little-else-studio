@@ -87,10 +87,14 @@ async function openProduction(options={}){
   function render(){
     if(!current())return;
     renderedRecords=records();
+    const readySource=(data.sources||[]).some(s=>s.ready);
+    const readyReference=(data.materials||[]).some(m=>m.kind==='image'&&m.approved);
+    const canPrepare=readySource&&(kind==='image'||readyReference);
+    const prepareReason=!readySource?'请先在创作板确认完整方案。':kind==='video'&&!readyReference?'请先确认一张当前版本的视频参考图。':'';
     body.innerHTML=mount
-      ? `<div class="journey-media-intro">${kind==='image'?'确认完整方案后，团队会在这里准备分镜图。生成后点击大图，确认商品、人物和画面是否可用。':'确认分镜图后，团队会准备视频。你核对画面描述和费用后再生成。'}<button class="ghost" data-prepare>让团队${kind==='image'?'准备分镜':'准备视频'}</button></div><div class="production-layout"><aside><details><summary>高级：手动编辑制作输入</summary>${editor()}</details></aside><section><div data-records>${renderedRecords}</div></section></div>`
+      ? `<div class="journey-media-intro">${kind==='image'?'确认完整方案后，团队会在这里准备分镜图。生成后点击大图，确认商品、人物和画面是否可用。':'确认分镜图后，团队会准备视频。你核对画面描述和费用后再生成。'}${prepareReason?`<p class="production-notice">${prepareReason}</p>`:''}<button class="ghost" data-prepare ${canPrepare?'':'disabled'}>让团队${kind==='image'?'准备分镜':'准备视频'}</button></div><div class="production-layout"><aside><details><summary>高级：手动编辑制作输入</summary>${editor()}</details></aside><section><div data-records>${renderedRecords}</div></section></div>`
       : `<div class="production-layout"><aside>${editor()}</aside><section><div class="production-record-heading"><h3>生成记录</h3><span>${data.drafts.length} 个方案</span></div><div data-records>${renderedRecords}</div></section></div>`;
-    const prepare=body.querySelector('[data-prepare]');if(prepare){prepare.disabled=!!data.active;prepare.onclick=()=>submitJob(runId,{request_id:crypto.randomUUID(),text:kind==='image'?'请根据我已确认的完整方案，准备分镜参考图的图片制作输入，完成文字制作检查，让我核对后生成。':'请基于我已确认的分镜图准备视频输入，完成文字制作检查，展示画面描述、时长与费用，等我确认后生成。'});}
+    const prepare=body.querySelector('[data-prepare]');if(prepare){prepare.disabled=!!data.active||!canPrepare;prepare.onclick=()=>submitJob(runId,{request_id:crypto.randomUUID(),text:kind==='image'?'请根据我已确认的完整方案，准备分镜参考图的图片制作输入，完成文字制作检查，让我核对后生成。':'请基于我已确认的分镜图准备视频输入，完成文字制作检查，展示画面描述、时长与费用，等我确认后生成。'});}
     const form=body.querySelector('form');for(const [key,value] of Object.entries(values)){const el=form.elements.namedItem(key);if(el)el.value=value;}
     function showSource(){const s=data.sources.find(s=>s.version===Number(values.source_version));form.querySelector('[data-source-note]').textContent=s?.summary||'不会自动选用最新稿件，请核对制作依据。';}
     showSource();

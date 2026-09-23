@@ -2,7 +2,7 @@ import io
 import json
 import zipfile
 
-from fastapi.testclient import TestClient
+from local_http import TestClient
 
 from studio.progress import project_progress
 from studio.server import build_app

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from fastapi.testclient import TestClient
+from local_http import TestClient
 
 from fakes import ScriptedModel, final_turn
 from studio import codex_auth

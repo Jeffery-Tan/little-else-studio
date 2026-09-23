@@ -16,6 +16,7 @@ const JOB_LABELS = {
 const JOB_ROLE_NAMES = { orchestrator: "主制片", director: "创意导演", material: "视觉策划", writer: "编剧", reviewer: "独立审片" };
 function jobGuidance(job) {
   const reason = String(job.reason || "");
+  if (job.deliverable?.status === 'incomplete') return `本轮交付还缺：${job.deliverable.missing.join('、')}。已完成的内容已保留，请查看准确版本后继续。`;
   // Missing accounting data is diagnostic, never a creative workflow warning.
   if (/soft cap|预算.*上限|预算不足/i.test(reason)) return "已达到本轮预算上限。请先检查用量与预算，再决定是否继续。";
   if (/Codex CLI is not installed or not on PATH/i.test(reason)) return "服务没有找到 Codex CLI。请确认本机已安装 Codex，重启工作台服务后再发送消息；已保存的内容不受影响。";

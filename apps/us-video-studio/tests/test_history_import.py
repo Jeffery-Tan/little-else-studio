@@ -5,7 +5,7 @@ import json
 
 import pytest
 from PIL import Image
-from fastapi.testclient import TestClient
+from local_http import TestClient
 
 from studio.history_import import import_plan, prepare
 from studio.project_history import snapshot, read_document

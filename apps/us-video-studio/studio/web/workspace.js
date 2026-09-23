@@ -15,7 +15,10 @@ function studioDate(value) {
   return Number.isNaN(date.getTime()) ? '日期未记录' : date.toLocaleDateString('zh-CN', {month:'short',day:'numeric'});
 }
 function filterProjects(runs, query) {
-  return runs.filter(run => (run.title || '').toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+  const urgent=new Set(['needs_input','reviewed','returned','review_failed','interrupted','stale']);
+  return runs.filter(run => (run.title || '').toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+    .sort((a,b)=>Number(urgent.has(b.project_brief?.phase))-Number(urgent.has(a.project_brief?.phase))
+      || (Date.parse(b.updated_at||b.created_at)||0)-(Date.parse(a.updated_at||a.created_at)||0));
 }
 function inspirationCases(cases) {
   return cases.filter(c => c.media && c.partition === 'calibration' && ['user_reference','discovered_reference'].includes(c.origin)
@@ -23,11 +26,15 @@ function inspirationCases(cases) {
 }
 function projectCardHtml(run, cover) {
   const id = escapeHtml(run.run_id), title = escapeHtml(run.title);
-  const visual = cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy">` : `<div class="project-cover-art">${studioIcon('film')}<span>STORY IN PROGRESS</span></div>`;
   const progress = run.progress;
-  const next = typeof journeyStatus==='function' ? journeyStatus(run.project_brief,null,null) : progress?.title;
-  return `<div class="project-card-item"><button class="project-card" data-open-project="${id}"><span class="project-cover">${visual}<span class="project-open">继续创作 ↗</span></span><span class="project-card-copy"><strong>${title}</strong>` +
-    (progress ? `<span class="project-next">${escapeHtml(next)}</span><span>继续讨论与查看成果<i aria-hidden="true">↗</i></span>` : `<span>项目 · ${escapeHtml(studioDate(run.created_at))}<i aria-hidden="true">↗</i></span>`) + `</span></button><button class="project-delete ghost small" data-delete-project="${id}" aria-label="删除项目：${title}">删除</button></div>`;
+  const brief=run.project_brief;
+  const next=brief?.title||progress?.title||'继续创作';
+  const action=brief?.action?.label||'打开项目';
+  const format=run.content_format==='photo'?'图文':run.content_format==='video'?'视频':'创作';
+  const visual = cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy">` : `<div class="project-cover-art">${studioIcon('film')}<span>${format}项目</span></div>`;
+  const date=studioDate(run.updated_at||run.created_at);
+  return `<div class="project-card-item"><button class="project-card" data-open-project="${id}"><span class="project-cover">${visual}<span class="project-open">${escapeHtml(action)} ↗</span></span><span class="project-card-copy"><strong>${title}</strong>` +
+    (brief||progress ? `<span class="project-next">${escapeHtml(next)}</span><span>${format} · 更新于 ${escapeHtml(date)}<i aria-hidden="true">↗</i></span>` : `<span>${format} · ${escapeHtml(date)}<i aria-hidden="true">↗</i></span>`) + `</span></button><button class="project-delete ghost small" data-delete-project="${id}" aria-label="删除项目：${title}">删除</button></div>`;
 }
 function referenceCardHtml(item, hero=false) {
   const id = encodeURIComponent(item.id), title = escapeHtml(item.title);

@@ -9,7 +9,7 @@ import time
 import httpx
 import pytest
 from PIL import Image
-from fastapi.testclient import TestClient
+from local_http import TestClient
 
 from studio.agents.client import Turn, Usage, ModelError, AnthropicCompatClient
 from studio.agents.openai_compat import OpenAICompatClient

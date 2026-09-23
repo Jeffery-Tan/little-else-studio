@@ -10,7 +10,12 @@ $("connections-open").onclick = async () => {
   const button = $("connections-open");
   if (button.disabled) return;
   button.disabled = true;
-  try { openConnectionDialog(await api("/api/connections")); }
+  try {
+    const [config, capabilities] = await Promise.all([api("/api/connections"), api("/api/capabilities")]);
+    let runtime = null;
+    try { runtime = await api("/api/runtime"); } catch {}
+    openConnectionDialog({...config, capabilities, runtime});
+  }
   catch (err) { toast(err.message, true); }
   finally { button.disabled = false; }
 };
@@ -39,10 +44,20 @@ function openConnectionDialog(config) {
   heading.append(box("h2", "", "你的制作团队"), close);
   form.append(heading, box("p", "muted", "先连接模型服务，再为团队成员分配模型。已有角色不会自动更换。"));
   const capabilities = box("section", "connection-capabilities");
+  const mediaBoundaries = config.capabilities
+    ? `${config.capabilities.image_analysis.ui_summary} ${config.capabilities.video_understanding.ui_summary} ${config.capabilities.production.ui_summary}`
+    : "能力说明暂时不可用，请重新打开模型设置。";
   capabilities.append(box("strong", "", "这支团队现在能做什么"),
     box("p", "", "需求梳理、创意方向、画面规划、脚本与独立审阅。这里分配的是文字策划模型。"),
-    box("p", "muted", "图片分析在素材区单独选择支持图片输入的 API 模型并确认；不会因分配视觉策划角色而自动看图。图片与视频生成在项目「制作」中单独确认，分别使用本机 Codex 与原百炼连接；尚未接入视频声画理解。"));
+    box("p", "muted", mediaBoundaries));
   form.append(capabilities);
+  const runtime = box("details", "connection-runtime");
+  const loaded = config.runtime;
+  runtime.append(box("summary", "", "当前服务版本与环境"),
+    box("p", "muted", loaded
+      ? `进程启动：${loaded.started_at} · 代码指纹：${loaded.code_fingerprint} · 数据根标识：${loaded.data_root_id} · Python ${loaded.python}。FFmpeg：${loaded.media_tools?.ffmpeg ? '可找到' : '未找到'}。${loaded.meaning}`
+      : "运行信息暂不可用；请确认后端已更新并重新打开模型设置。"));
+  form.append(runtime);
   const steps = box("ol", "connection-steps");
   for (const step of ["连接服务", "验证密钥与模型", "分配角色", "保存设置"]) steps.append(box("li", "", step));
   form.append(steps, box("p", "connection-privacy", "API Key 仅在本机加密保存，不回显。验证只读取模型列表，不发起内容生成；保存不会调用模型。"));

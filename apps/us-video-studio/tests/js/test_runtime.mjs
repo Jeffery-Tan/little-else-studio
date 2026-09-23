@@ -92,6 +92,12 @@ test('uncertain image submission retains the same payload and image route',async
   assert.equal(h.storage.size,0);
   assert.equal(h.context.state.busy,false);
 });
+test('an ended model turn surfaces the concrete missing deliverable', () => {
+  const h = harness(async () => ({}));
+  const job = {status:'blocked',reason:'交付未完成',deliverable:{goal:'writing',status:'incomplete',missing:['writing 当前准确版本']}};
+  assert.match(h.context.jobGuidance(job), /writing 当前准确版本/);
+  assert.doesNotMatch(h.context.jobGuidance(job), /已完成本轮/);
+});
 
 test('uncertain video observation retries acceptance identity without becoming a conversation job',async()=>{
   const calls=[];

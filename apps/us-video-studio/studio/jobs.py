@@ -117,11 +117,13 @@ class JobManager:
         if created is None:
             raise PipelineError('job_missing', '没有找到这次执行。')
         out = {k: v for k, v in created.items() if k not in ('kind', 'seq')}
-        out.update(run_id=run_id, status='queued', events=[], cursor=created['seq'], reason='')
+        out.update(run_id=run_id, status='queued', events=[], cursor=created['seq'], reason='', deliverable=None)
         for row in rows:
             out['cursor'] = row['seq']
             if row['kind'] == 'job_status':
                 out['status'], out['reason'] = row['status'], row.get('reason', '')
+            if row['kind'] == 'job_deliverable':
+                out['deliverable'] = row['deliverable']
             if row['kind'] == 'job_progress' and row['seq'] > after_seq:
                 out['events'].append({**row['event'], 'seq': row['seq'], 'at': row['at']})
         out['unresolved_calls'] = [
@@ -199,6 +201,11 @@ class JobManager:
             self.check_cancel()
             if result.stopped_because != 'done':
                 status, reason = 'blocked', f'本轮结束于 {result.stopped_because}；已保存进度，请查看结果后发送新的指令。'
+            deliverable = getattr(result, 'deliverable', None)
+            if deliverable:
+                self._event(run_id, job_id, 'job_deliverable', deliverable=deliverable)
+                if deliverable['status'] == 'incomplete':
+                    status, reason = 'blocked', '交付未完成：' + '、'.join(deliverable['missing'])
             emit({'type': 'done', 'text': result.text, 'rounds': result.rounds,
                   'stopped_because': result.stopped_because, 'tools': result.used_tools})
         except JobCancelled as exc:

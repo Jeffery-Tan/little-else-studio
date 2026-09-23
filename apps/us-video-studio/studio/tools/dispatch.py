@@ -292,7 +292,7 @@ class Dispatcher:
             f"你可以读取这些阶段的产物：{visible}。其他阶段读不到，也不需要读到。\n"
             f"你看不到任何一个同事的对话、推理或自我评价——你手上是产物本身和给你的说明。\n"
             f"read_capabilities 可查能力边界；read_method_document 可读登记方法。方法目录：\n"
-            + json.dumps(self.learning.skill_catalog(), ensure_ascii=False)
+            + json.dumps(self.learning.skill_catalog(workspace.role), ensure_ascii=False)
         )
 
     def _seed_message(self, workspace: Workspace, stage: str, brief: str, *, previous=None, local_revision=False) -> str:

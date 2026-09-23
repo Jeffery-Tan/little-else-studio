@@ -21,25 +21,14 @@ function questionCardHtml(q) {
 }
 
 function journeyGateHtml(pending, step) {
-  const options=pending.options || [];
-  const cards=(step?.blocks || []).find(b=>b.type==='cards')?.cards || [];
-  return `<section class="gate conversation-question" data-journey="1" data-stage="${escapeHtml(pending.stage)}" data-version="${pending.version}" data-sha="${escapeHtml(pending.artifact_sha256)}" data-passed="${pending.passed?'1':'0'}">` +
-    `<h3>${pending.stage==='direction'?'你更想往哪个方向做？':'这份方案可以开始准备分镜了吗？'}</h3>` +
-    `<p>${pending.passed?'方案已整理在左侧，你可以查看后确认，也可以提出修改。':'内部检查发现需要调整的地方。建议先说说你的意见，由团队完善。'}</p><button class="ghost small" data-view-plan>查看完整方案</button>` +
-    (options.length?`<fieldset class="gate-options"><legend>选择方向</legend>${options.map(o=>{
-      const card=cards.find(c=>c.head===o.key || String(c.head).startsWith(o.key));
-      const claim=card?.fields?.find(f=>f.label==='主张')?.value || `方向 ${o.key}`;
-      return `<label class="conversation-choice"><input type="radio" name="direction-choice-journey" value="${escapeHtml(o.key)}"><span><strong>${escapeHtml(o.key)}${o.recommended?'<small>推荐</small>':''}</strong><span>${escapeHtml(claim)}</span></span></label>`;
-    }).join('')}</fieldset>`:'') +
-    '<textarea class="reason" aria-label="决定意见" rows="2" maxlength="6000" placeholder="有其他想法？在这里补充…"></textarea><p class="gate-feedback" role="status"></p>' +
-    `<div class="gate-actions">${pending.passed?`<button class="primary" data-act="approve">${escapeHtml(gateApproveLabel(pending,'journey'))}</button>`:''}<button class="ghost" data-act="reject">${escapeHtml(gateRejectLabel('journey'))}</button></div>` +
-    (!pending.passed?`<details><summary>查看检查意见与其他决定</summary>${(pending.findings||[]).map(f=>`<p>${escapeHtml(f.issue)}</p>`).join('')}<button class="ghost" data-act="approve">${escapeHtml(gateApproveLabel(pending,'journey'))}</button></details>`:'') +
-    '<small>图片和视频生成前，会另行展示内容与费用供你确认。</small></section>';
+  return `<section class="conversation-question"><h3>${pending.stage==='direction'?'方向等你决定':'完整方案等你确认'}</h3>` +
+    '<p>请在创作板阅读当前版本并提交决定。选择、意见和确认只保留在这一处。</p>' +
+    '<button type="button" class="primary" data-view-plan>阅读并决定</button></section>';
 }
 
 function renderJourneyStatus() {
   const tl=state.timeline, brief=state.projectBrief || tl?.brief;
-  $('project-progress').innerHTML=`<div class="journey-status"><span class="small-dot"></span><span>${escapeHtml(journeyStatus(brief,tl?.pending,tl?.interaction))}</span><span class="journey-path">想法 → 方案 → 分镜 → 成片</span></div>`;
+  $('project-progress').innerHTML=`<div class="journey-status"><span class="small-dot"></span><span>${escapeHtml(tl?.pending_continuation?'决定已保存，待继续准备':journeyStatus(brief,tl?.pending,tl?.interaction))}</span><span class="journey-path">想法 → 方案 → 分镜 → 成片</span></div>`;
   const mode=tl?.creation_mode;
   if(mode){const label=box('span','attachment-chip',({autonomous:'自主创作',recreate:'按参考复刻',inspiration:'局部借鉴'})[mode.mode]||'');label.title=mode.scope||'可以直接在对话中调整';$('project-progress').append(label);}
   if(typeof StudioComposer!=='undefined')StudioComposer.render();
@@ -48,13 +37,27 @@ function renderJourneyStatus() {
 function renderJourneyDecision() {
   const host=$('journey-decision'),tl=state.timeline;
   if (!host || !tl) return;
-  const q=tl.interaction, pending=tl.pending;
-  const key=JSON.stringify([state.runId,q?.id,pending?.artifact_sha256,Boolean(state.busy)]);
+  const q=tl.interaction, pending=tl.pending, continuation=tl.pending_continuation;
+  const key=JSON.stringify([state.runId,q?.id,pending?.version,pending?.artifact_sha256,
+    continuation?.expected_version,continuation?.expected_artifact_sha256,Boolean(state.busy)]);
   if(host.dataset.key===key)return;
   host.dataset.key=key;
   host.innerHTML='';
   if (state.busy) return;
-  if (q) {
+  if (continuation) {
+    host.innerHTML='<section class="conversation-question"><h3>决定已保存</h3><p>下一步尚未启动。请检查模型连接，然后继续准备。</p><button type="button" class="primary" data-resume-decision>继续准备</button><p role="status" data-feedback></p></section>';
+    const button=host.querySelector('[data-resume-decision]'), runId=state.runId;
+    button.onclick=async()=>{
+      button.disabled=true;
+      try {
+        await api(`/api/runs/${encodeURIComponent(runId)}/decision-continuation`,{method:'POST',body:JSON.stringify(continuation)});
+        if(runId!==state.runId)return;
+        try { await refreshTimeline(); }
+        catch { const feedback=host.querySelector('[data-feedback]');if(feedback)feedback.textContent='任务已接受，页面暂时无法刷新；正在恢复运行状态。'; }
+        void restoreJob(runId);
+      } catch(err) { const feedback=host.querySelector('[data-feedback]');if(feedback)feedback.textContent=err.message;button.disabled=false; }
+    };
+  } else if (q) {
     host.innerHTML=questionCardHtml(q);
     const runId=state.runId;
     for(const button of host.querySelectorAll('[data-question-choice]'))button.onclick=async()=>{
@@ -64,7 +67,6 @@ function renderJourneyDecision() {
     };
   } else if (pending) {
     host.innerHTML=journeyGateHtml(pending,tl.rail.find(s=>s.stage===pending.stage));
-    wireGate(host);
     host.querySelector('[data-view-plan]').onclick=()=>{showJourneyTab('plan');selectStage(pending.stage);setProjectFocus('canvas');};
   } else if (['review_failed','interrupted'].includes((state.projectBrief||tl.brief)?.phase)) {
     host.innerHTML='<section class="conversation-question"><h3>方案已经保留</h3><p>本轮内部检查没能完成。你可以先看方案、直接说修改意见，或让团队接着处理。</p><button class="primary" data-resume>让团队继续处理</button></section>';
@@ -83,12 +85,31 @@ function closeEmbeddedProduction(){document.querySelector('.production-embedded'
 function showJourneyTab(tab) {
   closeEmbeddedProduction();
   state.canvasTab=tab;
-  for(const button of document.querySelectorAll('[data-journey-tab]'))button.setAttribute('aria-selected',String(button.dataset.journeyTab===tab));
-  $('stage').hidden=tab!=='plan';$('journey-media').hidden=tab==='plan';
+  for(const button of document.querySelectorAll('[data-journey-tab]')){
+    const selected=button.dataset.journeyTab===tab;
+    button.setAttribute('aria-selected',String(selected));button.tabIndex=selected?0:-1;
+  }
+  $('stage').hidden=tab!=='plan';
+  $('journey-storyboard').hidden=tab!=='storyboard';
+  $('journey-video').hidden=tab!=='video';
   if(tab==='plan'){
     const candidate=state.timeline?.pending?.stage || (state.rail||[]).find(s=>s.stage==='writing'&&s.has_doc)?.stage || (state.rail||[]).find(s=>s.stage==='direction'&&s.has_doc)?.stage || 'intake';
     selectStage(candidate);
-  } else openProduction({mount:$('journey-media'),kind:tab==='storyboard'?'image':'video'});
+  } else openProduction({mount:$(tab==='storyboard'?'journey-storyboard':'journey-video'),kind:tab==='storyboard'?'image':'video'});
+}
+
+function bindJourneyTabs(){
+  const tabs=[...document.querySelectorAll('[data-journey-tab]')];
+  for(const [index,button] of tabs.entries()){
+    button.onclick=()=>showJourneyTab(button.dataset.journeyTab);
+    button.onkeydown=event=>{
+      const next=event.key==='ArrowRight'?tabs[(index+1)%tabs.length]
+        :event.key==='ArrowLeft'?tabs[(index+tabs.length-1)%tabs.length]
+        :event.key==='Home'?tabs[0]:event.key==='End'?tabs[tabs.length-1]:null;
+      if(!next)return;
+      event.preventDefault();next.focus();showJourneyTab(next.dataset.journeyTab);
+    };
+  }
 }
 
 function startFromConversation(){
@@ -97,7 +118,7 @@ function startFromConversation(){
 }
 
 function initJourney() {
-  for(const button of document.querySelectorAll('[data-journey-tab]'))button.onclick=()=>showJourneyTab(button.dataset.journeyTab);
+  bindJourneyTabs();
   $('chat-attach').onclick=()=>{if(!state.busy)$('chat-files').click();};
   $('chat-files').onchange=()=>{if(!state.busy){StudioComposer.setFiles(state.runId,$('chat-files').files);StudioComposer.render();}$('chat-files').value='';};
   const form=$('start-conversation'),input=$('start-prompt'),files=$('start-files'),tray=$('start-attachments'),status=$('start-status');
@@ -138,4 +159,4 @@ function initJourney() {
   };
 }
 
-if(typeof module!=='undefined')module.exports={journeyStatus,questionCardHtml,journeyGateHtml};
+if(typeof module!=='undefined')module.exports={journeyStatus,questionCardHtml,journeyGateHtml,showJourneyTab,bindJourneyTabs};

@@ -2,7 +2,7 @@
 import json
 
 import pytest
-from fastapi.testclient import TestClient
+from local_http import TestClient
 
 from studio.server import build_app
 from studio.store import Store
