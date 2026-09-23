@@ -64,7 +64,7 @@
 | --- | --- |
 | 项目/产物 | `/api/runs`；run 的 `/state`、`/timeline`、`/chat`、`/events`、`/ledger`、`/artifacts`；GET 指定版本，POST `/nonce` 与 `/decision` 执行用户决定；决定已保存但后续任务未创建时 POST `/decision-continuation` 幂等接续 |
 | 对话入口/回收站 | POST `/api/conversations` 幂等建立项目；DELETE `/api/runs/{run_id}` 移入回收站，GET `/api/trash` 列表，POST run 的 `/restore` 恢复 |
-| 连接/任务 | GET/PUT `/api/connections`；GET `/api/capabilities` 与 `/api/runtime` 分别给出声明能力和已加载进程信息；POST `/api/connections/deepseek/check` 只读验密钥；run 的 POST `/jobs`、GET `/jobs/latest` 或 `/jobs/{job_id}`、POST `/jobs/{job_id}/cancel` |
+| 连接/任务 | GET/PUT `/api/connections`；GET `/api/capabilities` 与 `/api/runtime` 分别给出声明能力和已加载进程信息；GET `/api/connections/codex/models` 从本机 CLI 只读列出可见文字模型，POST `/api/connections/deepseek/check` 只读验密钥；run 的 POST `/jobs`、GET `/jobs/latest` 或 `/jobs/{job_id}`、POST `/jobs/{job_id}/cancel` |
 | Codex 登录 | GET `/api/connections/codex/status`；POST `/api/connections/codex/login` 显式启动官方浏览器登录，POST `/api/connections/codex/login/cancel` 取消对应 attempt_id；与模型任务互斥，不读取凭据或自动登出 |
 | 恢复 | GET `/recovery`；POST `/recovery/abandon` 关闭准确遗留尝试。`/recovery/reconcile` 仅为保留的开发兼容入口，不是用户继续前置条件 |
 | 素材/分析 | GET/POST `/materials`、`/material-observations`、`/image-analysis`；GET `/materials/{name}`；POST `/image-analysis/{analysis_id}/confirm` 逐条采用 |

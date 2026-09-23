@@ -80,6 +80,46 @@ test('service and validation precede role assignment; generic advanced fields re
   assert.doesNotMatch(visible(h.card('ds')), /max_completion_tokens|输出上限参数|服务地址（/);
 });
 
+test('Codex reads the local model catalog and saves an explicit role choice', async () => {
+  const initial=config(); initial.roles.writer={connection:'codex',model:'older-model'};
+  const h=harness(initial,async call => call.url === '/api/connections/codex/models'
+    ? {source:'codex_cli',model_invoked:false,models:[
+        {model:'gpt-6-sol',display_name:'GPT-6 Sol',is_default:true},
+        {model:'gpt-6-luna',display_name:'GPT-6 Luna',is_default:false},
+      ]} : {revision:8});
+  const writer=role(h.body,'writer');
+  assert.equal(writer.model().tag,'input');
+  await button(h.card('codex'),'读取本机可选模型').onclick();
+  assert.deepEqual(h.calls.map(call=>call.url),['/api/connections/codex/models']);
+  assert.equal(writer.model().tag,'select');
+  assert.deepEqual(writer.model().children.map(option=>option.value),['','gpt-6-sol','gpt-6-luna','older-model']);
+  assert.equal(writer.model().value,'older-model');
+  assert.match(visible(writer.row),/已保留原值/);
+  writer.model().value='gpt-6-sol'; writer.model().onchange();
+  await h.submit();
+  assert.equal(h.calls[1].body.roles.writer.model,'gpt-6-sol');
+  assert.equal(h.calls[1].body.roles.orchestrator.model,'');
+});
+
+test('opening model settings starts a read-only Codex catalog lookup when requested', async () => {
+  const initial=config(); initial.autoDiscoverCodex=true;
+  const h=harness(initial,async()=>({source:'codex_cli',model_invoked:false,
+    models:[{model:'fixture-model',display_name:'Fixture',is_default:true}]}));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(h.calls.map(call=>call.url),['/api/connections/codex/models']);
+  assert.equal(role(h.body,'orchestrator').model().tag,'select');
+  assert.equal(role(h.body,'orchestrator').model().value,'');
+});
+
+test('failed Codex catalog read keeps the saved model editable', async () => {
+  const initial=config(); initial.roles.writer={connection:'codex',model:'saved-model'};
+  const h=harness(initial,async()=>{throw new Error('本机模型列表暂不可用');});
+  await button(h.card('codex'),'读取本机可选模型').onclick();
+  assert.equal(role(h.body,'writer').model().tag,'input');
+  assert.equal(role(h.body,'writer').model().value,'saved-model');
+  assert.match(visible(h.card('codex')),/本机模型列表暂不可用/);
+});
+
 test('DeepSeek saves fixed parameters without changing the existing Codex orchestrator', async () => {
   const h = harness(config(), async () => ({revision:8}));
   const ds = h.card('ds'); labeled(ds,'API Key').value = 'synthetic-key';

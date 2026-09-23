@@ -67,7 +67,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File apps/us-video-studio/scripts
 
 点击左侧「模型设置」，先配置模型服务，再为主制片、创意导演、视觉策划、编剧和独立审片分配服务与模型。DeepSeek 提供模型选项；通用兼容连接仍填写提供方的准确模型 ID。新增服务不会自动替换主制片或其他角色。
 
-- **Codex CLI**：使用本机 CLI 的现有 ChatGPT 登录。模型 ID 留空时使用 CLI 默认模型。每次模型调用使用新的临时线程，制片室明确传入业务上下文，不复用当前开发对话。CLI 仍可能加载自身全局 AGENTS.md；适配器只允许该明确路径，拒绝仓库和其他项目指令来源，不承诺与 Windows 用户完全隔离。CLI 内置执行能力受限，模型只返回制片室工具请求，由后端执行与校验。优先使用服务进程 PATH 中的 CLI；Windows 普通终端未配置 PATH 时，自动从当前用户 `%LOCALAPPDATA%/OpenAI/Codex/bin/` 的已安装版本定位，优先最近更新的版本目录，其次旧版平铺目录。仍会校验实际协议与限制配置，不修改系统 PATH，也不要求桌面客户端保持打开。找不到时页面会明确提示安装与重启服务。
+- **Codex CLI**：使用本机 CLI 的现有 ChatGPT 登录。打开模型设置时只读加载本机 Codex 返回的可见模型，服务卡上的「读取本机可选模型」可刷新；随后可为五个角色分别从下拉列表选模型。留空时使用 CLI 默认模型；已保存但暂不在列表的型号保持原值，读取失败时仍可手填，不会静默改选。模型列表不是额度、登录或创作质量验证，也不发起模型调用。每次模型调用使用新的临时线程，制片室明确传入业务上下文，不复用当前开发对话。CLI 仍可能加载自身全局 AGENTS.md；适配器只允许该明确路径，拒绝仓库和其他项目指令来源，不承诺与 Windows 用户完全隔离。CLI 内置执行能力受限，模型只返回制片室工具请求，由后端执行与校验。优先使用服务进程 PATH 中的 CLI；Windows 普通终端未配置 PATH 时，自动从当前用户 `%LOCALAPPDATA%/OpenAI/Codex/bin/` 的已安装版本定位，优先最近更新的版本目录，其次旧版平铺目录。仍会校验实际协议与限制配置，不修改系统 PATH，也不要求桌面客户端保持打开。找不到时页面会明确提示安装与重启服务。模型目录协议依据：[OpenAI Docs · Codex App Server](https://learn.chatgpt.com/docs/app-server#list-models-modellist)。
 - **DeepSeek 官方 API**：选择 DeepSeek 后填写 API Key，地址与兼容参数由应用设置，不需要手填。可先点击「验证密钥与模型」，再把可用模型分配给角色；也可先保存，未验证状态会明确显示。默认提供 `deepseek-flash` / `deepseek-v4-pro` 选项，验证后以提供方返回的模型列表为准，既有模型不会被静默替换。更换 Key 或服务后旧验证结果失效。
 - **连接验证范围**：只向固定官方地址 `https://api.deepseek.com/v1/models` 发出一次只读 GET，验证认证并获取模型列表；不生成内容、不提交业务资料、不保存输入的 Key、不改变角色绑定。成功不代表余额、文本生成或完整 Agent 流程已经实测。Key 仅在点保存时按原本机 DPAPI 机制持久化；关闭窗口清空输入。验证结果仅用于当前编辑会话。
 - **DeepSeek 任务运行**：专用适配器使用 thinking enabled/high；工作台不传 `max_tokens`，采用提供方默认输出额度，不继承通用兼容连接的 16K 上限（官方 2026-09-21 文档：当前思考模式默认 64K）。累计费用预算按已知记录执行，用量未知不阻断；同一角色的当前循环精确保留工具往返和续写所需的私有推理字段，不进入用户正文或其他角色。新 job 从已保存对话与产物开启新的推理请求，旧助手回复作为标记的历史资料，不伪造旧推理字段或建立第二套可恢复私有会话；逐次逻辑请求诊断快照可能含本轮必要私有字段，不向其他角色提供。调用继续通过原用量台账和任务恢复边界。接口依据：[思考与工具调用](https://api-docs.deepseek.com/guides/thinking_mode/)、[模型列表](https://api-docs.deepseek.com/api/list-models/)（2026-09-19 核对）。
@@ -163,6 +163,7 @@ $env:STUDIO_DATA_ROOT = $studioPreview
 | `GET/PUT /api/connections` | 读取不含凭据的配置；携带 expected_revision 保存配置 |
 | `GET /api/runtime`、`GET /api/capabilities` | 当前已加载进程标识与声明能力；不测试付费模型 |
 | `POST /api/connections/deepseek/check` | 只读验证 DeepSeek 密钥并获取模型列表；不保存配置、不生成内容 |
+| `GET /api/connections/codex/models` | 只读获取本机 Codex 的可见文字模型；不保存配置、不发起模型调用 |
 | `POST /api/runs/{id}/jobs` | text + request_id 创建持久任务；同 ID 同文本幂等 |
 | `GET /api/runs/{id}/jobs/latest` | 当前项目最后一次任务，无任务为 null |
 | `GET /api/runs/{id}/jobs/{job_id}` | 读取任务和事件；after_seq 可读取增量 |

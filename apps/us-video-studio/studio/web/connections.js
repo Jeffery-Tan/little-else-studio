@@ -14,7 +14,7 @@ $("connections-open").onclick = async () => {
     const [config, capabilities] = await Promise.all([api("/api/connections"), api("/api/capabilities")]);
     let runtime = null;
     try { runtime = await api("/api/runtime"); } catch {}
-    openConnectionDialog({...config, capabilities, runtime});
+    openConnectionDialog({...config, capabilities, runtime, autoDiscoverCodex: true});
   }
   catch (err) { toast(err.message, true); }
   finally { button.disabled = false; }
@@ -37,7 +37,7 @@ function openConnectionDialog(config) {
   if (document.querySelector?.(".connection-dialog")) return;
   const dialog = document.createElement("dialog"); dialog.className = "connection-dialog";
   const form = document.createElement("form"), rows = [], roleInputs = {};
-  let closed = false, saving = false;
+  let closed = false, saving = false, codexChecking = false, codexModels = null;
   const heading = box("div", "connection-heading");
   const close = box("button", "ghost", "关闭"); close.type = "button";
   close.onclick = () => { if (!saving) dialog.close(); };
@@ -101,7 +101,18 @@ function openConnectionDialog(config) {
   function refreshModel(fields, value = selectedModel(fields)) {
     const row = rows.find(item => item.id === fields.connection.value);
     let input;
-    if (row?.provider.value === "deepseek") {
+    if (row?.provider.value === "codex_cli" && codexModels) {
+      const currentDefault = codexModels.find(item => item.is_default);
+      const options = Object.assign(Object.create(null), { "": currentDefault
+        ? `本机默认 · ${currentDefault.display_name}` : "本机默认模型" });
+      for (const item of codexModels) options[item.model] = item.display_name === item.model
+        ? item.model : `${item.display_name} · ${item.model}`;
+      if (value && !codexModels.some(item => item.model === value)) options[value] = `${value} · 保留原配置`;
+      input = selectInput(options, value);
+      fields.note.textContent = value && !codexModels.some(item => item.model === value)
+        ? "原模型不在本机当前列表中，已保留原值；请确认后保留或主动改选。"
+        : "选项来自本机 Codex；空值沿用默认模型，列表读取不代表已验证额度或创作质量。";
+    } else if (row?.provider.value === "deepseek") {
       const ids = row.verified ? row.verified.model_ids : DEEPSEEK_MODELS;
       const options = Object.assign(Object.create(null), { "": "请选择模型" });
       for (const id of ids) options[id] = id;
@@ -128,6 +139,7 @@ function openConnectionDialog(config) {
     for (const row of rows) {
       row.codexLogin?.sync();
       row.check.disabled = saving || row.checking;
+      row.codexModelCheck.disabled = saving || codexChecking;
       if (row.remove) {
         const bound = Object.values(roleInputs).some(fields => fields.connection.value === row.id);
         row.remove.disabled = saving || row.checking || bound;
@@ -199,6 +211,12 @@ function openConnectionDialog(config) {
     const hint = box("p", "muted"), advanced = box("details", "connection-advanced"), protocolFields = box("div", "connection-grid");
     const codexLoginHost = box("div", "codex-login");
     row.codexLogin = createCodexLogin(codexLoginHost, () => saving || closed);
+    const codexModelHost = box("div", "connection-check");
+    const codexModelCheck = box("button", "ghost", "读取本机可选模型"); codexModelCheck.type = "button";
+    const codexModelStatus = box("p", "connection-verification", "点击读取后可在下方为每个角色选择 Codex 模型；不会调用模型。候选列表以本机登录返回为准。");
+    codexModelStatus.setAttribute("role", "status");
+    codexModelHost.append(codexModelCheck, codexModelStatus);
+    row.codexModelCheck = codexModelCheck;
     const tokenField = field("输出上限参数（按提供方接口选择）", tokenLimit);
     protocolFields.append(field("服务地址（不含具体接口路径）", baseUrl), tokenField);
     const pricingHost = box("div", "pricing-list"), pricingSection = box("details", "");
@@ -221,7 +239,8 @@ function openConnectionDialog(config) {
       const deepseek = provider.value === "deepseek", codex = provider.value === "codex_cli";
       if (deepseek) { baseUrl.value = DEEPSEEK_URL; tokenLimit.value = "max_tokens"; }
       updateKeyHint();
-      apiFields.hidden = codex; verification.hidden = !deepseek; protocolFields.hidden = deepseek || codex; advanced.hidden = codex;
+      apiFields.hidden = codex; verification.hidden = !deepseek; codexModelHost.hidden = !codex;
+      protocolFields.hidden = deepseek || codex; advanced.hidden = codex;
       row.codexLogin.setVisible(codex);
       tokenField.hidden = provider.value !== "openai_compat";
       hint.textContent = deepseek ? "已预设 DeepSeek 官方连接，无需填写地址或兼容参数。填入 Key 后可先验证。"
@@ -266,7 +285,29 @@ function openConnectionDialog(config) {
         if (err.status === 409) status.textContent += " 本次输入仍保留，未保存或覆盖设置。";
       } finally { row.checking = false; if (!closed) syncButtons(); }
     };
-    card.append(header, grid, apiFields, hint, codexLoginHost, verification, advanced); connectionsHost.append(card); providerChanged(false);
+    codexModelCheck.onclick = async () => {
+      if (closed || saving || codexChecking || provider.value !== "codex_cli") return;
+      codexChecking = true; codexModelStatus.className = "connection-verification";
+      codexModelStatus.textContent = "正在读取本机 Codex 可选模型…"; syncButtons();
+      try {
+        const result = await api("/api/connections/codex/models");
+        if (closed || provider.value !== "codex_cli") return;
+        if (result.source !== "codex_cli" || result.model_invoked !== false || !Array.isArray(result.models)
+            || !result.models.length || result.models.some(item => !item || typeof item.model !== "string"
+              || !item.model.trim() || typeof item.display_name !== "string")) throw new Error("本机未返回可用模型列表。");
+        codexModels = result.models; codexModelStatus.className = "connection-verification verified";
+        codexModelStatus.textContent = `已读取 ${codexModels.length} 个本机可选模型；尚未发起创作或验证额度。`;
+        for (const fields of Object.values(roleInputs)) {
+          const bound = rows.find(item => item.id === fields.connection.value);
+          if (bound?.provider.value === "codex_cli") refreshModel(fields);
+        }
+      } catch (err) {
+        if (closed) return;
+        codexModelStatus.className = "connection-verification error";
+        codexModelStatus.textContent = String(err.message || "读取失败；可保留原模型设置或稍后重试。");
+      } finally { codexChecking = false; if (!closed) syncButtons(); }
+    };
+    card.append(header, grid, apiFields, hint, codexLoginHost, codexModelHost, verification, advanced); connectionsHost.append(card); providerChanged(false);
     return row;
   }
   for (const connection of config.connections) addConnection(connection);
@@ -301,6 +342,7 @@ function openConnectionDialog(config) {
   form.onsubmit = async event => {
     event.preventDefault(); if (saving || closed) return; error.textContent = "";
     if (rows.some(row => row.checking)) { error.textContent = "正在验证密钥与模型，请等验证结束后再保存。"; return; }
+    if (codexChecking) { error.textContent = "正在读取本机模型列表，请等候完成后再保存。"; return; }
     const connections = rows.map(row => {
       const pricing = {};
       for (const price of row.priceRows) {
@@ -332,4 +374,8 @@ function openConnectionDialog(config) {
   dialog.addEventListener("cancel", event => { if (saving) event.preventDefault(); });
   dialog.addEventListener("close", () => { closed = true; rows.forEach(row => { row.editVersion++; row.key.value = ""; row.codexLogin?.dispose(); }); dialog.remove(); });
   dialog.showModal();
+  if (config.autoDiscoverCodex) {
+    const codex = rows.find(row => row.provider.value === "codex_cli");
+    if (codex) void codex.codexModelCheck.onclick();
+  }
 }

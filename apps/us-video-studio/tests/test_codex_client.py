@@ -47,6 +47,7 @@ class FakeSession:
     thread_change = {}
     metadata = None
     denied_request = False
+    model_pages = []
 
     def __init__(self, command, cwd, config, timeout):
         self.command, self.cwd, self.config = command, cwd, config
@@ -74,6 +75,8 @@ class FakeSession:
             return result
         if method == "turn/start":
             return {"turn": {"id": "one-turn", "status": "inProgress"}}
+        if method == "model/list":
+            return copy.deepcopy(type(self).model_pages.pop(0))
         raise AssertionError("Unexpected RPC")
 
     def event(self):
@@ -90,11 +93,42 @@ class FakeSession:
 def client(monkeypatch, tmp_path):
     FakeSession.instances, FakeSession.events = [], finished()
     FakeSession.thread_change, FakeSession.metadata = {}, None
+    FakeSession.model_pages = []
     FakeSession.denied_request = False
     monkeypatch.setattr(codex, "_StdioSession", FakeSession)
     result = codex.CodexClient(run_id="unit-run", role="orchestrator", data_root=tmp_path)
     result._mcp_names = ("configured_mcp",)
     return result
+
+
+def test_model_catalog_is_read_only_paged_and_preserves_exact_model_ids(client, monkeypatch):
+    monkeypatch.setattr(client, "preflight", lambda: {"model_invoked": False})
+    FakeSession.model_pages = [
+        {"data": [{"model": "gpt-6-sol", "displayName": "GPT-6 Sol", "isDefault": True,
+                   "inputModalities": ["text", "image"]},
+                  {"model": "image-only", "inputModalities": ["image"]}], "nextCursor": "page-2"},
+        {"data": [{"model": "gpt-6-luna", "displayName": "GPT-6 Luna"},
+                  {"model": "gpt-6-sol", "displayName": "duplicate"}], "nextCursor": None},
+    ]
+    result = client.list_models()
+    assert result == {"source": "codex_cli", "model_invoked": False, "models": [
+        {"model": "gpt-6-sol", "display_name": "GPT-6 Sol", "is_default": True},
+        {"model": "gpt-6-luna", "display_name": "GPT-6 Luna", "is_default": False},
+    ]}
+    assert [call for session in FakeSession.instances for call in session.sent if call[0] == "model/list"] == [
+        ("model/list", {"limit": 100, "includeHidden": False}),
+        ("model/list", {"limit": 100, "includeHidden": False, "cursor": "page-2"}),
+    ]
+    assert all(session.closed for session in FakeSession.instances)
+
+
+def test_model_catalog_rejects_invalid_identifier_without_starting_a_turn(client, monkeypatch):
+    monkeypatch.setattr(client, "preflight", lambda: {"model_invoked": False})
+    FakeSession.model_pages = [{"data": [{"model": "bad\nmodel"}], "nextCursor": None}]
+    with pytest.raises(codex.CodexUnavailable, match="invalid model identifier"):
+        client.list_models()
+    assert all(call[0] != "thread/start" for session in FakeSession.instances for call in session.sent)
+    assert all(session.closed for session in FakeSession.instances)
 
 
 def complete(client, **kwargs):

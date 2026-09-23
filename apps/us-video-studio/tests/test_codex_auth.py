@@ -244,6 +244,25 @@ def test_http_consent_json_and_cross_origin_guards(http):
     assert response.json()['status'] == 'not_logged_in'
 
 
+def test_http_model_catalog_is_read_only_no_store_and_fails_closed(http):
+    client, app, cli = http
+    catalog = {'source': 'codex_cli', 'model_invoked': False,
+               'models': [{'model': 'fixture-model', 'display_name': 'Fixture', 'is_default': True}]}
+    app.state.codex_auth.model_catalog = lambda: catalog
+    response = client.get('/api/connections/codex/models')
+    assert response.status_code == 200 and response.json() == catalog
+    assert response.headers['cache-control'] == 'no-store'
+    assert cli.commands == []
+    assert client.get('/api/connections/codex/models', headers={'Origin': 'null'}).status_code == 403
+
+    def unavailable():
+        raise CodexUnavailable('private local diagnostics')
+    app.state.codex_auth.model_catalog = unavailable
+    response = client.get('/api/connections/codex/models')
+    assert response.status_code == 503
+    assert 'private local diagnostics' not in response.text
+
+
 def test_http_login_blocks_new_jobs_without_recording_a_model_call(http):
     client, app, cli = http
     client.post('/api/runs', json={'run_id': 'test-run', 'title': 'test', 'brief': 'test'})

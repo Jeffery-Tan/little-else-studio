@@ -425,6 +425,61 @@ class CodexClient:
                 raise
             raise CodexUnavailable("Codex local preflight failed; no model request sent") from exc
 
+    def list_models(self) -> dict[str, Any]:
+        """Read the local Codex picker catalog without starting a model turn."""
+        self.preflight()
+        models: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        cursor: str | None = None
+        try:
+            with tempfile.TemporaryDirectory(prefix="studio-codex-models-") as directory:
+                session = _StdioSession(self.command, Path(directory),
+                                        _overrides(self._mcp_names or ()), min(self.timeout, 30))
+                try:
+                    session.initialize()
+                    _verify_policy(session.policy_metadata())
+                    for _ in range(5):
+                        params: dict[str, Any] = {"limit": 100, "includeHidden": False}
+                        if cursor:
+                            params["cursor"] = cursor
+                        page = session.request("model/list", params)
+                        rows = page.get("data")
+                        if not isinstance(rows, list):
+                            raise CodexUnavailable("Codex model catalog has an unsupported shape")
+                        for row in rows:
+                            if not isinstance(row, dict):
+                                raise CodexUnavailable("Codex model catalog has an unsupported entry")
+                            model = row.get("model") or row.get("id")
+                            if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", model):
+                                raise CodexUnavailable("Codex model catalog has an invalid model identifier")
+                            if row.get("hidden") is True or (isinstance(row.get("inputModalities"), list)
+                                                               and "text" not in row["inputModalities"]):
+                                continue
+                            if model in seen:
+                                continue
+                            seen.add(model)
+                            name = row.get("displayName")
+                            if not isinstance(name, str) or not name.strip() or len(name) > 100 or any(ord(c) < 32 for c in name):
+                                name = model
+                            models.append({"model": model, "display_name": name.strip(),
+                                           "is_default": row.get("isDefault") is True})
+                        cursor = page.get("nextCursor")
+                        if cursor is None:
+                            break
+                        if not isinstance(cursor, str) or not cursor or len(cursor) > 512:
+                            raise CodexUnavailable("Codex model catalog has an invalid cursor")
+                    else:
+                        raise CodexUnavailable("Codex model catalog exceeded the supported page limit")
+                finally:
+                    session.close()
+        except (OSError, subprocess.SubprocessError, ModelError) as exc:
+            if isinstance(exc, CodexUnavailable):
+                raise
+            raise CodexUnavailable("Codex model catalog is unavailable; no model request sent") from exc
+        if not models:
+            raise CodexUnavailable("Codex did not return any selectable text models")
+        return {"models": models, "source": "codex_cli", "model_invoked": False}
+
     def complete(self, *, model: str, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> Turn:
         self._check()
         schema = _schema(tools)

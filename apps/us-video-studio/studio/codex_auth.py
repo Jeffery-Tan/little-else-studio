@@ -11,7 +11,7 @@ import uuid
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
-from .agents.codex_client import CodexUnavailable, resolve_codex_command
+from .agents.codex_client import CodexClient, CodexUnavailable, resolve_codex_command
 from .models import PipelineError
 
 
@@ -24,17 +24,28 @@ def _environment():
 
 
 class CodexAuth:
-    def __init__(self, jobs, *, resolver=None, runner=None, spawn=None, timeout=600):
+    def __init__(self, jobs, *, resolver=None, runner=None, spawn=None, timeout=600, model_catalog=None):
         self.jobs = jobs
         self.resolve = resolver or resolve_codex_command
         self.run = runner or subprocess.run
         self.spawn = spawn or subprocess.Popen
         self.timeout = timeout
+        self.model_catalog = model_catalog or self._model_catalog
         self.process = None
         self.attempt_id = None
         self.result = None
         self.checked_at = 0.0
         self.closed = False
+
+    def _model_catalog(self):
+        return CodexClient(run_id='model-catalog', role='orchestrator', data_root='.',
+                           command=self.resolve(), timeout=45).list_models()
+
+    def models(self):
+        try:
+            return self.model_catalog()
+        except (CodexUnavailable, OSError, subprocess.SubprocessError) as exc:
+            raise HTTPException(503, '暂时无法读取本机 Codex 模型列表；原有模型设置未改变。') from exc
 
     def _state(self, status, message, auth_method=None):
         return {'status': status, 'message': message, 'auth_method': auth_method,
@@ -183,6 +194,10 @@ def install_codex_auth_routes(app, auth):
     @app.get('/api/connections/codex/status')
     def status():
         return response(auth.status())
+
+    @app.get('/api/connections/codex/models')
+    def models():
+        return response(auth.models())
 
     @app.post('/api/connections/codex/login')
     def login(payload: LoginIn):
