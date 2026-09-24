@@ -118,6 +118,12 @@ class LearningRejectIn(BaseModel):
     request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
 
 
+class LearningRefreshIn(BaseModel):
+    expected_run_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    expected_current_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    request_id: str = Field(min_length=8, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
+
+
 class DeepSeekCheckIn(BaseModel):
     expected_revision: int = Field(ge=0, strict=True)
     connection_id: str = Field(min_length=1, max_length=64, pattern=r'^[a-z0-9][a-z0-9-]*$')

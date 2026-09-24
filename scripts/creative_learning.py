@@ -427,6 +427,9 @@ def validate_v2(doc):
         pids.add(pid)
         if preference.get('scope') not in ('user', 'brand', 'project') or not preference.get('dimension') or not preference.get('quote') or not preference.get('source_ref'):
             errors.append(f'{pid}: preference requires explicit scope, dimension, quote and source')
+        owner = preference.get('owner')
+        if not isinstance(owner, str) or not owner or (preference.get('scope') == 'user' and owner != 'workspace-user') or (preference.get('scope') in ('brand', 'project') and not _ID.fullmatch(owner)):
+            errors.append(f'{pid}: preference requires a scoped owner identity')
         if preference.get('market_effect') is not None:
             errors.append(f'{pid}: preference cannot assert market effect')
     return errors

@@ -27,7 +27,7 @@
   function mediaHtml(item,thumbnail=false) {
     if(!item.media)return `<div class="learning-no-preview"><span>暂无本地预览</span><small>可阅读已有观察记录</small></div>`;
     const url=`/api/learning/cases/${encodeURIComponent(item.id)}/media`;
-    const image=/\.(png|jpe?g|webp|gif)$/i.test(item.media.path||"");
+    const image=/\.(png|jpe?g|webp|gif)$/i.test(item.media.path||item.media.resource_id||"");
     if(image)return `<img class="${thumbnail?'learning-thumbnail':'learning-media'}" src="${esc(url)}" loading="lazy" alt="${esc(item.title||'参考图片')}">`;
     return `<video class="${thumbnail?'learning-thumbnail':'learning-media'}" ${thumbnail?'muted tabindex="-1" aria-hidden="true"':'controls'} playsinline preload="metadata" src="${esc(url)}#t=0.1"></video>`;
   }
@@ -194,7 +194,7 @@
     if(tab==="feedback")renderFeedback();
   }
   function renderSources(){
-    setContent(`<div class="learning-section-heading"><h3>从购买理由，到具体表达</h3><p class="learning-note">三份创作方法，按需要阅读。本轮实际提供给创作角色的内容，保留在「本轮参考」。</p></div><div class="learning-grid learning-skills-grid">${list(catalog.skills).map(skillCard).join("")}</div><h3>研究与说明</h3><div class="learning-document-list">${list(catalog.documents).map(d=>`<article class="learning-document-row"><h4>${esc(d.title||"研究资料")}</h4>${button("阅读 →","document",d.id)}</article>`).join("")}</div><details class="learning-details learning-archive-list"><summary>历史资料与 Oumomo 对照</summary><p class="learning-note">保留旧方案和受限比较。Oumomo 仅作偏好对照，不代表方法或市场效果已经验证。</p><div class="learning-document-list">${list(catalog.archives).map(a=>`<article class="learning-document-row"><h4>${esc(a.title||"历史资料")}</h4>${a.available===false?'<span class="learning-note">文件暂不可用</span>':button("查看 →","archive",a.id)}</article>`).join("")||empty("暂无历史资料。")}</div></details>`);
+    setContent(`<div class="learning-section-heading"><h3>从购买理由，到具体表达</h3><p class="learning-note">三份创作方法，按需要阅读。本轮实际提供给创作角色的内容，保留在「本轮参考」。</p></div><div class="learning-grid learning-skills-grid">${list(catalog.skills).map(skillCard).join("")}</div><h3>研究与说明</h3><div class="learning-document-list">${list(catalog.documents).map(d=>`<article class="learning-document-row"><h4>${esc(d.title||"研究资料")}</h4>${button("阅读 →","document",d.id)}</article>`).join("")}</div><h3>已保存的创作偏好</h3><p class="learning-note">个人或项目范围仅在身份匹配的新任务提供给创作角色，不替代市场判断与独立审核；品牌范围暂只存档，尚未回流。</p><div class="learning-grid">${list(catalog.preferences).map(p=>`<article class="learning-card"><h4>${esc(p.dimension||p.id)}</h4><p>${esc(p.quote)}</p><small>${esc(p.scope)} · ${esc(p.owner)} · ${p.application_status==='stored_only'?'只存档':'按范围匹配'}</small></article>`).join('')||empty('尚无已保存偏好。')}</div><details class="learning-details learning-archive-list"><summary>历史资料与 Oumomo 对照</summary><p class="learning-note">保留旧方案和受限比较。Oumomo 仅作偏好对照，不代表方法或市场效果已经验证。</p><div class="learning-document-list">${list(catalog.archives).map(a=>`<article class="learning-document-row"><h4>${esc(a.title||"历史资料")}</h4>${a.available===false?'<span class="learning-note">文件暂不可用</span>':button("查看 →","archive",a.id)}</article>`).join("")||empty("暂无历史资料。")}</div></details>`);
   }
   function renderSearch(kind){
     const items=list(catalog[kind]).map(item=>{
@@ -212,7 +212,9 @@
   function renderContext(){
     const fileNames={"review.md":"阅读方案","index.html":"打开图文包","prompt.txt":"生成提示词","caption.txt":"发布文案","prompts.md":"逐页文案与提示词"};
     const fileLink=f=>{const url=localFileURL(f.url);return url?`<a class="learning-file-link" href="${esc(url)}" target="_blank" rel="noopener">${esc(fileNames[f.name]||f.name)} ↗</a>`:"";};
-    setContent(`${projectReferences(referenceState.references,referenceState.capability)}<h3>这次创作参考了什么</h3><p class="learning-note">以下记录对应实际提供给各角色的内容。提供过，不等于内容或效果已经通过验证。</p><div class="learning-context-list">${list(run.contexts).map(c=>contextCard(c,prose)).join("")||empty("还没有本轮参考记录。开始创作后，这里会留下实际提供的方法和案例。")}</div><h3>方法选择与使用记录</h3><p class="learning-note">区分方法已提供、制片选择和稿件实际体现；以下选择记录仍待作品核实。</p><div class="learning-context-list">${list(run.method_usage).map(methodUsageCard).join("")||empty("尚无方法选择记录。")}</div><h3>方案与制作文件</h3><p class="learning-note">可阅读的方案、文案和制作输入。待生成的素材仍保持待生成。</p><div class="learning-grid">${list(run.packages).map(p=>`<article class="learning-card"><h4>${p.format==='photo'?'图文方案':'视频方案'} · ${esc(stages[p.stage]||p.stage)} 第 ${esc(p.version)} 版</h4><div class="learning-file-links">${list(p.files).filter(f=>fileNames[f.name]).map(fileLink).join("")}</div><details class="learning-details learning-audit"><summary>全部文件与版本记录</summary>${meta(p.artifact_sha256)}${list(p.files).map(fileLink).join("")}</details></article>`).join("")||empty("还没有保存的制作文件。")}</div>`);
+    const pin=run.pin_status;
+    const refreshCard=pin?.refresh_available?`<article class="learning-card"><h3>当前项目沿用旧版学习库</h3><p class="learning-note">${pin.historical_readonly?'旧库完整备份无法核对，当前只能回看既有项目记录。':'原项目知识版本仍固定，已有稿件和批准保留原版本。'}明确刷新后，仅后续任务使用当前共享库；这一步不会重写旧稿或恢复旧批准。</p><p class="learning-meta">项目库 ${esc(pin.run_library_sha256)} · 当前库 ${esc(pin.current_library_sha256)}</p>${button('后续任务采用当前库','refresh-library','','primary')}</article>`:'';
+    setContent(`${refreshCard}${projectReferences(referenceState.references,referenceState.capability)}<h3>这次创作参考了什么</h3><p class="learning-note">以下记录对应实际提供给各角色的内容。提供过，不等于内容或效果已经通过验证。</p><div class="learning-context-list">${list(run.contexts).map(c=>contextCard(c,prose)).join("")||empty("还没有本轮参考记录。开始创作后，这里会留下实际提供的方法和案例。")}</div><h3>方法选择与使用记录</h3><p class="learning-note">区分方法已提供、制片选择和稿件实际体现；以下选择记录仍待作品核实。</p><div class="learning-context-list">${list(run.method_usage).map(methodUsageCard).join("")||empty("尚无方法选择记录。")}</div><h3>方案与制作文件</h3><p class="learning-note">可阅读的方案、文案和制作输入。待生成的素材仍保持待生成。</p><div class="learning-grid">${list(run.packages).map(p=>`<article class="learning-card"><h4>${p.format==='photo'?'图文方案':'视频方案'} · ${esc(stages[p.stage]||p.stage)} 第 ${esc(p.version)} 版</h4><div class="learning-file-links">${list(p.files).filter(f=>fileNames[f.name]).map(fileLink).join("")}</div><details class="learning-details learning-audit"><summary>全部文件与版本记录</summary>${meta(p.artifact_sha256)}${list(p.files).map(fileLink).join("")}</details></article>`).join("")||empty("还没有保存的制作文件。")}</div>`);
   }
   function localFileURL(url){return typeof url==="string"&&/^\/api\/(runs|learning)\/[a-zA-Z0-9%_./?=&-]+$/.test(url)&&!url.includes("..")?url:null;}
   function renderFeedback(){
@@ -227,6 +229,16 @@
   }
   async function act(action,id){
     if(action==="tab"){tab=id;proposal=null;notify("");render();return;}
+    if(action==="refresh-library"){
+      if(!runId||!run.pin_status?.refresh_available)throw new Error('请重新打开项目知识版本。');
+      const target=main.querySelector('[data-learning-action="refresh-library"]');
+      if(target&&!target.dataset.requestId)target.dataset.requestId=crypto.randomUUID();
+      await request(runPath('/refresh'),{method:'POST',body:JSON.stringify({
+        expected_run_sha256:run.pin_status.run_library_sha256,
+        expected_current_sha256:run.pin_status.current_library_sha256,
+        request_id:target?.dataset.requestId||crypto.randomUUID()})});
+      await refresh();notify('当前共享库已用于这个项目的后续任务；旧稿和旧批准仍属原版本。');return;
+    }
     if(action==="skill"||action==="document"){
       const doc=action==="skill"?list(catalog.skills).find(s=>s.id===id):await request(`/api/learning/documents/${encodeURIComponent(id)}`);
       if(!doc)throw new Error("找不到该文本。");

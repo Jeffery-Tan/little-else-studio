@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import HTTPException
 from fastapi.responses import FileResponse, Response
 from .delivery import delivery_snapshot, delivery_zip
-from .http_contracts import LearningProposalIn, LearningApplyIn, LearningRejectIn
+from .http_contracts import LearningProposalIn, LearningApplyIn, LearningRejectIn, LearningRefreshIn
 from .learning import LearningConflict
 from .learning_session import session_snapshot
 from .models import PipelineError
@@ -31,6 +31,7 @@ def install_learning_routes(app, learning, learning_assets, creative_packages, s
 
     def learning_file(path):
         headers = {'X-Content-Type-Options': 'nosniff',
+                   'Cache-Control': 'no-store',
                    'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'"}
         return FileResponse(path, headers=headers)
 
@@ -58,7 +59,12 @@ def install_learning_routes(app, learning, learning_assets, creative_packages, s
     @app.get('/api/runs/{run_id}/learning')
     def run_learning(run_id: str):
         require_run(run_id)
-        return {'artifacts': [{'stage': a.stage, 'version': a.version,
+        try:
+            pin = learning.pin_status(run_id) if store.read_run(run_id).kind == 'creative' else None
+        except (LearningConflict, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {'pin_status': pin,
+                'artifacts': [{'stage': a.stage, 'version': a.version,
                               'artifact_sha256': a.sha256, 'title': a.summary}
                              for a in store.list_artifacts(run_id)],
                 'contexts': [{**event, 'snapshot': learning.context_record(run_id, event['snapshot_sha256'])}
@@ -66,6 +72,18 @@ def install_learning_routes(app, learning, learning_assets, creative_packages, s
                 'proposals': learning.proposals(run_id),
                 'method_usage': [event for event in store.read_events(run_id)
                                  if event['kind'] == 'method_usage_recorded']}
+
+    @app.post('/api/runs/{run_id}/learning/refresh')
+    def refresh_creative_library(run_id: str, payload: LearningRefreshIn):
+        require_run(run_id)
+        try:
+            with jobs.lock:
+                if jobs.active is not None:
+                    raise HTTPException(409, '当前任务仍在运行，请结束后再刷新学习库。')
+                return learning.refresh_run_pin(run_id, payload.expected_run_sha256,
+                                                payload.expected_current_sha256, payload.request_id)
+        except (LearningConflict, ValueError, PipelineError) as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.get('/api/runs/{run_id}/learning/session')
     def learning_session(run_id: str):

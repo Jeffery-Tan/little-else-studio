@@ -176,6 +176,9 @@ test('reference cards use registered local media, remain silent, and invent no p
   assert.doesNotMatch(html,/autoplay|https?:\/\//);
   assert.match(html,/观察到前袋放入小物/);
   assert.ok(html.indexOf('<video')<html.indexOf('<h4>装包参考'));
+  const v2=L.caseCard({id:'new-image',title:'图片参考',partition:'pending',
+    media:{resource_id:'run-material:learn-one:source.jpg',sha256:'a'.repeat(64)},evidence:[]});
+  assert.match(v2,/<img[^>]*src="\/api\/learning\/cases\/new-image\/media"/);
   assert.doesNotMatch(L.caseCard({id:'unobserved',title:'待研究参考'}),/<img|<video/);
   assert.match(L.caseCard({id:'unobserved',title:'待研究参考'}),/暂无本地预览/);
 });

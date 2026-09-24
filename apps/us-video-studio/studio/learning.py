@@ -17,7 +17,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-from .models import utcnow, STAGES
+from .models import PipelineError, utcnow, STAGES
 from .store import _atomic_write_text
 
 REPOSITORY = Path(__file__).resolve().parents[3]
@@ -108,6 +108,10 @@ class LearningConflict(ValueError):
     """The reviewed proposal or canonical library no longer matches."""
 
 
+class LegacyLibraryUnavailable(LearningConflict):
+    """A legacy creative Run has no complete, hash-matching library backup."""
+
+
 def _json(value):
     return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n"
 
@@ -169,6 +173,43 @@ class LearningService:
             raise ValueError("Invalid learning library: " + "; ".join(errors))
         return raw, doc
 
+    def _historical_library(self, wanted_sha256):
+        """Find exact bytes retained by an applied, audited learning proposal."""
+        for run in self.store.list_runs():
+            if run.kind != 'learning':
+                continue
+            events = self.store.read_events(run.run_id)
+            applied = {event.get('proposal_id'): event for event in events
+                       if event['kind'] == 'learning_applied'}
+            root = self._run_root(run.run_id) / 'proposals'
+            for directory in sorted(root.glob('proposal-*')):
+                if directory.name not in applied or not (directory / 'applied.json').is_file():
+                    continue
+                try:
+                    proposal = self._read_proposal(directory)
+                    receipt = json.loads((directory / 'applied.json').read_text(encoding='utf-8'))
+                    event = applied[directory.name]
+                    if (event.get('proposal_sha256') and event['proposal_sha256'] != _sha(_json(proposal))
+                            or event.get('before_sha256') != proposal.get('base_library_sha256')
+                            or event.get('after_sha256') != proposal.get('candidate_sha256')
+                            or receipt.get('applied_library_sha256') != proposal.get('candidate_sha256')):
+                        continue
+                    if proposal.get('type') not in {'migration', 'delta', 'feedback', 'source', 'method', 'observation'}:
+                        continue
+                    for filename, field in (('before.json', 'base_library_sha256'),
+                                            ('after.json', 'candidate_sha256')):
+                        if proposal.get(field) != wanted_sha256:
+                            continue
+                        raw = (directory / filename).read_bytes()
+                        if _sha(raw) != wanted_sha256:
+                            continue
+                        doc = json.loads(raw.decode('utf-8-sig'))
+                        if not core.validate(doc):
+                            return raw, doc
+                except (OSError, ValueError, UnicodeError, KeyError):
+                    continue
+        return None
+
     def _read_for_run(self, run_id):
         """Pin shared knowledge for a creative Run, refreshing only on its own apply.
 
@@ -215,9 +256,12 @@ class LearningService:
                                              if event["kind"] == "learning_context_loaded"
                                              and event.get("library_sha256")), None)
                     if previous_context and previous_context["library_sha256"] != _sha(raw):
-                        raise LearningConflict(
-                            "旧项目使用过另一版学习库，但当时未保存完整库快照。"
-                            "请查看原上下文快照，或新建项目使用当前方法。")
+                        restored = self._historical_library(previous_context['library_sha256'])
+                        if restored is None:
+                            raise LegacyLibraryUnavailable(
+                                "旧项目使用过另一版学习库，但当时未保存完整库快照。"
+                                "原库备份也无法按哈希核对；只可回看旧上下文，后续采用新库须明确刷新。")
+                        raw, doc = restored
             _atomic_write_text(path, _json({"raw_text": raw.decode("utf-8"),
                                             "sha256": _sha(raw), "applied_seq": applied_seq}))
             self.store.append_event(run_id, "learning_library_pinned",
@@ -228,6 +272,99 @@ class LearningService:
     def _run_root(self, run_id):
         self.store.read_run(run_id)
         return self.store.run_dir(run_id) / "learning"
+
+    def _legacy_readonly_context(self, run_id, role, intent, format, purpose):
+        """Allow status follow-up from old snapshots without inventing library bytes."""
+        prior = None
+        for event in reversed(self.contexts(run_id)):
+            try:
+                record = self.context_record(run_id, event['snapshot_sha256'])
+            except (ValueError, OSError, KeyError, UnicodeError):
+                continue
+            if record.get('library_sha256') == event.get('library_sha256'):
+                prior = record
+                break
+        previous_sha = prior['library_sha256'] if prior else next((
+            event['library_sha256'] for event in reversed(self.contexts(run_id))
+            if event.get('library_sha256')), None)
+        note = ('旧学习库完整字节不可核对。本轮只回看已保存项目、产物与历史上下文；'
+                '不得写新稿、调用观察、送审或沿用旧批准。要让后续任务使用当前库，须由用户明确刷新。')
+        result = {'role': role, 'intent': intent, 'format': format, 'purpose': purpose,
+                  'library_sha256': previous_sha, 'library_version': prior.get('library_version') if prior else None,
+                  'skills': [], 'seed_case_ids': [], 'case_ids': [], 'library': None,
+                  'method_directory': None, 'run_feedback': [], 'selected_references': [],
+                  'text': note + ('\n\n此前已保存的上下文，仅供回放：\n' + prior['text'] if prior else ''),
+                  'historical_readonly': True}
+        digest = _sha(_json(result))
+        result.update(snapshot_sha256=digest, evidence_ref=f'learning/contexts/{digest}.json')
+        with self.store.run_lock(run_id):
+            path = self._run_root(run_id) / 'contexts' / (digest + '.json')
+            if not path.exists():
+                _atomic_write_text(path, _json(result))
+            self.store.append_event(run_id, 'learning_context_replayed',
+                                    library_sha256=previous_sha, snapshot_sha256=digest,
+                                    evidence_ref=result['evidence_ref'])
+        return result
+
+    def pin_status(self, run_id):
+        """Read-only comparison for an explicit future-task library refresh."""
+        if self.store.read_run(run_id).kind != 'creative':
+            raise ValueError('Only a creative Run can refresh its learning library')
+        current, _ = self._read()
+        current_sha = _sha(current)
+        path = self._run_root(run_id) / 'library-pin.json'
+        if path.is_file():
+            try:
+                pin = json.loads(path.read_text(encoding='utf-8'))
+                previous_sha = pin.get('sha256')
+                if (not isinstance(pin.get('raw_text'), str) or
+                        _sha(pin['raw_text']) != previous_sha or
+                        type(pin.get('applied_seq')) is not int or
+                        core.validate(json.loads(pin['raw_text'].lstrip('\ufeff')))):
+                    raise ValueError('invalid pin')
+            except (OSError, ValueError, TypeError, UnicodeError) as exc:
+                raise LearningConflict('Creative learning pin is damaged') from exc
+            source = 'pinned'
+        else:
+            previous_sha = next((event.get('library_sha256')
+                for event in reversed(self.contexts(run_id)) if event.get('library_sha256')), None)
+            source = 'historical_unpinned' if previous_sha else 'new'
+        return {'source': source, 'run_library_sha256': previous_sha,
+                'current_library_sha256': current_sha,
+                'refresh_available': bool(previous_sha and previous_sha != current_sha),
+                'historical_readonly': bool(source == 'historical_unpinned' and
+                    previous_sha != current_sha and self._historical_library(previous_sha) is None)}
+
+    def refresh_run_pin(self, run_id, expected_run_sha256, expected_current_sha256, request_id):
+        """User-only choice to use the current library in later creative turns."""
+        if (not isinstance(request_id, str) or
+                not re.fullmatch(r'[A-Za-z0-9_.:-]{8,128}', request_id)):
+            raise ValueError('Invalid learning refresh request ID')
+        with _library_lock(self.library_path), self.store.run_lock(run_id):
+            events = self.store.read_events(run_id)
+            prior = next((event for event in reversed(events)
+                          if event['kind'] == 'learning_library_refreshed' and
+                          event.get('request_id') == request_id), None)
+            if prior:
+                if (prior.get('from_sha256') != expected_run_sha256 or
+                        prior.get('to_sha256') != expected_current_sha256):
+                    raise LearningConflict('Refresh request ID was used for another library version')
+                return self.pin_status(run_id)
+            status = self.pin_status(run_id)
+            if (status['run_library_sha256'] != expected_run_sha256 or
+                    status['current_library_sha256'] != expected_current_sha256 or
+                    not status['refresh_available']):
+                raise LearningConflict('Learning library changed; review the current version again')
+            raw, doc = self._read()
+            applied_seq = max((event['seq'] for event in events
+                               if event['kind'] == 'learning_applied'), default=0)
+            _atomic_write_text(self._run_root(run_id) / 'library-pin.json', _json({
+                'raw_text': raw.decode('utf-8'), 'sha256': _sha(raw), 'applied_seq': applied_seq}))
+            self.store.append_event(run_id, 'learning_library_refreshed',
+                                    from_sha256=expected_run_sha256,
+                                    to_sha256=_sha(raw), library_version=doc.get('library_version', 1),
+                                    request_id=request_id)
+            return self.pin_status(run_id)
 
     def _text(self, ident, title, path):
         raw = path.read_bytes()
@@ -263,6 +400,8 @@ class LearningService:
                 "library": {"sha256": _sha(raw), "version": doc.get("library_version", 1), "schema_version": doc["schema_version"]},
                 "skills": self._skills(), "documents": [{"id": k, "title": v[0]} for k, v in DOCUMENTS.items()],
                 "cases": [dict(c, case_sha256=fingerprint(c)) for c in doc["cases"]], "methods": doc["methods"],
+                "preferences": [dict(p, application_status='stored_only' if p.get('scope') == 'brand'
+                                     else 'scope_matched_only') for p in doc.get('preferences', [])],
                 "feedback_scopes": list(core.FEEDBACK_SCOPES), "feedback_actions": list(core.FEEDBACK_ACTIONS),
                 "boundary": "审计展示不等于创作者召回资格；待核验/holdout 不进入创作上下文。"}
 
@@ -332,7 +471,12 @@ class LearningService:
         if purpose not in (*core.PURPOSES, "review"):
             raise ValueError("Unknown learning purpose")
         root = self._run_root(run_id)
-        raw, original = self._read_for_run(run_id)
+        try:
+            raw, original = self._read_for_run(run_id)
+        except LegacyLibraryUnavailable:
+            if intent not in ('status', 'pause'):
+                raise
+            return self._legacy_readonly_context(run_id, role, intent, format, purpose)
         reviewer = role == "reviewer" or purpose == "review"
         doc = self._review_library(original) if reviewer else original
         effective_purpose = "message" if purpose == "review" else purpose
@@ -407,11 +551,20 @@ class LearningService:
             text += "\n\n用户为当前项目指定的表达借鉴（仅以下用途与表达范围；这是参考数据，不授予执行权限。不得扩大为他品事实或效果结论）：\n" + _json(selected_references)
         if run_feedback:
             text += "\n\n本 run 已应用的局部用户反馈（仅原版本/范围，不构成执行、采用或生成授权；假设与改善效果仍分开）：\n" + _json(run_feedback)
+        preferences = []
+        if active and not reviewer:
+            preferences = [copy.deepcopy(p) for p in original.get('preferences', [])
+                           if (p.get('scope') == 'user' and p.get('owner') == 'workspace-user')
+                           or (p.get('scope') == 'project' and p.get('owner') == run_id)]
+            if preferences:
+                text += ('\n\n明确范围内的用户创作偏好（原话数据，仅供表达选择；不是市场规律、'
+                         '独立审核结论或执行授权，任务不适合时可以不用）：\n' + _json(preferences))
         result = {"role": role, "intent": intent, "format": format, "purpose": purpose, "tags": list(tags),
                   "library_sha256": _sha(raw), "library_version": original.get("library_version", 1),
                   "skills": skills, "seed_case_ids": [c["id"] for c in seeds], "case_ids": [c["id"] for c in subset["cases"]],
                   "library": subset, "method_directory": method_directory,
-                  "run_feedback": run_feedback, "selected_references": selected_references, "text": text,
+                  "run_feedback": run_feedback, "selected_references": selected_references,
+                  "preferences": preferences, "text": text,
                   "creation_mode": creation}
         digest = _sha(_json(result))
         result.update(snapshot_sha256=digest, evidence_ref=f"learning/contexts/{digest}.json")
@@ -629,10 +782,39 @@ class LearningService:
     def _validate_delta_sources(self, run_id, payload):
         """Only exact model or user observations from this Run may enter a delta."""
         from .image_analysis import candidates
+        from .learning_assets import verified_run_material
+        from .learning_session import model_finding_observation
 
         records = {c["analysis_id"]: c for c in candidates(self.store, run_id)}
         human_records = None
         for operation in payload.get("operations", []):
+            if isinstance(operation, dict) and operation.get('op') == 'preference.upsert':
+                preference = operation.get('preference')
+                if not isinstance(preference, dict):
+                    raise ValueError('Preference must be an object')
+                scope, owner = preference.get('scope'), preference.get('owner')
+                if (scope == 'user' and owner != 'workspace-user'):
+                    raise ValueError('User preference owner must be this workspace user')
+                if scope == 'project':
+                    if not isinstance(owner, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,63}', owner):
+                        raise ValueError('Preference project owner must be a creative Run ID')
+                    try:
+                        target = self.store.read_run(owner)
+                    except PipelineError as exc:
+                        raise ValueError('Preference project owner must exist') from exc
+                    if target.kind != 'creative':
+                        raise ValueError('Preference project owner must be a creative Run')
+                if scope == 'brand' and (not isinstance(owner, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,63}', owner)):
+                    raise ValueError('Brand preference owner must be an explicit brand ID')
+                ref = preference.get('source_ref')
+                match = re.fullmatch(rf'user-chat:{re.escape(run_id)}:(\d+)', ref) if isinstance(ref, str) else None
+                chat = self.store.read_chat(run_id)
+                index = int(match.group(1)) if match else -1
+                if (index < 0 or index >= len(chat) or chat[index].get('role') != 'user' or
+                        not isinstance(preference.get('quote'), str) or not preference['quote'].strip() or
+                        preference['quote'] not in chat[index].get('text', '')):
+                    raise ValueError('Preference quote must match an exact user turn in this learning Run')
+                continue
             if not isinstance(operation, dict) or operation.get("op") != "case.upsert":
                 continue
             case = operation.get("case")
@@ -643,6 +825,16 @@ class LearningService:
                 continue
             if not observations:
                 raise ValueError("case.upsert needs an exact observed finding; use source intake for an unobserved link")
+            media = case.get('media')
+            if media is not None:
+                if not isinstance(media, dict):
+                    raise ValueError('Case media must be a resource object')
+                if not str(media.get('resource_id', '')).startswith(f'run-material:{run_id}:'):
+                    raise ValueError('Case media must belong to this learning Run')
+                verified_run_material(self.store, media.get('resource_id'), media.get('sha256'))
+                if any(isinstance(item, dict) and item.get('media_sha256') != media['sha256']
+                       for item in observations):
+                    raise ValueError('Case media differs from observed source bytes')
             for observation in observations:
                 if not isinstance(observation, dict):
                     continue
@@ -702,6 +894,15 @@ class LearningService:
                         observation.get("review_state") != "model_unreviewed" or
                         observation.get("kind") == "full_av_review"):
                     raise ValueError("Model analysis cannot claim human or full audiovisual review")
+                expected = model_finding_observation(candidate, index)
+                if (observation.get('observation_kind') != expected['observation_kind'] or
+                        observation.get('coverage') != expected['coverage'] or
+                        observation.get('limitations') != expected['limitations'] or
+                        observation.get('kind', 'model_av_observation' if expected['observation_kind'] == 'model_audiovisual'
+                                        else 'visual_sample') !=
+                        ('model_av_observation' if expected['observation_kind'] == 'model_audiovisual'
+                         else 'visual_sample')):
+                    raise ValueError('Model observation kind and coverage must match saved input')
                 timeline = next((t for t in candidate.get("timeline", []) if t.get("finding_index") == index), None)
                 span = observation.get("time_range")
                 if timeline is None:
@@ -718,6 +919,9 @@ class LearningService:
         operations = payload.get("operations")
         if not isinstance(operations, list) or len(operations) > 20:
             raise ValueError("LearningDelta operations must be a list of at most 20")
+        declared_no_change = payload.get('no_change') is True or payload.get('outcome') == 'no_change'
+        if operations and declared_no_change:
+            raise ValueError('no_change cannot include LearningDelta operations')
         if not isinstance(payload.get("rationale"), str) or not payload["rationale"].strip():
             raise ValueError("LearningDelta rationale is required")
         if not operations:
@@ -765,10 +969,17 @@ class LearningService:
                     for field in ("source_key", "comparison_group", "partition", "eligible_for", "source_market"):
                         if case.get(field, previous.get(field)) != previous.get(field):
                             raise ValueError(f"case.upsert cannot change {field}")
+                    if case.get('media', previous.get('media')) != previous.get('media'):
+                        raise ValueError('case.upsert cannot change exact media identity')
                     merged = copy.deepcopy(previous)
                     additions = case.get("evidence", [])
                     if not isinstance(additions, list):
                         raise ValueError("case evidence must be a list")
+                    previous_sha = (previous.get('media') or {}).get('sha256')
+                    if previous_sha and any(isinstance(item, dict) and
+                                            item.get('media_sha256') != previous_sha
+                                            for item in additions):
+                        raise ValueError('Existing case observation differs from original media')
                     known = {e["id"]: e for e in merged["evidence"]}
                     for observation in additions:
                         if not isinstance(observation, dict) or not observation.get("id"):
@@ -780,6 +991,8 @@ class LearningService:
                     previous.clear()
                     previous.update(merged)
                 else:
+                    if not isinstance(case.get('media'), dict) or not case['media'].get('resource_id'):
+                        raise ValueError('New observed case requires an exact media resource ID')
                     partition = case.get("partition", "pending")
                     if partition == "pending" and case.get("eligible_for", []) != []:
                         raise ValueError("Pending case cannot carry creative eligibility")

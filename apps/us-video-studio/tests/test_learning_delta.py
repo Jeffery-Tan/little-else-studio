@@ -1,11 +1,13 @@
 """Learning library v2 and atomic delta tests; temporary libraries only."""
 import copy
+import hashlib
 import json
 
 import pytest
 
 from studio.learning import LearningConflict, LearningService, SKILLS, _json, _sha, core
-from studio.learning_session import session_snapshot
+from studio.learning_assets import run_material_resource_id
+from studio.learning_session import model_finding_observation, session_snapshot
 from studio.material_observations import material_workspace, save_human_observation
 from studio.materials import accept_upload
 from studio.store import Store
@@ -123,6 +125,51 @@ def test_invalid_operation_rolls_back_whole_candidate(env):
     assert not any(m["id"] == "reasoned-dialogue" for m in service._read()[1]["methods"])
 
 
+def test_no_change_with_operations_is_rejected_before_proposal(env):
+    service, store, library = env
+    migrate(service)
+    before = library.read_bytes()
+    for marker in ({'no_change': True}, {'outcome': 'no_change'}):
+        with pytest.raises(ValueError, match='no_change cannot include'):
+            service.propose_delta('learning-one', {
+                'rationale': 'Create a method', 'operations': [
+                    {'op': 'method.create', 'method': new_method()}], **marker})
+    assert library.read_bytes() == before
+    assert not any(p['type'] == 'delta' for p in service.proposals('learning-one'))
+
+
+def test_preference_uses_exact_user_quote_and_only_matching_creative_scope(env):
+    service, store, _ = env
+    migrate(service)
+    store.create_run('target-project', 'Target', 'Creative brief')
+    store.create_run('other-project', 'Other', 'Different creative brief')
+    text = '我喜欢短暂停顿。这个项目的结尾不要突然加速。品牌口吻先存档。'
+    store.append_chat('learning-one', 'user', text)
+    source_ref = 'user-chat:learning-one:0'
+    preferences = [
+        {'id': 'user-pause', 'scope': 'user', 'owner': 'workspace-user',
+         'dimension': 'pace', 'quote': '我喜欢短暂停顿', 'source_ref': source_ref},
+        {'id': 'project-ending', 'scope': 'project', 'owner': 'target-project',
+         'dimension': 'ending', 'quote': '这个项目的结尾不要突然加速', 'source_ref': source_ref},
+        {'id': 'brand-tone', 'scope': 'brand', 'owner': 'little-else',
+         'dimension': 'tone', 'quote': '品牌口吻先存档', 'source_ref': source_ref},
+    ]
+    proposal = service.propose_delta('learning-one', {'rationale': 'Save exact scoped preferences',
+        'operations': [{'op': 'preference.upsert', 'preference': item} for item in preferences]})
+    apply(service, proposal, 'preference-save-1')
+    target = service.context('target-project', 'orchestrator', intent='new', format='video')
+    other = service.context('other-project', 'writer', intent='new', format='video')
+    reviewer = service.context('target-project', 'reviewer', intent='new', format='video')
+    assert {p['id'] for p in target['preferences']} == {'user-pause', 'project-ending'}
+    assert {p['id'] for p in other['preferences']} == {'user-pause'}
+    assert reviewer['preferences'] == []
+    assert '品牌口吻先存档' not in target['text']
+    assert next(p for p in service.catalog()['preferences'] if p['id'] == 'brand-tone')['application_status'] == 'stored_only'
+    with pytest.raises(ValueError, match='exact user turn'):
+        service.propose_delta('learning-one', {'rationale': 'Invent', 'operations': [
+            {'op': 'preference.upsert', 'preference': dict(preferences[0], id='invented', quote='用户没说过')} ]})
+
+
 def test_user_correction_stales_delta_but_agent_completion_does_not(env):
     service, store, _ = env
     migrate(service)
@@ -166,23 +213,29 @@ def test_v2_validation_rejects_unearned_market_and_performance_claims(env):
 
 
 def test_case_and_method_commit_together_from_exact_same_run_finding(env, monkeypatch):
-    service, _, library = env
+    service, store, library = env
     migrate(service)
+    media_bytes = b'exact synthetic video fixture'
+    media_sha = hashlib.sha256(media_bytes).hexdigest()
+    accept_upload(store, 'learning-one', 'reference.mp4', media_bytes)
     finding = "The speaker gives a reason while opening the bag"
-    source = {"analysis_id": "analysis-123", "sha256": "a" * 64, "status": "pending",
+    coverage = {"mode": "native_audiovisual", "audio_sent": True,
+                "audio_ranges": [[0.0, 5.0]], "duration_seconds": 5.0}
+    source = {"analysis_id": "analysis-123", "sha256": media_sha, "status": "pending",
               "findings": [finding], "timeline": [{"finding_index": 0, "start_seconds": 1.0,
-                                                     "end_seconds": 2.5}]}
+                                                     "end_seconds": 2.5}], "audiovisual": coverage}
     monkeypatch.setattr("studio.image_analysis.candidates", lambda store, run_id: [source])
     # Shape copied from read_learning_session; no v2 compatibility aliases.
     observation = {"id": "analysis-123/0", "source_ref": "analysis:analysis-123",
-                   "media_sha256": "a" * 64, "time_range": [1.0, 2.5], "observer_type": "model",
+                   "media_sha256": media_sha, "time_range": [1.0, 2.5], "observer_type": "model",
                    "observation_kind": "model_audiovisual", "content": finding,
-                   "coverage": "one observed segment", "review_state": "model_unreviewed"}
-    case = {"id": "new-case", "source_key": "sha256:" + "a" * 64, "source_platform": "local",
-            "source_market": "unknown", "title": "A specific observed moment", "comparison_group": "a" * 64,
+                   "coverage": coverage, "limitations": [], "review_state": "model_unreviewed"}
+    case = {"id": "new-case", "source_key": "sha256:" + media_sha, "source_platform": "local",
+            "source_market": "unknown", "title": "A specific observed moment", "comparison_group": media_sha,
             "partition": "calibration", "eligible_for": ["message"], "strategy": {"speech": "Add a reason"},
             "limits": ["Only 1–2.5 seconds observed; market effect unknown"], "evidence": [observation],
-            "tags": ["speech"]}
+            "tags": ["speech"], "media": {"resource_id": run_material_resource_id('learning-one', 'reference.mp4'),
+                                           "sha256": media_sha}}
     method = new_method()
     method["support_refs"] = ["new-case/analysis-123/0"]
     before = library.read_bytes()
@@ -218,6 +271,47 @@ def test_model_cannot_forge_or_rewrite_finding(env, monkeypatch):
     assert library.read_bytes() == before
 
 
+def test_visual_only_finding_cannot_be_relabelled_audiovisual(env, monkeypatch):
+    service, _, library = env
+    migrate(service)
+    sampling = {'duration_seconds': 3.0, 'frames': [{'id': 'f1', 'time_seconds': 1.0}]}
+    monkeypatch.setattr('studio.image_analysis.candidates', lambda store, run_id: [{
+        'analysis_id': 'visual-one', 'sha256': 'c' * 64, 'status': 'pending',
+        'findings': ['画面中拉上包的拉链'], 'timeline': [], 'sampling': sampling}])
+    base = {'id': 'visual-one/0', 'source_ref': 'analysis:visual-one',
+            'media_sha256': 'c' * 64, 'content': '画面中拉上包的拉链',
+            'observer_type': 'model', 'review_state': 'model_unreviewed', 'limitations': []}
+    case = {'id': 'visual-case', 'source_key': 'sha256:' + 'c' * 64,
+            'source_platform': 'local', 'source_market': 'unknown',
+            'comparison_group': 'c' * 64, 'title': 'Visual only',
+            'partition': 'pending', 'evidence': []}
+    before = library.read_bytes()
+    for forged in [dict(base, observation_kind='model_audiovisual',
+                        coverage={'audio_sent': True, 'audio_ranges': [[0, 3]]}),
+                   dict(base, observation_kind='model_visual_sample',
+                        coverage={'mode': 'visual_sample', 'sampling': sampling,
+                                  'audio_sent': True, 'audio_ranges': [[0, 3]]})]:
+        with pytest.raises(ValueError, match='kind and coverage'):
+            service.propose_delta('learning-one', {'rationale': 'Try', 'operations': [
+                {'op': 'case.upsert', 'case': dict(case, evidence=[forged])}]})
+    assert library.read_bytes() == before
+
+
+def test_no_audio_and_partial_audio_coverage_remain_exact():
+    base = {'analysis_id': 'audio-check', 'sha256': 'd' * 64,
+            'findings': ['动作与声音关系待核对'], 'timeline': []}
+    silent = model_finding_observation(dict(base, audiovisual={
+        'mode': 'native_audiovisual', 'audio_sent': False,
+        'audio_ranges': [], 'duration_seconds': 8}), 0)
+    assert silent['observation_kind'] == 'model_visual_sample'
+    assert silent['coverage']['audio_ranges'] == []
+    partial = model_finding_observation(dict(base, audiovisual={
+        'mode': 'native_audiovisual', 'audio_sent': True,
+        'audio_ranges': [[2, 4]], 'duration_seconds': 8}), 0)
+    assert partial['observation_kind'] == 'model_audiovisual'
+    assert partial['coverage']['audio_ranges'] == [[2, 4]]
+
+
 def test_exact_same_run_human_finding_can_support_scoped_method(env):
     service, store, library = env
     migrate(service)
@@ -237,7 +331,9 @@ def test_exact_same_run_human_finding_can_support_scoped_method(env):
             "eligible_for": ["message"], "tags": ["opening"],
             "strategy": {"proof": "Show how the opening works"},
             "limits": ["Only the still image was observed; no sound or market effect"],
-            "evidence": [observed]}
+            "evidence": [observed],
+            "media": {"resource_id": run_material_resource_id('learning-one', material['name']),
+                      "sha256": material['sha256']}}
     method = new_method()
     method["support_refs"] = ["human-case/" + observed["id"]]
     proposal = service.propose_delta("learning-one", {"rationale": "User's still image observation supports a scoped choice",

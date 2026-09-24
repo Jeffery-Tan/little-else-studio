@@ -3,6 +3,11 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import re
+from urllib.parse import quote, unquote
+
+from .materials import resolve
+from .models import PipelineError
 
 REPOSITORY = Path(__file__).resolve().parents[3]
 US_MEDIA = Path('J:/E-Business-Video-Data/US')
@@ -18,6 +23,40 @@ ARCHIVES = {
     'comparison-record': ('Oumomo 旧片 · 材料与缺口', 'creative-comparison-20260918/baseline-v2/comparison.json'),
 }
 MEDIA_SUFFIXES = {'.mp4', '.webm', '.mov', '.m4v', '.jpg', '.jpeg', '.png', '.webp', '.gif'}
+RESOURCE_ID = re.compile(r'^run-material:([a-z0-9][a-z0-9-]*):([^:/]+)$')
+
+
+def run_material_resource_id(run_id, name):
+    return f'run-material:{run_id}:{quote(name, safe="")}'
+
+
+def verified_run_material(store, resource_id, expected_sha256):
+    match = RESOURCE_ID.fullmatch(resource_id) if isinstance(resource_id, str) else None
+    if match is None or not isinstance(expected_sha256, str) or not re.fullmatch(r'[a-f0-9]{64}', expected_sha256):
+        raise ValueError('学习媒体资源 ID 或指纹无效。')
+    run_id, encoded_name = match.groups()
+    name = unquote(encoded_name)
+    try:
+        run = store.read_run(run_id)
+    except PipelineError as exc:
+        raise ValueError('学习媒体来源记录不存在。') from exc
+    if quote(name, safe='') != encoded_name or run.kind != 'learning':
+        raise ValueError('学习媒体资源身份无法核对。')
+    try:
+        events = store.read_events(run_id)
+    except (PipelineError, OSError) as exc:
+        raise ValueError('学习媒体来源记录不可读取。') from exc
+    if not any(event.get('kind') == 'material_uploaded' and event.get('name') == name and
+               event.get('sha256') == expected_sha256 for event in events):
+        raise ValueError('学习媒体没有准确的来源记录。')
+    try:
+        path = resolve(store, run_id, name)
+        valid = path is not None and path.suffix.lower() in MEDIA_SUFFIXES and digest(path) == expected_sha256
+    except OSError as exc:
+        raise ValueError('学习媒体字节不可读取。') from exc
+    if not valid:
+        raise ValueError('学习媒体字节已变化或不可访问。')
+    return path
 
 
 def digest(path):
@@ -29,9 +68,10 @@ def digest(path):
 
 
 class LearningAssets:
-    def __init__(self, repository_root=REPOSITORY, media_root=US_MEDIA):
+    def __init__(self, repository_root=REPOSITORY, media_root=US_MEDIA, store=None):
         self.repository_root = Path(repository_root).resolve()
         self.media_root = Path(media_root).resolve()
+        self.store = store
 
     def archives(self):
         return [{'id': key, 'title': title, 'kind': Path(relative).suffix.lstrip('.'),
@@ -57,6 +97,10 @@ class LearningAssets:
     def case_media(self, catalog, case_id):
         case = next((case for case in catalog['cases'] if case['id'] == case_id), None)
         media = case.get('media') if case else None
+        if isinstance(media, dict) and media.get('resource_id'):
+            if self.store is None:
+                raise ValueError('此案例的媒体资源当前不可核对。')
+            return verified_run_material(self.store, media['resource_id'], media.get('sha256'))
         if not isinstance(media, dict) or not media.get('path') or not media.get('sha256'):
             raise ValueError('此案例尚未登记本地媒体。')
         source = Path(media['path'])

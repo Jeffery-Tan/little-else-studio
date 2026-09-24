@@ -166,6 +166,10 @@ class Orchestrator:
 
         try:
             extra = self._system_extra()
+            historical_readonly = self.method_context.get('historical_readonly') is True
+            if historical_readonly:
+                extra += ('\n# 旧库只读回放\n原学习库完整字节无法核对。只回答状态与已保存记录，'
+                          '本轮不写稿、不准备制作、不观察或送审；需要新库时说明用户须明确刷新。')
             if feedback_context:
                 extra += ('\n# 本轮反馈的准确对象\n' +
                     json.dumps(feedback_context, ensure_ascii=False, sort_keys=True) +
@@ -180,14 +184,19 @@ class Orchestrator:
             self._emit({'type': 'learning_context', 'role': 'orchestrator',
                         'snapshot_sha256': self.method_context['snapshot_sha256'],
                         'evidence_ref': self.method_context['evidence_ref']})
+            available_tools = [tool for tool in tools_for("orchestrator")
+                               if tool['name'] not in {'read_learning_session', 'propose_learning_delta'}]
+            if historical_readonly:
+                allowed_readonly = {'read_project_state', 'read_conversation_history',
+                                    'read_artifact', 'read_work_plan', 'read_capabilities',
+                                    'read_production', 'list_reviews', 'list_materials', 'ask_user'}
+                available_tools = [tool for tool in available_tools if tool['name'] in allowed_readonly]
             result = run_agent_loop(
                 budgeted,
                 model=self.settings.model_for("orchestrator"),
                 system=system,
                 messages=history,
-                tools=[tool for tool in tools_for("orchestrator")
-                       if tool['name'] not in {'read_learning_session',
-                                               'propose_learning_delta'}],
+                tools=available_tools,
                 execute_tool=execute,
                 max_rounds=self.settings.max_tool_rounds,
                 max_continuations=self.settings.max_continuations,
@@ -241,7 +250,7 @@ class Orchestrator:
             self.check_cancel()
         self.store.append_chat(self.run_id, 'user', message)
         self._current_user_message = message
-        from ..learning_session import discussion_sha256, session_snapshot
+        from ..learning_session import agent_session_context, discussion_sha256, session_snapshot
         session = session_snapshot(self.store, self.learning, self.run_id)
         skill = self.learning.read_method_document('us-creative-learning',
                                                   role='orchestrator', run_id=self.run_id)
@@ -261,7 +270,7 @@ class Orchestrator:
                   + '\n# 当前库与提案状态\n' + json.dumps({
                       'library_version': self.learning.catalog()['library_version'],
                       'discussion_sha256': session['discussion_sha256'],
-                      'proposals': [{k: p.get(k) for k in ('id', 'type', 'status', 'summary')}
+                      'proposals': [{k: p.get(k) for k in ('id', 'type', 'status')}
                                     for p in session['proposals'][-8:]],
                   }, ensure_ascii=False))
         allowed = {'ask_user', 'read_learning_session', 'retrieve_learning_methods',
@@ -274,10 +283,11 @@ class Orchestrator:
             if name not in allowed:
                 return ToolResult('学习记录不能调用生产工具。', is_error=True)
             if name == 'read_learning_session':
-                current = session_snapshot(self.store, self.learning, self.run_id)
-                current['observations'] = current['observations'][-40:]
-                current['proposals'] = current['proposals'][-10:]
-                return json.dumps(current, ensure_ascii=False)
+                return json.dumps(agent_session_context(
+                    self.store, self.learning, self.run_id,
+                    cursor=args.get('cursor', 0), limit=args.get('limit', 40),
+                    analysis_id=args.get('analysis_id'),
+                    observation_ids=args.get('observation_ids')), ensure_ascii=False)
             if name == 'retrieve_learning_methods':
                 return json.dumps(self.learning.method_summaries(
                     run_id=self.run_id, purpose=args.get('purpose', 'message'),

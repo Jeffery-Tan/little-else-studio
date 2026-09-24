@@ -73,7 +73,8 @@ def build_app(
     pipeline = Pipeline(store)
     connections = ConnectionStore(settings.data_root)
     learning = LearningService(store, repository_root=learning_repository_root)
-    learning_assets = LearningAssets(learning_repository_root or REPOSITORY, learning_media_root or US_MEDIA)
+    learning_assets = LearningAssets(learning_repository_root or REPOSITORY, learning_media_root or US_MEDIA,
+                                     store=store)
     creative_packages = CreativePackages(store, learning_repository_root or REPOSITORY)
     ledger = Ledger(store, settings if client_factory is not None else connections.settings(settings))
 
