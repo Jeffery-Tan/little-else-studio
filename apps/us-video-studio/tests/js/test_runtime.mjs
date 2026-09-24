@@ -209,6 +209,62 @@ test('unchanged polling preserves the stop button and keyboard focus target', ()
   assert.equal(h.nodes.get('job-status').children.at(-1), stopButton);
 });
 
+test('bounded diagnosis failure preserves an unsent composer draft', async () => {
+  const calls = [];
+  const h = harness(async (url, options) => {
+    if (!options) return {status:'succeeded',events:[]};
+    calls.push({url,body:JSON.parse(options.body)});
+    throw {status:409,message:'制作记录已变化'};
+  });
+  h.context.$('chat-input').value = '我还在写的反馈';
+  await h.context.submitJob('run-a', {
+    text:'请诊断已记录的问题',request_id:'diagnose-once',reference_consent:false,
+    feedback_target:{kind:'production_draft',run_id:'run-a',draft_id:'draft-a',draft_sha256:'a'.repeat(64)},
+  }, {preserveComposerOnError:true});
+  assert.equal(h.nodes.get('chat-input').value, '我还在写的反馈');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, '/api/runs/run-a/jobs');
+  assert.equal(calls[0].body.reference_consent, false);
+  assert.equal(calls[0].body.feedback_target.draft_id, 'draft-a');
+});
+
+test('an uncertain diagnosis retries the same request without replacing later user writing', async () => {
+  const calls = [];
+  const h = harness(async (url, options) => {
+    if (!options) return {status:'succeeded',events:[]};
+    calls.push(JSON.parse(options.body));
+    if (calls.length === 1) throw new TypeError('connection lost');
+    throw {status:409,message:'制作记录已变化'};
+  });
+  const input = h.context.$('chat-input');
+  input.value = '我自己的反馈还没发';
+  const payload = {text:'请诊断已记录的问题',request_id:'diagnose-same',reference_consent:false,
+    feedback_target:{kind:'production_draft',run_id:'run-a',draft_id:'draft-a',draft_sha256:'a'.repeat(64)}};
+  await h.context.submitJob('run-a',payload,{preserveComposerOnError:true});
+  await h.nodes.get('job-status').children.at(-1).onclick();
+  assert.deepEqual(calls[0],calls[1]);
+  assert.equal(input.value,'我自己的反馈还没发');
+});
+
+test('refresh restores the bounded diagnosis UI option before an uncertain retry', async () => {
+  const calls = [];
+  const h = harness(async (_url, options) => {
+    if (!options) return {job_id:'older',request_id:'older',status:'succeeded',events:[]};
+    calls.push(JSON.parse(options.body));
+    if (calls.length === 1) throw new TypeError('connection lost');
+    throw {status:409,message:'制作记录已变化'};
+  });
+  const payload = {text:'请诊断已记录的问题',request_id:'diagnose-after-refresh',reference_consent:false,
+    feedback_target:{kind:'production_draft',run_id:'run-a',draft_id:'draft-a',draft_sha256:'a'.repeat(64)}};
+  await h.context.submitJob('run-a',payload,{preserveComposerOnError:true});
+  assert.equal(JSON.parse(h.storage.get('studio-job-ui:run-a')).request_id,payload.request_id);
+  await h.context.restoreJob('run-a');
+  await h.nodes.get('job-status').children.at(-1).onclick();
+  assert.deepEqual(calls[0],calls[1]);
+  assert.equal(h.context.$('chat-input').value,'');
+  assert.equal(h.storage.size,0);
+});
+
 test('conversation stays correctable while running and old poll cannot undo cancellation', () => {
   const h = harness(async () => {});
   const job = {job_id:'j1', job_kind:'conversation', status:'running', cursor:10, events:[]};

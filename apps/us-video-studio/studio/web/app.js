@@ -437,15 +437,22 @@ function setMediaFeedbackTarget(runId, attempt, kind, atSeconds) {
   setProjectFocus('chat'); $('chat-input').focus();
 }
 
-function setProductionFeedbackTarget(runId, draft, attempt) {
+function productionFeedbackTarget(runId, draft, attempt) {
   if (state.runId !== runId || !draft?.draft_id ||
       !/^[a-f0-9]{64}$/.test(draft.draft_sha256 || '') ||
-      (attempt && !attempt.attempt_id)) {
-    toast('这份制作输入暂时无法核对，请重新打开当前作品。', true); return;
-  }
+      (attempt && (!attempt.attempt_id ||
+        !(draft.attempts || []).some(row => row.attempt_id === attempt.attempt_id)))) return null;
   const target = {kind:'production_draft', run_id:runId,
     draft_id:draft.draft_id, draft_sha256:draft.draft_sha256};
   if (attempt) target.attempt_id = attempt.attempt_id;
+  return target;
+}
+
+function setProductionFeedbackTarget(runId, draft, attempt) {
+  const target = productionFeedbackTarget(runId, draft, attempt);
+  if (!target) {
+    toast('这份制作输入暂时无法核对，请重新打开当前作品。', true); return;
+  }
   state.feedbackTarget = target;
   const chip = $('feedback-target');
   chip.replaceChildren();
@@ -455,6 +462,28 @@ function setProductionFeedbackTarget(runId, draft, attempt) {
   chip.append(label, clear); chip.hidden = false;
   $('chat-input').placeholder = '说说哪里需要调整，团队会核对这版作品和本次问题…';
   setProjectFocus('chat'); $('chat-input').focus();
+}
+
+function requestProductionDiagnosis(runId, draft, attempt, productionActive = false) {
+  const latest = (draft?.attempts || []).at(-1);
+  const failedAttempt = attempt && latest?.attempt_id === attempt.attempt_id &&
+    ['failed', 'blocked', 'interrupted'].includes(attempt.status);
+  const failedReview = !attempt && draft?.review?.verdict !== 'ready' &&
+    Array.isArray(draft?.review?.findings) && draft.review.findings.length > 0;
+  const target = productionFeedbackTarget(runId, draft, failedAttempt ? attempt : null);
+  if (!target || (!failedAttempt && !failedReview)) {
+    toast('这次问题记录已变化，请重新打开当前作品核对。', true); return false;
+  }
+  if (productionActive || state.busy || steerPosting || state.decisionBusy || state.recoveryBlocked) {
+    toast('请先结束当前任务或处理待恢复事项。', true); return false;
+  }
+  setProjectFocus('chat');
+  setConversationOpen(true);
+  submitJob(runId, {
+    text:'请核对这份准确制作输入的现有检查意见与失败记录，先说明可核实的原因和未确定处，再提出具体、可审阅的修正建议。此次只做诊断，不提交图片或视频生成，也不沿用已有图审或费用授权。',
+    request_id:crypto.randomUUID(), feedback_target:target, reference_consent:false,
+  }, {preserveComposerOnError:true});
+  return true;
 }
 
 function wireCreatorFeedback(host, step) {

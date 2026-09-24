@@ -73,6 +73,7 @@ function canSteerJob(job) {
     (job.status === 'running' || (job.status === 'cancelling' && job.steer_status === 'received')));
 }
 function pendingJobKey(runId) { return `studio-job-pending:${runId}`; }
+function pendingJobUiKey(runId) { return `studio-job-ui:${runId}`; }
 function closeJobSource() {
   jobSource?.close();
   jobSource = null;
@@ -115,7 +116,17 @@ function readPendingJob(runId) {
   try { return JSON.parse(sessionStorage.getItem(pendingJobKey(runId)) || "null"); }
   catch (_) { return null; }
 }
-function clearPendingJob(runId) { sessionStorage.removeItem(pendingJobKey(runId)); }
+function readPendingJobOptions(runId, payload) {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(pendingJobUiKey(runId)) || "{}");
+    return saved.request_id === payload?.request_id ? {preserveComposerOnError:saved.preserveComposerOnError === true} : {};
+  }
+  catch (_) { return {}; }
+}
+function clearPendingJob(runId) {
+  sessionStorage.removeItem(pendingJobKey(runId));
+  sessionStorage.removeItem(pendingJobUiKey(runId));
+}
 
 function showJob(job, notice = "") {
   if (job && currentJob?.job_id === job.job_id && Number(currentJob.cursor || 0) > Number(job.cursor || 0)) return;
@@ -347,10 +358,10 @@ async function watchJob(runId, job, generation) {
   }, jobSource ? 8000 : 1000);
 }
 
-function showUncertainSubmission(runId, payload) {
+function showUncertainSubmission(runId, payload, options = {}) {
   showJob(null, "发送结果尚未确认。请确认提交状态，避免重复执行。");
   const retry = box("button", "ghost small", "确认提交状态");
-  retry.onclick = () => submitJob(runId, payload);
+  retry.onclick = () => submitJob(runId, payload, options);
   $("job-status").append(retry);
 }
 
@@ -367,7 +378,7 @@ async function restoreJob(runId) {
     if (runId !== state.runId || generation !== jobWatch) return;
     const pending = readPendingJob(runId);
     if (pending && job?.request_id === pending.request_id) clearPendingJob(runId);
-    else if (pending) { showUncertainSubmission(runId, pending); return; }
+    else if (pending) { showUncertainSubmission(runId, pending, readPendingJobOptions(runId, pending)); return; }
     const steer = readPendingSteer(runId);
     if (steer && (job?.parent_job_id === steer.job_id ||
         (job?.job_id === steer.job_id && Number(job.goal_revision || 0) > steer.expected_goal_revision))) {
@@ -412,7 +423,7 @@ async function submitSteer(runId, jobId, payload) {
   }
 }
 
-async function submitJob(runId, payload) {
+async function submitJob(runId, payload, options = {}) {
   if (runId !== state.runId) return;
   // Both conversation entry points display the same on-demand analysis notice.
   // This does not enable media generation; the main agent still needs an
@@ -427,6 +438,9 @@ async function submitJob(runId, payload) {
   // Persist only the user's request, never connection credentials. A retry uses
   // the same id even when the browser never received the acceptance response.
   sessionStorage.setItem(pendingJobKey(runId), JSON.stringify(payload));
+  if (options.preserveComposerOnError)
+    sessionStorage.setItem(pendingJobUiKey(runId), JSON.stringify({request_id:payload.request_id,preserveComposerOnError:true}));
+  else sessionStorage.removeItem(pendingJobUiKey(runId));
   showJob(null, "正在提交…");
   let job;
   try {
@@ -437,11 +451,12 @@ async function submitJob(runId, payload) {
     if (runId !== state.runId || generation !== jobWatch) return;
     if (err.status >= 400 && err.status < 500) {
       clearPendingJob(runId);
-      if (!payload.request_kind) $("chat-input").value = payload.text;
+      if (!payload.request_kind && !options.preserveComposerOnError && !$("chat-input").value.trim())
+        $("chat-input").value = payload.text;
       showJob(null, err.message);
       await restoreJob(runId);
       toast(err.message, true);
-    } else showUncertainSubmission(runId, payload);
+    } else showUncertainSubmission(runId, payload, options);
     return;
   }
   clearPendingJob(runId);

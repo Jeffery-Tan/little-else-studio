@@ -245,6 +245,12 @@ def seed_stages(pipeline: Pipeline, run_id: str, *, stop: str,
     approve(pipeline, run_id, "writing")
 
 
+def revise_writing(pipeline: Pipeline, run_id: str) -> None:
+    revised = {**WRITING, "caption": "A revised caption for the next video. #LunchRoutine"}
+    submit(pipeline, run_id, "writing", "# 返工脚本\n\n这份新版发布文案尚未对应已生成视频。", revised)
+    approve(pipeline, run_id, "writing")
+
+
 def draft_for(store: Store, pipeline: Pipeline, run_id: str, kind: str,
               reference: dict | None = None, *, variant: str = "") -> dict:
     source = store.latest_artifact(run_id, "writing")
@@ -393,10 +399,14 @@ def seed(root: Path) -> None:
             production_attempt(store, ledger, run_id, draft, "succeeded", clip)
         elif run_id == "ux-video-retry-failed":
             production_attempt(store, ledger, run_id, draft, "succeeded", clip)
+            revise_writing(pipeline, run_id)
             revised = draft_for(store, pipeline, run_id, "video", reference, variant="-revised")
             production_attempt(store, ledger, run_id, revised, "failed", number=2)
         elif run_id == "ux-video-unknown":
-            production_attempt(store, ledger, run_id, draft, "unknown")
+            production_attempt(store, ledger, run_id, draft, "succeeded", clip)
+            revise_writing(pipeline, run_id)
+            revised = draft_for(store, pipeline, run_id, "video", reference, variant="-unknown")
+            production_attempt(store, ledger, run_id, revised, "unknown", number=2)
 
 
 class OfflineText:

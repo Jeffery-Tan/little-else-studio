@@ -90,8 +90,28 @@ test('failed retry keeps the preceding playable result as the main work',()=>{
  assert.match(html,/<video controls preload="metadata" src="\/api\/runs\/demo\/materials\/movie.mp4"/);
  assert.match(html,/上一份已生成结果/);assert.match(html,/口型与旁白冲突/);
  assert.match(html,/data-feedback-attempt="first"/);assert.doesNotMatch(html,/data-feedback-attempt="retry"/);
- assert.match(html,/production-primary-actions"><button class="primary" data-production-feedback="one">告诉团队这次问题/);
+ assert.match(html,/production-primary-actions"><button class="primary" data-production-diagnose="one">让团队检查并提出修正/);
+ assert.match(html,/data-production-feedback="one">自己描述问题/);
  assert.ok(html.indexOf('手动调整制作输入')>html.indexOf('再次制作或高级编辑'));
+});
+test('only a recorded check or failed attempt offers one-click diagnosis',()=>{
+ const checked={...draft,review:{verdict:'revise',findings:['开场证据不足']}};
+ const checkWork=ui.currentProductionWork({...data,drafts:[checked]},'video','demo');
+ assert.equal(ui.canDiagnoseWork(checkWork),true);
+ const review=ui.draftHtml(checked,data,'demo');
+ assert.match(review,/data-production-diagnose="one">让团队检查并提出修正/);
+ assert.match(review,/data-production-feedback="one">自己描述问题/);
+ const failed={...draft,attempts:[{attempt_id:'failed',status:'failed',message:'提供方返回失败'}]};
+ assert.equal(ui.canDiagnoseWork(ui.currentProductionWork({...data,drafts:[failed]},'video','demo')),true);
+ const unknown={...draft,attempts:[{attempt_id:'unknown',status:'unknown',task_id:'original'}]};
+ const uncertain=ui.draftHtml(unknown,data,'demo');
+ assert.match(uncertain,/data-refresh="unknown">查询这次结果/);
+ assert.doesNotMatch(uncertain,/data-production-diagnose/);
+ assert.equal(ui.canDiagnoseWork(ui.currentProductionWork({...data,drafts:[unknown]},'video','demo')),false);
+ const cancelled={...draft,attempts:[{attempt_id:'stop',status:'cancelled'}]};
+ assert.doesNotMatch(ui.draftHtml(cancelled,data,'demo'),/data-production-diagnose/);
+ const noFindings={...checked,review:{verdict:'revise',findings:[]}};
+ assert.doesNotMatch(ui.draftHtml(noFindings,data,'demo'),/data-production-diagnose/);
 });
 test('new failed draft can show a verified result from an earlier draft',()=>{
  const movie={name:'movie.mp4',sha256:hash,kind:'video',url:'/api/runs/demo/materials/movie.mp4'};
