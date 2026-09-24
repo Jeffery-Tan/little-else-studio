@@ -1111,7 +1111,19 @@ function renderTurn(turn) {
     // The current decision is rendered once, alongside the conversation.
   }
 
-  if (turn.reply && turn.reply.text !== state.timeline?.interaction?.message) {
+  const interaction = state.timeline?.interaction;
+  if (typeof shouldShowQuestionInTurn === 'function' && shouldShowQuestionInTurn(turn, interaction)) {
+    // Producer clarification as an interactive bubble in the conversation.
+    const bubble = box("div", "msg assistant");
+    bubble.append(box("div", "who", "制片团队"));
+    const cardHost = box("div", "body question-host");
+    const shell = document.createElement("div");
+    shell.innerHTML = questionCardHtml(interaction);
+    while (shell.firstChild) cardHost.appendChild(shell.firstChild);
+    bubble.appendChild(cardHost);
+    if (typeof bindQuestionChoices === "function") bindQuestionChoices(bubble, interaction);
+    wrap.appendChild(bubble);
+  } else if (turn.reply && turn.reply.text !== interaction?.message) {
     const bubble = box("div", "msg assistant");
     const who = box("div", "who", "制片团队");
     const body = box("div", "body");

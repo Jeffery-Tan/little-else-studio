@@ -8,7 +8,7 @@ globalThis.escapeHtml=require('../../studio/web/md.js').escapeHtml;
 const stageMod=require('../../studio/web/stage.js');
 globalThis.gateApproveLabel=stageMod.gateApproveLabel;
 globalThis.gateRejectLabel=stageMod.gateRejectLabel;
-const {questionCardHtml,journeyGateHtml,journeyStatus,bindJourneyTabs}=require('../../studio/web/journey.js');
+const {questionCardHtml,journeyGateHtml,journeyStatus,bindJourneyTabs,shouldShowQuestionInTurn}=require('../../studio/web/journey.js');
 
 test('clarification supports recommendation and free text without implicit selection',()=>{
   const html=questionCardHtml({id:'abc',question:'<script>?</script>',options:[{label:'A',description:'one'},{label:'B'}],recommended:0});
@@ -71,4 +71,13 @@ test('outcome tabs have linked panels and arrow keys move the single tab stop',(
   assert.equal(panels['journey-storyboard'].hidden,false);assert.equal(panels.stage.hidden,true);
   tabs[1].onkeydown({key:'End',preventDefault(){}});
   assert.equal(focused,'video');assert.equal(panels['journey-video'].hidden,false);
+});
+
+test("pending ask_user renders as an interactive producer bubble in the conversation", () => {
+  const interaction = {id: "q1", question: "说话方式选哪种？", message: "说话方式选哪种？\n\n1. 手部…",
+    options: [{label: "手部"}, {label: "真人"}], recommended: 0};
+  assert.equal(shouldShowQuestionInTurn({reply: {text: interaction.message}}, interaction), true);
+  assert.equal(shouldShowQuestionInTurn({reply: {text: "普通回复"}}, interaction), false);
+  assert.equal(shouldShowQuestionInTurn({reply: null}, interaction), false);
+  assert.equal(shouldShowQuestionInTurn({reply: {text: "x"}}, null), false);
 });

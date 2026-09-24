@@ -20,6 +20,29 @@ function questionCardHtml(q) {
     '<p class="muted">点一个选项，或直接在下方对话中回答。</p><p role="status" data-feedback></p></section>';
 }
 
+/** Pending clarification belongs in the producer's bubble, not only a footer. */
+function shouldShowQuestionInTurn(turn, interaction) {
+  if (!interaction || !turn?.reply?.text) return false;
+  return turn.reply.text === interaction.message;
+}
+
+function bindQuestionChoices(root, q) {
+  if (!root || !q?.options) return;
+  const runId = state.runId;
+  for (const button of root.querySelectorAll('[data-question-choice]')) {
+    button.onclick = async () => {
+      if (state.busy || state.runId !== runId) return;
+      const choice = q.options[Number(button.dataset.questionChoice)];
+      if (!choice) return;
+      await submitJob(runId, {
+        text: `关于「${q.question}」：${choice.label}`,
+        question_id: q.id,
+        request_id: crypto.randomUUID(),
+      });
+    };
+  }
+}
+
 function journeyGateHtml(pending, step) {
   return `<section class="conversation-question"><h3>${pending.stage==='direction'?'方向等你决定':'完整方案等你确认'}</h3>` +
     '<p>请在创作板阅读当前版本并提交决定。选择、意见和确认只保留在这一处。</p>' +
@@ -116,13 +139,11 @@ function renderJourneyDecision() {
       } catch(err) { const feedback=host.querySelector('[data-feedback]');if(feedback)feedback.textContent=err.message;button.disabled=false; }
     };
   } else if (q) {
+    // Prefer the producer bubble already in the conversation; avoid a second card.
+    const inChat = document.querySelector(`#conversation-body .conversation-question[data-question="${q.id}"]`);
+    if (inChat) { host.innerHTML=''; return; }
     host.innerHTML=questionCardHtml(q);
-    const runId=state.runId;
-    for(const button of host.querySelectorAll('[data-question-choice]'))button.onclick=async()=>{
-      if(state.busy||state.runId!==runId)return;
-      const choice=q.options[Number(button.dataset.questionChoice)];if(!choice)return;
-      await submitJob(runId,{text:`关于「${q.question}」：${choice.label}`,question_id:q.id,request_id:crypto.randomUUID()});
-    };
+    bindQuestionChoices(host, q);
   }
 }
 
@@ -237,4 +258,4 @@ function initJourney() {
   };
 }
 
-if(typeof module!=='undefined')module.exports={journeyStatus,questionCardHtml,journeyGateHtml,showJourneyTab,bindJourneyTabs};
+if(typeof module!=='undefined')module.exports={journeyStatus,questionCardHtml,journeyGateHtml,showJourneyTab,bindJourneyTabs,shouldShowQuestionInTurn,bindQuestionChoices};
