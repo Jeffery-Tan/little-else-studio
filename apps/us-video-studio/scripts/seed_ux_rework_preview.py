@@ -1,0 +1,362 @@
+r"""Seed nine isolated, offline creator-UX states in a new data root.
+
+All creative text, review decisions, approvals, media, and usage are synthetic
+fixture data. The records use the application's Store/Pipeline/production event
+contracts; they are not a real customer project or a claim that a model ran.
+The optional server injects providers that refuse every model/generation call.
+
+    python scripts/seed_ux_rework_preview.py "$env:TEMP\studio-ux-preview-<unique>" --serve
+
+The destination must not exist and must be outside the Git repository. To
+restart the read-only preview server without reseeding, use --serve-existing.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import io
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+from PIL import Image, ImageDraw
+
+APP = Path(__file__).resolve().parent.parent
+REPOSITORY = APP.parents[1]
+sys.path.insert(0, str(APP))
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+from studio.config import Pricing, ROLES, Settings  # noqa: E402
+from studio.connections import ConnectionStore  # noqa: E402
+from studio.ledger import Ledger  # noqa: E402
+from studio.materials import accept_upload  # noqa: E402
+from studio.models import utcnow  # noqa: E402
+from studio.pipeline import Pipeline  # noqa: E402
+from studio.production import DraftIn, prepare_draft, validate_video  # noqa: E402
+from studio.store import Store  # noqa: E402
+
+
+RUNS = (
+    ("ux-old-prose", "旧项目回看", "历史方向与脚本是原文，阅读后再决定是否修改。"),
+    ("ux-direction-pending", "新方向待选择", "选择一条创意方向，团队才会继续写稿。"),
+    ("ux-direction-adopted", "方向已采用", "已采用方向 B；现在要看接下来如何写成脚本。"),
+    ("ux-writing-pending", "阅读并修改脚本", "阅读台词、画面与发布文案，并指出要修改的地方。"),
+    ("ux-image-review", "图片待确认", "核对这张参考图，确认后才能用于视频。"),
+    ("ux-video-ready", "视频可生成", "核对准确参考图、制作输入与费用，再明确启动视频。"),
+    ("ux-video-completed", "视频已完成", "播放并核对视频，然后查看发布文案。"),
+    ("ux-video-unknown", "生成结果待核实", "核实原视频任务，避免重复提交和费用。"),
+    ("ux-analysis-only", "只分析参考", "阅读已保存的参考拆解，不自动进入制作。"),
+)
+
+BRIEF = (
+    "为美国线一款便携午餐包准备 TikTok Shop 竖屏短视频。"
+    "需要能看清商品和真实使用场景，目标是一条可核对的视频与英文发布文案。"
+    "这是离线 UX 验收数据；商品效果、受众判断和创意判断均不是市场结论。"
+)
+
+DIRECTION = {
+    "options": [
+        {"key": "A", "title": "出门前十秒", "claim": "把装午餐的早晨动作拍成一段轻快开场。",
+         "audience_moment": "早上准备带饭，正在收拾随身物品的人。",
+         "hook": "手在桌前把午餐放进包里，立刻看到包的大小。",
+         "story": "先放入午餐，再提起包走向门口；商品始终可见。",
+         "gives_up": "不做价格比较。", "evidence_strength": "仅演示已拍到的放置动作",
+         "difficulty": "中", "asset_needs": "需要实物和真实动作镜头。"},
+        {"key": "B", "title": "带上你的午餐", "claim": "让包在通勤途中自然出现，建立带饭情境。",
+         "audience_moment": "准备出门上班，想把午餐与日常物品一起带走的人。",
+         "hook": "先见午餐盒，再见它被放入包中。",
+         "story": "装好、提起、走出门；用三个动作讲完整使用场景。",
+         "gives_up": "不声明未经核实的保温时长。", "evidence_strength": "仅演示画面可见的动作",
+         "difficulty": "低", "asset_needs": "需要准确商品图或实拍。"},
+        {"key": "C", "title": "桌上有什么", "claim": "把桌面整理与午餐包的出现作为画面推进。",
+         "audience_moment": "午休前整理东西的人。",
+         "hook": "凌乱桌面先入画，商品最后落位。",
+         "story": "逐件整理物品，最后展示带走的整体画面。",
+         "gives_up": "不使用人物表演。", "evidence_strength": "画面概念，未验证效果",
+         "difficulty": "中", "asset_needs": "需要多个可核对的物件。"},
+    ],
+    "recommended": "B",
+    "recommended_because": "动作少，商品出现早；可见行为能支撑文案，不依赖未证实的性能。",
+    "prerequisites": ["商品形状、颜色与使用方式必须与真实素材一致。"],
+}
+
+WRITING = {
+    "segments": [
+        {"tc": "0–3s", "duration": "3 秒", "line": "Lunch is packed. Let's go.",
+         "picture": "午餐盒放入打开的包中，商品正面清楚可见。", "sound": "拉链与轻快环境声。"},
+        {"tc": "3–7s", "duration": "4 秒", "line": "Everything I need is right here.",
+         "picture": "提起包走向门口；不展示未经核实的容量或保温效果。", "sound": "脚步与自然口播。"},
+        {"tc": "7–12s", "duration": "5 秒", "line": "Ready for the day.",
+         "picture": "定格在手持午餐包的完整画面，留出结尾呼吸。", "sound": "音乐轻落。"},
+    ],
+    "total_duration": "约 12 秒（演示素材仅 2 秒，用于检查播放布局）",
+    "caption": "Pack lunch. Head out. Keep your day moving. #LunchRoutine",
+    "assumptions": ["本 fixture 的媒体是合成测试画面；真实商品信息和成片质量尚未核对。"],
+}
+
+
+def png_bytes(label: str) -> bytes:
+    image = Image.new("RGB", (540, 960), "#d9e0dd")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((92, 310, 448, 720), fill="#314b51", outline="#20353b", width=8)
+    draw.rounded_rectangle((134, 242, 406, 348), radius=35, fill="#314b51", width=6)
+    draw.rectangle((154, 382, 386, 418), fill="#c9d3cc")
+    draw.text((90, 96), "OFFLINE UX PREVIEW", fill="#20353b")
+    draw.text((90, 132), label[:30], fill="#20353b")
+    draw.text((90, 828), "Synthetic image - not product evidence", fill="#20353b")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def video_bytes() -> bytes:
+    """Build a tiny, fully decodable local MP4; never call a generation model."""
+    with tempfile.TemporaryDirectory(prefix="studio-ux-video-") as directory:
+        output = Path(directory) / "preview.mp4"
+        command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                   "-f", "lavfi", "-i", "color=c=#314b51:s=360x640:r=15:d=2",
+                   "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                   "-t", "2", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                   "-c:a", "aac", "-b:a", "64k", "-movflags", "+faststart", str(output)]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=45, check=False)
+        except FileNotFoundError as exc:
+            raise SystemExit("需要 ffmpeg 才能生成可播放的离线验收视频。") from exc
+        if result.returncode:
+            raise SystemExit("ffmpeg 无法创建离线预览视频：" + result.stderr[-1200:])
+        raw = output.read_bytes()
+    validate_video(raw)
+    return raw
+
+
+def submit(pipeline: Pipeline, run_id: str, stage: str, content: str, structured: dict) -> None:
+    attempt = pipeline.start_attempt(run_id, stage, actor="fixture")
+    pipeline.submit(run_id, stage, attempt.token, content=content, summary=content.splitlines()[0],
+                    evidence=["离线 UX fixture；非真实商品证据"],
+                    limitations=["所有创意内容均为合成演示"], structured=structured, actor="fixture")
+
+
+def approve(pipeline: Pipeline, run_id: str, stage: str, *, selected: str | None = None) -> None:
+    pipeline.record_review(run_id, stage, verdict="pass", findings=[],
+                           expected_artifact_sha256=pipeline.stage_state(run_id, stage).latest.sha256)
+    nonce = pipeline.issue_nonce(run_id, stage)
+    pipeline.record_approval(run_id, stage, nonce=nonce, decision="approved",
+                             selected_option_id=selected, note="离线 UX fixture 决定；并非用户真实批准")
+
+
+def seed_stages(pipeline: Pipeline, run_id: str, *, stop: str, old: bool = False) -> None:
+    submit(pipeline, run_id, "intake",
+           "# 需求整理\n\n目标是一条美国线午餐包短视频与英文 caption。真实商品主张待核对。",
+           {"facts": [{"label": "交付", "value": "竖屏视频与英文发布文案", "source": "fixture brief"}],
+            "constraints": ["不能把合成示例画面当作商品证据。"]})
+    direction_text = (
+        "# 创意方向（历史原文）\n\n## A. 出门前十秒\n装好午餐，提起包出门。"
+        "\n\n## B. 带上你的午餐\n先看午餐，再看它进包，最后走向门口。"
+        "\n\n## C. 桌上有什么\n物件依次整理，包在最后出现。"
+        "\n\n推荐 B，因为商品出现较早。此历史版本没有结构化选项卡。"
+        if old else "# 创意方向\n\nA 出门前十秒；B 带上你的午餐；C 桌上有什么。推荐 B。")
+    submit(pipeline, run_id, "direction", direction_text, {} if old else DIRECTION)
+    if stop == "direction_pending":
+        pipeline.record_review(run_id, "direction", verdict="pass", findings=[])
+        return
+    approve(pipeline, run_id, "direction", selected=None if old else "B")
+    if stop == "direction_adopted":
+        return
+    submit(pipeline, run_id, "material_plan",
+           "# 素材安排\n\n需要核对商品参考图；测试图片仅供界面验收。",
+           {"items": [{"shot": "商品入包", "purpose": "看清动作", "status": "需要生成",
+                       "note": "fixture 模拟", "file": ""}]})
+    script_text = (
+        "# 历史脚本原文\n\n0–3s：Lunch is packed. Let's go. 午餐盒放入包中。"
+        "\n\n3–7s：Everything I need is right here. 提包走向门口。"
+        "\n\n7–12s：Ready for the day. 完整商品镜头。"
+        "\n\n发布文案：Pack lunch. Head out. Keep your day moving. #LunchRoutine"
+        if old else "# 当前脚本\n\n完整台词、画面与发布文案见结构化作品。")
+    submit(pipeline, run_id, "writing", script_text, {} if old else WRITING)
+    if stop == "writing_pending":
+        pipeline.record_review(run_id, "writing", verdict="pass", findings=[])
+        return
+    approve(pipeline, run_id, "writing")
+
+
+def draft_for(store: Store, pipeline: Pipeline, run_id: str, kind: str,
+              reference: dict | None = None) -> dict:
+    source = store.latest_artifact(run_id, "writing")
+    payload = DraftIn(request_id=f"{run_id}-{kind}-draft", kind=kind,
+                      prompt=("OFFLINE UX PREVIEW: synthetic lunch tote, three visible actions, "
+                              "no product performance claim; no real generation requested."),
+                      source_version=source.version, source_sha256=source.sha256,
+                      reference=reference, model="wan3.0-video" if kind == "video" else "codex-image",
+                      duration=12 if kind == "video" else None,
+                      resolution="720P" if kind == "video" else None)
+    draft = prepare_draft(store, pipeline, run_id, payload, actor="fixture")
+    store.append_event(run_id, "production_review", draft_id=draft["draft_id"],
+                       draft_sha256=draft["draft_sha256"],
+                       review={"verdict": "ready", "findings": ["仅供离线 UX 验收；未调用审核模型。"],
+                               "checks": {key: "fixture 数据；真实内容未审核" for key in
+                                          ("opening", "progression", "payoff", "product", "execution")},
+                               "at": utcnow(), "model": "offline-fixture", "scope": "合成数据"})
+    return draft
+
+
+def production_attempt(store: Store, ledger: Ledger, run_id: str, draft: dict,
+                       status: str, output: bytes | None = None) -> None:
+    attempt_id = f"{run_id}-attempt-1"
+    store.append_event(run_id, "production_attempt", attempt_id=attempt_id,
+                       draft_id=draft["draft_id"], draft_sha256=draft["draft_sha256"],
+                       media_kind=draft["kind"], status="preparing", message="离线 fixture 记录。",
+                       output=None, endpoint="https://offline.cn-beijing.maas.aliyuncs.com/api/v1"
+                       if draft["kind"] == "video" else None)
+    ledger.begin_media_call(run_id, call_id=attempt_id,
+                            model=draft["model"], provider="fixture",
+                            usage_unit="video_seconds" if draft["kind"] == "video" else "images")
+    if output is not None:
+        suffix = ".mp4" if draft["kind"] == "video" else ".png"
+        name = f"production-{hashlib.sha256(attempt_id.encode()).hexdigest()[:24]}{suffix}"
+        registered = accept_upload(store, run_id, name, output)
+        store.append_event(run_id, "production_output", attempt_id=attempt_id,
+                           output={"name": name, "sha256": hashlib.sha256(output).hexdigest(),
+                                   "url": registered["url"]})
+        ledger.settle_media_call(run_id, attempt_id, quantity=2 if draft["kind"] == "video" else 1,
+                                 ok=True, note="合成 UX fixture 用量；非提供方结算", pricing_source="offline-fixture")
+        store.append_event(run_id, "production_status", attempt_id=attempt_id,
+                           update={"status": "succeeded", "message": "合成测试结果已保存；请核对画面。"})
+    else:
+        store.append_event(run_id, "production_status", attempt_id=attempt_id,
+                           update={"status": status, "message": "提交结果待核实，请先查原任务，不要重新提交。"})
+
+
+def seed(root: Path) -> None:
+    if root.exists():
+        raise SystemExit(f"拒绝覆盖已有目录：{root}")
+    if root.resolve().is_relative_to(REPOSITORY.resolve()):
+        raise SystemExit(f"验收数据必须在 Git 仓库外：{root}")
+    # Validate the local playable media before writing even the empty root.
+    clip = video_bytes()
+    picture = png_bytes("Lunch tote reference")
+    result_picture = png_bytes("Generated image pending review")
+    root.mkdir(parents=True)
+    ConnectionStore(root).save({
+        "expected_revision": 0,
+        "connections": [{"id": "offline-ux", "name": "离线 UX 预览（拒绝模型调用）",
+                         "provider": "openai_compat", "base_url": "http://127.0.0.1:9", "pricing": {}}],
+        "roles": {role: {"connection": "offline-ux", "model": "offline-ux"} for role in ROLES},
+    })
+    store = Store(root)
+    pipeline = Pipeline(store)
+    settings = Settings(data_root=root, base_url="http://127.0.0.1:9",
+                        pricing=Pricing(source="offline-fixture", input_usd_per_mtok=None,
+                                        output_usd_per_mtok=None, as_of="2026-09-24"))
+    ledger = Ledger(store, settings)
+    for run_id, title, target in RUNS:
+        analysis_only = run_id == "ux-analysis-only"
+        brief = ("只分析我上传的参考视频，给我一份观察、可借鉴方法与限制。"
+                 "这次不做午餐包创意、脚本、图片或视频。" if analysis_only else BRIEF)
+        store.create_run(run_id, f"UX 验收 · {title}", brief + "\n\n当前验收目标：" + target)
+        store.append_chat(run_id, "user", "请只分析这条参考视频，不开始制作。" if analysis_only
+                          else "请按当前项目目标完成这条午餐包作品。")
+        store.append_chat(run_id, "assistant", "这是一份离线 UX fixture，所有内容与决定均为合成演示。")
+        if analysis_only:
+            source = accept_upload(store, run_id, "reference-preview.mp4", clip)
+            reference_id = "ux-analysis-reference"
+            store.append_event(run_id, "reference_video_started", reference_id=reference_id,
+                               request={"intent": "analyze", "name": source["name"],
+                                        "expected_sha256": hashlib.sha256(clip).hexdigest(),
+                                        "instruction": "只拆解参考，不开始制作。", "source_url": None})
+            store.append_event(run_id, "reference_video_source", reference_id=reference_id,
+                               source={"name": source["name"], "sha256": hashlib.sha256(clip).hexdigest(),
+                                       "origin": "user_upload", "acquired_at": utcnow()})
+            store.append_event(run_id, "reference_video_ready", reference_id=reference_id,
+                               analysis_id="ux-offline-analysis",
+                               report=("参考视频拆解（离线合成示例）\n\n"
+                                       "1. 开场先给可见物，再进入动作。\n"
+                                       "2. 注意力由动作转换推进，最后停在完整画面。\n\n"
+                                       "限制：该片是合成测试视频；没有真实参考观察，不能当成商品或创意证据。"))
+            store.append_event(run_id, "reference_video_completed", reference_id=reference_id)
+            continue
+        store.append_event(run_id, "creative_context_selected",
+                           selection={"intent": "new", "format": "video", "tags": [], "case_ids": None})
+        reference = None
+        if run_id in {"ux-video-ready", "ux-video-completed", "ux-video-unknown"}:
+            uploaded = accept_upload(store, run_id, "lunch-tote-reference.png", picture)
+            reference = {"name": uploaded["name"], "sha256": hashlib.sha256(picture).hexdigest()}
+        stop = {"ux-direction-pending": "direction_pending",
+                "ux-direction-adopted": "direction_adopted",
+                "ux-writing-pending": "writing_pending"}.get(run_id, "complete")
+        seed_stages(pipeline, run_id, stop=stop, old=(run_id == "ux-old-prose"))
+        if stop != "complete" or run_id == "ux-old-prose":
+            continue
+        if run_id == "ux-image-review":
+            draft = draft_for(store, pipeline, run_id, "image")
+            production_attempt(store, ledger, run_id, draft, "succeeded", result_picture)
+            continue
+        draft = draft_for(store, pipeline, run_id, "video", reference)
+        store.append_event(run_id, "production_material_approval", name=reference["name"],
+                           sha256=reference["sha256"], approved=True, actor="fixture",
+                           nonce_sha256=hashlib.sha256(b"offline-ux-fixture").hexdigest())
+        if run_id == "ux-video-completed":
+            production_attempt(store, ledger, run_id, draft, "succeeded", clip)
+        elif run_id == "ux-video-unknown":
+            production_attempt(store, ledger, run_id, draft, "unknown")
+
+
+class OfflineText:
+    def complete(self, *args, **kwargs):
+        raise RuntimeError("离线 UX fixture 拒绝模型调用")
+
+
+class OfflineImage:
+    def capability(self):
+        return {"available": True, "verified": False, "reason": "离线 UX fixture；生成会在调用前拒绝"}
+
+    def generate(self, *args, **kwargs):
+        from studio.agents.codex_client import CodexUnavailable
+        raise CodexUnavailable("离线 UX fixture 不进行图片生成")
+
+
+class OfflineVideo:
+    endpoint = "https://offline.cn-beijing.maas.aliyuncs.com/api/v1"
+
+    def submit(self, *args, **kwargs):
+        from studio.agents.wan_video import WanVideoError
+        raise WanVideoError("离线 UX fixture 不进行视频生成", submission_unknown=False)
+
+
+def serve(root: Path, port: int) -> None:
+    import uvicorn
+    from studio.server import build_app
+
+    settings = Settings(data_root=root, base_url="http://127.0.0.1:9",
+                        pricing=Pricing(source="offline-fixture", input_usd_per_mtok=None,
+                                        output_usd_per_mtok=None, as_of="2026-09-24"))
+    app = build_app(settings, client_factory=OfflineText,
+                    production_image_factory=OfflineImage,
+                    production_video_factory=OfflineVideo)
+    print(f"离线 UX 预览：http://127.0.0.1:{port}", flush=True)
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("data_root", type=Path, help="尚不存在的 Git 仓库外目录")
+    parser.add_argument("--serve", action="store_true", help="播种后启动仅本地、拒绝模型调用的预览服务")
+    parser.add_argument("--serve-existing", action="store_true", help="只重启本脚本播种的现有根，不覆盖")
+    parser.add_argument("--port", type=int, default=4762)
+    args = parser.parse_args()
+    root = args.data_root.expanduser().resolve()
+    if args.serve_existing:
+        if not all((root / "runs" / run_id / "run.json").is_file() for run_id, _, _ in RUNS):
+            raise SystemExit("已有目录不是完整的九状态 UX fixture；不会修改或启动。")
+    else:
+        seed(root)
+    print("数据根：", root)
+    for run_id, title, _ in RUNS:
+        print(f"  {run_id:24} {title}")
+    if args.serve or args.serve_existing:
+        serve(root, args.port)
+
+
+if __name__ == "__main__":
+    main()

@@ -27,49 +27,50 @@ function journeyGateHtml(pending, step) {
 }
 
 function renderJourneyStatus() {
-  const tl=state.timeline, brief=state.projectBrief || tl?.brief;
+  const tl=state.timeline, view=state.creatorView;
   const run=(state.runs || []).find(item=>item.run_id===state.runId) || tl?.run || {};
-  const format=run.content_format;
-  const status=tl?.pending_continuation?'决定已保存，下一步尚未启动':journeyStatus(brief,tl?.pending,tl?.interaction);
-  const kind=format==='photo'?'图文作品':format==='video'?'视频作品':'创作目标待确认';
-  const next=state.busy?'':tl?.pending_continuation?'继续保存的决定':tl?.pending?'查看并决定':tl?.interaction?'回答当前问题'
-    :brief?.action?.kind==='activity'?'':brief?.action?.label||'';
+  if (!view) { $('project-progress').replaceChildren(); return; }
+  const next=state.busy ? null : view.action;
   $('project-progress').innerHTML=`<section class="creator-goal" aria-label="当前作品与下一步">`+
-    `<div class="creator-goal-main"><div class="creator-goal-heading"><span class="creator-kicker">当前作品 · ${escapeHtml(kind)}</span><h1>${escapeHtml(run.title||'未命名作品')}</h1></div>`+
-    `<p class="creator-goal-request"><strong>你的要求</strong> ${escapeHtml(run.brief||'创作目标仍待确认')}</p>`+
-    `<p class="creator-goal-current"><span class="small-dot"></span><strong>${escapeHtml(status)}</strong>`+
-    (brief?.detail?`<span>${escapeHtml(brief.detail)}</span>`:'')+`</p></div>`+
-    (next?`<button type="button" class="primary creator-next" data-creator-next>${escapeHtml(next)}</button>`:'')+
+    `<div class="creator-goal-main"><div class="creator-goal-heading"><span class="creator-kicker">最终交付 · ${escapeHtml(view.goal)}</span><h1>${escapeHtml(run.title||'未命名作品')}</h1></div>`+
+    `<p class="creator-goal-current"><span class="small-dot"></span><strong>现在：${escapeHtml(view.current)}</strong></p>`+
+    (view.detail?`<p class="creator-goal-detail">${escapeHtml(view.detail)}</p>`:'')+
+    (run.brief?`<details class="creator-goal-source"><summary>查看原始需求</summary><p>${escapeHtml(run.brief)}</p></details>`:'')+`</div>`+
+    (next?`<button type="button" class="primary creator-next" data-creator-next>${escapeHtml(next.label)}</button>`:'')+
     `</section>`;
   const button=$('project-progress').querySelector('[data-creator-next]');
   if(button)button.onclick=()=>{
-    if(tl?.pending_continuation){$('journey-decision')?.querySelector('[data-resume-decision]')?.click();return;}
-    if(tl?.pending){showJourneyTab('plan');selectStage(tl.pending.stage);setProjectFocus('canvas');
-      document.getElementById('stage-decision')?.scrollIntoView({block:'nearest'});return;}
-    if(tl?.interaction){setProjectFocus('chat');$('journey-decision')?.scrollIntoView({block:'nearest'});return;}
-    const action=brief?.action||{};
+    const action=view.action;
+    if(action.kind==='continue'){$('journey-decision')?.querySelector('[data-resume-decision]')?.click();return;}
+    if(action.kind==='question'){setProjectFocus('chat');$('journey-decision')?.scrollIntoView({block:'nearest'});return;}
     if(action.kind==='review_stage'){
       button.disabled=true;
       submitJob(state.runId,{request_kind:'stage_review',request_id:crypto.randomUUID(),stage:action.stage,
         expected_version:action.version,expected_artifact_sha256:action.sha256});return;
     }
-    if(action.kind==='delivery'){openDelivery();return;}
-    if(action.kind==='recovery'){setProjectFocus('chat');$('job-status')?.scrollIntoView({block:'nearest'});return;}
-    if(action.stage){showJourneyTab('plan');selectStage(action.stage);}
-    if(action.kind==='draft')prepareProjectDraft(action.prompt);
-    else setProjectFocus('canvas');
+    if(action.kind==='reference'){toggleMaterials(true);return;}
+    if(action.kind==='chat'){setProjectFocus('chat');$('chat-input').focus();return;}
+    if(action.kind==='navigate'){
+      showJourneyTab(action.tab);
+      if(action.tab==='plan'&&action.stage)selectStage(action.stage);
+      setProjectFocus('canvas');
+      const target=action.tab==='plan' ? document.getElementById('stage-decision')||$('stage')
+        : document.querySelector('.production-embedded .production-card')||$(action.tab==='video'?'journey-video':'journey-storyboard');
+      target?.scrollIntoView({block:'nearest'});
+    }
   };
   if(typeof StudioComposer!=='undefined')StudioComposer.render();
 }
 
 function configureJourneyTabs() {
   const run=(state.runs || []).find(item=>item.run_id===state.runId);
-  const photo=run?.content_format==='photo';
-  const analysis=!run?.content_format && state.currentJob?.job_kind==='reference_video';
+  const photo=(state.creatorView?.format||run?.content_format)==='photo';
+  const analysis=Boolean(state.creatorView?.analysisOnly);
   $('journey-tab-plan').textContent=analysis?'分析与参考':photo?'创意与文案':'创意与脚本';
   $('journey-tab-storyboard').textContent=photo?'图片':'画面';
   $('journey-tab-storyboard').hidden=analysis;
   $('journey-tab-video').hidden=photo||analysis;
+  $('project-stages').hidden=analysis;
   if (((photo || analysis) && state.canvasTab === 'video') || (analysis && state.canvasTab === 'storyboard'))
     showJourneyTab('plan');
 }
@@ -92,6 +93,7 @@ function renderJourneyDecision() {
       try {
         await api(`/api/runs/${encodeURIComponent(runId)}/decision-continuation`,{method:'POST',body:JSON.stringify(continuation)});
         if(runId!==state.runId)return;
+        state.canvasTouched=false;
         try { await refreshTimeline(); }
         catch { const feedback=host.querySelector('[data-feedback]');if(feedback)feedback.textContent='任务已接受，页面暂时无法刷新；正在恢复运行状态。'; }
         void restoreJob(runId);
@@ -105,9 +107,6 @@ function renderJourneyDecision() {
       const choice=q.options[Number(button.dataset.questionChoice)];if(!choice)return;
       await submitJob(runId,{text:`关于「${q.question}」：${choice.label}`,question_id:q.id,request_id:crypto.randomUUID()});
     };
-  } else if (pending) {
-    host.innerHTML=journeyGateHtml(pending,tl.rail.find(s=>s.stage===pending.stage));
-    host.querySelector('[data-view-plan]').onclick=()=>{showJourneyTab('plan');selectStage(pending.stage);setProjectFocus('canvas');};
   }
 }
 
@@ -119,8 +118,9 @@ function scrollToJourneyDecision(host) {
   return true;
 }
 function closeEmbeddedProduction(){document.querySelector('.production-embedded')?.studioClose?.();}
-function showJourneyTab(tab) {
+function showJourneyTab(tab, options={}) {
   if($(`journey-tab-${tab}`)?.hidden)return;
+  if(!options.automatic)state.canvasTouched=true;
   closeEmbeddedProduction();
   state.canvasTab=tab;
   for(const button of document.querySelectorAll('[data-journey-tab]')){
@@ -134,6 +134,23 @@ function showJourneyTab(tab) {
     const candidate=state.timeline?.pending?.stage || (state.rail||[]).find(s=>s.stage==='writing'&&s.has_doc)?.stage || (state.rail||[]).find(s=>s.stage==='direction'&&s.has_doc)?.stage || 'intake';
     selectStage(candidate);
   } else openProduction({mount:$(tab==='storyboard'?'journey-storyboard':'journey-video'),kind:tab==='storyboard'?'image':'video'});
+}
+
+function renderReferenceAnalysis() {
+  const task=state.creatorView?.reference;
+  const host=$('stage');
+  if(!task){host.innerHTML='<section class="creator-analysis"><h2>参考分析</h2><p>分析尚未完成，可在素材与参考中查看任务状态。</p><button type="button" class="ghost" data-show-analysis>查看参考任务</button></section>';}
+  else {
+    const material=(state.materials||[]).find(item=>item.name===task.name&&item.kind==='video'&&item.usable);
+    const video=material?`<video controls preload="metadata" src="${escapeHtml(materialUrl(material.name))}" aria-label="本次分析的参考视频"></video>`:'';
+    host.innerHTML=`<section class="creator-analysis"><span class="creator-kicker">当前作品 · 参考分析</span>`+
+      `<h2>${escapeHtml(task.title||'参考视频拆解报告')}</h2>`+
+      (task.name?`<p class="muted">指定参考：${escapeHtml(task.name)}</p>`:'')+video+
+      (task.report?`<div class="creator-analysis-report"><h3>观察与可借鉴方法</h3><div>${escapeHtml(task.report).replace(/\n/g,'<br>')}</div></div>`:'<p>报告尚未保存，请查看参考任务状态。</p>')+
+      `<p class="muted">模型观察未经人工核对；不会自动进入制作。</p>`+
+      `<button type="button" class="ghost" data-show-analysis>查看参考来源与记录</button></section>`;
+  }
+  host.querySelector('[data-show-analysis]')?.addEventListener('click',()=>toggleMaterials(true));
 }
 
 function bindJourneyTabs(){

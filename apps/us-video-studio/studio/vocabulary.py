@@ -531,6 +531,7 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None) -> list[dic
 
         latest = st.get("latest") or {}
         review = st.get("review") or {}
+        approval = st.get("approval") or {}
         structured = latest.get("structured") or {}
         blank = stage_blank(stage, st)
         rail.append(
@@ -547,6 +548,10 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None) -> list[dic
                 # Who wrote it and when, so the panel does not have to join
                 # against `turns[].items` to find the card it already holds.
                 "summary": latest.get("summary", ""),
+                # The pipeline already binds this approval to the exact latest
+                # artifact. Keep its actual choice separate from display prose.
+                "approval_decision": approval.get("decision"),
+                "selected_option_id": approval.get("selected_option_id"),
                 "decision_sentence": (approval_sentence(st["approval"]["decision"], st["approval"].get("note", "")) + (f" 已选方向 {st["approval"]["selected_option_id"]}。" if st["approval"].get("selected_option_id") else "")) if st.get("approval") else "",
                 "author": role_label(latest.get("author_role", "")),
                 "created_at": latest.get("created_at", ""),

@@ -11,7 +11,7 @@ test('project search preserves identity and supports trimmed mixed case queries'
   assert.deepEqual(filterProjects(projects, '通勤'), [projects[1]]);
   assert.deepEqual(filterProjects(projects, 'missing'), []);
 });
-test('actionable projects surface first and cards use the server project status', () => {
+test('actionable projects surface first while cards lead to the current work', () => {
   const runs=[
     {run_id:'recent',title:'最近项目',updated_at:'2026-09-23T10:00:00Z',project_brief:{phase:'ready',title:'策划已就绪'}},
     {run_id:'decision',title:'待决定项目',updated_at:'2026-09-22T10:00:00Z',content_format:'photo',
@@ -19,11 +19,14 @@ test('actionable projects surface first and cards use the server project status'
   ];
   assert.equal(filterProjects(runs,'')[0].run_id,'decision');
   const card=projectCardHtml(runs[1],null);
-  assert.match(card,/图文方案等你决定/);
-  assert.match(card,/阅读并决定/);
+  assert.match(card,/打开查看当前作品与下一步/);
+  assert.match(card,/打开作品/);
   assert.match(card,/图文项目/);
-  assert.match(card,/图文 · 更新于/);
+  assert.match(card,/目标：带货图片与文案 · 更新于/);
+  assert.doesNotMatch(card,/图文方案等你决定/);
   assert.doesNotMatch(card,/笼统状态/);
+  assert.match(projectCardHtml({run_id:'video',title:'午餐包',content_format:'video',
+    brief:'目标是一条短视频与英文发布文案。'},null),/目标：商品视频与发布文案/);
 });
 test('discovery includes eligible actual references, never presents own results or holdouts as inspiration', () => {
   const base = {media:{seconds:15}, partition:'calibration', origin:'user_reference', eligible_for:['message']};

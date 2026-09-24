@@ -2,7 +2,7 @@
 
 Why this exists: the artifacts were always structured documents that the screen
 flattened into a Markdown blob. ``direction-v2`` carries three options across
-seven attributes, a dependency matrix and seven open questions — all of it
+creative attributes, a dependency matrix and seven open questions — all of it
 present, none of it visible without opening a reader and scrolling. The research
 note on MoneyPrinterTurbo describes the same failure from the other end: its
 backend records ``failure = {"failed_stage": ..., "error": ...}`` and its frontend
@@ -92,9 +92,9 @@ SHAPES: dict[str, Shape] = {
         Field("open_questions", "rows", QUESTION_COLUMNS),
     )),
     "direction": Shape("direction", (
-        # A/B/C × the seven attributes roles.py already asks the director for.
+        # A/B/C × the existing attributes, with an optional short creative title.
         Field("options", "rows", (
-            "key", "claim", "audience_moment", "hook", "story",
+            "key", "title", "claim", "audience_moment", "hook", "story",
             "gives_up", "evidence_strength", "difficulty", "asset_needs",
         )),
         Field("recommended", "text"),
@@ -159,7 +159,8 @@ BRIEF: dict[str, str] = {
 - `open_questions`：你没能确认、只能他来定的事。""",
 
     "direction": """\
-- `options`：一个方案一行。`key` 用 A/B/C。`claim` 主张一句话。
+- `options`：一个方案一行。`key` 用 A/B/C。`title` 可选，写能区分方案的短创意名称，
+  不要用 A/B/C 作标题，也不要在标题里编造未证实的商品效果。`claim` 主张一句话。
   `audience_moment` 给谁看、在什么场景下被看到。`hook` 开场识别点。
   `story` 写清开场、关键动作、结尾回报及必要的样例对白，让用户看得见这条片子。
   `gives_up` 是创作方案的取舍，不要求角色必须放弃物品或承担代价。`evidence_strength` 证据强度。
@@ -389,7 +390,7 @@ def canonical_document(stage: str, data: dict[str, Any]) -> str:
         "options": "方向方案", "recommended": "推荐方向", "recommended_because": "推荐理由",
         "prerequisites": "需要验证的前提", "dependency_matrix": "方案依赖", "items": "素材安排",
         "gaps": "素材缺口", "segments": "分镜内容", "total_duration": "总时长", "caption": "发布文案", "assumptions": "时长假设",
-        "label": "事实", "value": "内容", "source": "来源", "key": "方案", "claim": "主张",
+        "label": "事实", "value": "内容", "source": "来源", "key": "方案", "title": "标题", "claim": "主张",
         "audience_moment": "观众与处境", "hook": "开场", "story": "画面与表达", "gives_up": "方案取舍",
         "evidence_strength": "依据", "difficulty": "执行难度", "asset_needs": "素材需求",
         "need": "前提", "shot": "画面", "purpose": "作用", "status": "状态", "note": "说明", "file": "素材文件",
@@ -498,6 +499,7 @@ LABEL: dict[str, str] = {
     "question": "问题",
     "blocks": "卡住了什么",
     "key": "方案",
+    "title": "标题",
     "claim": "主张",
     "audience_moment": "给谁看、什么场景",
     "hook": "前 3 秒",
@@ -647,7 +649,7 @@ def _direction(data: dict[str, Any]) -> list[dict[str, Any]]:
                         "fields": _fields(
                             o,
                             (
-                                "claim", "audience_moment", "hook", "story", "gives_up",
+                                "title", "claim", "audience_moment", "hook", "story", "gives_up",
                                 "evidence_strength", "difficulty", "asset_needs",
                             ),
                             secondary=("gives_up", "evidence_strength", "difficulty", "asset_needs"),

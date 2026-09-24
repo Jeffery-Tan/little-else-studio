@@ -26,15 +26,17 @@ function inspirationCases(cases) {
 }
 function projectCardHtml(run, cover) {
   const id = escapeHtml(run.run_id), title = escapeHtml(run.title);
-  const progress = run.progress;
-  const brief=run.project_brief;
-  const next=brief?.title||progress?.title||'继续创作';
-  const action=brief?.action?.label||'打开项目';
-  const format=run.content_format==='photo'?'图文':run.content_format==='video'?'视频':'创作';
+  const analysis=!run.content_format&&/只分析.{0,20}参考视频/u.test(run.brief||'');
+  const format=analysis?'分析':run.content_format==='photo'?'图文':run.content_format==='video'?'视频':'创作';
+  const requestedCaption=/(?:与|和|及|附|加上|需要|附带|[+＋]).{0,6}(?:英文)?(?:发布文案|caption)/iu.test(run.brief||'');
+  const goal=run.creator_view?.goal|| (analysis?'参考视频拆解报告'
+    :run.content_format==='photo'?'带货图片与文案'
+    :run.content_format==='video'?`商品视频${requestedCaption?'与发布文案':''}`:'交付形式待确认');
+  const next=run.creator_view?.current||'打开查看当前作品与下一步';
   const visual = cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy">` : `<div class="project-cover-art">${studioIcon('film')}<span>${format}项目</span></div>`;
   const date=studioDate(run.updated_at||run.created_at);
-  return `<div class="project-card-item"><button class="project-card" data-open-project="${id}"><span class="project-cover">${visual}<span class="project-open">${escapeHtml(action)} ↗</span></span><span class="project-card-copy"><strong>${title}</strong>` +
-    (brief||progress ? `<span class="project-next">${escapeHtml(next)}</span><span>${format} · 更新于 ${escapeHtml(date)}<i aria-hidden="true">↗</i></span>` : `<span>${format} · ${escapeHtml(date)}<i aria-hidden="true">↗</i></span>`) + `</span></button><button class="project-delete ghost small" data-delete-project="${id}" aria-label="删除项目：${title}">删除</button></div>`;
+  return `<div class="project-card-item"><button class="project-card" data-open-project="${id}"><span class="project-cover">${visual}<span class="project-open">打开作品 ↗</span></span><span class="project-card-copy"><strong>${title}</strong>` +
+    `<span class="project-next">${escapeHtml(next)}</span><span>目标：${escapeHtml(goal)} · 更新于 ${escapeHtml(date)}<i aria-hidden="true">↗</i></span></span></button><button class="project-delete ghost small" data-delete-project="${id}" aria-label="删除项目：${title}">删除</button></div>`;
 }
 function referenceCardHtml(item, hero=false) {
   const id = encodeURIComponent(item.id), title = escapeHtml(item.title);

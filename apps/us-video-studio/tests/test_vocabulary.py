@@ -473,3 +473,15 @@ def test_returned_or_stale_approval_cannot_look_done():
         row = v.build_rail([step], None)[0]
         assert row["state"] != "done"
         assert "B" in row["decision_sentence"]
+
+
+def test_direction_rail_exposes_the_recorded_choice_without_parsing_approval_prose():
+    step = _stage("direction", latest={"version": 2, "digest_algorithm": "artifact-v2"},
+                  status="approved", approval={"decision": "approved", "selected_option_id": "B"})
+    row = v.build_rail([step], None)[0]
+    assert row["approval_decision"] == "approved"
+    assert row["selected_option_id"] == "B"
+
+    undecided = v.build_rail([_stage("direction", latest={"version": 1})], None)[0]
+    assert undecided["approval_decision"] is None
+    assert undecided["selected_option_id"] is None

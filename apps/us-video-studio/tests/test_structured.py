@@ -35,9 +35,9 @@ def test_every_stage_can_report_open_questions():
 
 
 def test_the_direction_shape_covers_what_the_role_is_told_to_write():
-    """roles.py asks the director for these seven attributes by name."""
+    """The optional title and established creative attributes share one shape."""
     columns = set(s.SHAPES["direction"].field("options").columns)
-    assert {"key", "claim", "audience_moment", "hook"} <= columns
+    assert {"key", "title", "claim", "audience_moment", "hook"} <= columns
     assert {"gives_up", "evidence_strength", "difficulty", "asset_needs"} <= columns
 
 
@@ -70,6 +70,25 @@ def test_a_well_formed_payload_survives_intact():
     assert out.data["options"][1]["claim"] == "容量二选一"
     assert out.data["recommended"] == "B"
     assert out.data["prerequisites"] == ["容量是买家纠结点", "至少两档官方图"]
+
+
+def test_optional_creative_title_is_part_of_the_formal_direction_artifact():
+    payload = {"options": [{"key": "A", "title": "从桌边到海边", "claim": "午餐场景切换"}]}
+    s.validate_canonical_input("direction", payload)
+    data = s.normalize("direction", payload).data
+    assert data["options"][0]["title"] == "从桌边到海边"
+    assert "- **标题**：从桌边到海边" in s.canonical_document("direction", data)
+    fields = s.view("direction", data)[0]["cards"][0]["fields"]
+    assert fields[0] == {"label": "标题", "value": "从桌边到海边"}
+
+
+def test_old_direction_without_title_keeps_its_existing_canonical_reading():
+    data = s.normalize("direction", {"options": [{"key": "A", "claim": "原主张"}]}).data
+    assert s.canonical_document("direction", data) == (
+        "# 创意方向\n\n<!-- studio:structured-document-v1 -->\n\n"
+        "## 方向方案\n\n### 1\n\n- **方案**：A\n- **主张**：原主张"
+    )
+    assert all(field["label"] != "标题" for field in s.view("direction", data)[0]["cards"][0]["fields"])
 
 
 def test_the_dependency_matrix_keeps_its_ticks_as_booleans():

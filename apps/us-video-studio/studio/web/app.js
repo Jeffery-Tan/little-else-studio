@@ -51,6 +51,10 @@ const state = {
   chatDrafts: new Map(),
   runId: null,
   currentJob: null,
+  productionData: null,
+  referenceTasks: [],
+  creatorView: null,
+  canvasTouched: false,
   feedbackTarget: null,
   timeline: null,
   rail: [],
@@ -157,6 +161,7 @@ async function selectRun(runId) {
   $('materials-project-name').textContent = '';
   if (typeof closeEmbeddedProduction === 'function') closeEmbeddedProduction();
   state.canvasTab = 'plan';
+  state.canvasTouched = false;
   $('stage').hidden=false;$('journey-storyboard').hidden=true;$('journey-video').hidden=true;
   for(const tab of document.querySelectorAll('[data-journey-tab]')){
     const selected=tab.dataset.journeyTab==='plan';tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;
@@ -170,6 +175,9 @@ async function selectRun(runId) {
   state.timeline = null;
   state.projectBrief = null;
   state.currentJob = null;
+  state.productionData = null;
+  state.referenceTasks = [];
+  state.creatorView = null;
   clearFeedbackTarget();
   state.rail = [];
   $("rail").innerHTML = "";
@@ -198,13 +206,29 @@ async function selectRun(runId) {
 async function refreshTimeline() {
   if (!state.runId) return;
   const runId = state.runId, serial = ++state.refreshSerial;
-  const tl = await api(`/api/runs/${runId}/timeline`);
+  const [tl, production, references] = await Promise.all([
+    api(`/api/runs/${runId}/timeline`),
+    api(`/api/runs/${runId}/production`).catch(() => null),
+    api(`/api/runs/${runId}/reference-videos`).catch(() => null),
+  ]);
   if (state.runId !== runId || serial !== state.refreshSerial) return;
   state.timeline = tl;
   state.projectBrief = tl.brief;
+  state.productionData = production;
+  state.referenceTasks = references?.tasks || [];
+  const run = state.runs.find(item => item.run_id === runId) || tl.run || {};
+  const imageWork = production && typeof StudioProduction?.currentProductionWork === 'function'
+    ? StudioProduction.currentProductionWork(production, 'image', runId) : null;
+  const videoWork = production && typeof StudioProduction?.currentProductionWork === 'function'
+    ? StudioProduction.currentProductionWork(production, 'video', runId) : null;
+  state.creatorView = creatorProjectView({run, timeline:tl, imageWork, videoWork,
+    referenceTasks:state.referenceTasks, currentJob:state.currentJob});
   if (typeof configureJourneyTabs === 'function') configureJourneyTabs();
+  if (!state.canvasTouched && state.creatorView.tab === 'plan' && state.creatorView.stage)
+    state.activeStage = state.creatorView.stage;
   const project = state.runs.find(run => run.run_id === runId);
   if (project) {
+    project.creator_view = state.creatorView;
     project.project_brief = tl.brief;
     project.progress = tl.brief
       ? { ...tl.progress, title: tl.brief.title, detail: tl.brief.detail }
@@ -228,6 +252,8 @@ async function refreshTimeline() {
   renderSpend(tl);
   renderMaterials();
   renderProjects();
+  if (!state.canvasTouched && state.creatorView?.tab && state.creatorView.tab !== state.canvasTab)
+    showJourneyTab(state.creatorView.tab, {automatic:true});
 }
 
 /* --------------------------------------------------------------- header -- */
@@ -267,7 +293,7 @@ function renderRail(rail) {
     // that came out empty need different things from him than a step nobody has
     // started.
     node.title = [step.blank.text, n ? `${n} 个问题等你回答` : ""].filter(Boolean).join(" · ");
-    node.onclick = () => selectStage(step.stage);
+    node.onclick = () => { state.canvasTouched = true; selectStage(step.stage); };
     host.appendChild(node);
   }
 }
@@ -309,21 +335,18 @@ function selectStage(stage) {
 /* ------------------------------------------------------------ the stage -- */
 
 function renderPane() {
+  renderProjectProgress();
   if (state.canvasTab && state.canvasTab !== 'plan') return;
   const host = $("stage");
   const step = (state.rail || []).find((s) => s.stage === state.activeStage);
-  renderProjectProgress();
+  if (state.creatorView?.analysisOnly) { renderReferenceAnalysis(); return; }
   if (!step) {
     host.innerHTML = "";
     return;
   }
   const tl = state.timeline || {};
   if(!step.has_doc){
-    const analysis=state.currentJob?.job_kind==='reference_video';
-    host.innerHTML=analysis
-      ? '<div class="journey-empty"><h2>参考分析记录</h2><p>当前项目尚无创意方案。参考分析和它的覆盖范围保存在「素材与参考」中；只分析不会自动进入制作。</p><button type="button" class="ghost" data-show-analysis>查看分析与参考</button></div>'
-      : '<div class="journey-empty"><h2>作品内容会在这里展开</h2><p>先和制片团队说说目标。当前还没有可阅读的方案、脚本或画面。</p></div>';
-    host.querySelector('[data-show-analysis]')?.addEventListener('click',()=>toggleMaterials(true));
+    host.innerHTML='<div class="journey-empty"><h2>作品内容会在这里展开</h2><p>先和制片团队说说目标。当前还没有可阅读的创意、脚本或画面。</p></div>';
     return;
   }
   const expected = tl.pending?.stage === step.stage && tl.pending.version === step.version
@@ -347,8 +370,11 @@ function renderPane() {
     pending: tl.pending || null,
     drafts: state.draft,
   });
-  if (step.stage === 'writing' && !step.stale && step.integrity_ok !== false) {
-    const hint = box('p', 'creator-feedback-hint', '点一句台词或一段画面，在对话中提出修改。');
+  if (step.stage === 'writing' && !step.stale && step.integrity_ok !== false &&
+      host.querySelector('[data-creator-target], .artifact-prose p, .artifact-prose li')) {
+    const hint = box('p', 'creator-feedback-hint',
+      host.querySelector('[data-creator-target]') ? '点一段台词或展开画面，在对话中提出修改。'
+        : '点一段原文，在对话中提出这段的修改。');
     host.querySelector('.stage-heading')?.after(hint);
   }
   wireGate(host);
@@ -411,13 +437,14 @@ function wireCreatorFeedback(host, step) {
       !/^[a-f0-9]{64}$/.test(step.artifact_sha256 || '')) return;
   const bound = {run_id:state.runId, stage:step.stage, version:step.version,
     artifact_sha256:step.artifact_sha256};
-  for (const node of host.querySelectorAll('.blk-cards .vf-value, .blk-text, .blk-list .blk-item')) {
+  for (const node of host.querySelectorAll('[data-creator-target], .artifact-prose p, .artifact-prose li')) {
     const quote = node.textContent.trim().slice(0, 240);
     if (!quote) continue;
+    const targetName = node.dataset.creatorTarget || '这段原文';
     node.classList.add('creator-feedback-source');
     node.tabIndex = 0;
     node.setAttribute('role', 'button');
-    node.setAttribute('aria-label', `反馈这一句：${quote}`);
+    node.setAttribute('aria-label', `反馈${targetName}：${quote}`);
     const choose = () => {
       const current = (state.rail || []).find(row => row.stage === bound.stage);
       if (state.runId !== bound.run_id || current?.version !== bound.version ||
@@ -427,7 +454,7 @@ function wireCreatorFeedback(host, step) {
       state.feedbackTarget = {...bound, quote};
       const chip = $('feedback-target');
       chip.replaceChildren();
-      const label = box('span', '', `正在反馈第 ${bound.version} 版：「${quote}」`);
+      const label = box('span', '', `正在修改${targetName} · 第 ${bound.version} 版：「${quote}」`);
       const clear = box('button', 'ghost small', '取消');
       clear.type = 'button'; clear.onclick = clearFeedbackTarget;
       chip.append(label, clear); chip.hidden = false;
@@ -1142,6 +1169,7 @@ function wireGate(host) {
       })});
       try { localStorage.removeItem(key); localStorage.removeItem(legacyJourneyKey); } catch {}
       startedJob = result.continuation?.status === 'started';
+      state.canvasTouched = false;
       toast(startedJob ? "决定已保存，团队正在继续。" : "决定已保存，下一步尚未启动。请检查连接后点击继续。", !startedJob);
       try { await refreshTimeline(); }
       catch { toast("决定已保存，但页面暂时无法刷新。请重新打开项目查看接续状态。", true); }

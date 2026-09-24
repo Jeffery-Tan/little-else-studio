@@ -50,7 +50,7 @@ _STAGE = {"type": "string", "enum": ["intake", "direction", "material_plan", "wr
 #: slightly wrong should still get to submit the document it wrote.
 _SHAPE_NOTES = (
     "intake → facts[{label,value,source}], constraints[], open_questions[{question,blocks}]; "
-    "direction → options[{key,claim,audience_moment,hook,story,gives_up,evidence_strength,"
+    "direction → options[{key,title?,claim,audience_moment,hook,story,gives_up,evidence_strength,"
     "difficulty,asset_needs}], recommended, recommended_because, prerequisites[], "
     "dependency_matrix[{need,options:{A:true/B:false,...}}], open_questions[{question,blocks}]; "
     "material_plan → items[{shot,purpose,status,note,file?}] where status is one of "

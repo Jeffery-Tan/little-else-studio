@@ -1,0 +1,82 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
+const require=createRequire(import.meta.url);
+const {creatorProjectView}=require('../../studio/web/creator-view.js');
+
+const writing={stage:'writing',has_doc:true,version:2,approval_decision:'approved',
+  blocks:[{type:'timeline',segments:[]},{type:'text',title:'发布文案',text:'Lunch, sorted.'}]};
+const direction={stage:'direction',has_doc:true,version:1,approval_decision:'approved',selected_option_id:'B'};
+const run={title:'午餐包',brief:'做一条短视频',content_format:'video'};
+const base={run,timeline:{rail:[direction,writing],brief:{phase:'ready',execution:{active:false}}},
+  imageWork:{kind:'image',phase:'needs_plan',draft:null},videoWork:{kind:'video',phase:'needs_plan',draft:null}};
+const withVideo=(phase,other={})=>({kind:'video',phase,draft:{draft_id:'v1'},...other});
+
+test('direction choice and adopted direction keep a creative destination',()=>{
+  const pending=creatorProjectView({...base,timeline:{rail:[direction],pending:{stage:'direction'},brief:{execution:{active:false}}}});
+  assert.equal(pending.current,'正在选择创意方向；采用后会继续准备脚本');
+  assert.equal(pending.action.label,'选择创意方向');
+  const adopted=creatorProjectView({...base,timeline:{rail:[direction],brief:{execution:{active:false}}}});
+  assert.equal(adopted.stage,'direction');
+  assert.equal(adopted.current,'已采用方向 B，下一份脚本尚未准备好');
+  assert.equal(adopted.action.kind,'chat');
+});
+
+test('script is the current work until media work exists',()=>{
+  const pending=creatorProjectView({...base,timeline:{...base.timeline,pending:{stage:'writing'}}});
+  assert.equal(pending.action.label,'阅读并决定脚本');
+  const ready=creatorProjectView(base);
+  assert.equal(ready.goal,'商品视频与发布文案');
+  assert.equal(ready.current,'脚本已确认，下一步准备实际画面');
+  assert.equal(ready.tab,'plan');
+  assert.equal(ready.action.tab,'storyboard');
+});
+
+test('media states map to one current work and safe main action',()=>{
+  const image=creatorProjectView({...base,imageWork:{kind:'image',phase:'image_pending',draft:{draft_id:'i1'}}});
+  assert.equal(image.current,'图片已取回，等待你确认这张画面');
+  assert.equal(image.tab,'storyboard');
+  const ready=creatorProjectView({...base,videoWork:withVideo('ready')});
+  assert.equal(ready.action.label,'核对并生成');
+  const done=creatorProjectView({...base,videoWork:withVideo('completed')});
+  assert.equal(done.current,'视频已取回，核对实际内容');
+  assert.equal(done.action.label,'播放并核对视频');
+  const unknown=creatorProjectView({...base,videoWork:withVideo('unknown',{primaryAction:'refresh'})});
+  assert.equal(unknown.current,'视频生成结果尚未确认');
+  assert.equal(unknown.action.label,'查询这次结果');
+  assert.equal(unknown.detail,'先处理原任务；当前不会再次提交生成。');
+});
+
+test('old project and only-analysis report remain readable without a new approval',()=>{
+  const old=creatorProjectView({...base,run:{title:'旧项目',brief:'做一条短视频'},timeline:{rail:[direction]}});
+  assert.equal(old.tab,'plan');
+  assert.equal(old.stage,'direction');
+  assert.equal(old.action.kind,'chat');
+  const oldScript=creatorProjectView({...base,run:{title:'旧项目',brief:'目标是一条视频与英文发布文案',content_format:'video'},
+    timeline:{rail:[{...writing,blocks:[]}],brief:{phase:'ready'}}});
+  assert.equal(oldScript.goal,'商品视频与发布文案');
+  assert.equal(oldScript.tab,'plan');
+  const analysis=creatorProjectView({run:{title:'参考观察',brief:'只分析参考'},
+    timeline:{rail:[]},referenceTasks:[{intent:'analyze',status:'completed',report:'观察结果'}]});
+  assert.equal(analysis.goal,'参考视频拆解报告');
+  assert.equal(analysis.analysisOnly,true);
+  assert.equal(analysis.action.label,'阅读分析结果');
+  assert.equal(analysis.tab,'plan');
+});
+
+test('active execution and saved decision do not imply a new media authorization',()=>{
+  const active=creatorProjectView({...base,timeline:{...base.timeline,brief:{execution:{active:true}}}});
+  assert.equal(active.action,null);
+  const continuing=creatorProjectView({...base,timeline:{...base.timeline,pending_continuation:{stage:'direction'}}});
+  assert.equal(continuing.action.kind,'continue');
+});
+
+test('old reviewed content keeps a failed internal review visible with its existing retry action',()=>{
+  const review={kind:'review_stage',label:'重试本版审核',stage:'direction',version:3,sha256:'exact-v3'};
+  const view=creatorProjectView({...base,timeline:{rail:[direction],brief:{phase:'review_failed',
+    detail:'审核未完成，方案已保留。',action:review,execution:{active:false}}}});
+  assert.equal(view.current,'创意方向已保存，内部审核未完成');
+  assert.equal(view.action,review);
+  assert.equal(view.stage,'direction');
+  assert.equal(view.detail,'审核未完成，方案已保留。');
+});

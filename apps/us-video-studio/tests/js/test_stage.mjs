@@ -317,7 +317,7 @@ test("an answer drafted against an older version does not fill the new one", () 
 
 /* ------------------------------------------------------------ the document -- */
 
-test("the laid-out document is drawn through the block renderer", () => {
+test("a structured direction stays readable without a pending decision", () => {
   const html = stageHtml(
     step({
       blocks: [
@@ -326,8 +326,9 @@ test("the laid-out document is drawn through the block renderer", () => {
     }),
     {}
   );
-  assert.ok(html.includes('class="blocks"'));
-  assert.ok(html.includes("3 个方向"));
+  assert.ok(html.includes('class="creator-direction-grid"'));
+  assert.ok(html.includes('<h3>外观</h3>'));
+  assert.ok(!html.includes('data-act="approve"'));
   assert.ok(html.includes("pane-summary"));
 });
 
@@ -460,4 +461,63 @@ test('structured direction cards carry the same explicit version-bound choice', 
   assert.match(html,new RegExp(`data-sha="${hash}"`));
   assert.match(html,/开场 B/);
   assert.doesNotMatch(html,/name="direction-choice"/);
+});
+
+test('normal direction fields lead with the real claim and show recommendation and risks', () => {
+  const html=stageHtml(step({blocks:[
+    {type:'cards',cards:[{head:'A',emphasis:'chosen',fields:[
+      {label:'主张',value:'先帮观众决定容量'},
+      {label:'画面与表达',value:'开场并排，结尾回到选择'},
+      {label:'开场',value:'Which size fits your day?'},
+      {label:'依据',value:'容量差异已核实',secondary:true},
+      {label:'素材依赖',value:'仍需两档产品图',secondary:true},
+    ]}]},
+    {type:'callout',title:'推荐',text:'推荐 A —— 因为容量差异是当前唯一确认的区别',items:[{text:'两档官方图需先核对'}]},
+  ]}),{});
+  assert.match(html,/<h3>先帮观众决定容量<\/h3>/);
+  assert.match(html,/开场并排，结尾回到选择/);
+  assert.match(html,/Which size fits your day\?/);
+  assert.match(html,/团队推荐/);
+  assert.match(html,/仍需两档产品图/);
+  assert.match(html,/两档官方图需先核对/);
+  assert.doesNotMatch(html,/data-act="approve"|<h3>方向 A<\/h3>/);
+});
+
+test('accepted option is highlighted from recorded approval, never from recommendation', () => {
+  const cards=[{head:'A',emphasis:'chosen',fields:[{label:'主张',value:'视觉方向'}]},
+    {head:'B',fields:[{label:'主张',value:'容量选择'}]}];
+  const html=stageHtml(step({blocks:[{type:'cards',cards}],approval_decision:'approved',selected_option_id:'B'}),{});
+  assert.match(html,/已采用方向 B/);
+  assert.match(html,/class="creator-direction-card is-selected" data-direction-card="B"/);
+  assert.doesNotMatch(html,/class="creator-direction-card is-selected" data-direction-card="A"/);
+  assert.doesNotMatch(html,/data-act="approve"/);
+});
+
+test('structured script reads exact lines before optional pictures and the timeline', () => {
+  const html=stageHtml(step({stage:'writing',label:'脚本与分镜',blocks:[
+    {type:'text',title:'总时长',text:'15 秒'},
+    {type:'timeline',title:'分镜',segments:[{tc:'0:00–0:03',label:'A',seconds:3}]},
+    {type:'cards',title:'逐段',cards:[
+      {head:'0:00–0:03',fields:[{label:'画面',value:'两档产品并排'},{label:'台词',value:'Small or roomy?'},{label:'声音',value:'轻快音乐'}]},
+      {head:'0:03–0:06',fields:[{label:'画面',value:'放入午餐盒'},{label:'台词',value:'Here is how I choose.'}]},
+    ]},
+    {type:'text',title:'发布文案',text:'Choose your lunch size.'},
+  ],artifact_sha256:'a'.repeat(64)}),{});
+  assert.ok(html.indexOf('Small or roomy?') < html.indexOf('两档产品并排'));
+  assert.ok(html.indexOf('Here is how I choose.') < html.indexOf('class="timeline"'));
+  assert.match(html,/data-creator-target="第 1 段台词"/);
+  assert.match(html,/data-creator-target="第 1 段画面"/);
+  assert.match(html,/class="creator-script-caption"/);
+  assert.match(html,/查看分镜顺序与其他依据/);
+});
+
+test('prose-only historical script displays its original bytes without invented segments', () => {
+  const body='# 原脚本\n\nOpen on the bag.\n\nSay the actual line.';
+  const html=stageHtml(step({stage:'writing',label:'脚本与分镜',blocks:[],artifact_sha256:'a'.repeat(64)}),{
+    artifactBody:{stage:'writing',version:2,status:'loaded',text:body,sha256:'a'.repeat(64)},
+  });
+  assert.match(html,/Open on the bag/);
+  assert.match(html,/Say the actual line/);
+  assert.match(html,/这份历史脚本按原文保存/);
+  assert.doesNotMatch(html,/creator-script-segment|data-creator-target=/);
 });
