@@ -67,9 +67,24 @@ def build_timeline(
     pricing = ledger.price_note()
 
     from .interactions import pending_question
+    interaction = pending_question(store, run_id)
+    # Single place that binds a pending clarification to a conversation turn.
+    # The screen must not re-infer this from reply text; later copy edits or
+    # partial messages must not break the producer bubble.
+    if interaction:
+        for turn in reversed(turns):
+            reply = turn.get("reply") or {}
+            if reply.get("text") == interaction.get("message"):
+                turn["pending_clarification_id"] = interaction["id"]
+                break
+        else:
+            # No matching assistant reply (edge: empty LoopResult text). Still
+            # park it on the last user turn so the UI has exactly one home.
+            if turns and turns[-1].get("user"):
+                turns[-1]["pending_clarification_id"] = interaction["id"]
     return {
         "run": state.get("run"),
-        "interaction": pending_question(store, run_id),
+        "interaction": interaction,
         "progress": project_progress(state),
         "brief": project_brief(state, job),
         "turns": turns,

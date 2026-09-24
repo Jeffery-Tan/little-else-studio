@@ -20,10 +20,12 @@ function questionCardHtml(q) {
     '<p class="muted">点一个选项，或直接在下方对话中回答。</p><p role="status" data-feedback></p></section>';
 }
 
-/** Pending clarification belongs in the producer's bubble, not only a footer. */
+/** One structural rule: only server-tagged turns get the interactive clarification.
+ *  Copy equality between reply text and interaction.message is not used here.
+ */
 function shouldShowQuestionInTurn(turn, interaction) {
-  if (!interaction || !turn?.reply?.text) return false;
-  return turn.reply.text === interaction.message;
+  if (!interaction || !turn?.pending_clarification_id) return false;
+  return turn.pending_clarification_id === interaction.id;
 }
 
 function bindQuestionChoices(root, q) {
@@ -139,9 +141,9 @@ function renderJourneyDecision() {
       } catch(err) { const feedback=host.querySelector('[data-feedback]');if(feedback)feedback.textContent=err.message;button.disabled=false; }
     };
   } else if (q) {
-    // Prefer the producer bubble already in the conversation; avoid a second card.
-    const inChat = document.querySelector(`#conversation-body .conversation-question[data-question="${q.id}"]`);
-    if (inChat) { host.innerHTML=''; return; }
+    // Footer only hosts clarifications no conversation turn already owns.
+    const owned = Array.isArray(tl.turns) && tl.turns.some(t => t.pending_clarification_id === q.id);
+    if (owned) { host.innerHTML=''; return; }
     host.innerHTML=questionCardHtml(q);
     bindQuestionChoices(host, q);
   }

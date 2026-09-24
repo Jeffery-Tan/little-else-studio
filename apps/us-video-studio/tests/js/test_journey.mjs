@@ -76,8 +76,8 @@ test('outcome tabs have linked panels and arrow keys move the single tab stop',(
 test("pending ask_user renders as an interactive producer bubble in the conversation", () => {
   const interaction = {id: "q1", question: "说话方式选哪种？", message: "说话方式选哪种？\n\n1. 手部…",
     options: [{label: "手部"}, {label: "真人"}], recommended: 0};
-  assert.equal(shouldShowQuestionInTurn({reply: {text: interaction.message}}, interaction), true);
-  assert.equal(shouldShowQuestionInTurn({reply: {text: "普通回复"}}, interaction), false);
-  assert.equal(shouldShowQuestionInTurn({reply: null}, interaction), false);
-  assert.equal(shouldShowQuestionInTurn({reply: {text: "x"}}, null), false);
+  assert.equal(shouldShowQuestionInTurn({pending_clarification_id: "q1", reply: {text: interaction.message}}, interaction), true);
+  assert.equal(shouldShowQuestionInTurn({reply: {text: interaction.message}}, interaction), false);
+  assert.equal(shouldShowQuestionInTurn({pending_clarification_id: "q2"}, interaction), false);
+  assert.equal(shouldShowQuestionInTurn({pending_clarification_id: "q1"}, null), false);
 });

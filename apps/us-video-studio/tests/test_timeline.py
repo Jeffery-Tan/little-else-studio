@@ -828,3 +828,29 @@ def test_the_cost_line_drops_dollars_when_the_rate_card_has_no_rates(tmp_path):
     sentence = studio.vocabulary.cost_sentence(ledger.last_stage_cost("writer", "writing"))
     assert "token" in sentence
     assert "$" not in sentence
+
+
+def test_pending_clarification_is_tagged_on_exactly_one_turn(env):
+    """Timeline is the only place that binds a pending ask_user to a turn."""
+    store, pipeline, ledger = env
+    store.append_chat(RUN, "user", "更喜欢哪种风格？")
+    from studio.interactions import ask
+    question = ask(store, RUN, {
+        "question": "更喜欢哪种风格？",
+        "options": [{"label": "自然"}, {"label": "夸张"}],
+        "recommended": 0,
+    })
+    # Matching assistant reply (what ask() persists as the question message)
+    store.append_chat(RUN, "assistant", question["message"])
+    payload = timeline(store, pipeline, ledger)
+    assert payload["interaction"]["id"] == question["id"]
+    tagged = [t for t in payload["turns"] if t.get("pending_clarification_id")]
+    assert len(tagged) == 1
+    assert tagged[0]["pending_clarification_id"] == question["id"]
+    assert tagged[0]["reply"]["text"] == question["message"]
+
+    # After answering, the tag disappears with the pending interaction.
+    from studio.interactions import answer
+    answer(store, RUN, "自然")
+    assert timeline(store, pipeline, ledger)["interaction"] is None
+    assert not any(t.get("pending_clarification_id") for t in timeline(store, pipeline, ledger)["turns"])
