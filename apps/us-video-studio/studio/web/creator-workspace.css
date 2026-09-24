@@ -1,6 +1,6 @@
 /* Creator-facing hierarchy: work and its next decision before pipeline detail. */
 .project-workspace[data-focus="workbench"]{grid-template-columns:minmax(0,1fr) minmax(370px,38%);grid-template-rows:auto minmax(0,1fr)}
-.project-tools{display:flex;justify-content:flex-end;align-items:center;gap:8px;position:relative;z-index:5;border-bottom:0;background:transparent;padding:8px 18px 0}
+.project-chrome>.project-tools{display:flex;align-items:center;justify-content:flex-end;gap:8px;position:relative;z-index:1;border-bottom:1px solid #4c5640;background:linear-gradient(115deg,#1b201c,#191b1a);padding:0 16px}
 .project-tools .project-more{position:relative;margin-left:auto;font-size:12px;color:var(--ink-soft)}
 .project-more>summary{list-style:none;cursor:pointer;padding:7px 10px;border:1px solid var(--line);border-radius:8px}
 .project-more>summary::-webkit-details-marker{display:none}
