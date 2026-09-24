@@ -87,12 +87,14 @@ def build_timeline(
         "budget": {
             "limit_usd": ledger.settings.budget_limit_usd,
             "remaining_usd": ledger.remaining_usd(),
-            "limit_mode": "soft_threshold",
+            "limit_tokens": ledger.settings.budget_limit_tokens,
+            "remaining_tokens": ledger.remaining_tokens(),
+            "limit_mode": "soft_threshold" if pricing["limit_kind"] == "soft" else "none",
             "pricing": pricing,
         },
-        "spend_sentence": v.spend_sentence(mine, pricing["usd_cap_enforceable"]),
+        "spend_sentence": v.spend_sentence(mine, pricing["usd_estimate_available"]),
         "all_runs_sentence": (
-            f"开发期已知用量：{v.human_tokens(everything.input_tokens + everything.output_tokens)}"
+            f"累计已知用量：{v.human_tokens(everything.input_tokens + everything.output_tokens)}"
             f" token · {everything.calls} 次调用 · {everything.unknown_calls} 次用量未返回（跨所有项目）"
         ),
         # The shelf rides along with the timeline rather than being fetched

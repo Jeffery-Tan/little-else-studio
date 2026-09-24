@@ -1,4 +1,4 @@
-"""Ledger rules: tokens are facts, dollars are labelled estimates, cap stops work."""
+"""Ledger rules: tokens are facts, dollars are estimates, optional caps stop work."""
 from __future__ import annotations
 
 import pytest
@@ -123,6 +123,26 @@ def test_the_token_cap_is_what_actually_bites(tmp_path):
     assert ledger.remaining_tokens() == 0
 
 
+def test_no_caps_allow_new_calls_after_old_thresholds_without_losing_usage(tmp_path):
+    store = Store(tmp_path)
+    store.create_run(RUN, "t", "b")
+    ledger = Ledger(store, make_settings(tmp_path, budget_limit_usd=None))
+    ledger.record(RUN, role="director", stage="direction", model="deepseek-flash",
+                  input_tokens=12_000_000, output_tokens=100)
+
+    assert ledger.totals().input_tokens == 12_000_000
+    assert ledger.totals().estimated_usd > 10
+    assert ledger.remaining_usd() is None
+    assert ledger.remaining_tokens() is None
+    assert ledger.price_note()["limit_kind"] == "none"
+    assert ledger.price_note()["usd_estimate_available"] is True
+    assert ledger.price_note()["usd_cap_enforceable"] is False
+    ledger.ensure_within_budget()
+    call_id = ledger.begin_call(RUN, role="writer", stage="writing", model="deepseek-flash")
+    assert call_id
+    assert ledger.totals().pending_calls == 1
+
+
 def test_a_zero_rate_card_is_reported_as_not_enforceable(tmp_path):
     store = Store(tmp_path)
     store.create_run(RUN, "t", "b")
@@ -159,9 +179,23 @@ def test_price_note_says_the_dollars_are_estimates(env):
 
 def test_default_config_has_every_role_on_a_known_model(tmp_path):
     settings = load_settings(tmp_path)
-    assert settings.budget_limit_usd == 10.0
+    assert settings.budget_limit_usd is None
+    assert settings.budget_limit_tokens is None
     for role in ("orchestrator", "director", "material", "writer", "reviewer"):
         assert settings.model_for(role) == "deepseek-flash"
+
+
+def test_config_accepts_explicit_null_caps_and_legacy_numeric_caps(tmp_path):
+    config = tmp_path / "config.json"
+    config.write_text('{"budget_limit_usd": null, "budget_limit_tokens": null}', encoding="utf-8")
+    unlimited = load_settings(tmp_path)
+    assert unlimited.budget_limit_usd is None
+    assert unlimited.budget_limit_tokens is None
+
+    config.write_text('{"budget_limit_usd": 10, "budget_limit_tokens": 2000000}', encoding="utf-8")
+    legacy = load_settings(tmp_path)
+    assert legacy.budget_limit_usd == 10.0
+    assert legacy.budget_limit_tokens == 2_000_000
 
 
 def test_config_rejects_an_unknown_model_name(tmp_path):

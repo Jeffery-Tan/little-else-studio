@@ -102,7 +102,9 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
         out["budget"] = {
             "limit_usd": settings.budget_limit_usd,
             "remaining_usd": ledger.remaining_usd(),
-            "limit_mode": "soft_threshold",
+            "limit_tokens": settings.budget_limit_tokens,
+            "remaining_tokens": ledger.remaining_tokens(),
+            "limit_mode": "none" if settings.budget_limit_usd is None and settings.budget_limit_tokens is None else "soft_threshold",
             "pricing": ledger.price_note(),
         }
         out["pipeline"] = [

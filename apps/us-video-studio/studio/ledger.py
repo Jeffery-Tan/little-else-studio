@@ -1,8 +1,8 @@
 """Append-only per-attempt intent and settlement journal.
 
-Limits stop new calls after a recorded threshold; they are soft limits, not a
-reservation or a guaranteed maximum bill. Incomplete usage blocks new calls
-until explicit reconciliation against provider evidence.
+Optional historical limits stop new calls after a recorded threshold; they are
+soft limits, not a reservation or a guaranteed maximum bill. Usage remains
+auditable when those limits are disabled.
 """
 from __future__ import annotations
 
@@ -295,14 +295,20 @@ class Ledger:
         return self.totals(run_id).estimated_usd
 
     def remaining_usd(self, run_id: str | None = None) -> float | None:
+        limit = self.settings.budget_limit_usd
+        if limit is None or not self.settings.usd_cap_is_enforceable:
+            return None
         spent = self.spent_usd(run_id)
-        return max(0.0, self.settings.budget_limit_usd - spent) if spent is not None and self.settings.usd_cap_is_enforceable else None
+        return max(0.0, limit - spent) if spent is not None else None
 
     def remaining_tokens(self) -> int | None:
+        limit = self.settings.budget_limit_tokens
+        if limit is None:
+            return None
         totals = self.totals()
         if totals.unknown_calls:
             return None
-        return max(0, self.settings.budget_limit_tokens - totals.input_tokens - totals.output_tokens)
+        return max(0, limit - totals.input_tokens - totals.output_tokens)
 
     def last_stage_cost(self, role: str, stage: str) -> dict[str, Any] | None:
         groups: dict[str, list[LedgerEntry]] = {}
@@ -321,9 +327,13 @@ class Ledger:
         pricing = self.settings.pricing
         enforceable = self.settings.usd_cap_is_enforceable
         note = "USD figures are estimates from this rate card, not the provider's bill."
-        if not enforceable:
+        if self.settings.budget_limit_usd is None and self.settings.budget_limit_tokens is None:
+            note += " No spend limits are configured; usage is still recorded."
+        elif self.settings.budget_limit_usd is not None and not enforceable:
             note += " Unverified rates mean the USD cap cannot stop anything yet; dollar totals remain unknown."
-        note += " Limits stop new calls after recorded totals reach them; an in-flight call may exceed the limit. Unknown usage is retained for diagnostics and does not block new calls."
+        if self.settings.budget_limit_usd is not None or self.settings.budget_limit_tokens is not None:
+            note += " Configured limits stop new calls after recorded totals reach them; an in-flight call may exceed the limit."
+        note += " Unknown usage is retained for diagnostics and does not block new calls."
         routes = {role: {'connection': cid, 'provider': self.settings.provider_by_role[role],
                         'model': self.settings.model_for(role),
                         'source': self.settings.pricing_for(role, self.settings.model_for(role)).source}
@@ -332,12 +342,20 @@ class Ledger:
                 "as_of": '' if routes else pricing.as_of, 'routes': routes,
                 "input_usd_per_mtok": pricing.input_usd_per_mtok if pricing.known and not routes else None,
                 "output_usd_per_mtok": pricing.output_usd_per_mtok if pricing.known and not routes else None,
-                "usd_cap_enforceable": enforceable, "limit_kind": "soft", "note": note}
+                "usd_estimate_available": self.settings.usd_estimate_available,
+                "usd_cap_enforceable": enforceable,
+                "limit_kind": "soft" if (self.settings.budget_limit_usd is not None or
+                                          self.settings.budget_limit_tokens is not None) else "none",
+                "note": note}
 
     def ensure_within_budget(self) -> None:
+        token_limit = self.settings.budget_limit_tokens
+        usd_limit = self.settings.budget_limit_usd
+        if token_limit is None and usd_limit is None:
+            return
         totals = self.totals()
         tokens = totals.input_tokens + totals.output_tokens
-        if tokens >= self.settings.budget_limit_tokens:
-            raise BudgetExceeded(f"{tokens} tokens reached the soft cap of {self.settings.budget_limit_tokens}; refusing a new call.")
-        if totals.known_estimated_usd >= self.settings.budget_limit_usd:
-            raise BudgetExceeded(f"estimated known spend reached the soft cap of {self.settings.budget_limit_usd:.2f} USD; refusing a new call.")
+        if token_limit is not None and tokens >= token_limit:
+            raise BudgetExceeded(f"{tokens} tokens reached the soft cap of {token_limit}; refusing a new call.")
+        if usd_limit is not None and totals.known_estimated_usd >= usd_limit:
+            raise BudgetExceeded(f"estimated known spend reached the soft cap of {usd_limit:.2f} USD; refusing a new call.")

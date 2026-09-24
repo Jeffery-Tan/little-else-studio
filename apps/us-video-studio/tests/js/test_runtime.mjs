@@ -320,9 +320,22 @@ test('current production role replaces raw model progress on the collapsed runni
 test('budget and connection failures remain actionable in plain language', () => {
   const h = harness(async () => {});
   h.context.showJob({ job_id: 'j1', status: 'blocked', reason: '20000 tokens reached the soft cap of 20000; refusing a new call.' });
-  assert.match(visibleText(h.nodes.get('job-status')), /达到本轮预算上限/);
+  assert.match(visibleText(h.nodes.get('job-status')), /当时的预算设置挡住/);
   h.context.showJob({ job_id: 'j2', status: 'blocked', reason: '连接准备未通过：ConnectionUnavailable' });
   assert.match(visibleText(h.nodes.get('job-status')), /检查制作团队/);
+});
+
+test('a blocked brief conversation shows an old-budget explanation outside the optional work record',()=>{
+  const h=harness(async()=>{});
+  h.context.state.timeline={budget:{limit_tokens:null,limit_usd:null,limit_mode:'none'}};
+  h.context.showJob({job_id:'j-budget',run_id:'run-a',job_kind:'conversation',status:'blocked',
+    brief:{title:'原始创作目标',detail:'旧进展'},
+    reason:'[budget] 2009455 tokens reached the soft cap of 2000000; refusing a new call.',events:[]});
+  const visible=visibleText(h.nodes.get('job-status'));
+  assert.match(visible,/上一轮被旧额度设置中断/);
+  assert.match(visible,/已保存内容仍可阅读/);
+  assert.match(visible,/不会自动重试/);
+  assert.doesNotMatch(visible,/2009455|refusing a new call/);
 });
 
 function descendants(node, predicate) {

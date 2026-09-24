@@ -121,7 +121,6 @@ print(f"materials: {len(SHOTS) if PRODUCT is not None else 0} files -> {shelf}")
 settings = Settings(
     data_root=ROOT,
     base_url="https://example.invalid/anthropic",
-    budget_limit_usd=10.0,
     pricing=Pricing(source="预览用的假价目表", input_usd_per_mtok=0.28,
                     output_usd_per_mtok=0.42, as_of="2026-09-17"),
 )

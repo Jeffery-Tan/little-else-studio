@@ -488,6 +488,26 @@ def test_the_header_says_the_dollar_cap_cannot_stop_anything_yet(env):
     assert "估算" in out["spend_sentence"]
 
 
+def test_unlimited_timeline_reports_usage_without_a_fake_cap(env, tmp_path):
+    store, pipeline, _ = env
+    settings = settings_for(tmp_path)
+    ledger = Ledger(store, Settings(
+        data_root=settings.data_root, base_url=settings.base_url, pricing=settings.pricing,
+    ))
+    ledger.record(RUN, role="director", stage="direction", model="deepseek-flash",
+                  input_tokens=2_009_455, output_tokens=1)
+
+    out = timeline(store, pipeline, ledger)
+    assert out["budget"]["limit_usd"] is None
+    assert out["budget"]["limit_tokens"] is None
+    assert out["budget"]["remaining_usd"] is None
+    assert out["budget"]["remaining_tokens"] is None
+    assert out["budget"]["limit_mode"] == "none"
+    assert out["budget"]["pricing"]["usd_estimate_available"] is True
+    assert out["budget"]["pricing"]["usd_cap_enforceable"] is False
+    assert "估算" in out["spend_sentence"]
+
+
 def test_cross_run_spend_is_reported_separately(env):
     """$10 is a development budget across every run, not a per-run allowance."""
     store, pipeline, ledger = env

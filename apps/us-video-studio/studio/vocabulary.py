@@ -17,6 +17,7 @@ wording, and so it is testable. The frontend only draws what this returns.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 # --------------------------------------------------------------------------- #
@@ -386,11 +387,18 @@ def failure_note(text: str) -> str:
 
     ``Orchestrator.send`` persists one of these on any exception, precisely
     because the SSE error is not persisted: without it, reloading after a
-    failure shows his question followed by silence. The technical text is kept
-    verbatim — it is the actual error, and he may need to quote it.
+    failure shows his question followed by silence. Known historical budget
+    stops get a readable note; the raw reason remains in job diagnostics.
+    Other technical text stays verbatim so he can quote it when needed.
     """
     if 'unknown, partial or pending usage' in text or 'reconcile provider evidence' in text:
         return '这一轮当时因用量记录缺失而暂停，已有内容已保留。现已取消核账限制，可以继续。'
+    if re.fullmatch(
+        r'BudgetExceeded: \[budget\] (?:\d+ tokens reached the soft cap of \d+'
+        r'|estimated known spend reached the soft cap of \d+(?:\.\d+)? USD)'
+        r'; refusing a new call\.', text,
+    ):
+        return '这一轮当时被工作台额度设置挡住，已保存的内容仍在。旧请求不会自动重试；请先核对当前项目进度。'
     return f"这一轮没能做完：{text}"
 
 

@@ -28,6 +28,20 @@ def test_historical_accounting_stop_no_longer_asks_for_manual_reconciliation():
     assert 'BudgetExceeded' not in note
 
 
+def test_historical_budget_cap_note_is_readable_without_claiming_the_cap_is_still_active():
+    old_reasons = (
+        'BudgetExceeded: [budget] 2009455 tokens reached the soft cap of 2000000; refusing a new call.',
+        'BudgetExceeded: [budget] estimated known spend reached the soft cap of 10.00 USD; refusing a new call.',
+    )
+    for reason in old_reasons:
+        note = v.failure_note(reason)
+        assert '当时被工作台额度设置挡住' in note
+        assert '已保存的内容仍在' in note
+        assert '旧请求不会自动重试' in note
+        assert 'BudgetExceeded' not in note
+        assert 'soft cap' not in note
+
+
 def test_unknown_names_degrade_to_themselves_rather_than_blank():
     # A new stage added to the pipeline must still render as *something*.
     assert v.stage_label("storyboard") == "storyboard"

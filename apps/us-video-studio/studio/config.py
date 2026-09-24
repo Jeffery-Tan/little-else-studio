@@ -33,13 +33,11 @@ DEFAULT_MODEL = "deepseek-flash"
 #: Roles that produce a stage artifact or a review verdict.
 ROLES = ("orchestrator", "director", "material", "writer", "reviewer")
 
-#: Development-period cap, in estimated USD. Jeffery set this on 2026-09-17.
-DEFAULT_BUDGET_LIMIT_USD = 10.0
+#: Historical optional soft limits. New data roots do not impose spend caps.
+#: Existing numeric config.json values are still accepted; null disables a cap.
+DEFAULT_BUDGET_LIMIT_USD = None
 
-#: Development token soft limit. It stops NEW calls after the recorded total
-#: reaches this threshold; an in-flight call can overshoot it. This is not proof
-#: of staying below $10: unverified rates leave dollar spend unknown.
-DEFAULT_BUDGET_LIMIT_TOKENS = 2_000_000
+DEFAULT_BUDGET_LIMIT_TOKENS = None
 
 
 @dataclass(frozen=True)
@@ -98,8 +96,8 @@ class Settings:
     data_root: Path
     base_url: str
     model_by_role: dict[str, str] = field(default_factory=dict)
-    budget_limit_usd: float = DEFAULT_BUDGET_LIMIT_USD
-    budget_limit_tokens: int = DEFAULT_BUDGET_LIMIT_TOKENS
+    budget_limit_usd: float | None = DEFAULT_BUDGET_LIMIT_USD
+    budget_limit_tokens: int | None = DEFAULT_BUDGET_LIMIT_TOKENS
     pricing: Pricing = DEFAULT_PRICING
     max_tool_rounds: int = 12
     max_tokens: int = DEFAULT_MAX_TOKENS
@@ -121,11 +119,15 @@ class Settings:
             Pricing('unknown: no price for this connection/model', None, None, ''))
 
     @property
-    def usd_cap_is_enforceable(self) -> bool:
-        """A zero rate card means the dollar figure cannot stop anything."""
+    def usd_estimate_available(self) -> bool:
+        """Whether the configured rate cards can estimate every role's USD."""
         if self.connection_by_role:
             return all(self.pricing_for(role, self.model_for(role)).known for role in ROLES)
         return self.pricing.known
+
+    @property
+    def usd_cap_is_enforceable(self) -> bool:
+        return self.budget_limit_usd is not None and self.usd_estimate_available
 
 
 def _read_json(path: Path) -> dict:
@@ -178,18 +180,20 @@ def load_settings(data_root: Path | str | None = None) -> Settings:
     )
 
     limit = raw.get("budget_limit_usd", DEFAULT_BUDGET_LIMIT_USD)
-    if not isinstance(limit, (int, float)) or isinstance(limit, bool) or not math.isfinite(limit) or limit < 0:
-        raise ValueError("budget_limit_usd must be a non-negative number")
+    if limit is not None and (not isinstance(limit, (int, float)) or isinstance(limit, bool)
+                              or not math.isfinite(limit) or limit < 0):
+        raise ValueError("budget_limit_usd must be a non-negative number or null")
 
     token_limit = raw.get("budget_limit_tokens", DEFAULT_BUDGET_LIMIT_TOKENS)
-    if not isinstance(token_limit, int) or isinstance(token_limit, bool) or token_limit < 0:
-        raise ValueError("budget_limit_tokens must be a non-negative whole number")
+    if token_limit is not None and (not isinstance(token_limit, int)
+                                    or isinstance(token_limit, bool) or token_limit < 0):
+        raise ValueError("budget_limit_tokens must be a non-negative whole number or null")
 
     return Settings(
         data_root=root,
         base_url=raw.get("base_url") or os.environ.get("STUDIO_BASE_URL") or DEFAULT_BASE_URL,
         model_by_role=model_by_role,
-        budget_limit_usd=float(limit),
+        budget_limit_usd=float(limit) if limit is not None else None,
         budget_limit_tokens=token_limit,
         pricing=pricing,
         max_tool_rounds=int(raw.get("max_tool_rounds", 12)),

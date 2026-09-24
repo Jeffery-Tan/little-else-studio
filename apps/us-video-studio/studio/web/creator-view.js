@@ -44,6 +44,22 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
   const continuation = timeline.pending_continuation;
   const interaction = timeline.interaction;
   const active = timeline.brief?.execution?.active;
+  const tokenCap = currentProjectJob?.status === 'blocked'
+    ? /^\[budget\] (\d+) tokens reached the soft cap of (\d+); refusing a new call\.$/u.exec(String(currentProjectJob.reason || ''))
+    : null;
+  const dollarCap = currentProjectJob?.status === 'blocked'
+    ? /^\[budget\] estimated known spend reached the soft cap of \d+(?:\.\d+)? USD; refusing a new call\.$/u.test(String(currentProjectJob.reason || ''))
+    : false;
+
+  if ((tokenCap || dollarCap) && timeline.budget?.limit_mode === 'none') return result(
+    '上一轮被旧额度设置中断，项目内容已保存',
+    {kind:'chat',label:'继续创作'}, 'plan', null,
+    '当前已不设置工作台额度。旧任务不会自动重试；请说明接下来要做什么，发送后才会开始新一轮。');
+  if (tokenCap) return result(
+    `创作已暂停：本机共享 Token 上限已达到（${Number(tokenCap[1]).toLocaleString('zh-CN')} / ${Number(tokenCap[2]).toLocaleString('zh-CN')}）`,
+    null, 'plan', null, '已保存的作品和决定仍可阅读。');
+  if (dollarCap) return result('创作已暂停：本机共享美元预算上限已达到',
+    null, 'plan', null, '已保存的作品和决定仍可阅读。');
 
   if (analysisOnly) {
     if (reference?.report) return nav('阅读分析结果', 'plan', '参考拆解报告已保存', null,

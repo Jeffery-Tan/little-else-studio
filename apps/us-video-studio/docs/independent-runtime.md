@@ -32,7 +32,7 @@
 
 | 路径 | 含义 |
 | --- | --- |
-| `config.json` / `connections.json` | 预算与循环限制 / 站内角色路由、价格及 Windows DPAPI 加密凭据 |
+| `config.json` / `connections.json` | 循环限制与可选的旧额度字段 / 站内角色路由、价格及 Windows DPAPI 加密凭据 |
 | `.studio-root.json` | 显式新建空工作台时留下的初始化标识；不能用 writer 锁文件代替项目身份 |
 | `runs/<id>/run.json`、`events.jsonl` | 初始项目及追加事件；任务、修订、制作、反馈等状态从事件推导 |
 | `runs/<id>/artifacts/`、`reviews/`、`approvals.jsonl` | 不可变正文与 sidecar、独立审核、用户决定 |

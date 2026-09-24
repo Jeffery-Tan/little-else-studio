@@ -19,7 +19,9 @@ function jobGuidance(job) {
   const reason = String(job.reason || "");
   if (job.deliverable?.status === 'incomplete') return `本轮交付还缺：${job.deliverable.missing.join('、')}。已完成的内容已保留，请查看准确版本后继续。`;
   // Missing accounting data is diagnostic, never a creative workflow warning.
-  if (/soft cap|预算.*上限|预算不足/i.test(reason)) return "已达到本轮预算上限。请先检查用量与预算，再决定是否继续。";
+  if (/soft cap|预算.*上限|预算不足/i.test(reason)) return state.timeline?.budget?.limit_mode === 'none'
+    ? "上一轮被旧额度设置中断。已保存内容仍可阅读；当前不会自动重试，请明确发送下一步要求。"
+    : "这轮调用被当时的预算设置挡住。已保存内容仍可阅读；请核对当前设置后再决定下一步。";
   if (/Codex CLI is not installed or not on PATH/i.test(reason)) return "服务没有找到 Codex CLI。请确认本机已安装 Codex，重启工作台服务后再发送消息；已保存的内容不受影响。";
   if (/连接准备未通过|ConnectionUnavailable|CodexUnavailable/i.test(reason)) return "模型连接尚未准备好。请检查制作团队中的对应服务设置，再发送继续指令。";
   if (job.open_attempts?.length) return "有尚未结束的制作阶段。请先按下方恢复步骤处理遗留任务，再继续创作。";
@@ -148,6 +150,11 @@ function showJob(job, notice = "") {
   // observer; historical usage cannot turn it back into a second status panel.
   if (job?.brief && !notice && !state.recoveryBlocked && ['conversation','stage_review'].includes(job.job_kind || 'conversation')) {
     if (view.active) copy.append(box('span','job-live',teamProgress(job).current || '团队正在处理当前步骤'));
+    if (!view.active && view.guidance) {
+      const warning = box('strong','job-warning',view.guidance);
+      warning.setAttribute?.('role','alert');
+      copy.append(warning);
+    }
     if (job.steer_status === 'received' && view.active)
       copy.append(box('span','job-live','调整已收到，等待旧步骤结束后继续'));
     if (job.steer_status === 'blocked') {

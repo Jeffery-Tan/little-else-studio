@@ -295,27 +295,28 @@ class Orchestrator:
         """
         spend = self.ledger.totals()
         run_spend = self.ledger.totals(self.run_id)
-        limit = self.settings.budget_limit_usd
         tokens = f"{spend.input_tokens} 输入 / {spend.output_tokens} 输出 token"
+        cap_lines = []
+        if self.settings.budget_limit_usd is not None:
+            cap_lines.append(f"累计美元软阈值 {self.settings.budget_limit_usd:.2f}，跨所有运行共享。")
+            if not self.settings.usd_cap_is_enforceable:
+                cap_lines.append(f"价目表未确认（{self.settings.pricing.source}），美元阈值当前无法判断。")
+        if self.settings.budget_limit_tokens is not None:
+            cap_lines.append(f"累计 token 软阈值 {self.settings.budget_limit_tokens}，达到后停止新调用。")
+        if cap_lines:
+            cap_lines.append("阈值在调用前检查，最后一笔可能超出；美元按价目表估算，不是账单。")
+        else:
+            cap_lines.append("当前不设置累计费用或 token 额度；继续记录每次调用的用量与估算成本，实际账单以提供方平台为准。")
         return "\n".join(
             [
                 "# 成本（实时）",
                 "",
-                (f"开发期累计估算：{spend.estimated_usd:.4f} 美元" if spend.estimated_usd is not None else "开发期金额未知")
+                (f"累计估算：{spend.estimated_usd:.4f} 美元" if spend.estimated_usd is not None else "累计金额未知")
                 + f"（已知 {tokens}，{spend.calls} 次调用；{spend.unknown_calls} 次未返回完整用量（不阻断继续））。",
-                "累计数包含本项目里所有角色的调用，不只是你自己的；"
+                "累计数包含所有项目里所有角色的调用，不只是你自己的；"
                 "派工和送审产生的调用也算在里面。",
                 (f"本次运行估算金额：{run_spend.estimated_usd:.4f} 美元。" if run_spend.estimated_usd is not None else "本次运行金额未知。无需手工核账，账单以提供方平台为准，不影响继续创作。"),
-                f"开发期总额度 {limit:.2f} 美元，跨所有运行共享。",
-                "美元按价目表估算，不是账单；用量含未核实部分时只展示已知小计。上限为软阈值，不保证最后一笔不超额。",
-                *(
-                    [
-                        f"价目表未确认（{self.settings.pricing.source}），"
-                        "所以美元阈值无法判断；token 软阈值仅阻止累计已达到阈值后的新调用。"
-                    ]
-                    if not self.settings.usd_cap_is_enforceable
-                    else []
-                ),
+                *cap_lines,
             ]
         )
 

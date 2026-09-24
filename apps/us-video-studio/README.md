@@ -72,7 +72,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File apps/us-video-studio/scripts
 - **Codex CLI**：使用本机 CLI 的现有 ChatGPT 登录。打开模型设置时只读加载本机 Codex 返回的可见模型，服务卡上的「读取本机可选模型」可刷新；随后可为五个角色分别从下拉列表选模型。留空时使用 CLI 默认模型；已保存但暂不在列表的型号保持原值，读取失败时仍可手填，不会静默改选。模型列表不是额度、登录或创作质量验证，也不发起模型调用。每次模型调用使用新的临时线程，制片室明确传入业务上下文，不复用当前开发对话。CLI 仍可能加载自身全局 AGENTS.md；适配器只允许该明确路径，拒绝仓库和其他项目指令来源，不承诺与 Windows 用户完全隔离。CLI 内置执行能力受限，模型只返回制片室工具请求，由后端执行与校验。优先使用服务进程 PATH 中的 CLI；Windows 普通终端未配置 PATH 时，自动从当前用户 `%LOCALAPPDATA%/OpenAI/Codex/bin/` 的已安装版本定位，优先最近更新的版本目录，其次旧版平铺目录。仍会校验实际协议与限制配置，不修改系统 PATH，也不要求桌面客户端保持打开。找不到时页面会明确提示安装与重启服务。模型目录协议依据：[OpenAI Docs · Codex App Server](https://learn.chatgpt.com/docs/app-server#list-models-modellist)。
 - **DeepSeek 官方 API**：选择 DeepSeek 后填写 API Key，地址与兼容参数由应用设置，不需要手填。可先点击「验证密钥与模型」，再把可用模型分配给角色；也可先保存，未验证状态会明确显示。默认提供 `deepseek-flash` / `deepseek-v4-pro` 选项，验证后以提供方返回的模型列表为准，既有模型不会被静默替换。更换 Key 或服务后旧验证结果失效。
 - **连接验证范围**：只向固定官方地址 `https://api.deepseek.com/v1/models` 发出一次只读 GET，验证认证并获取模型列表；不生成内容、不提交业务资料、不保存输入的 Key、不改变角色绑定。成功不代表余额、文本生成或完整 Agent 流程已经实测。Key 仅在点保存时按原本机 DPAPI 机制持久化；关闭窗口清空输入。验证结果仅用于当前编辑会话。
-- **DeepSeek 任务运行**：专用适配器使用 thinking enabled/high；工作台不传 `max_tokens`，采用提供方默认输出额度，不继承通用兼容连接的 16K 上限（官方 2026-09-21 文档：当前思考模式默认 64K）。累计费用预算按已知记录执行，用量未知不阻断；同一角色的当前循环精确保留工具往返和续写所需的私有推理字段，不进入用户正文或其他角色。新 job 从已保存对话与产物开启新的推理请求，旧助手回复作为标记的历史资料，不伪造旧推理字段或建立第二套可恢复私有会话；逐次逻辑请求诊断快照可能含本轮必要私有字段，不向其他角色提供。调用继续通过原用量台账和任务恢复边界。接口依据：[思考与工具调用](https://api-docs.deepseek.com/guides/thinking_mode/)、[模型列表](https://api-docs.deepseek.com/api/list-models/)（2026-09-19 核对）。
+- **DeepSeek 任务运行**：专用适配器使用 thinking enabled/high；工作台不传 `max_tokens`，采用提供方默认输出额度，不继承通用兼容连接的 16K 上限（官方 2026-09-21 文档：当前思考模式默认 64K）。工作台默认不设全局 token 或美元额度；用量未知不阻断，调用照常记入台账；同一角色的当前循环精确保留工具往返和续写所需的私有推理字段，不进入用户正文或其他角色。新 job 从已保存对话与产物开启新的推理请求，旧助手回复作为标记的历史资料，不伪造旧推理字段或建立第二套可恢复私有会话；逐次逻辑请求诊断快照可能含本轮必要私有字段，不向其他角色提供。调用继续通过原用量台账和任务恢复边界。接口依据：[思考与工具调用](https://api-docs.deepseek.com/guides/thinking_mode/)、[模型列表](https://api-docs.deepseek.com/api/list-models/)（2026-09-19 核对）。
 - **Anthropic / OpenAI 兼容 API**：填写服务地址、API Key 与该提供方的准确模型 ID。OpenAI 连接默认使用 `max_completion_tokens`；旧兼容网关可选择 `max_tokens`，不自动重试替换参数。Anthropic 地址可含 `/v1`；OpenAI 地址可含 `/v1`，勿填写具体 messages/chat/completions 路径。
 - **价格**：可按连接、模型填写输入/输出价格及来源；空白保持未知，Codex 订阅用量不套用 API 价格。更换已有连接的地址或协议会清空旧价格，核实后重新填写。
 - **保存**：仅保存配置，不调用模型；正在执行的轮次保留配置快照，下一轮才应用变更。更换地址或协议需要重新输入 Key。
@@ -81,10 +81,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File apps/us-video-studio/scripts
 | --- | --- |
 | `STUDIO_DATA_ROOT` | 数据根；未设时使用上述默认目录 |
 | `<data-root>/connections.json` | 站内维护的连接、角色绑定与 Windows DPAPI 加密凭据；不提交 Git |
-| `<data-root>/config.json` | 预算软阈值与循环限制；已有文件保持原样 |
+| `<data-root>/config.json` | 循环限制与可选的旧版预算字段；未配置额度时不阻断调用 |
 | `STUDIO_BASE_URL`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | 旧直接客户端的兼容配置；新的站内连接不自动导入环境凭据 |
 
-没有 `connections.json` 的新服务默认各角色选择 Codex CLI。已有旧版 `config.json` 的模型/端点不会自动迁移为站内连接；第一次正式使用前在页面确认角色配置。预算和历史账目继续沿用原数据根。API Key 只在服务端加密存储，接口仅返回是否已保存，不写入浏览器存储、任务事件或模型上下文。
+没有 `connections.json` 的新服务默认各角色选择 Codex CLI。已有旧版 `config.json` 的模型/端点不会自动迁移为站内连接；第一次正式使用前在页面确认角色配置。历史账目继续沿用原数据根；旧数值预算字段仍可兼容，当前不设额度可将两项预算字段置为 null。API Key 只在服务端加密存储，接口仅返回是否已保存，不写入浏览器存储、任务事件或模型上下文。
 
 ### Codex 登录 / 授权
 
@@ -197,7 +197,7 @@ nonce 请求的查询参数必须包含 `stage`、`expected_version` 和 `expect
 
 未知用量或价格保留为未知，美元金额为 `null`，不能补零。已知小计、未知调用和待核实状态分别显示；当前个人工作台不提供手工核账流程，未知用量不阻断任何项目后续调用。实际账单由用户在提供方平台查看，未来商业化积分/计费另行设计。金额是价目表估算，不是提供方账单。
 
-默认总量软阈值为 2,000,000 token，美元软阈值为 10；仅确认有效价目表后美元阈值才可执行。上限跨该数据根所有运行累计，在调用前检查，最后一笔可能越过阈值，不保证绝不超额。
+工作台默认不设累计 token 或美元额度。历史 `config.json` 中的数值软阈值仍兼容；若保留数值，会跨该数据根所有运行累计，在调用前检查，最后一笔可能越过阈值。将 `budget_limit_tokens` 和 `budget_limit_usd` 设为 `null` 即关闭旧阈值；台账始终保留。
 
 日常恢复只处理未结束的阶段尝试，不要求用户填写 token 或媒体计费用量。已结束调用即使用量未知，也允许用户明确发起下一轮；未完成的阶段仍可在「制片对话 → 找回创作进度」关闭，保留历史且不自动重试。
 
@@ -310,7 +310,7 @@ python -m studio.input_import --data-root <DATA_ROOT> --run-id <RUN_ID> --path <
 
 视频复用原 Windows 用户已有的百炼 DPAPI 凭据，仅在明确提交或查询原任务时解密，不修改实际配置、不复制凭据。当前接入北京 `wan3.0-video` 单首帧方式：2–30 秒、480P/720P/1080P，跟随参考图比例、原生声音开启、关闭自动 prompt 扩写；参数随方案冻结。发送原始参考图 data URL，视频参考需满足提供方至少 240 像素、最大边 8000、比例不超过 8、最多 20 MB 的条件。工作台图审允许静态 PNG/JPEG/WebP，最多 24 MB / 4000 万像素，不能静默压缩已批准图片以凑接口要求。
 
-百炼公开原价估算按 ¥0.3 / ¥0.6 / ¥1.2 每秒分别计算；日期 2026-09-19，来源 [官方 Wan 3.0](https://help.aliyun.com/zh/model-studio/wan3-0-video)。实际优惠与账单未核验。视频人民币估算单独显示，不与文字美元金额相加，也不声称受文字模型美元预算覆盖。媒体调用写入同一 `ledger.jsonl`：`usage_unit=images|video_seconds`、`usage_quantity`、`estimated_cny`；文字 Tokens 不凭空补 0。未知媒体用量仅保留记录，不阻止新的模型调用；查询和取回原任务不重发生成。
+百炼公开原价估算按 ¥0.3 / ¥0.6 / ¥1.2 每秒分别计算；日期 2026-09-19，来源 [官方 Wan 3.0](https://help.aliyun.com/zh/model-studio/wan3-0-video)。实际优惠与账单未核验。视频人民币估算单独显示，不与文字美元金额相加；当前工作台不设累计额度。媒体调用写入同一 `ledger.jsonl`：`usage_unit=images|video_seconds`、`usage_quantity`、`estimated_cny`；文字 Tokens 不凭空补 0。未知媒体用量仅保留记录，不阻止新的模型调用；查询和取回原任务不重发生成。
 
 恢复语义：request_id 保证原请求重试不重提交。百炼接受后立即保留 task_id 和固定 workspace endpoint；下载失败或服务重启后从原任务查询，不能自动换空间或再次提交。提交超时且没有 task_id 时，用户凭提供方证据补充任务编号，或明确登记未提交；已有任务/输出不能记作未提交。图片计量或视频秒数仅记录提供方返回值，缺失不要求用户手工核账。关闭制作对话框只停止页面轮询；停止制作执行仅结束本地等待，远端仍可能生成并计费。
 

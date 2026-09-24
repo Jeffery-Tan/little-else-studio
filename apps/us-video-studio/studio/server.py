@@ -307,7 +307,12 @@ def main() -> None:
     settings = load_settings()
     print(f"data root : {settings.data_root}")
     print(f"stages    : {' -> '.join(STAGES)}")
-    print(f"budget cap: {settings.budget_limit_usd:.2f} USD (estimated, all runs)")
+    limits = []
+    if settings.budget_limit_usd is not None:
+        limits.append(f"{settings.budget_limit_usd:.2f} USD")
+    if settings.budget_limit_tokens is not None:
+        limits.append(f"{settings.budget_limit_tokens} tokens")
+    print(f"budget cap: {', '.join(limits) if limits else 'none'} (all runs)")
     print(f"listening : http://{args.host}:{args.port}  (loopback only)")
     uvicorn.run(build_app(settings), host=args.host, port=args.port, log_level="info")
 

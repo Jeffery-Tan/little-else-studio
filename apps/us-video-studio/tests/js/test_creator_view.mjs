@@ -113,6 +113,34 @@ test('active execution and saved decision do not imply a new media authorization
   assert.equal(continuing.action.kind,'continue');
 });
 
+test('an old token-cap failure becomes an explicit new-turn option when the cap is disabled',()=>{
+  const reason='[budget] 2009455 tokens reached the soft cap of 2000000; refusing a new call.';
+  const blocked=creatorProjectView({...base,timeline:{rail:[],brief:{execution:{active:false}},
+      budget:{limit_tokens:null,limit_usd:null,limit_mode:'none'}},
+    currentJob:{run_id:'demo',job_kind:'conversation',status:'blocked',reason}});
+  assert.match(blocked.current,/上一轮被旧额度设置中断/);
+  assert.match(blocked.detail,/旧任务不会自动重试/);
+  assert.deepEqual(blocked.action,{kind:'chat',label:'继续创作'});
+  assert.doesNotMatch(blocked.current+blocked.detail,/已达到|查看用量/);
+
+  const stillLimited=creatorProjectView({...base,timeline:{rail:[],budget:{limit_tokens:2000000}},
+    currentJob:{run_id:'demo',job_kind:'conversation',status:'blocked',reason}});
+  assert.match(stillLimited.current,/本机共享 Token 上限已达到/);
+  assert.equal(stillLimited.action,null);
+
+  const otherProject=creatorProjectView({...base,timeline:{rail:[]},
+    currentJob:{run_id:'other',job_kind:'conversation',status:'blocked',reason}});
+  assert.equal(otherProject.action.kind,'chat');
+  const dollarCap=creatorProjectView({...base,timeline:{rail:[]},
+    currentJob:{run_id:'demo',job_kind:'conversation',status:'blocked',
+      reason:'[budget] estimated known spend reached the soft cap of 10.00 USD; refusing a new call.'}});
+  assert.equal(dollarCap.action,null);
+  const oldDollarCap=creatorProjectView({...base,timeline:{rail:[],budget:{limit_mode:'none'}},
+    currentJob:{run_id:'demo',job_kind:'conversation',status:'blocked',
+      reason:'[budget] estimated known spend reached the soft cap of 10.00 USD; refusing a new call.'}});
+  assert.equal(oldDollarCap.action.label,'继续创作');
+});
+
 test('old reviewed content keeps a failed internal review visible with its existing retry action',()=>{
   const review={kind:'review_stage',label:'重试本版审核',stage:'direction',version:3,sha256:'exact-v3'};
   const view=creatorProjectView({...base,timeline:{rail:[direction],brief:{phase:'review_failed',
