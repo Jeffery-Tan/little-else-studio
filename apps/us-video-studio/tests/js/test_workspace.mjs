@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 globalThis.escapeHtml = require('../../studio/web/md.js').escapeHtml;
-const { filterProjects, inspirationCases, projectCardHtml, referenceCardHtml } = require('../../studio/web/workspace.js');
+const { filterProjects, inspirationCases, projectCardHtml, referenceCardHtml, shortTitle } = require('../../studio/web/workspace.js');
 
 test('project search preserves identity and supports trimmed mixed case queries', () => {
   const projects = [{run_id:'one', title:'US 午餐包'}, {run_id:'two', title:'通勤内容'}];
@@ -49,4 +49,15 @@ test('reference cards use registered media route and never autoplay or expose lo
   assert.ok(!html.includes('J:/private'));
   assert.ok(!html.includes('<script>'));
   assert.ok(html.includes('&lt;b&gt;reason'));
+});
+
+test('shortTitle truncates long prompt-like titles for display only', () => {
+  assert.equal(shortTitle('午餐包短视频'), '午餐包短视频');
+  const long = '给这个午餐包做一条自然一点的短视频突出防水面料风格参考';
+  const shown = shortTitle(long, 18);
+  assert.equal(shown.length, 18);
+  assert.ok(shown.endsWith('…'));
+  const html = projectCardHtml({run_id:'x', title: long, created_at:'invalid'}, null);
+  assert.ok(html.includes('title='));
+  assert.ok(!html.includes(long.slice(0, 30) + '</strong>'));
 });

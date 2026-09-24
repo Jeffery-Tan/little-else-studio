@@ -7,6 +7,7 @@ from .http_contracts import RunIn, JobIn, redact_http_event, redact_http_events
 from .models import PipelineError, STAGE_SPEC
 from .product_cards import create_with_card
 from .project_brief import project_brief, latest_execution
+from .project_title import derive_project_title
 from .progress import project_progress
 from .structured import open_questions, view
 from .timeline import build_timeline
@@ -101,7 +102,7 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
                 if existing.brief != text:
                     raise HTTPException(409, '这次发送已保存，请使用原内容重试。')
                 return existing.to_dict()
-            return store.create_run(run_id, text.splitlines()[0][:48], text).to_dict()
+            return store.create_run(run_id, derive_project_title(text), text).to_dict()
 
     @app.get("/api/runs/{run_id}/state")
     def state(run_id: str) -> dict[str, Any]:

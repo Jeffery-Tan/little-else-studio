@@ -33,8 +33,10 @@ function renderJourneyStatus() {
   const visibleTarget=view.action?.kind==='navigate' && view.action.tab===state.canvasTab &&
     (view.action.tab!=='plan'||!view.action.stage||view.action.stage===state.activeStage);
   const next=state.busy||visibleTarget ? null : view.action;
+  const fullTitle=String(run.title||'未命名作品');
+  const shownTitle=(typeof shortTitle==='function'?shortTitle(fullTitle):fullTitle.slice(0,18));
   $('project-progress').innerHTML=`<section class="creator-goal" aria-label="当前作品与下一步">`+
-    `<div class="creator-goal-main"><div class="creator-goal-heading"><span class="creator-kicker">最终交付 · ${escapeHtml(view.goal)}</span><h1>${escapeHtml(run.title||'未命名作品')}</h1></div>`+
+    `<div class="creator-goal-main"><div class="creator-goal-heading"><span class="creator-kicker">最终交付 · ${escapeHtml(view.goal)}</span><h1 title="${escapeHtml(fullTitle)}">${escapeHtml(shownTitle)}</h1></div>`+
     `<p class="creator-goal-current"><span class="small-dot"></span><strong>现在：${escapeHtml(view.current)}</strong></p>`+
     (view.detail?`<p class="creator-goal-detail">${escapeHtml(view.detail)}</p>`:'')+
     (run.brief?`<details class="creator-goal-source"><summary>查看原始需求</summary><p>${escapeHtml(run.brief)}</p></details>`:'')+`</div>`+

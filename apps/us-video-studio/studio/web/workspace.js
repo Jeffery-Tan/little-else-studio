@@ -14,6 +14,11 @@ function studioDate(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? '日期未记录' : date.toLocaleDateString('zh-CN', {month:'short',day:'numeric'});
 }
+function shortTitle(title, max = 18) {
+  const text = String(title ?? '').trim();
+  if (!text) return '未命名作品';
+  return text.length <= max ? text : `${text.slice(0, Math.max(1, max - 1))}…`;
+}
 function filterProjects(runs, query) {
   const urgent=new Set(['needs_input','reviewed','returned','review_failed','interrupted','stale']);
   return runs.filter(run => (run.title || '').toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
@@ -25,7 +30,7 @@ function inspirationCases(cases) {
     && (c.eligible_for || []).includes('message')).slice(0,4);
 }
 function projectCardHtml(run, cover) {
-  const id = escapeHtml(run.run_id), title = escapeHtml(run.title);
+  const id = escapeHtml(run.run_id), fullTitle = String(run.title || ''), title = escapeHtml(shortTitle(fullTitle));
   const learning=run.kind==='learning';
   const analysis=!run.content_format&&/只分析.{0,20}参考视频/u.test(run.brief||'');
   const format=learning?'学习':analysis?'分析':run.content_format==='photo'?'图文':run.content_format==='video'?'视频':'创作';
@@ -36,7 +41,7 @@ function projectCardHtml(run, cover) {
   const next=learning?'打开原片、讨论与变更记录':run.creator_view?.current||'打开查看当前作品与下一步';
   const visual = cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy">` : `<div class="project-cover-art">${studioIcon(learning?'spark':'film')}<span>${format}项目</span></div>`;
   const date=studioDate(run.updated_at||run.created_at);
-  return `<div class="project-card-item"><button class="project-card" data-open-project="${id}"><span class="project-cover">${visual}<span class="project-open">${learning?'打开研究':'打开作品'} ↗</span></span><span class="project-card-copy"><strong>${title}</strong>` +
+  return `<div class="project-card-item"><button class="project-card" data-open-project="${id}" title="${escapeHtml(fullTitle)}"><span class="project-cover">${visual}<span class="project-open">${learning?'打开研究':'打开作品'} ↗</span></span><span class="project-card-copy"><strong title="${escapeHtml(fullTitle)}">${title}</strong>` +
     `<span class="project-next">${escapeHtml(next)}</span><span>目标：${escapeHtml(goal)} · 更新于 ${escapeHtml(date)}<i aria-hidden="true">↗</i></span></span></button><button class="project-delete ghost small" data-delete-project="${id}" aria-label="删除项目：${title}">删除</button></div>`;
 }
 function referenceCardHtml(item, hero=false) {
@@ -44,7 +49,7 @@ function referenceCardHtml(item, hero=false) {
   const media = `/api/learning/cases/${id}/media#t=0.1`;
   return `<button class="${hero?'hero-reference':'reference-card'}" data-open-reference="${escapeHtml(item.id)}" aria-label="查看参考：${title}"><span class="reference-visual"><video src="${media}" preload="metadata" muted playsinline aria-hidden="true" tabindex="-1"></video><span class="reference-play" aria-hidden="true">▷</span><span class="reference-label">参考片</span></span><span class="reference-copy"><strong>${title}</strong>${!hero?`<span>${escapeHtml(item.strategy?.situation || '打开查看表达方法与适用范围')}</span>`:''}</span></button>`;
 }
-if (typeof module !== 'undefined' && module.exports) module.exports={filterProjects,inspirationCases,projectCardHtml,referenceCardHtml};
+if (typeof module !== 'undefined' && module.exports) module.exports={filterProjects,inspirationCases,projectCardHtml,referenceCardHtml,shortTitle};
 
 function setStudioView(view) {
   const project = view === 'project' && Boolean(state.runId);

@@ -32,6 +32,10 @@ def test_first_message_reserves_exactly_one_project_without_calling_model(tmp_pa
         body = {'text': '用这些图做一条自然的商品视频', 'request_id': 'first'}
         first = http.post('/api/conversations', json=body)
         assert first.status_code == 200
+        title = first.json()['title']
+        assert len(title) <= 16
+        assert title != body['text'][:48]
+        assert '视频' in title
         assert http.post('/api/conversations', json=body).json() == first.json()
         assert http.post('/api/conversations', json={**body, 'text': '换一个想法'}).status_code == 409
         assert len(http.get('/api/runs').json()) == 1
