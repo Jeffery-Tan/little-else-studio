@@ -780,3 +780,23 @@ def test_latest_facts_enter_main_context_even_after_chat_window_rolls_over(env, 
     assert 'Current exact synthetic product facts, revised by user' in context
     assert 'intake-v2' in context
     assert 'Old synthetic facts' not in context
+
+
+def test_completion_check_tells_orchestrator_to_continue_without_user_decision(env, tmp_path):
+    store, pipeline, ledger = env
+    model = ScriptedModel([
+        tool_turn("route", "prepare_creative_context",
+                  {"intent": "new", "format": "video", "deliverable": "direction"}),
+        final_turn("方向正文先放着，我先停。"),
+        final_turn("继续内部审核，不再问用户。"),
+    ])
+    orch = make_orchestrator(store, pipeline, ledger, model, tmp_path)
+    turn = orch.send("做一条短视频")
+    # The reminder is injected after the first end_turn, so it appears in the
+    # follow-up request (calls[2]), not the incomplete turn itself (calls[1]).
+    reminder = model.requests_text()
+    assert "不需要用户提供新事实" in reminder
+    assert "request_review" in reminder
+    assert "ask_user" in reminder
+    assert len(model.calls) == 3
+    assert turn.stopped_because == "incomplete"

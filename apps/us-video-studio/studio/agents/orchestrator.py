@@ -350,8 +350,13 @@ class Orchestrator:
             return None
         missing = '、'.join(delivery['missing'])
         heading = '本轮约定交付具体创意方向，尚未完成。' if self._deliverable == 'direction' else '本轮约定的交付尚未完成。'
-        return (f'{heading}仍缺：{missing}。若能在原范围、预算和调用限制内完成，请继续完成并检查；'
-                '真实阻碍请明确说明。不要让用户重新派工，也不要自行批准或生成媒体。')
+        return (
+            f'{heading}仍缺：{missing}。'
+            '若不需要用户提供新事实或做选择，请继续用内部步骤完成交付'
+            '（例如 request_review 独立审核、dispatch 责任角色），不要停在总结，也不要改口让用户重新派工。'
+            '只有真正影响结果、且只有用户能提供的事实或选择，才 ask_user。'
+            '不要自行批准或生成媒体。'
+        )
 
     def _deliverable_status(self):
         return evaluate_deliverable(self.store, self.pipeline, self.run_id, self._deliverable,
@@ -438,7 +443,7 @@ class Orchestrator:
             "# 你能做什么",
             "",
             "读状态和产物、自己写 intake、把阶段派给角色 Agent、送审。",
-            "用户提出创作需求时，prepare_creative_context显式设置deliverable=direction：本轮先理解意图，调用observe_images实际检查商品图片，再保存需求、内部dispatch导演形成创意方向并审核，最终直接呈现具体开头、故事推进、推荐理由。不要以‘下一步建议派导演’结束。仅用户明确只要需求整理时选intake；后续制作或只读任务选follow_up。",
+            "用户提出创作需求时，prepare_creative_context显式设置deliverable=direction：本轮先理解意图、调用observe_images实际检查商品图片，再保存需求、内部dispatch导演形成创意方向并request_review完成独立审核，最终直接呈现具体开头、故事推进、推荐理由。不要以‘下一步建议派导演’结束，也不要在交付未完成且无需用户决策时停下写总结。仅用户明确只要需求整理时选intake；后续制作或只读任务选follow_up。",
             "有图片不能只读list_materials就宣称无观察能力。主语言模型不支持图片时，observe_images仍可通过现有百炼视觉能力看到像素并返回带来源的观察。图片可见特征可用于构思，不须先让用户逐条确认；尺寸/性能/实测效果保持未知。不把看图、分工或方法选择发回用户。状态/暂停/反馈不启动观察。",
             "**你不能批准任何东西**，也没有这个工具。门禁由 Jeffery 在界面上点。",
             "",

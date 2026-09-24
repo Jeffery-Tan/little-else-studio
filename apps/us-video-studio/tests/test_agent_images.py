@@ -119,7 +119,11 @@ def test_completion_reminder_is_bounded_and_does_not_replay_failed_tools():
     run_agent_loop(model,model='fixture',system='',messages=[],tools=[],execute_tool=lambda *_:None,
                    completion_check=lambda:'Finish the selected goal')
     assert len(model.calls)==2
-    model=ScriptedModel([tool_turn('failed','unavailable',{}),final_turn('blocked')])
+    # A failed internal tool no longer skips the deliverable reminder: the model
+    # gets one more chance to continue team work before the turn ends incomplete.
+    model=ScriptedModel([tool_turn('failed','unavailable',{}),final_turn('blocked'),
+                         final_turn('give up')])
     run_agent_loop(model,model='fixture',system='',messages=[],tools=[],execute_tool=lambda *_:None,
                    completion_check=lambda:'Finish the selected goal')
-    assert len(model.calls)==2
+    assert len(model.calls)==3
+    assert 'Finish the selected goal' in model.requests_text()

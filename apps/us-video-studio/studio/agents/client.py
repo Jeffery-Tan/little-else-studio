@@ -415,8 +415,10 @@ def run_agent_loop(
                 continuations_left -= 1
                 continue
             incomplete = False
-            if (completion_check and turn.stop_reason == 'end_turn'
-                    and not any(not r['ok'] for r in tool_log)):
+            # Always check the turn deliverable on end_turn — even after a
+            # failed internal tool (e.g. request_review). Skipping here left the
+            # model free to write a summary while the goal was still unfinished.
+            if completion_check and turn.stop_reason == 'end_turn':
                 reminder = completion_check()
                 incomplete = bool(reminder)
                 if reminder and completion_reminders and round_index < max_rounds:
