@@ -15,6 +15,63 @@ from .material_observations import material_workspace
 from .reference_video import task_state
 
 
+def proposal_for_agent(proposal: dict) -> dict:
+    """Model-safe proposal projection for tool returns and agent context.
+
+    Never includes the library diff, holdout content, raw operations payload,
+    or other human-audit-only fields. Human review routes keep using the full
+    proposal from ``LearningService.proposal`` / ``session_snapshot``.
+    """
+    payload = proposal.get("payload") if isinstance(proposal.get("payload"), dict) else {}
+    operations = payload.get("operations") if isinstance(payload.get("operations"), list) else []
+    no_change = bool(proposal.get("no_change", False))
+    if no_change:
+        action_summary = "no_change：本轮没有可保存的知识变更，等待用户确认。"
+    else:
+        op_names = []
+        for op in operations:
+            if isinstance(op, dict) and isinstance(op.get("op"), str):
+                op_names.append(op["op"])
+        if op_names:
+            unique = ", ".join(dict.fromkeys(op_names))
+            action_summary = (
+                f"待人工确认的知识变更：{len(operations)} 项操作（{unique}）。"
+                "完整库差异仅供人工审阅，不随工具返回。"
+            )
+        else:
+            action_summary = str(proposal.get("summary") or "待人工确认的学习提案。")
+    status = proposal.get("status")
+    return {
+        "id": proposal.get("id"),
+        "type": proposal.get("type"),
+        "status": status,
+        "no_change": no_change,
+        "action_summary": action_summary,
+        "base_library_sha256": proposal.get("base_library_sha256"),
+        "candidate_sha256": proposal.get("candidate_sha256"),
+        "proposal_sha256": proposal.get("proposal_sha256"),
+        "requires_human_approval": status not in {"applied", "rejected"},
+    }
+
+
+def project_discussion_message(run_id: str, index: int, row: dict) -> dict:
+    """Stable identity for one chat turn. Agents must cite these, not count."""
+    role = row.get("role")
+    item = dict(row)
+    item["id"] = f"chat:{run_id}:{index}"
+    item["index"] = index
+    item.setdefault("text", "")
+    if role == "user":
+        source_ref = f"user-chat:{run_id}:{index}"
+        item["id"] = source_ref
+        item["source_ref"] = source_ref
+    return item
+
+
+def project_discussion(run_id: str, chat: list[dict]) -> list[dict]:
+    return [project_discussion_message(run_id, index, row) for index, row in enumerate(chat)]
+
+
 def discussion_sha256(chat: list[dict]) -> str:
     """Only user turns invalidate a pending interpretation or delta.
 
@@ -176,12 +233,14 @@ def session_snapshot(store, learning, run_id: str) -> dict:
     return {
         "run": run.to_dict(), **phase,
         "sources": sources, "observations": observations,
-        "discussion": chat,
+        "discussion": project_discussion(run_id, chat),
     }
 
 
 def agent_session_context(store, learning, run_id: str, *, cursor=0, limit=40,
-                          analysis_id=None, observation_ids=None) -> dict:
+                          analysis_id=None, observation_ids=None,
+                          discussion_cursor=None, discussion_limit=20,
+                          message_ids=None) -> dict:
     """Bounded model view; human proposal payloads and full-library diffs stay private."""
     if type(cursor) is not int or cursor < 0 or type(limit) is not int or not 1 <= limit <= 40:
         raise ValueError('Invalid learning observation page')
@@ -193,6 +252,16 @@ def agent_session_context(store, learning, run_id: str, *, cursor=0, limit=40,
         raise ValueError('Observation IDs must be a nonempty list of at most 40')
     if analysis_id is not None and observation_ids is not None:
         raise ValueError('Choose analysis ID or observation IDs, not both')
+    if type(discussion_limit) is not int or not 1 <= discussion_limit <= 40:
+        raise ValueError('Invalid discussion page')
+    if discussion_cursor is not None and (type(discussion_cursor) is not int or discussion_cursor < 0):
+        raise ValueError('Invalid discussion cursor')
+    if message_ids is not None and (not isinstance(message_ids, list) or
+            not 1 <= len(message_ids) <= 40 or
+            any(not isinstance(value, str) or not value for value in message_ids)):
+        raise ValueError('Message IDs must be a nonempty list of at most 40')
+    if message_ids is not None and discussion_cursor is not None:
+        raise ValueError('Choose discussion cursor or message IDs, not both')
     human = session_snapshot(store, learning, run_id)
     observations = human['observations']
     if analysis_id is not None:
@@ -209,10 +278,33 @@ def agent_session_context(store, learning, run_id: str, *, cursor=0, limit=40,
         raise ValueError('Learning observation cursor is out of range')
     page = observations[cursor:cursor + limit]
     next_cursor = cursor + len(page) if cursor + len(page) < total else None
-    proposals = [{'id': row['id'], 'type': row['type'], 'status': row['status'],
-                  'no_change': row.get('no_change', False)} for row in human['proposals'][-10:]]
+    discussion_all = human['discussion']
+    discussion_total = len(discussion_all)
+    if message_ids is not None:
+        by_message = {row['id']: row for row in discussion_all}
+        if any(ident not in by_message for ident in message_ids):
+            raise ValueError('Unknown discussion message ID in this learning Run')
+        discussion_page = [by_message[ident] for ident in message_ids]
+        discussion_next_cursor = None
+        discussion_truncated = False
+    elif discussion_cursor is not None:
+        if discussion_cursor > discussion_total:
+            raise ValueError('Discussion cursor is out of range')
+        discussion_page = discussion_all[discussion_cursor:discussion_cursor + discussion_limit]
+        end = discussion_cursor + len(discussion_page)
+        discussion_next_cursor = end if end < discussion_total else None
+        discussion_truncated = discussion_total > len(discussion_page)
+    else:
+        start = max(0, discussion_total - discussion_limit)
+        discussion_page = discussion_all[start:]
+        discussion_next_cursor = None
+        discussion_truncated = start > 0
+    proposals = [proposal_for_agent(row) for row in human['proposals'][-10:]]
     return {'run': human['run'], 'status': human['status'], 'discussion_sha256': human['discussion_sha256'],
             'sources': human['sources'], 'observations': page, 'observation_total': total,
             'truncated': total > len(page), 'next_cursor': next_cursor,
-            'proposals': proposals, 'discussion': human['discussion'][-20:],
-            'discussion_truncated': len(human['discussion']) > 20}
+            'proposals': proposals,
+            'discussion': discussion_page,
+            'discussion_total': discussion_total,
+            'discussion_truncated': discussion_truncated,
+            'discussion_next_cursor': discussion_next_cursor}

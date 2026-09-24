@@ -15,7 +15,9 @@ from studio.agents.orchestrator import Orchestrator
 from studio.config import Pricing, Settings
 from studio.learning import LearningConflict, LearningService
 from studio.learning_assets import LearningAssets, run_material_resource_id
-from studio.learning_session import agent_session_context, session_phase, session_snapshot
+from studio.learning_session import (
+    agent_session_context, proposal_for_agent, session_phase, session_snapshot,
+)
 from studio.material_observations import material_workspace, save_human_observation
 from studio.materials import accept_upload
 from studio.ledger import Ledger
@@ -429,3 +431,125 @@ def test_actual_v1_shape_migrates_in_isolated_copy_with_exact_backup(tmp_path):
     assert (backup / 'before.json').read_bytes() == original
     assert json.loads((backup / 'migration-backup.json').read_text(encoding='utf-8'))['library_version'] == 1
     assert json.loads(learning.library_path.read_text(encoding='utf-8-sig'))['schema_version'] == 2
+
+
+def _seed_holdout_canary(learning, canary):
+    doc = json.loads(learning.library_path.read_text(encoding='utf-8-sig'))
+    hidden = copy.deepcopy(doc['cases'][0])
+    hidden.update(id='holdout-canary', source_key='fixture:holdout-canary',
+                  source_url=None, media=None, comparison_group='holdout-canary',
+                  partition='holdout', eligible_for=[])
+    hidden['title'] = canary
+    doc['cases'].append(hidden)
+    learning.library_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + '\n',
+                                     encoding='utf-8')
+
+
+def _delta_method():
+    return {'id': 'reasoned-dialogue', 'kind': 'expression_method', 'name': 'Give a reason',
+            'retrieval_summary': 'Use spoken choice reasoning when speech repeats visible action',
+            'goal': 'Keep a conversational reason', 'use_when': ['The product action is visible'],
+            'avoid_when': ['Pure visual montage'], 'required_inputs': ['Verified product structure'],
+            'procedure': ['Connect a visible action to a reason'],
+            'must_preserve': ['Reason tied to product evidence'], 'can_vary': ['Wording and pace'],
+            'limitations': ['Transfer untested'], 'checks': ['Speech adds meaning beyond the image'],
+            'decision': 'Connect visible action and reason', 'support_refs': ['t01-tote-reference/semantics'],
+            'counterexample_refs': []}
+
+
+def test_propose_learning_delta_return_is_model_safe_while_human_keeps_diff(tmp_path):
+    repo, store, settings, learning = setup(tmp_path)
+    canary = 'HOLDOUT-CANARY-DO-NOT-SEND'
+    _seed_holdout_canary(learning, canary)
+    run_id = 'learn-delta-safe'
+    store.create_run(run_id, 'Study', 'Propose without leaking holdout', kind='learning')
+    migration = learning.propose_migration(run_id)
+    learning.apply(run_id, migration['id'], migration['base_library_sha256'],
+                   migration['proposal_sha256'], 'migration-delta-safe-1')
+    # Re-indent so the next library rewrite is a full-file human diff that
+    # still contains the holdout canary as changed/context lines.
+    doc = json.loads(learning.library_path.read_text(encoding='utf-8'))
+    learning.library_path.write_text(json.dumps(doc, ensure_ascii=False, indent=4) + '\n',
+                                     encoding='utf-8')
+    payload = {'rationale': 'Add one scoped expression method', 'summary': 'Add a scoped method',
+               'operations': [{'op': 'method.create', 'method': _delta_method()}]}
+    model = ScriptedModel([
+        tool_turn('propose-one', 'propose_learning_delta', payload),
+        tool_turn('propose-again', 'propose_learning_delta', payload),
+        final_turn('已准备待审提案，完整差异请人工查看。'),
+    ])
+    Orchestrator(store, Pipeline(store), settings, model, Ledger(store, settings),
+                 run_id, learning_service=learning).send('请提出待审知识变更。')
+    assert len(model.calls) == 3
+    requests = model.requests_text()
+    assert canary not in requests
+    assert '"diff"' not in requests
+    assert 'canonical-before.json' not in requests
+    human = next(row for row in learning.proposals(run_id) if row['type'] == 'delta')
+    assert human['diff'] and canary in human['diff']
+    assert human['diff'] not in requests
+    safe = proposal_for_agent(human)
+    assert safe['id'] == human['id'] and safe['requires_human_approval'] is True
+    assert 'diff' not in safe and 'payload' not in safe
+    app = build_app(settings, client_factory=lambda: ScriptedModel([final_turn('offline')]),
+                    learning_repository_root=repo, learning_media_root=tmp_path / 'media')
+    with TestClient(app) as client:
+        session = client.get(f'/api/runs/{run_id}/learning/session').json()
+        listed = [row for row in session['proposals'] if row['type'] == 'delta']
+        assert listed and listed[0]['diff'] and canary in listed[0]['diff']
+        detail = client.get(f'/api/runs/{run_id}/learning').json()['proposals']
+        assert any(row.get('diff') and canary in row['diff'] for row in detail)
+
+
+def test_early_user_correction_is_readdressable_with_stable_source_ref(tmp_path):
+    _, store, settings, learning = setup(tmp_path)
+    run_id = 'learn-history'
+    store.create_run(run_id, 'History', 'Long discussion', kind='learning')
+    migration = learning.propose_migration(run_id)
+    learning.apply(run_id, migration['id'], migration['base_library_sha256'],
+                   migration['proposal_sha256'], 'migration-history-1')
+    correction = '结尾不要突然加速'
+    for index in range(25):
+        if index == 3:
+            store.append_chat(run_id, 'user', f'早期纠正：{correction}')
+        elif index % 2 == 0:
+            store.append_chat(run_id, 'user', f'用户消息 {index}')
+        else:
+            store.append_chat(run_id, 'assistant', f'助手回复 {index}')
+    source_ref = f'user-chat:{run_id}:3'
+    window = agent_session_context(store, learning, run_id)
+    assert window['discussion_truncated'] is True
+    assert window['discussion_total'] == 25
+    assert all(correction not in row['text'] for row in window['discussion'])
+    assert all(row.get('index') is not None for row in window['discussion'])
+    exact = agent_session_context(store, learning, run_id, message_ids=[source_ref])
+    assert exact['discussion'][0]['source_ref'] == source_ref
+    assert exact['discussion'][0]['id'] == source_ref
+    assert correction in exact['discussion'][0]['text']
+    page = agent_session_context(store, learning, run_id, discussion_cursor=0, discussion_limit=10)
+    assert page['discussion'][0]['index'] == 0
+    assert any(correction in row['text'] for row in page['discussion'])
+    assert page['discussion_next_cursor'] == 10
+    payload = {'rationale': 'Preserve the early ending-pace correction',
+               'operations': [{'op': 'preference.upsert', 'preference': {
+                   'id': 'ending-pace', 'scope': 'user', 'owner': 'workspace-user',
+                   'dimension': 'ending', 'quote': correction, 'source_ref': source_ref}}]}
+    model = ScriptedModel([
+        tool_turn('read-early', 'read_learning_session', {'message_ids': [source_ref]}),
+        tool_turn('propose-pref', 'propose_learning_delta', payload),
+        final_turn('已按早期纠正整理待审偏好。'),
+    ])
+    Orchestrator(store, Pipeline(store), settings, model, Ledger(store, settings),
+                 run_id, learning_service=learning).send('请回读早期纠正并整理偏好。')
+    assert correction in model.requests_text()
+    assert source_ref in model.requests_text()
+    proposals = [row for row in learning.proposals(run_id) if row['type'] == 'delta']
+    assert proposals and proposals[0]['payload']['operations'][0]['preference']['source_ref'] == source_ref
+    store.append_chat(run_id, 'user', '再补充一条新说明')
+    store.append_chat(run_id, 'assistant', '已记录')
+    again = agent_session_context(store, learning, run_id, message_ids=[source_ref])
+    assert again['discussion'][0]['source_ref'] == source_ref
+    assert again['discussion'][0]['index'] == 3
+    assert correction in again['discussion'][0]['text']
+    with pytest.raises(ValueError, match='Unknown discussion message ID'):
+        agent_session_context(store, learning, run_id, message_ids=[f'user-chat:{run_id}:999'])

@@ -1,4 +1,4 @@
-# us-video-studio 目录约定
+﻿# us-video-studio 目录约定
 
 本文件只约束本应用。跨项目规则见仓库根 [AGENTS.md](../../AGENTS.md) 与
 适用的全局规则，线路事实源见 [tracks/us](../../tracks/us/README.md)。

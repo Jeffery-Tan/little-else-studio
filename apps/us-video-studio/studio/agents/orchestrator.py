@@ -250,7 +250,9 @@ class Orchestrator:
             self.check_cancel()
         self.store.append_chat(self.run_id, 'user', message)
         self._current_user_message = message
-        from ..learning_session import agent_session_context, discussion_sha256, session_snapshot
+        from ..learning_session import (
+            agent_session_context, discussion_sha256, proposal_for_agent, session_snapshot,
+        )
         session = session_snapshot(self.store, self.learning, self.run_id)
         skill = self.learning.read_method_document('us-creative-learning',
                                                   role='orchestrator', run_id=self.run_id)
@@ -270,8 +272,7 @@ class Orchestrator:
                   + '\n# 当前库与提案状态\n' + json.dumps({
                       'library_version': self.learning.catalog()['library_version'],
                       'discussion_sha256': session['discussion_sha256'],
-                      'proposals': [{k: p.get(k) for k in ('id', 'type', 'status')}
-                                    for p in session['proposals'][-8:]],
+                      'proposals': [proposal_for_agent(p) for p in session['proposals'][-8:]],
                   }, ensure_ascii=False))
         allowed = {'ask_user', 'read_learning_session', 'retrieve_learning_methods',
                    'read_learning_method', 'read_method_document', 'propose_learning_delta'}
@@ -287,7 +288,10 @@ class Orchestrator:
                     self.store, self.learning, self.run_id,
                     cursor=args.get('cursor', 0), limit=args.get('limit', 40),
                     analysis_id=args.get('analysis_id'),
-                    observation_ids=args.get('observation_ids')), ensure_ascii=False)
+                    observation_ids=args.get('observation_ids'),
+                    discussion_cursor=args.get('discussion_cursor'),
+                    discussion_limit=args.get('discussion_limit', 20),
+                    message_ids=args.get('message_ids')), ensure_ascii=False)
             if name == 'retrieve_learning_methods':
                 return json.dumps(self.learning.method_summaries(
                     run_id=self.run_id, purpose=args.get('purpose', 'message'),
@@ -298,8 +302,9 @@ class Orchestrator:
                     args['library_sha256'], purpose=args.get('purpose', 'message')),
                     ensure_ascii=False)
             if name == 'propose_learning_delta':
-                return json.dumps(self.learning.propose_delta(self.run_id, args, actor='agent'),
-                                  ensure_ascii=False)
+                return json.dumps(proposal_for_agent(
+                    self.learning.propose_delta(self.run_id, args, actor='agent')),
+                    ensure_ascii=False)
             return self._execute(name, args, Workspace(self.store, self.pipeline,
                                                        self.run_id, 'orchestrator'))
 
