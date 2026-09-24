@@ -12,6 +12,7 @@ from studio.agents.orchestrator import Orchestrator
 from studio.agents.reviewer import run_review
 from studio.config import Settings, Pricing
 from studio.learning import LearningService, SKILLS
+from studio.learning_session import proposal_for_agent
 from studio.ledger import Ledger
 from studio.pipeline import Pipeline
 from studio.store import Store
@@ -174,6 +175,57 @@ def test_feedback_tool_rejects_invented_quote_and_wrong_artifact(runtime):
     assert len(result.failed_tools) == 2
     assert learning.proposals(RUN) == []
     assert all("apply" not in name for name in model.calls[0]["tool_names"])
+
+
+def test_propose_learning_feedback_return_is_model_safe_while_human_keeps_diff(runtime):
+    """R1: creative feedback tool must not re-enter the full library diff to the model."""
+    store, pipeline, settings, ledger, learning = runtime
+    canary = "HOLDOUT-CANARY-FEEDBACK-DO-NOT-SEND"
+    doc = json.loads(learning.library_path.read_text(encoding="utf-8"))
+    doc["cases"].append({
+        "id": "holdout-canary", "market": "US", "title": canary,
+        "source_key": "fixture:holdout-canary", "source_url": None, "media": None,
+        "comparison_group": "holdout-canary", "partition": "holdout",
+        "eligible_for": [], "tags": [], "strategy": {}, "limits": [],
+        "user_feedback": None, "market_effect": None, "evidence": [],
+    })
+    # Compact on disk; the next _library_text rewrite is a full-file human diff
+    # that still contains the holdout canary on both sides.
+    learning.library_path.write_text(json.dumps(doc, ensure_ascii=False, separators=(",", ":")),
+                                     encoding="utf-8")
+    submit(pipeline, "intake")
+    artifact = submit(pipeline, "direction")
+    quote = "这版只修正角色关系，不代表采用整个方向。"
+    arguments = {"stage": "direction", "version": artifact.version, "artifact_sha256": artifact.sha256,
+                 "quote": quote, "scope": "persona_dialogue", "action": "diagnose"}
+    before = learning.library_path.read_bytes()
+    model = ScriptedModel([
+        tool_turn("feedback", "propose_learning_feedback", arguments),
+        tool_turn("feedback-again", "propose_learning_feedback", arguments),
+        final_turn("已提出待审差异，完整差异请人工查看。"),
+    ])
+    result = orchestrator(runtime, model).send(quote)
+    assert not result.failed_tools
+    assert len(model.calls) == 3
+    assert learning.library_path.read_bytes() == before
+    requests = model.requests_text()
+    assert canary not in requests
+    assert '"diff"' not in requests
+    assert "canonical-before.json" not in requests
+    proposals = learning.proposals(RUN)
+    assert len(proposals) == 1
+    human = proposals[0]
+    assert human["status"] == "pending"
+    assert human["diff"] and canary in human["diff"]
+    assert human["diff"] not in requests
+    assert human["payload"]["quote"] == quote
+    assert human["payload"]["artifact_sha256"] == artifact.sha256
+    safe = proposal_for_agent(human)
+    assert "diff" not in safe and "payload" not in safe
+    assert safe["requires_human_approval"] is True
+    applied = learning.apply(RUN, human["id"], human["base_library_sha256"],
+                             human["proposal_sha256"], "r1-feedback-apply")
+    assert applied["status"] == "applied"
 
 
 def test_model_reads_contract_and_compiles_real_local_video_pack(runtime):

@@ -249,6 +249,8 @@ class Orchestrator:
         if self.check_cancel:
             self.check_cancel()
         self.store.append_chat(self.run_id, 'user', message)
+        from ..interactions import answer
+        answer(self.store, self.run_id, message)
         self._current_user_message = message
         from ..learning_session import (
             agent_session_context, discussion_sha256, proposal_for_agent, session_snapshot,
@@ -578,9 +580,10 @@ class Orchestrator:
                 self._context_refs.append(document["evidence_ref"])
             return document if isinstance(document, str) else json.dumps(document, ensure_ascii=False)
         if name == "propose_learning_feedback":
+            from ..learning_session import proposal_for_agent
             proposal = self.learning.propose_feedback(self.run_id, args,
                 current_user_message=self._current_user_message, actor="agent")
-            return json.dumps(proposal, ensure_ascii=False)
+            return json.dumps(proposal_for_agent(proposal), ensure_ascii=False)
         if name == 'read_production':
             from ..production import draft_records
             from ..evidence import evidence_snapshot

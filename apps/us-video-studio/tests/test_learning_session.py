@@ -553,3 +553,95 @@ def test_early_user_correction_is_readdressable_with_stable_source_ref(tmp_path)
     assert correction in again['discussion'][0]['text']
     with pytest.raises(ValueError, match='Unknown discussion message ID'):
         agent_session_context(store, learning, run_id, message_ids=[f'user-chat:{run_id}:999'])
+
+
+def _wait_job(http, run_id, job):
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        row = http.get(f'/api/runs/{run_id}/jobs/{job["job_id"]}').json()
+        if row['status'] not in {'queued', 'running'}:
+            return row
+        time.sleep(.02)
+    raise AssertionError('offline job did not finish')
+
+
+def test_learning_answer_settles_pending_question_for_id_and_plain_reply(tmp_path):
+    """R2: learning path must clear pending_question the same way creative send does."""
+    from studio.interactions import pending_question
+    repo, store, settings, learning = setup(tmp_path)
+    run_id = 'learn-question'
+    store.create_run(run_id, 'Study', 'Clarify expression', kind='learning')
+    question = {'question': '更关注节奏还是开场？', 'context': '先按你的选择继续。',
+                'options': [{'label': '节奏', 'description': '整体快慢'},
+                            {'label': '开场', 'description': '前三秒'}], 'recommended': 0}
+    model = ScriptedModel([
+        tool_turn('ask1', 'ask_user', question),
+        final_turn('已按选择继续分析。'),
+        tool_turn('ask2', 'ask_user', question),
+        final_turn('已理解你的自然语言补充。'),
+    ])
+    app = build_app(settings, client_factory=lambda: model,
+                    learning_repository_root=repo, learning_media_root=tmp_path / 'media')
+    with TestClient(app) as client:
+        first = client.post(f'/api/runs/{run_id}/jobs', json={
+            'text': '先确认表达重点', 'request_id': 'q-start'})
+        assert first.status_code == 200, first.text
+        job = _wait_job(client, run_id, first.json())
+        assert job['status'] == 'succeeded', job
+        events = store.read_events(run_id)
+        requested = [e for e in events if e['kind'] == 'interaction_requested']
+        assert len(requested) == 1
+        first_qid = requested[0]['question']['id']
+        assert pending_question(store, run_id)['id'] == first_qid
+
+        # Accurate question_id answer settles the old question exactly once.
+        answer_id = {'text': '选节奏', 'request_id': 'q-answer',
+                     'question_id': first_qid}
+        second = client.post(f'/api/runs/{run_id}/jobs', json=answer_id)
+        assert second.status_code == 200, second.text
+        job = _wait_job(client, run_id, second.json())
+        assert job['status'] == 'succeeded', job
+        assert pending_question(store, run_id) is None
+        answered = [e for e in store.read_events(run_id)
+                    if e['kind'] == 'interaction_answered' and e['question_id'] == first_qid]
+        assert len(answered) == 1
+
+        # Same request_id is idempotent: same job, no second answer event.
+        retry = client.post(f'/api/runs/{run_id}/jobs', json=answer_id)
+        assert retry.json()['job_id'] == second.json()['job_id']
+        assert len([e for e in store.read_events(run_id)
+                    if e['kind'] == 'interaction_answered' and e['question_id'] == first_qid]) == 1
+
+        # After settle, the old question_id cannot pass a new request check.
+        stale = client.post(f'/api/runs/{run_id}/jobs', json={
+            'text': '再答一次', 'request_id': 'q-stale', 'question_id': first_qid})
+        assert stale.status_code == 409
+
+        # Natural-language answer without question_id also settles.
+        third = client.post(f'/api/runs/{run_id}/jobs', json={
+            'text': '再问一次重点', 'request_id': 'q-plain-ask'})
+        assert third.status_code == 200, third.text
+        job = _wait_job(client, run_id, third.json())
+        assert job['status'] == 'succeeded', job
+        events = store.read_events(run_id)
+        requested = [e for e in events if e['kind'] == 'interaction_requested']
+        assert len(requested) == 2
+        second_qid = requested[1]['question']['id']
+        assert pending_question(store, run_id)['id'] == second_qid
+        fourth = client.post(f'/api/runs/{run_id}/jobs', json={
+            'text': '开场更重要', 'request_id': 'q-plain-answer'})
+        assert fourth.status_code == 200, fourth.text
+        job = _wait_job(client, run_id, fourth.json())
+        assert job['status'] == 'succeeded', job
+        assert pending_question(store, run_id) is None
+        assert len([e for e in store.read_events(run_id)
+                    if e['kind'] == 'interaction_answered' and e['question_id'] == second_qid]) == 1
+        # Refreshed timeline must not present the old question as still pending.
+        timeline = client.get(f'/api/runs/{run_id}/timeline').json()
+        interaction = timeline.get('interaction')
+        assert interaction is None or interaction.get('id') not in {first_qid, second_qid}
+
+        # Answering a clarification never grants approval or generation.
+        assert store.list_approvals(run_id) == []
+        assert not any(e['kind'] in {'approval', 'image_approved', 'generation_authorized'}
+                       for e in store.read_events(run_id))

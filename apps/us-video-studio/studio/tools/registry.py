@@ -156,7 +156,7 @@ _TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="propose_learning_feedback",
-        description="Propose a pending learning diff from an exact quote in the current user message, bound to an immutable artifact version/hash. Does not apply the library, approve, revise or resume production.",
+        description="Propose a pending learning diff from an exact quote in the current user message, bound to an immutable artifact version/hash. Returns only a model-safe proposal summary; the full library diff stays for human review. Does not apply the library, approve, revise or resume production.",
         input_schema=_obj({
             "stage": _STAGE, "version": {"type": "integer", "minimum": 1},
             "artifact_sha256": {"type": "string"}, "case_id": {"type": "string"},
