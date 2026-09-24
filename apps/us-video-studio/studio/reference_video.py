@@ -41,10 +41,19 @@ class ReferenceIn(BaseModel):
 
 def task_state(store, run_id):
     items = {}
-    for event in store.read_events(run_id):
+    events = store.read_events(run_id)
+    latest_creative_seq = max((event['seq'] for event in events
+        if event['kind'] in {'attempt_submitted', 'stage_decided', 'production_draft',
+                             'production_attempt', 'production_material_approval'}
+        or (event['kind'] == 'job_created' and event.get('job_kind') != 'reference_video')),
+        default=0)
+    for event in events:
         rid = event.get('reference_id')
         if event['kind'] == 'reference_video_started':
-            items.setdefault(rid, {**event['request'], 'reference_id': rid, 'status': 'started'})
+            items.setdefault(rid, {**event['request'], 'reference_id': rid,
+                                   'started_at': event['at'],
+                                   'after_creative_work': event['seq'] > latest_creative_seq,
+                                   'status': 'started'})
         elif rid in items and event['kind'] == 'reference_video_source':
             items[rid].update(event['source'], status='downloaded')
         elif rid in items and event['kind'] == 'reference_video_ready':

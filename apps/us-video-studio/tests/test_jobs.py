@@ -16,6 +16,7 @@ from studio.ledger import Ledger
 from studio.models import PipelineError
 from studio.materials import accept_upload
 from studio.pipeline import Pipeline
+from studio.production import digest
 from studio.server import build_app
 from studio.store import Store
 from test_server import RUN, make_run, settings_for
@@ -96,6 +97,76 @@ def test_media_feedback_requires_the_saved_result_bytes(tmp_path):
         assert 'made-output' not in accepted.json()['text']
         wait_job(http, accepted.json()['job_id'])
         assert 'made-output' in model.calls[0]['system']
+
+
+def test_production_draft_feedback_binds_exact_draft_and_optional_attempt(tmp_path):
+    model = ScriptedModel([final_turn('收到第一条。'), final_turn('收到第二条。'),
+                           final_turn('已记录需核对的错误。')])
+    with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: model)) as http:
+        make_run(http)
+        store = Store(tmp_path)
+        drafts = []
+        for draft_id in ('draft-current', 'draft-other'):
+            draft = {'draft_id': draft_id, 'kind': 'video', 'prompt': '已有制作描述'}
+            draft['draft_sha256'] = digest(draft)
+            store.append_event(RUN, 'production_draft', draft=draft)
+            drafts.append(draft)
+        current, other = drafts
+        http.app.state.production.event(RUN, 'production_attempt',
+            attempt_id='failed-current', draft_id=current['draft_id'],
+            draft_sha256=current['draft_sha256'], media_kind='video', status='failed',
+            message='输入描述要求嘴部表演，但当前画面是静态商品图。',
+            endpoint='https://private.invalid/raw-request')
+        http.app.state.production.event(RUN, 'production_attempt',
+            attempt_id='failed-other', draft_id=other['draft_id'],
+            draft_sha256=other['draft_sha256'], media_kind='video', status='failed')
+        target = {'kind': 'production_draft', 'run_id': RUN,
+                  'draft_id': current['draft_id'], 'draft_sha256': current['draft_sha256'],
+                  'attempt_id': 'failed-current'}
+        for request_id, wrong in (
+            ('wrong-run', {**target, 'run_id': 'other-run'}),
+            ('wrong-draft', {**target, 'draft_id': 'missing-draft'}),
+            ('wrong-sha', {**target, 'draft_sha256': 'a' * 64}),
+            ('wrong-attempt', {**target, 'attempt_id': 'failed-other'}),
+            ('missing-attempt', {**target, 'attempt_id': 'missing-attempt'}),
+        ):
+            rejected = http.post(f'/api/runs/{RUN}/jobs', json={
+                'text': '请调整这版描述', 'request_id': request_id, 'feedback_target': wrong})
+            assert rejected.status_code == 409, rejected.text
+        assert not model.calls
+        accepted = http.post(f'/api/runs/{RUN}/jobs', json={
+            'text': '请调整这版描述', 'request_id': 'valid-attempt', 'feedback_target': target})
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()['text'] == '请调整这版描述'
+        assert accepted.json()['job_payload']['feedback_target'] == target
+        wait_job(http, accepted.json()['job_id'])
+        assert current['draft_sha256'] in model.calls[0]['system']
+        assert 'failed-current' in model.calls[0]['system']
+        assert '输入描述要求嘴部表演，但当前画面是静态商品图。' in model.calls[0]['system']
+        assert 'message_untrusted' in model.calls[0]['system']
+        assert 'private.invalid' not in model.calls[0]['system']
+        assert 'draft-current' not in accepted.json()['text']
+
+        without_attempt = {key: value for key, value in target.items() if key != 'attempt_id'}
+        accepted = http.post(f'/api/runs/{RUN}/jobs', json={
+            'text': '讨论这份方案', 'request_id': 'valid-draft',
+            'feedback_target': without_attempt})
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()['text'] == '讨论这份方案'
+        assert accepted.json()['job_payload']['feedback_target'] == without_attempt
+        wait_job(http, accepted.json()['job_id'])
+        assert 'attempt_evidence' not in model.calls[1]['system']
+
+        http.app.state.production.status(RUN, 'failed-current', status='failed',
+            message='https://private.invalid/result?api_key=synthetic-secret')
+        accepted = http.post(f'/api/runs/{RUN}/jobs', json={
+            'text': '请解释这次失败', 'request_id': 'sensitive-message',
+            'feedback_target': target})
+        assert accepted.status_code == 200, accepted.text
+        wait_job(http, accepted.json()['job_id'])
+        assert '具体说明已省略' in model.calls[2]['system']
+        assert 'synthetic-secret' not in model.calls[2]['system']
+        assert len(model.calls) == 3
 
 
 def test_job_replay_idempotency_and_context_refs(tmp_path):

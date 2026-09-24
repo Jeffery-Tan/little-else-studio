@@ -7,7 +7,7 @@ const {creatorProjectView}=require('../../studio/web/creator-view.js');
 const writing={stage:'writing',has_doc:true,version:2,approval_decision:'approved',
   blocks:[{type:'timeline',segments:[]},{type:'text',title:'发布文案',text:'Lunch, sorted.'}]};
 const direction={stage:'direction',has_doc:true,version:1,approval_decision:'approved',selected_option_id:'B'};
-const run={title:'午餐包',brief:'做一条短视频',content_format:'video'};
+const run={run_id:'demo',title:'午餐包',brief:'做一条短视频',content_format:'video'};
 const base={run,timeline:{rail:[direction,writing],brief:{phase:'ready',execution:{active:false}}},
   imageWork:{kind:'image',phase:'needs_plan',draft:null},videoWork:{kind:'video',phase:'needs_plan',draft:null}};
 const withVideo=(phase,other={})=>({kind:'video',phase,draft:{draft_id:'v1'},...other});
@@ -45,6 +45,16 @@ test('media states map to one current work and safe main action',()=>{
   assert.equal(unknown.current,'视频生成结果尚未确认');
   assert.equal(unknown.action.label,'查询这次结果');
   assert.equal(unknown.detail,'先处理原任务；当前不会再次提交生成。');
+  const settings=creatorProjectView({...base,videoWork:withVideo('blocked',
+    {primaryAction:'settings',label:'本次制作还不能提交',detail:'视频连接尚未配置'})});
+  assert.equal(settings.action.kind,'settings');
+  assert.equal(settings.action.label,'打开模型设置');
+  const occupied=creatorProjectView({...base,videoWork:withVideo('blocked',
+    {primaryAction:'none',label:'本次制作还不能提交',detail:'制作团队正在执行'})});
+  assert.equal(occupied.action,null);
+  const preparing=creatorProjectView({...base,videoWork:{kind:'video',phase:'prepare',draft:null}});
+  assert.equal(preparing.action.kind,'prepare');
+  assert.equal(preparing.action.label,'准备这张图的视频输入');
 });
 
 test('old project and only-analysis report remain readable without a new approval',()=>{
@@ -62,6 +72,38 @@ test('old project and only-analysis report remain readable without a new approva
   assert.equal(analysis.analysisOnly,true);
   assert.equal(analysis.action.label,'阅读分析结果');
   assert.equal(analysis.tab,'plan');
+});
+
+test('a newer analysis task in a creative project is current without changing its final deliverable',()=>{
+  const review={intent:'analyze',status:'completed',started_at:'2026-09-24T12:00:00Z',report:'只拆解新参考'};
+  const earlier={...writing,created_at:'2026-09-24T10:00:00Z'};
+  const current=creatorProjectView({...base,timeline:{rail:[direction,earlier],brief:{phase:'ready'}},
+    referenceTasks:[review]});
+  assert.equal(current.goal,'商品视频与发布文案');
+  assert.equal(current.current,'本轮只分析新参考：拆解报告已保存');
+  assert.equal(current.referenceCurrent,true);
+  assert.equal(current.action,null);
+  const tied=creatorProjectView({...base,timeline:{rail:[direction,{...earlier,created_at:review.started_at}],brief:{phase:'ready'}},
+    referenceTasks:[{...review,after_creative_work:true}]});
+  assert.equal(tied.referenceCurrent,true);
+  const overtaken=creatorProjectView({...base,timeline:{rail:[direction,{...earlier,created_at:review.started_at}],brief:{phase:'ready'}},
+    referenceTasks:[{...review,after_creative_work:false}]});
+  assert.equal(overtaken.referenceCurrent,false);
+  const later=creatorProjectView({...base,timeline:{rail:[direction,{...earlier,created_at:'2026-09-24T13:00:00Z'}],brief:{phase:'ready'}},
+    referenceTasks:[review]});
+  assert.equal(later.referenceCurrent,false);
+  assert.equal(later.current,'脚本已确认，下一步准备实际画面');
+  const recreated=creatorProjectView({...base,timeline:{rail:[direction,earlier],brief:{phase:'ready'}},
+    referenceTasks:[review,{intent:'recreate',started_at:'2026-09-24T13:00:00Z'}]});
+  assert.equal(recreated.referenceCurrent,false);
+  const creativeJob=creatorProjectView({...base,timeline:{rail:[direction,earlier],brief:{execution:{active:true}}},
+    referenceTasks:[review],currentJob:{run_id:'demo',job_kind:'conversation',at:'2026-09-24T13:00:00Z'}});
+  assert.equal(creativeJob.referenceCurrent,false);
+  assert.equal(creativeJob.current,'团队正在处理当前任务');
+  const referenceJob=creatorProjectView({...base,timeline:{rail:[direction,earlier],brief:{execution:{active:true}}},
+    referenceTasks:[review],currentJob:{run_id:'demo',job_kind:'reference_video',at:'2026-09-24T12:00:00Z'}});
+  assert.equal(referenceJob.referenceCurrent,true);
+  assert.match(referenceJob.current,/本轮只分析新参考/);
 });
 
 test('active execution and saved decision do not imply a new media authorization',()=>{

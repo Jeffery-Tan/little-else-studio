@@ -11,13 +11,14 @@ from local_http import TestClient
 from PIL import Image
 
 from studio.agents.client import Turn, Usage
+from studio.agents.orchestrator import OrchestratorTurn
 from studio.agents.codex_image import GeneratedImage, ImageResult
 from studio.agents.codex_client import CodexUnavailable
 from studio.agents.wan_video import WanVideoError, WanVideoResult
 from studio.ledger import Ledger
 from studio.materials import accept_upload
 from studio.pipeline import Pipeline
-from studio.models import Approval
+from studio.models import Approval, PipelineError
 from studio.production import DraftIn, prepare_draft, read_image, source_snapshot
 from studio.server import build_app
 from studio.store import Store
@@ -165,6 +166,161 @@ def approve(scene, approved=True):
     data = workspace(scene); ref = data['materials'][0]
     return scene[0].post(BASE + '/material-approvals', json={
         'name': ref['name'], 'sha256': ref['sha256'], 'approved': approved, 'nonce': data['nonce']})
+
+
+def video_goal(scene):
+    scene[1].append_event(RUN, 'creative_context_selected',
+        selection={'intent': 'new', 'format': 'video', 'tags': [], 'case_ids': None})
+
+
+def capture_continuation(scene, *, finish_input=False):
+    calls = []
+    def prepare(run_id):
+        calls.append(run_id)
+        def run(text, emit, check_cancel):
+            if finish_input:
+                service = scene[0].app.state.production
+                source = service.workspace(run_id, for_agent=True)['sources'][-1]
+                reference = next(m for m in service.workspace(run_id, for_agent=True)['materials']
+                                 if m['name'] == 'reference.png')
+                payload = DraftIn(request_id='agent-video-input', kind='video',
+                    prompt='Synthetic reviewed video input for the approved image.',
+                    source_version=source['version'], source_sha256=source['artifact_sha256'],
+                    reference={'name': reference['name'], 'sha256': reference['sha256']},
+                    model='wan3.0-video', duration=5, resolution='720P')
+                item = prepare_draft(scene[1], scene[2], run_id, payload, actor='agent')
+                from studio.production import ActionIn
+                reviewer, settings = scene[3], scene[-1]
+                review, _ = service.prepare_review(run_id, item['draft_id'], ActionIn(
+                    request_id='agent-review', expected_sha256=item['draft_sha256'], consent=True),
+                    frozen=(settings, reviewer, {'source': 'offline-frozen'}))
+                review('check', emit, check_cancel)
+            return OrchestratorTurn('Prepared offline.', 'done', 0)
+        return run, {'source': 'offline-continuation'}
+    scene[0].app.state.jobs.prepare = prepare
+    return calls
+
+
+def test_approved_image_continues_exact_video_work_once_without_generation(scene):
+    video_goal(scene)
+    calls = capture_continuation(scene, finish_input=True)
+    source = workspace(scene)['sources'][-1]
+    ref = workspace(scene)['materials'][0]
+
+    first = approve(scene)
+    assert first.status_code == 200, first.text
+    continuation = first.json()['continuation']
+    assert continuation['job_id']
+    job = wait(scene, scene[0].get(f"/api/runs/{RUN}/jobs/{continuation['job_id']}"))
+    assert job['status'] == 'succeeded'
+    assert ref['name'] in job['text'] and ref['sha256'] in job['text']
+    assert source['artifact_sha256'] in job['text']
+    assert calls == [RUN]
+    assert not scene[4].calls and not scene[5].calls
+    prepared = workspace(scene)['drafts'][-1]
+    assert prepared['actor'] == 'agent' and prepared['review']['verdict'] == 'ready'
+    assert prepared['reference']['sha256'] == ref['sha256']
+    assert prepared['source_sha256'] == source['artifact_sha256']
+    assert prepared['can_generate'] is True
+
+    repeated = approve(scene)
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()['continuation'] == {'status': 'existing', 'draft_id': prepared['draft_id']}
+    assert calls == [RUN]
+
+
+def test_approved_image_continuation_can_resume_after_job_was_not_started(scene):
+    video_goal(scene)
+    calls = capture_continuation(scene)
+    jobs = scene[0].app.state.jobs
+    before_submit = jobs.before_submit
+    jobs.before_submit = lambda: (_ for _ in ()).throw(PipelineError('fixture', '连接暂不可用'))
+    try:
+        response = approve(scene)
+    finally:
+        jobs.before_submit = before_submit
+    assert response.status_code == 200, response.text
+    assert response.json()['continuation']['status'] == 'not_started'
+    assert not calls
+    ref = workspace(scene)['materials'][0]
+    assert ref['approved'] is True
+
+    recovery = {'name': ref['name'], 'sha256': ref['sha256'], 'request_id': 'first-explicit-click'}
+    recovered = scene[0].post(BASE + '/material-approvals/continue', json=recovery)
+    assert recovered.status_code == 200, recovered.text
+    job_id = recovered.json()['continuation']['job_id']
+    assert wait(scene, scene[0].get(f"/api/runs/{RUN}/jobs/{job_id}"))['status'] == 'succeeded'
+    assert calls == [RUN]
+    again = scene[0].post(BASE + '/material-approvals/continue', json=recovery)
+    assert again.json()['continuation']['job_id'] == job_id
+    assert calls == [RUN]
+    assert not scene[4].calls and not scene[5].calls
+
+
+@pytest.mark.parametrize('first_status', ['failed', 'blocked'])
+def test_approved_image_continuation_retries_only_after_explicit_new_click(scene, first_status):
+    video_goal(scene)
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    def prepare(run_id):
+        calls.append(run_id)
+        ordinal = len(calls)
+        def run(text, emit, check_cancel):
+            if ordinal == 1:
+                if first_status == 'failed':
+                    raise PipelineError('fixture', 'Synthetic preparation failure')
+                return OrchestratorTurn('Synthetic preparation blocked.', 'incomplete', 0)
+            entered.set()
+            assert release.wait(2), 'second preparation was not released'
+            return OrchestratorTurn('Prepared offline.', 'done', 0)
+        return run, {'source': 'offline-continuation'}
+    scene[0].app.state.jobs.prepare = prepare
+    data = workspace(scene)
+    ref = data['materials'][0]
+    approval = {'name': ref['name'], 'sha256': ref['sha256'], 'approved': True, 'nonce': data['nonce']}
+    first = scene[0].post(BASE + '/material-approvals', json=approval)
+    assert first.status_code == 200, first.text
+    first_id = first.json()['continuation']['job_id']
+    assert wait(scene, scene[0].get(f'/api/runs/{RUN}/jobs/{first_id}'))['status'] == first_status
+
+    # A repeated approval after an uncertain HTTP response cannot spend on a
+    # new model turn. The existing job, even though failed, is returned.
+    duplicate_approval = scene[0].post(BASE + '/material-approvals', json=approval)
+    assert duplicate_approval.status_code == 200, duplicate_approval.text
+    assert duplicate_approval.json()['continuation']['job_id'] == first_id
+    assert calls == [RUN]
+
+    path = BASE + '/material-approvals/continue'
+    retry = {'name': ref['name'], 'sha256': ref['sha256'], 'request_id': 'explicit-retry-1'}
+    second = scene[0].post(path, json=retry)
+    assert second.status_code == 200, second.text
+    second_id = second.json()['continuation']['job_id']
+    assert second_id != first_id and entered.wait(2)
+    assert scene[0].post(path, json=retry).json()['continuation']['job_id'] == second_id
+    assert scene[0].post(path, json={**retry, 'request_id': 'explicit-retry-2'}).json()['continuation']['job_id'] == second_id
+    assert calls == [RUN, RUN]
+
+    release.set()
+    assert wait(scene, scene[0].get(f'/api/runs/{RUN}/jobs/{second_id}'))['status'] == 'succeeded'
+    assert scene[0].post(path, json={**retry, 'request_id': 'explicit-retry-3'}).json()['continuation']['job_id'] == second_id
+    assert calls == [RUN, RUN]
+    assert not scene[4].calls and not scene[5].calls
+
+
+def test_image_approval_skips_video_continuation_for_photo_and_existing_input(scene):
+    calls = capture_continuation(scene)
+    photo = approve(scene)
+    assert photo.status_code == 200 and 'continuation' not in photo.json()
+    assert not calls
+
+    video_goal(scene)
+    existing = draft(scene)
+    assert existing.status_code == 200, existing.text
+    assert wait(scene, action(scene, existing.json()))['status'] == 'succeeded'
+    approved = approve(scene)
+    assert approved.status_code == 200, approved.text
+    assert approved.json()['continuation'] == {'status': 'existing', 'draft_id': existing.json()['draft_id']}
+    assert not calls
 
 
 def wait(scene, response):

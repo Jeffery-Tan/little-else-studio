@@ -17,6 +17,16 @@ from test_server import RUN
 URL = 'https://www.tiktok.com/@fixture/video/7250000000000000000'
 
 
+def test_reference_current_work_uses_event_order_when_timestamps_share_a_second(native):
+    store = native[1]
+    store.append_event(RUN, 'attempt_submitted', stage='writing', sha256='a' * 64)
+    store.append_event(RUN, 'reference_video_started', reference_id='ordered-reference',
+                       request={'intent': 'analyze', 'instruction': '只拆解'})
+    assert task_state(store, RUN)[0]['after_creative_work'] is True
+    store.append_event(RUN, 'production_draft', draft={'draft_id': 'later-work'})
+    assert task_state(store, RUN)[0]['after_creative_work'] is False
+
+
 def request(native, *, remote=False, intent='analyze'):
     http, store, model, _, _, _ = native
     raw = video_bytes(audio=True)

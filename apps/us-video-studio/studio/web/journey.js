@@ -30,7 +30,9 @@ function renderJourneyStatus() {
   const tl=state.timeline, view=state.creatorView;
   const run=(state.runs || []).find(item=>item.run_id===state.runId) || tl?.run || {};
   if (!view) { $('project-progress').replaceChildren(); return; }
-  const next=state.busy ? null : view.action;
+  const visibleTarget=view.action?.kind==='navigate' && view.action.tab===state.canvasTab &&
+    (view.action.tab!=='plan'||!view.action.stage||view.action.stage===state.activeStage);
+  const next=state.busy||visibleTarget ? null : view.action;
   $('project-progress').innerHTML=`<section class="creator-goal" aria-label="当前作品与下一步">`+
     `<div class="creator-goal-main"><div class="creator-goal-heading"><span class="creator-kicker">最终交付 · ${escapeHtml(view.goal)}</span><h1>${escapeHtml(run.title||'未命名作品')}</h1></div>`+
     `<p class="creator-goal-current"><span class="small-dot"></span><strong>现在：${escapeHtml(view.current)}</strong></p>`+
@@ -39,7 +41,7 @@ function renderJourneyStatus() {
     (next?`<button type="button" class="primary creator-next" data-creator-next>${escapeHtml(next.label)}</button>`:'')+
     `</section>`;
   const button=$('project-progress').querySelector('[data-creator-next]');
-  if(button)button.onclick=()=>{
+  if(button)button.onclick=async()=>{
     const action=view.action;
     if(action.kind==='continue'){$('journey-decision')?.querySelector('[data-resume-decision]')?.click();return;}
     if(action.kind==='question'){setProjectFocus('chat');$('journey-decision')?.scrollIntoView({block:'nearest'});return;}
@@ -49,7 +51,19 @@ function renderJourneyStatus() {
         expected_version:action.version,expected_artifact_sha256:action.sha256});return;
     }
     if(action.kind==='reference'){toggleMaterials(true);return;}
+    if(action.kind==='settings'){$('connections-open')?.click();return;}
     if(action.kind==='chat'){setProjectFocus('chat');$('chat-input').focus();return;}
+    if(action.kind==='prepare'){
+      const runId=state.runId;
+      button.disabled=true;
+      await showJourneyTab(action.tab);
+      if(state.runId!==runId)return;
+      setProjectFocus('canvas');
+      const prepare=document.querySelector('.production-embedded [data-prepare]');
+      if(prepare&&!prepare.disabled)prepare.click();
+      else button.disabled=false;
+      return;
+    }
     if(action.kind==='navigate'){
       showJourneyTab(action.tab);
       if(action.tab==='plan'&&action.stage)selectStage(action.stage);
@@ -130,27 +144,33 @@ function showJourneyTab(tab, options={}) {
   $('stage').hidden=tab!=='plan';
   $('journey-storyboard').hidden=tab!=='storyboard';
   $('journey-video').hidden=tab!=='video';
+  let opened=null;
   if(tab==='plan'){
     const candidate=state.timeline?.pending?.stage || (state.rail||[]).find(s=>s.stage==='writing'&&s.has_doc)?.stage || (state.rail||[]).find(s=>s.stage==='direction'&&s.has_doc)?.stage || 'intake';
     selectStage(candidate);
-  } else openProduction({mount:$(tab==='storyboard'?'journey-storyboard':'journey-video'),kind:tab==='storyboard'?'image':'video'});
+  } else opened=openProduction({mount:$(tab==='storyboard'?'journey-storyboard':'journey-video'),kind:tab==='storyboard'?'image':'video'});
+  if(state.creatorView)renderJourneyStatus();
+  return opened;
 }
 
-function renderReferenceAnalysis() {
-  const task=state.creatorView?.reference;
-  const host=$('stage');
-  if(!task){host.innerHTML='<section class="creator-analysis"><h2>参考分析</h2><p>分析尚未完成，可在素材与参考中查看任务状态。</p><button type="button" class="ghost" data-show-analysis>查看参考任务</button></section>';}
-  else {
-    const material=(state.materials||[]).find(item=>item.name===task.name&&item.kind==='video'&&item.usable);
-    const video=material?`<video controls preload="metadata" src="${escapeHtml(materialUrl(material.name))}" aria-label="本次分析的参考视频"></video>`:'';
-    host.innerHTML=`<section class="creator-analysis"><span class="creator-kicker">当前作品 · 参考分析</span>`+
-      `<h2>${escapeHtml(task.title||'参考视频拆解报告')}</h2>`+
-      (task.name?`<p class="muted">指定参考：${escapeHtml(task.name)}</p>`:'')+video+
-      (task.report?`<div class="creator-analysis-report"><h3>观察与可借鉴方法</h3><div>${escapeHtml(task.report).replace(/\n/g,'<br>')}</div></div>`:'<p>报告尚未保存，请查看参考任务状态。</p>')+
-      `<p class="muted">模型观察未经人工核对；不会自动进入制作。</p>`+
-      `<button type="button" class="ghost" data-show-analysis>查看参考来源与记录</button></section>`;
-  }
+function referenceAnalysisHtml(task,materials) {
+  if(!task)return '<section class="creator-analysis"><h2>参考分析</h2><p>分析尚未完成，可在素材与参考中查看任务状态。</p><button type="button" class="ghost" data-show-analysis>查看参考任务</button></section>';
+  const material=(materials||[]).find(item=>item.name===task.name&&item.kind==='video'&&item.usable);
+  const video=material?`<video controls preload="metadata" src="${escapeHtml(materialUrl(material.name))}" aria-label="本次分析的参考视频"></video>`:'';
+  return `<section class="creator-analysis"><span class="creator-kicker">本轮任务 · 参考分析</span>`+
+    `<h2>${escapeHtml(task.title||'参考视频拆解报告')}</h2>`+
+    (task.name?`<p class="muted">指定参考：${escapeHtml(task.name)}</p>`:'')+video+
+    (task.report?`<div class="creator-analysis-report"><h3>观察与可借鉴方法</h3><div>${escapeHtml(task.report).replace(/\n/g,'<br>')}</div></div>`:'<p>报告尚未保存，请查看参考任务状态。</p>')+
+    `<p class="muted">模型观察未经人工核对；不会自动进入制作。</p>`+
+    `<button type="button" class="ghost" data-show-analysis>查看参考来源与记录</button></section>`;
+}
+function wireReferenceAnalysis(host) {
   host.querySelector('[data-show-analysis]')?.addEventListener('click',()=>toggleMaterials(true));
+}
+function renderReferenceAnalysis() {
+  const host=$('stage');
+  host.innerHTML=referenceAnalysisHtml(state.creatorView?.reference,state.materials);
+  wireReferenceAnalysis(host);
 }
 
 function bindJourneyTabs(){

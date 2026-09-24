@@ -480,7 +480,23 @@ test('normal direction fields lead with the real claim and show recommendation a
   assert.match(html,/团队推荐/);
   assert.match(html,/仍需两档产品图/);
   assert.match(html,/两档官方图需先核对/);
+  assert.ok(html.indexOf('研究依据与制作条件') < html.indexOf('仍需两档产品图'));
+  assert.ok(html.indexOf('完整说明与成立前提') < html.indexOf('两档官方图需先核对'));
   assert.doesNotMatch(html,/data-act="approve"|<h3>方向 A<\/h3>/);
+});
+
+test('choice-changing direction risks remain visible while generic evidence stays in details', () => {
+  const html=stageHtml(step({blocks:[
+    {type:'cards',cards:[{head:'A',fields:[
+      {label:'主张',value:'先比较容量'},
+      {label:'方案取舍',value:'舍弃细节镜头',secondary:true},
+      {label:'证据强度',value:'只有一张样品图',secondary:true},
+    ]}]},
+    {type:'matrix',columns:['A'],rows:[{label:'两款实际容量',cells:[true]}]},
+  ]}),{});
+  assert.ok(html.indexOf('舍弃细节镜头') < html.indexOf('研究依据与制作条件'));
+  assert.match(html,/「两款实际容量」未解决时，这个方向不能成立/);
+  assert.ok(html.indexOf('研究依据与制作条件') < html.indexOf('只有一张样品图'));
 });
 
 test('accepted option is highlighted from recorded approval, never from recommendation', () => {
@@ -490,6 +506,9 @@ test('accepted option is highlighted from recorded approval, never from recommen
   assert.match(html,/已采用方向 B/);
   assert.match(html,/class="creator-direction-card is-selected" data-direction-card="B"/);
   assert.doesNotMatch(html,/class="creator-direction-card is-selected" data-direction-card="A"/);
+  assert.match(html,/<details class="creator-direction-alternatives"><summary>比较其他 1 个方向<\/summary>/);
+  assert.ok(html.indexOf('data-direction-card="B"') < html.indexOf('creator-direction-alternatives'));
+  assert.ok(html.indexOf('creator-direction-alternatives') < html.indexOf('data-direction-card="A"'));
   assert.doesNotMatch(html,/data-act="approve"/);
 });
 
@@ -509,6 +528,39 @@ test('structured script reads exact lines before optional pictures and the timel
   assert.match(html,/data-creator-target="第 1 段画面"/);
   assert.match(html,/class="creator-script-caption"/);
   assert.match(html,/查看分镜顺序与其他依据/);
+});
+
+test('visual script shows every picture and sound without opening details or inventing silence', () => {
+  const html=stageHtml(step({stage:'writing',blocks:[{type:'cards',cards:[
+    {head:'0:00–0:03',fields:[{label:'画面',value:'拉开空包，镜头贴近拉链'},{label:'声音',value:'拉链声'}]},
+    {head:'0:03–0:07',fields:[{label:'画面',value:'装入午餐盒与水瓶'},{label:'台词',value:'（无台词）'},{label:'声音',value:'脚步与环境声'}]},
+    {head:'0:07–0:12',fields:[{label:'画面',value:'合上包并背起离开'},{label:'声音',value:'音乐落点'}]},
+  ]}],artifact_sha256:'a'.repeat(64)}),{contentFormat:'video'});
+  for (const phrase of ['拉开空包，镜头贴近拉链','装入午餐盒与水瓶','合上包并背起离开','拉链声','脚步与环境声','音乐落点']) assert.match(html,new RegExp(phrase));
+  assert.doesNotMatch(html,/creator-script-shot|这一段未记录台词或字幕/);
+  assert.equal((html.match(/原稿注明：/g)||[]).length,1);
+  assert.equal((html.match(/data-creator-target="第 \d 段画面"/g)||[]).length,3);
+  assert.doesNotMatch(html,/data-creator-target="第 1 段台词"/);
+});
+
+test('photo script reads page pictures and on-image copy without video labels', () => {
+  const html=stageHtml(step({stage:'writing',blocks:[{type:'cards',cards:[
+    {head:'第 1 页',fields:[{label:'画面',value:'桌上并排两款包'},{label:'台词',value:'Pick your lunch size'}]},
+    {head:'第 2 页',fields:[{label:'画面',value:'大号包放入午餐盒'},{label:'台词',value:'Room for more'}]},
+  ]}],artifact_sha256:'a'.repeat(64)}),{contentFormat:'photo'});
+  assert.match(html,/逐页看画面与图内文案/);
+  assert.match(html,/data-creator-target="第 1 页画面"/);
+  assert.match(html,/data-creator-target="第 2 页图内文案"/);
+  assert.ok(html.indexOf('桌上并排两款包') < html.indexOf('Pick your lunch size'));
+  assert.doesNotMatch(html,/第 1 段|台词或字幕|声音/);
+});
+
+test('stale structured script stays readable without offering a current-version text target', () => {
+  const html=stageHtml(step({stage:'writing',stale:true,blocks:[{type:'cards',cards:[
+    {head:'0:00–0:03',fields:[{label:'画面',value:'旧稿画面'},{label:'台词',value:'旧稿台词'}]},
+  ]}],artifact_sha256:'a'.repeat(64)}),{contentFormat:'video'});
+  assert.match(html,/旧稿画面/);
+  assert.doesNotMatch(html,/data-creator-target=/);
 });
 
 test('prose-only historical script displays its original bytes without invented segments', () => {

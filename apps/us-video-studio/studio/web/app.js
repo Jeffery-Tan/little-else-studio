@@ -359,7 +359,9 @@ function renderPane() {
   // to the bottom, which is half of what 「翻来翻去」 meant: a stage that updated
   // under him moved the text out from beneath his eyes.
   const kept = host.scrollTop;
-  host.innerHTML = stageHtml(displayStep, {
+  const referenceWork = state.creatorView?.referenceCurrent && typeof referenceAnalysisHtml === 'function'
+    ? referenceAnalysisHtml(state.creatorView.reference, state.materials) : '';
+  host.innerHTML = referenceWork + stageHtml(displayStep, {
     artifactBody: state.artifactBodies.get(bodyKey),
     // Every question the run has. `stageHtml` keeps the ones belonging to this
     // stage — the rule lives there so it has one home and one test.
@@ -369,11 +371,13 @@ function renderPane() {
     // separate radio group name so the two never share one document group.
     pending: tl.pending || null,
     drafts: state.draft,
+    contentFormat: state.creatorView?.format ||
+      (state.runs || []).find(run => run.run_id === state.runId)?.content_format,
   });
   if (step.stage === 'writing' && !step.stale && step.integrity_ok !== false &&
       host.querySelector('[data-creator-target], .artifact-prose p, .artifact-prose li')) {
     const hint = box('p', 'creator-feedback-hint',
-      host.querySelector('[data-creator-target]') ? '点一段台词或展开画面，在对话中提出修改。'
+      host.querySelector('[data-creator-target]') ? '点一段画面、声音或台词，在对话中提出修改。'
         : '点一段原文，在对话中提出这段的修改。');
     host.querySelector('.stage-heading')?.after(hint);
   }
@@ -402,6 +406,7 @@ function renderPane() {
   // resolvable once `state.materials` is loaded.
   wireMedia(host);
   wireCreatorFeedback(host, step);
+  if (referenceWork && typeof wireReferenceAnalysis === 'function') wireReferenceAnalysis(host);
   host.scrollTop = kept;
 }
 
@@ -429,6 +434,26 @@ function setMediaFeedbackTarget(runId, attempt, kind, atSeconds) {
   clear.type = 'button'; clear.onclick = clearFeedbackTarget;
   chip.append(box('span', '', label), clear); chip.hidden = false;
   $('chat-input').placeholder = kind === 'video' ? '说说这个时间点哪里需要调整…' : '说说这张图哪里需要调整…';
+  setProjectFocus('chat'); $('chat-input').focus();
+}
+
+function setProductionFeedbackTarget(runId, draft, attempt) {
+  if (state.runId !== runId || !draft?.draft_id ||
+      !/^[a-f0-9]{64}$/.test(draft.draft_sha256 || '') ||
+      (attempt && !attempt.attempt_id)) {
+    toast('这份制作输入暂时无法核对，请重新打开当前作品。', true); return;
+  }
+  const target = {kind:'production_draft', run_id:runId,
+    draft_id:draft.draft_id, draft_sha256:draft.draft_sha256};
+  if (attempt) target.attempt_id = attempt.attempt_id;
+  state.feedbackTarget = target;
+  const chip = $('feedback-target');
+  chip.replaceChildren();
+  const label = box('span', '', `正在说明这版${draft.kind === 'video' ? '视频' : '图片'}制作的问题`);
+  const clear = box('button', 'ghost small', '取消');
+  clear.type = 'button'; clear.onclick = clearFeedbackTarget;
+  chip.append(label, clear); chip.hidden = false;
+  $('chat-input').placeholder = '说说哪里需要调整，团队会核对这版作品和本次问题…';
   setProjectFocus('chat'); $('chat-input').focus();
 }
 
@@ -1382,12 +1407,12 @@ async function send(text) {
     if (target) {
       if (runId !== target.run_id)
         throw Error('项目已切换。意见已保留，请重新选择目标。');
-      if (target.kind !== 'media') {
+      if (target.kind === 'writing') {
         const current = (state.rail || []).find(row => row.stage === target.stage);
         if (current?.version !== target.version || current?.artifact_sha256 !== target.artifact_sha256)
           throw Error('稿件版本已变化。意见已保留，请重新选择当前版本中的句子。');
       }
-      if (state.busy) throw Error('当前任务结束后再发送逐句反馈；现在可取消句子选择，直接调整运行目标。');
+      if (state.busy) throw Error('当前任务结束后再发送这条定点反馈；现在可取消目标选择，直接调整运行目标。');
     }
     if (state.busy && canSteerJob(currentJob)) {
       if (typeof StudioComposer !== 'undefined' && StudioComposer.files(runId).length)

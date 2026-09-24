@@ -55,11 +55,19 @@ class MediaFeedbackTarget(BaseModel):
     at_seconds: float | None = Field(default=None, ge=0, le=3600)
 
 
+class ProductionDraftFeedbackTarget(BaseModel):
+    kind: Literal['production_draft']
+    run_id: str = Field(min_length=1, max_length=64)
+    draft_id: str = Field(min_length=1, max_length=160)
+    draft_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    attempt_id: str | None = Field(default=None, min_length=1, max_length=160)
+
+
 class JobIn(MessageIn):
     request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
     question_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
     reference_consent: bool = Field(default=False, strict=True)
-    feedback_target: FeedbackTarget | MediaFeedbackTarget | None = None
+    feedback_target: FeedbackTarget | MediaFeedbackTarget | ProductionDraftFeedbackTarget | None = None
 
 
 class SteerIn(MessageIn):

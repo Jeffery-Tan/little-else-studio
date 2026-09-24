@@ -90,6 +90,13 @@ function fieldValue(card, labels) {
   return (card.fields || []).find(field => labels.includes(field.label))?.value || '';
 }
 
+function shortRecommendation(text) {
+  const value = String(text || '').trim();
+  if (value.length <= 170) return value;
+  const sentence = value.match(/^.{24,170}?[。！？.!?](?=\s|$|[^。！？.!?])/u)?.[0];
+  return sentence || `${value.slice(0, 170).trimEnd()}…`;
+}
+
 function directionWorkHtml(step, pending, ctx) {
   const blocks = step.blocks || [];
   const cards = blocks.find(block => block.type === 'cards' && block.cards?.length)?.cards || [];
@@ -106,6 +113,7 @@ function directionWorkHtml(step, pending, ctx) {
     ...cards.filter(card => card.emphasis === 'chosen').map(card => keyOf(card)),
   ]);
   const recommendation = blocks.find(block => block.type === 'callout' && block.title === '推荐');
+  const dependencies = blocks.find(block => block.type === 'matrix' && block.rows?.length);
   const other = blocks.filter(block => block.type !== 'cards' && block !== recommendation);
   const ordered = inlineGate ? matching : cards;
   const optionCard = card => {
@@ -116,10 +124,14 @@ function directionWorkHtml(step, pending, ctx) {
     const opening = fieldValue(card, ['开场', '前 3 秒', '开场句']);
     const selectedHere = Boolean(selected && selected === key);
     const used = new Set(['标题', '名称', '创意名称', '主张', '创意主张', '画面与表达', '故事概述', '开场', '前 3 秒', '开场句']);
+    const background = new Set(['依据', '证据强度', '素材依赖', '素材需求', '执行难度']);
+    const choiceRisk = new Set(['方案取舍', '取舍', '风险', '可能失败', '限制']);
     const visible = (card.fields || []).filter(field => !used.has(field.label) &&
-      (!field.secondary || ['依据', '证据强度', '素材依赖', '素材需求'].includes(field.label)));
-    const details = (card.fields || []).filter(field => !used.has(field.label) && field.secondary &&
-      !['依据', '证据强度', '素材依赖', '素材需求'].includes(field.label));
+      (choiceRisk.has(field.label) || (!field.secondary && !background.has(field.label))));
+    const details = (card.fields || []).filter(field => !used.has(field.label) && !visible.includes(field));
+    const dependencyRows = dependencies?.rows || [];
+    const optionIndex = (dependencies?.columns || []).indexOf(key);
+    const choiceDependencies = optionIndex < 0 ? [] : dependencyRows.filter(row => row.cells?.[optionIndex] && row.label);
     return `<article class="creator-direction-card${selectedHere ? ' is-selected' : ''}" data-direction-card="${escapeHtml(key)}">` +
       (card.media ? `<div class="creator-direction-media" data-media="${escapeHtml(card.media)}"></div>` : '') +
       `<div class="creator-direction-body"><span class="creator-kicker">${selectedHere ? `${selectedLabel} · ` : ''}${recommended.has(key) ? '团队推荐 · ' : ''}方向 ${escapeHtml(key)}</span>` +
@@ -128,18 +140,28 @@ function directionWorkHtml(step, pending, ctx) {
       (story ? `<p class="creator-direction-story">${escapeHtml(story)}</p>` : '') +
       (opening ? `<div class="creator-opening"><span>具体开场</span><p>${escapeHtml(opening)}</p></div>` : '') +
       (visible.length ? `<dl class="creator-direction-fields">${visible.map(field => `<dt>${escapeHtml(field.label)}</dt><dd>${escapeHtml(field.value)}</dd>`).join('')}</dl>` : '') +
-      (details.length ? `<details class="creator-direction-details"><summary>更多取舍与执行条件</summary><dl>${details.map(field => `<dt>${escapeHtml(field.label)}</dt><dd>${escapeHtml(field.value)}</dd>`).join('')}</dl></details>` : '') +
+      (choiceDependencies.length ? `<div class="creator-direction-risk"><strong>选择前要核对</strong><ul>${choiceDependencies.map(row => `<li>「${escapeHtml(row.label)}」未解决时，这个方向不能成立</li>`).join('')}</ul></div>` : '') +
+      (details.length ? `<details class="creator-direction-details"><summary>研究依据与制作条件</summary><dl>${details.map(field => `<dt>${escapeHtml(field.label)}</dt><dd>${escapeHtml(field.value)}</dd>`).join('')}</dl></details>` : '') +
       (inlineGate ? `<button type="button" class="good creator-direction-choose" data-act="approve" data-option-key="${escapeHtml(key)}">采用这个方向并继续</button>` : '') +
       `</div></article>`;
   };
-  const decision = selected ? `<p class="creator-direction-selected">${selectedLabel}方向 ${escapeHtml(selected)}，下方保留其他提案供比较。</p>` :
+  const selectedCard = selected && !inlineGate ? ordered.find(card => keyOf(card) === selected) : null;
+  const alternatives = selectedCard ? ordered.filter(card => card !== selectedCard) : [];
+  const cardList = selectedCard ? `<div class="creator-direction-current">${optionCard(selectedCard)}</div>` +
+    (alternatives.length ? `<details class="creator-direction-alternatives"><summary>比较其他 ${alternatives.length} 个方向</summary><div class="creator-direction-grid">${alternatives.map(optionCard).join('')}</div></details>` : '') :
+    `<div class="creator-direction-grid">${ordered.map(optionCard).join('')}</div>`;
+  const decision = selected ? `<p class="creator-direction-selected">${selectedLabel}方向 ${escapeHtml(selected)}。${alternatives.length ? '其他提案可展开比较。' : ''}</p>` :
     step.approval_decision === 'returned' ? '<p class="creator-direction-selected">这一版已退回，提案保留供回看。</p>' : '';
   const findings = pending?.findings?.length ? `<div class="gate-findings creator-review-warning"><strong>${pending.passed ? '采用前请留意' : '审核尚未通过，采用前请核对'}</strong>${pending.findings.map(findingHtml).join('')}</div>` : '';
-  const recommendationHtml = recommendation?.text ? `<div class="creator-direction-recommendation"><strong>团队建议</strong><p>${escapeHtml(recommendation.text)}</p>` +
-    (recommendation.items?.length ? `<ul>${recommendation.items.map(item => `<li>${escapeHtml(item.text)}</li>`).join('')}</ul>` : '') + '</div>' : '';
+  const recommendationText = recommendation?.text || '';
+  const recommendationShort = shortRecommendation(recommendationText);
+  const recommendationHtml = recommendationText ? `<div class="creator-direction-recommendation"><strong>${selectedCard ? '当时的团队建议' : '团队建议'}</strong><p>${escapeHtml(recommendationShort)}</p>` +
+    (recommendation.items?.length || recommendationShort !== recommendationText ? `<details><summary>完整说明与成立前提</summary>` +
+      (recommendationShort !== recommendationText ? `<p>${escapeHtml(recommendationText)}</p>` : '') +
+      (recommendation.items?.length ? `<ul>${recommendation.items.map(item => `<li>${escapeHtml(item.text)}</li>`).join('')}</ul>` : '') + '</details>' : '') + '</div>' : '';
   const gateAttrs = inlineGate ? ` id="stage-decision" class="gate creator-direction-gate" role="group" aria-label="选择这一版创意方向" data-stage="direction" data-version="${escapeHtml(pending.version)}" data-sha="${escapeHtml(pending.artifact_sha256 || '')}" data-passed="${pending.passed ? '1' : '0'}" data-needs-choice="1"` : ' class="creator-direction-work"';
   const footer = inlineGate ? `<div class="creator-direction-footer"><label class="gate-note-label">${pending.passed ? '补充意见' : '覆盖审核或退回的具体理由'}<textarea class="reason" rows="3" maxlength="8000" aria-label="决定意见" placeholder="想保留什么，哪里需要调整？"></textarea></label><p class="gate-feedback" role="status">选择方向才会提交；推荐不代表已选</p><button type="button" class="bad small" data-act="reject">都不合适，退回修改</button><p class="gate-limit">仅确认这一版策划，不开始图片或视频生成。</p><details class="gate-next"><summary>后续阶段与历史用量</summary>${pending.next_stage_label ? `<div>下一步：${escapeHtml(pending.next_stage_label)} · ${escapeHtml(pending.next_owner)}</div>` : ''}<div class="gate-next-cost">${escapeHtml(pending.next_cost_sentence || '')}</div></details></div>` : '';
-  const html = `<div class="pane-doc"><section${gateAttrs}><div class="creator-decision-intro"><span class="creator-kicker">${inlineGate ? '现在需要你决定' : '当前创意'}</span><h2>${inlineGate ? '选一个方向，继续写成方案' : selected ? '已采用的方向与备选' : '看看这些创意方向'}</h2></div>${decision}${recommendationHtml}${findings}<div class="creator-direction-grid">${ordered.map(optionCard).join('')}</div>${footer}${other.length ? `<details class="creator-direction-support"><summary>完整依据与其他内容</summary>${blocksHtml(other)}</details>` : ''}${sourceSummaryHtml(step)}</section></div>`;
+  const html = `<div class="pane-doc"><section${gateAttrs}><div class="creator-decision-intro"><span class="creator-kicker">${inlineGate ? '现在需要你决定' : '当前创意'}</span><h2>${inlineGate ? '选一个方向，继续写成方案' : selected ? `${selectedLabel}的方向` : '看看这些创意方向'}</h2></div>${decision}${selectedCard ? cardList + recommendationHtml : recommendationHtml + findings + cardList}${footer}${other.length ? `<details class="creator-direction-support"><summary>完整依据与其他内容</summary>${blocksHtml(other)}</details>` : ''}${sourceSummaryHtml(step)}</section></div>`;
   return {html, inlineGate};
 }
 
@@ -155,23 +177,34 @@ function writingWorkHtml(step, ctx) {
   const blocks = step.blocks || [];
   const cards = blocks.find(block => block.type === 'cards' && block.cards?.length)?.cards || [];
   if (!cards.length) return legacyWorkHtml(step, '脚本正文', '这份历史脚本按原文保存；可阅读原稿并对当前作品提出修改。', ctx);
+  const isPhoto = ctx?.contentFormat === 'photo' ||
+    (!ctx?.contentFormat && cards.every(card => /^(?:第\s*)?\d+\s*页|^页\s*\d+|^P\s*\d+/iu.test(String(card.head || '').trim())));
+  const canSelect = !step.stale && step.integrity_ok !== false && /^[a-f0-9]{64}$/.test(step.artifact_sha256 || '');
   const caption = blocks.find(block => block.type === 'text' && block.title === '发布文案');
   const assumptions = blocks.find(block => block.type === 'list' && block.title === '这份脚本做了哪些假设');
   const other = blocks.filter(block => block !== caption && block !== assumptions && block.type !== 'cards');
   const segments = cards.map((card, index) => {
-    const number = index + 1, line = fieldValue(card, ['台词', '台词或字幕']), picture = fieldValue(card, ['画面']);
+    const number = index + 1;
+    const line = fieldValue(card, isPhoto ? ['图内文案', '图内文字', '文案', '台词', '台词或字幕'] : ['台词', '台词或字幕']);
+    const picture = fieldValue(card, ['画面', '画面与动作']);
     const sound = fieldValue(card, ['声音']), duration = fieldValue(card, ['时长']);
     const time = String(card.head || '').trim();
-    return `<article class="creator-script-segment"><header><span>第 ${number} 段${time ? ` · ${escapeHtml(time)}` : ''}</span>${duration ? `<small>${escapeHtml(duration)}</small>` : ''}</header>` +
-      `<div class="blk-cards"><p class="creator-script-line${line ? ' vf-value' : ''}"${line ? ` data-creator-target="第 ${number} 段台词"` : ''}>${escapeHtml(line || '这一段未记录台词或字幕')}</p>` +
-      `<details class="creator-script-shot"><summary>看这一段的画面与声音</summary>` +
+    const explicitNoLine = !isPhoto && /^(?:[（(]?无台词[）)]?|不使用口播|无口播)$/u.test(line.trim());
+    const hasLine = Boolean(line.trim()) && !explicitNoLine && !['无', '—', '-'].includes(line.trim());
+    const target = isPhoto ? `第 ${number} 页` : `第 ${number} 段`;
+    const words = hasLine ? `<div class="creator-script-words"><strong>${isPhoto ? '图内文案' : '台词或字幕'}</strong><p class="creator-script-line vf-value"${canSelect ? ` data-creator-target="${target}${isPhoto ? '图内文案' : '台词'}"` : ''}>${escapeHtml(line)}</p></div>` :
+      explicitNoLine ? `<p class="creator-script-no-line">原稿注明：${escapeHtml(line)}</p>` : '';
+    const visual = picture || card.media ? `<div class="creator-script-visual">` +
       (card.media ? `<div class="creator-script-media" data-media="${escapeHtml(card.media)}"></div>` : '') +
-      `<div class="creator-script-shot-body"><strong>画面</strong><p class="creator-script-picture${picture ? ' vf-value' : ''}"${picture ? ` data-creator-target="第 ${number} 段画面"` : ''}>${escapeHtml(picture || '这一段未记录画面')}</p>` +
-      (sound ? `<strong>声音</strong><p>${escapeHtml(sound)}</p>` : '') + '</div></details></div></article>';
+      (picture ? `<div class="creator-script-picture-wrap"><strong>${isPhoto ? '画面' : '画面与动作'}</strong><p class="creator-script-picture vf-value"${canSelect ? ` data-creator-target="${target}画面"` : ''}>${escapeHtml(picture)}</p></div>` : '') + '</div>' : '';
+    const audio = sound ? `<div class="creator-script-sound"><strong>声音</strong><p${canSelect ? ` data-creator-target="${target}声音"` : ''}>${escapeHtml(sound)}</p></div>` : '';
+    const content = isPhoto || !hasLine ? visual + words : words + visual;
+    const heading = isPhoto ? (time || `第 ${number} 页`) : `第 ${number} 段${time ? ` · ${time}` : ''}`;
+    return `<article class="creator-script-segment${isPhoto ? ' is-photo' : hasLine ? ' has-words' : ' is-visual'}"><header><span>${escapeHtml(heading)}</span>${duration && !isPhoto ? `<small>${escapeHtml(duration)}</small>` : ''}</header>` +
+      `<div class="creator-script-content">${content}${audio}${!content && !audio ? `<p class="creator-script-unwritten">这一${isPhoto ? '页' : '段'}尚未写出可读内容。</p>` : ''}</div></article>`;
   }).join('');
-  const canSelect = !step.stale && step.integrity_ok !== false && /^[a-f0-9]{64}$/.test(step.artifact_sha256 || '');
-  return `<div class="pane-doc creator-script-work"><div class="creator-script-intro"><span class="creator-kicker">当前脚本</span><h2>按实际台词阅读</h2><p>${canSelect ? '点选一句台词，或展开画面后选中描述，在对话中说明要改哪里。' : '先阅读这份脚本；来源或版本需要核对后才能针对句子修改。'}</p></div><div class="creator-script-lines">${segments}</div>` +
-    (caption?.text ? `<section class="creator-script-caption"><h3>发布文案</h3><p class="blk-text" data-creator-target="发布文案">${escapeHtml(caption.text)}</p></section>` : '') +
+  return `<div class="pane-doc creator-script-work"><div class="creator-script-intro"><span class="creator-kicker">${isPhoto ? '当前图文稿' : '当前脚本'}</span><h2>${isPhoto ? '逐页看画面与图内文案' : '逐段读画面与表达'}</h2><p>${canSelect ? '点选画面或文字，在对话中说明要改哪里。' : '先阅读这份作品；来源或版本需要核对后才能针对具体内容修改。'}</p></div><div class="creator-script-lines">${segments}</div>` +
+    (caption?.text ? `<section class="creator-script-caption"><h3>发布文案</h3><p class="blk-text"${canSelect ? ' data-creator-target="发布文案"' : ''}>${escapeHtml(caption.text)}</p></section>` : '') +
     (assumptions?.items?.length ? `<section class="creator-script-assumptions"><h3>这份脚本仍需核对</h3><ul>${assumptions.items.map(item => `<li>${escapeHtml(item.text)}</li>`).join('')}</ul></section>` : '') +
     (other.length ? `<details class="creator-script-support"><summary>查看分镜顺序与其他依据</summary>${blocksHtml(other)}</details>` : '') + sourceSummaryHtml(step) + '</div>';
 }

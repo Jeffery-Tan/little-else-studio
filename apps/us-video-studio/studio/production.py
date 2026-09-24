@@ -66,6 +66,13 @@ class ApprovalIn(Reference):
     nonce: str
 
 
+class ContinueApprovalIn(Reference):
+    # A click identity survives HTTP uncertainty; a new click may retry only
+    # after the preceding preparation job has conclusively failed or blocked.
+    request_id: str | None = Field(default=None, min_length=1, max_length=128,
+                                   pattern=r'^[A-Za-z0-9_.:-]+$')
+
+
 class RefreshIn(Input):
     request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
 
@@ -359,6 +366,12 @@ class Production:
                           'approved': approvals.get((m['name'], m['sha256']), False)}
                          for m in evidence_snapshot(self.store, run_id)['materials']]
             material_hashes = {m['name']: m['sha256'] for m in materials}
+            material_by_pair = {(m['name'], m['sha256']): m for m in materials if m['kind'] == 'image'}
+            latest_approved_image = next((material_by_pair.get((event.get('name'), event.get('sha256')))
+                for event in reversed(self.store.read_events(run_id))
+                if event.get('kind') == 'production_material_approval' and event.get('approved')
+                and approvals.get((event.get('name'), event.get('sha256')))
+                and material_by_pair.get((event.get('name'), event.get('sha256')))), None)
             current = self.store.latest_artifact(run_id, 'writing')
             sources = []
             for a in self.store.list_artifacts(run_id, 'writing'):
@@ -378,7 +391,8 @@ class Production:
             result = {'sources': sources, 'materials': materials, 'drafts': list(drafts.values())}
         if not for_agent:
             result.update(capabilities=self.capabilities(), nonce=self.nonce(run_id),
-                          active=bool(self.jobs.active), unresolved_calls=self.jobs.ledger.totals().unknown_calls)
+                          active=bool(self.jobs.active), unresolved_calls=self.jobs.ledger.totals().unknown_calls,
+                          latest_approved_image=latest_approved_image)
         return result
 
     def prepare_review(self, run_id, draft_id, payload, *, frozen=None):
@@ -629,6 +643,87 @@ def install_production_routes(app, jobs, require_run, connections, settings, lea
         if jobs.active is not None:
             raise ValueError('制作团队正在执行，请本轮结束后再保存或确认。')
 
+    def continue_after_image_approval(run_id: str, name: str, sha256: str, *, retry_request_id: str | None = None):
+        """Continue the already approved video work without granting media authority.
+
+        The source and image fingerprints make retries resolve to the same job.
+        Reading a project never invokes this function; only the approval click or
+        an explicit recovery request does.
+        """
+        # Serialize the choice of a retry identity with job creation and
+        # completion. A repeated approval never retries; only /continue with a
+        # fresh request_id can do that after a verified terminal failure.
+        with jobs.lock:
+            with jobs.store.run_lock(run_id):
+                if not service.approvals(run_id).get((name, sha256)):
+                    raise ValueError('这张图片尚未获确认，请重新打开图片审核。')
+                selection = next((event.get('selection', {}) for event in reversed(jobs.store.read_events(run_id))
+                                  if event.get('kind') == 'creative_context_selected'), None)
+                if not selection or selection.get('format') != 'video' or selection.get('intent') not in {'new', 'continue', 'edit'}:
+                    return None
+                source = jobs.store.latest_artifact(run_id, 'writing')
+                if (not source or source.digest_algorithm != 'artifact-v2'
+                        or not jobs.store.verify_artifact(run_id, 'writing', source.version)
+                        or not jobs.pipeline.is_complete(run_id, 'writing')):
+                    return {'status': 'not_started', 'reason': '当前脚本需要先确认准确版本，视频输入尚未准备。'}
+                read_image(jobs.store, run_id, name, sha256)
+                baseline = source_snapshot(jobs.store, run_id)
+                existing = next((draft for draft in reversed(list(draft_records(jobs.store, run_id).values()))
+                                 if draft['kind'] == 'video' and draft['source_sha256'] == source.sha256
+                                 and draft['source_snapshot'] == baseline
+                                 and draft['reference'] == {'name': name, 'sha256': sha256}
+                                 and draft['review'] and draft['review'].get('verdict') == 'ready'), None)
+                if existing:
+                    return {'status': 'existing', 'draft_id': existing['draft_id']}
+                fingerprint = hashlib.sha256(json.dumps([name, sha256, source.sha256],
+                    ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+                base_request_id = 'approved-image:' + fingerprint
+                retry_id = (base_request_id + ':retry:' + hashlib.sha256(retry_request_id.encode()).hexdigest()[:24]
+                            if retry_request_id else None)
+                prior = [event for event in jobs.store.read_events(run_id)
+                         if event.get('kind') == 'job_created' and
+                         (event.get('request_id') == base_request_id or
+                          str(event.get('request_id', '')).startswith(base_request_id + ':retry:'))]
+                text = (f'我已在界面确认参考图 {json.dumps(name, ensure_ascii=False)}，图片 SHA256 为 {sha256}。'
+                        f'请仅针对当前已确认脚本第 {source.version} 版（SHA256 {source.sha256}）'
+                        '准备这张图对应的视频制作输入，并完成独立文字制作检查。'
+                        '将准确参考图、画面描述、时长和费用展示在成片视图，等我核对后决定是否生成。'
+                        '不要批准图片、不要提交图片或视频生成。')
+
+            def receipt(job):
+                return {'status': 'started' if job['status'] in {'queued', 'running', 'cancelling'} else 'existing',
+                        'job_id': job['job_id'], 'job_status': job['status']}
+
+            if retry_id:
+                repeated = next((row for row in prior if row['request_id'] == retry_id), None)
+                if repeated:
+                    return receipt(jobs.get(run_id, repeated['job_id']))
+            if prior:
+                latest_job = jobs.get(run_id, prior[-1]['job_id'])
+                if (not retry_id or latest_job['status'] not in {'failed', 'blocked'}
+                        or latest_job['open_attempts'] or latest_job['unresolved_calls']):
+                    return receipt(latest_job)
+            request_id = retry_id or base_request_id
+
+            def prepare_exact(rid):
+                with jobs.store.run_lock(rid):
+                    latest = jobs.store.latest_artifact(rid, 'writing')
+                    selected = next((event.get('selection', {}) for event in reversed(jobs.store.read_events(rid))
+                                     if event.get('kind') == 'creative_context_selected'), None)
+                    if (not service.approvals(rid).get((name, sha256)) or not latest
+                            or latest.sha256 != source.sha256 or latest.version != source.version
+                            or not jobs.pipeline.is_complete(rid, 'writing')
+                            or not selected or selected.get('format') != 'video'
+                            or selected.get('intent') not in {'new', 'continue', 'edit'}):
+                        raise ValueError('参考图或脚本已变化，请核对当前作品后重新决定。')
+                    read_image(jobs.store, rid, name, sha256)
+                return jobs.prepare(rid)
+            try:
+                job = jobs.submit(run_id, text, request_id, prepare=prepare_exact)
+            except (ValueError, PipelineError) as exc:
+                return {'status': 'not_started', 'reason': str(exc)}
+            return receipt(job)
+
     @app.get('/api/runs/{run_id}/production')
     def workspace(run_id: str):
         require_run(run_id)
@@ -657,7 +752,24 @@ def install_production_routes(app, jobs, require_run, connections, settings, lea
                 read_image(jobs.store, run_id, payload.name, payload.sha256)
                 service.event(run_id, 'production_material_approval', name=payload.name, sha256=payload.sha256,
                               approved=payload.approved, actor='user', nonce_sha256=hashlib.sha256(payload.nonce.encode()).hexdigest())
-                return {'approved': payload.approved}
+            result = {'approved': payload.approved}
+            if payload.approved:
+                continuation = continue_after_image_approval(run_id, payload.name, payload.sha256)
+                if continuation is not None:
+                    result['continuation'] = continuation
+            return result
+        except (ValueError, PipelineError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post('/api/runs/{run_id}/production/material-approvals/continue')
+    def continue_approved_image(run_id: str, payload: ContinueApprovalIn):
+        require_run(run_id)
+        try:
+            continuation = continue_after_image_approval(run_id, payload.name, payload.sha256,
+                retry_request_id=payload.request_id)
+            if continuation is None:
+                raise ValueError('当前项目没有待准备的视频作品。')
+            return {'continuation': continuation}
         except (ValueError, PipelineError) as exc:
             raise HTTPException(409, str(exc)) from exc
 

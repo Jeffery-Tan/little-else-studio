@@ -9,6 +9,14 @@ test('draft binds exact source and reference bytes without implicit latest',()=>
 test('video parameters and reference are explicit and validated',()=>{for(const changes of [{reference_name:''},{duration:'1'},{duration:'5.5'},{resolution:'fake'},{model:'fake'}])assert.throws(()=>ui.submission({...values,...changes},data,'save'));const image=ui.submission({...values,kind:'image',reference_name:''},data,'image');assert.equal(image.duration,null);assert.equal(image.resolution,null);assert.equal(image.reference,null);assert.equal(image.model,'codex-image');});
 test('unknown pricing never becomes zero or free',()=>{assert.equal(ui.price(null),'费用未知');assert.equal(ui.price({amount:null,currency:'CNY'}),'费用未知');assert.equal(ui.price({amount:NaN}),'费用未知');assert.match(ui.price({amount:3,currency:'CNY'}),/CNY 3.00/);assert.match(ui.price({amount:0,currency:'CNY'}),/0.00/);});
 test('generation requires verified capability review and exact reference approval',()=>{assert.equal(ui.gate(draft,data),'');for(const changes of [{kind:'image'},{review:null},{review:{verdict:'revise'}},{source_ready:false},{reference_approved:false},{reference:null},{can_generate:false},{attempts:[{status:'submitted'}]},{attempts:[{status:'unknown'}]}])assert.notEqual(ui.gate({...draft,...changes},data),'');});
+test('unavailable generation capability leads to settings, while another active job offers no repair action',()=>{
+ const unavailable={...data,capabilities:{...data.capabilities,video:{available:false,reason:'视频连接尚未配置'}},drafts:[draft]};
+ const blocked=ui.currentProductionWork(unavailable,'video','demo');
+ assert.equal(blocked.phase,'blocked');assert.equal(blocked.primaryAction,'settings');
+ assert.match(ui.draftHtml(draft,unavailable,'demo'),/data-model-settings>打开模型设置/);
+ const active=ui.currentProductionWork({...data,active:true,drafts:[draft]},'video','demo');
+ assert.equal(active.phase,'blocked');assert.equal(active.primaryAction,'none');
+});
 test('network retry retains identical consent request and nonce',()=>{const p=ui.actionRequest('generate',draft,'old-nonce','same-request');assert.deepEqual(ui.actionRequest('generate',draft,'new-nonce','new-request',JSON.parse(JSON.stringify(p))),p);assert.equal(p.body.expected_sha256,hash);assert.equal(p.body.consent,true);assert.throws(()=>ui.actionRequest('review',draft,'n','r',p));assert.throws(()=>ui.actionRequest('generate',{...draft,draft_id:'other'},'n','r',p));});
 test('media only renders same project material endpoints',()=>{assert.equal(ui.mediaUrl('/api/runs/demo/materials/a%20b.png','demo'),'/api/runs/demo/materials/a%20b.png');for(const url of ['https://evil.test/a.png','//evil.test/a.png','javascript:alert(1)','/api/runs/other/materials/a.png','/api/runs/demo/materials/../x','/api/runs/demo/materials/%2e%2e','/api/runs/demo/materials/a%2fb.png','/api/runs/demo/materials/a.png?x=1'])assert.equal(ui.mediaUrl(url,'demo'),'');});
 test('records escape prompts findings model status messages and block external outputs',()=>{const html=ui.draftHtml({...draft,prompt:'<script>x</script>',review:{verdict:'ready',findings:['<img src=x>']},attempts:[{attempt_id:'x',status:'failed',message:'<iframe>',output:{url:'https://evil.test/a',name:'bad'}}]},data,'demo');assert.doesNotMatch(html,/<script>|<iframe>|<img src=x>|https:\/\/evil/);assert.match(html,/&lt;script/);assert.match(html,/&lt;img/);});
@@ -67,7 +75,62 @@ test('completed video makes playback and download the main work, while a new gen
  const html=ui.draftHtml(finished,shown,'demo');
  assert.ok(html.indexOf('<video controls')<html.indexOf('production-primary-actions'));
  assert.match(html,/<div class="production-actions production-primary-actions"><a class="primary production-download"[^>]+>下载视频<\/a>/);
- assert.ok(html.indexOf('修改或再次制作')>html.indexOf('下载视频'));
+ assert.ok(html.indexOf('再次制作或高级编辑')>html.indexOf('下载视频'));
+});
+test('failed retry keeps the preceding playable result as the main work',()=>{
+ const movie={name:'movie.mp4',sha256:hash,kind:'video',url:'/api/runs/demo/materials/movie.mp4'};
+ const shown={...data,materials:[...data.materials,movie]};
+ const first={attempt_id:'first',status:'succeeded',at:'2026-09-24T09:00:00Z',output:movie};
+ const retry={attempt_id:'retry',status:'failed',at:'2026-09-24T10:00:00Z',message:'口型与旁白冲突'};
+ const changed={...draft,attempts:[first,retry]};
+ const work=ui.currentProductionWork({...shown,drafts:[changed]},'video','demo');
+ assert.equal(work.phase,'failed');assert.equal(work.primaryAction,'discuss');
+ assert.equal(work.displayAttempt.attempt_id,'first');assert.equal(work.resultIsPrevious,true);
+ const html=ui.draftHtml(changed,shown,'demo');
+ assert.match(html,/<video controls preload="metadata" src="\/api\/runs\/demo\/materials\/movie.mp4"/);
+ assert.match(html,/上一份已生成结果/);assert.match(html,/口型与旁白冲突/);
+ assert.match(html,/data-feedback-attempt="first"/);assert.doesNotMatch(html,/data-feedback-attempt="retry"/);
+ assert.match(html,/production-primary-actions"><button class="primary" data-production-feedback="one">告诉团队这次问题/);
+ assert.ok(html.indexOf('手动调整制作输入')>html.indexOf('再次制作或高级编辑'));
+});
+test('new failed draft can show a verified result from an earlier draft',()=>{
+ const movie={name:'movie.mp4',sha256:hash,kind:'video',url:'/api/runs/demo/materials/movie.mp4'};
+ const first={...draft,draft_id:'first-draft',source_version:1,attempts:[{attempt_id:'first',status:'succeeded',at:'2026-09-24T09:00:00Z',output:movie}]};
+ const retry={...draft,draft_id:'retry-draft',attempts:[{attempt_id:'retry',status:'failed',at:'2026-09-24T10:00:00Z',message:'新尝试未完成'}]};
+ const shown={...data,materials:[...data.materials,movie],drafts:[first,retry]};
+ const work=ui.currentProductionWork(shown,'video','demo');
+ assert.equal(work.draft.draft_id,'retry-draft');assert.equal(work.attempt.attempt_id,'retry');
+ assert.equal(work.displayAttempt.attempt_id,'first');assert.equal(work.phase,'failed');
+ const html=ui.draftHtml(retry,shown,'demo');
+ assert.match(html,/上一份已生成结果 · 来自脚本第 1 版/);assert.match(html,/data-feedback-attempt="first"/);
+ assert.match(html,/<video controls preload="metadata"/);
+});
+test('an older video cannot replace the pending reference image approval target',()=>{
+ const movie={name:'movie.mp4',sha256:hash,kind:'video',url:'/api/runs/demo/materials/movie.mp4'};
+ const prior={...draft,draft_id:'prior',attempts:[{attempt_id:'first',status:'succeeded',output:movie}]};
+ const awaiting={...draft,draft_id:'awaiting',reference_approved:false,attempts:[]};
+ const shown={...data,materials:[...data.materials,movie],drafts:[prior,awaiting]};
+ const work=ui.currentProductionWork(shown,'video','demo');
+ assert.equal(work.phase,'image_pending');assert.equal(work.outputName,'movie.mp4');
+ const html=ui.draftHtml(awaiting,shown,'demo');
+ assert.match(html,/data-image="a.png">查看并确认这张图/);
+ assert.match(html,/alt="本次待确认的视频参考图"/);
+ assert.match(html,/<video controls preload="metadata"/);
+});
+test('unknown retry still prioritizes original-task recovery while retaining an earlier result',()=>{
+ const movie={name:'movie.mp4',sha256:hash,kind:'video',url:'/api/runs/demo/materials/movie.mp4'};
+ const first={attempt_id:'first',status:'succeeded',output:movie};
+ const pending={attempt_id:'pending',status:'unknown',task_id:'provider-task'};
+ const changed={...draft,attempts:[first,pending]};
+ const shown={...data,materials:[...data.materials,movie],drafts:[changed]};
+ const work=ui.currentProductionWork(shown,'video','demo');
+ assert.equal(work.phase,'unknown');assert.equal(work.primaryAction,'refresh');
+ assert.equal(work.displayAttempt.attempt_id,'first');
+ const html=ui.draftHtml(changed,shown,'demo');
+ assert.match(html,/data-refresh="pending"/);assert.match(html,/上一份已生成结果/);
+ assert.match(html,/data-feedback-attempt="first"/);
+ assert.match(html,/<video controls preload="metadata"/);
+ assert.match(html,/data-generate="one" disabled/);
 });
 test('returned image asks for exact image approval before treating it as complete',()=>{
  const picture={name:'returned.png',sha256:hash,kind:'image',url:'/api/runs/demo/materials/returned.png',approved:false};
@@ -78,6 +141,20 @@ test('returned image asks for exact image approval before treating it as complet
  assert.match(ui.draftHtml(image,shown,'demo'),/class="production-actions production-primary-actions"><button class="primary" data-image="returned.png">查看并确认这张图/);
  work=ui.currentProductionWork({...shown,materials:[...data.materials,{...picture,approved:true}],drafts:[image]},'image','demo');
  assert.equal(work.phase,'completed');assert.equal(work.primaryAction,'download');
+});
+test('a later success on another draft cannot change the current image approval target',()=>{
+ const older={name:'older.png',sha256:hash,kind:'image',url:'/api/runs/demo/materials/older.png',approved:true};
+ const pending={name:'pending.png',sha256:hash,kind:'image',url:'/api/runs/demo/materials/pending.png',approved:false};
+ const prior={...draft,kind:'image',draft_id:'prior',attempts:[{attempt_id:'older-job',status:'succeeded',at:'2026-09-24T12:00:00Z',output:older}]};
+ const current={...draft,kind:'image',draft_id:'current',attempts:[{attempt_id:'pending-job',status:'succeeded',at:'2026-09-24T11:00:00Z',output:pending}]};
+ const shown={...data,materials:[...data.materials,older,pending],drafts:[prior,current]};
+ const work=ui.currentProductionWork(shown,'image','demo');
+ assert.equal(work.draft.draft_id,'current');assert.equal(work.phase,'image_pending');
+ assert.equal(work.outputName,'pending.png');assert.equal(work.displayAttempt.attempt_id,'pending-job');
+ const html=ui.draftHtml(current,shown,'demo');
+ assert.match(html,/data-image="pending.png">查看并确认这张图/);
+ assert.match(html,/src="\/api\/runs\/demo\/materials\/pending.png"/);
+ assert.doesNotMatch(html,/data-image="older.png">查看并确认这张图/);
 });
 test('ready video shows the exact reference and estimate before generation',()=>{
  const prepared={...draft,estimate:{amount:3,currency:'CNY',notice:'Fixture estimate'},attempts:[]};
@@ -94,8 +171,11 @@ test('empty media view names the actual missing step instead of a fixed prepare 
  assert.equal(noScript.phase,'needs_plan');assert.match(ui.emptyWorkHtml(noScript),/查看当前方案/);
  const imageNeeded=ui.currentProductionWork({...data,materials:[],drafts:[]},'video','demo');
  assert.equal(imageNeeded.phase,'image_pending');assert.match(ui.emptyWorkHtml(imageNeeded),/查看并确认画面/);
- const prepare=ui.currentProductionWork({...data,drafts:[]},'video','demo');
- assert.equal(prepare.phase,'prepare');assert.match(ui.emptyWorkHtml(prepare),/准备视频输入/);
+ const prepare=ui.currentProductionWork({...data,drafts:[],latest_approved_image:data.materials[0]},'video','demo');
+ assert.equal(prepare.phase,'prepare');
+ const html=ui.emptyWorkHtml(prepare);
+ assert.match(html,/准备这张图的视频输入/);assert.match(html,/已确认参考图：a.png/);
+ assert.match(html,/src="\/api\/runs\/demo\/materials\/a.png"/);
 });
 test('generation confirmation keeps exact scope, reference, cost and limits visible while full prompt is optional',()=>{
  const checked={...draft,prompt:'<raw prompt>',estimate:{amount:3,currency:'CNY',notice:'含声音；实际账单以提供方为准'},

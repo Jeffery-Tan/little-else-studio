@@ -7,9 +7,23 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
   const writing = rail.find(row => row.stage === 'writing' && row.has_doc);
   const direction = rail.find(row => row.stage === 'direction' && row.has_doc);
   const hasCreativeWork = rail.some(row => row.has_doc);
-  const reference = [...referenceTasks].reverse().find(row => row.intent === 'analyze');
+  const latestReference = referenceTasks.at(-1);
+  const reference = latestReference?.intent === 'analyze' ? latestReference : null;
   const analysisOnly = !hasCreativeWork && !imageWork?.draft && !videoWork?.draft &&
-    (Boolean(reference) || currentJob?.job_kind === 'reference_video');
+    (Boolean(reference) || (currentJob?.job_kind === 'reference_video' && latestReference?.intent === 'analyze'));
+  const creativeTimes = [
+    ...rail.map(row => row.created_at), imageWork?.draft?.created_at, videoWork?.draft?.created_at,
+    imageWork?.attempt?.at, videoWork?.attempt?.at,
+  ].map(value => Date.parse(value || '') || 0);
+  const referenceStarted = Date.parse(reference?.started_at || '') || 0;
+  const referenceAfterCreative = reference?.after_creative_work === true ||
+    (reference?.after_creative_work == null && referenceStarted >= Math.max(0, ...creativeTimes));
+  const currentProjectJob = currentJob?.run_id === run.run_id ? currentJob : null;
+  const newerCreativeJob = currentProjectJob && currentProjectJob.job_kind !== 'reference_video' &&
+    (Date.parse(currentProjectJob.at || '') || 0) > referenceStarted;
+  const referenceCurrent = !analysisOnly && referenceStarted > 0 && referenceAfterCreative &&
+    !newerCreativeJob && !timeline.pending && !timeline.pending_continuation &&
+    !timeline.interaction && (!timeline.brief?.execution?.active || currentProjectJob?.job_kind === 'reference_video');
   const hasCaption = Boolean((writing?.blocks || []).find(block =>
     block.type === 'text' && block.title === '发布文案' && block.text));
   const requestedCaption = /(?:与|和|及|附|加上|需要|附带|[+＋]).{0,6}(?:英文)?(?:发布文案|caption)/iu.test(run.brief || '');
@@ -23,7 +37,7 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
     : format === 'video' ? `商品视频${hasCaption || requestedCaption ? '与发布文案' : ''}`
     : '交付形式待确认';
   const result = (current, action, tab = 'plan', stage = null, detail = '') =>
-    ({goal, current, action, tab, stage, detail, analysisOnly, reference, format});
+    ({goal, current, action, tab, stage, detail, analysisOnly, referenceCurrent, reference, format});
   const nav = (label, tab, current, stage = null, detail = '') =>
     result(current, {kind: 'navigate', label, tab, stage}, tab, stage, detail);
   const pending = timeline.pending;
@@ -37,7 +51,8 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
     return result(active ? '正在分析这条参考' : '参考分析尚未完成',
       active ? null : {kind: 'reference', label: '查看参考任务'}, 'plan');
   }
-  if (active) return result('团队正在处理当前任务', null, 'plan', null,
+  if (active && !(referenceCurrent && currentProjectJob?.job_kind === 'reference_video'))
+    return result('团队正在处理当前任务', null, 'plan', null,
     '已保存的作品仍可阅读；新结果会在完成后显示。');
   if (continuation) return result('决定已保存，下一份作品尚未开始准备',
     {kind: 'continue', label: '继续准备'}, 'plan', continuation.stage);
@@ -53,9 +68,14 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
     return result(`${name}已保存，内部审核未完成`, review, 'plan', review.stage,
       timeline.brief.detail || '先阅读当前作品与审核记录，再决定是否重试本版审核。');
   }
+  if (referenceCurrent) return result(reference?.report
+    ? '本轮只分析新参考：拆解报告已保存' : '本轮只分析新参考：报告尚未完成',
+    reference?.report ? null : {kind:'reference',label:'查看参考任务'}, 'plan',
+    writing?.stage || direction?.stage || null,
+    '下方阅读本轮参考；原项目的最终交付仍按作品目标保留。');
 
-  // The latest unresolved attempt takes precedence over an older usable result.
-  // The production selector validates material bytes and the exact run URL.
+  // The latest unresolved attempt controls recovery; a verified earlier result
+  // can remain the readable work. The selector checks its material bytes and URL.
   const work = videoWork?.draft ? videoWork
     : imageWork?.phase === 'image_pending' && imageWork?.draft ? imageWork
     : videoWork?.phase === 'prepare' ? videoWork
@@ -64,7 +84,8 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
     const tab = work.kind === 'video' ? 'video' : 'storyboard';
     if (work.phase === 'unknown') return nav(work.primaryAction === 'refresh'
       ? '查询这次结果' : '核实这次提交', tab,
-      `${work.kind === 'video' ? '视频' : '图片'}生成结果尚未确认`, null,
+      work.resultIsPrevious ? `上一份已生成${work.kind === 'video' ? '视频' : '图片'}仍可查看；这次结果尚未确认`
+        : `${work.kind === 'video' ? '视频' : '图片'}生成结果尚未确认`, null,
       '先处理原任务；当前不会再次提交生成。');
     if (work.phase === 'processing') return result(
       `${work.kind === 'video' ? '视频' : '图片'}任务正在处理`, null, tab);
@@ -79,10 +100,17 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
       `${work.kind === 'video' ? '视频' : '图片'}输入已准备好，等待你确认本次生成`);
     if (work.phase === 'review') return nav('查看制作准备', tab,
       '制作描述已保存，等待完成文字检查');
+    if (work.phase === 'blocked' && work.primaryAction === 'settings')
+      return result(work.label, {kind:'settings',label:'打开模型设置'}, tab, null, work.detail);
+    if (work.phase === 'blocked' && work.primaryAction === 'none')
+      return result(work.label, null, tab, null, work.detail);
     if (work.phase === 'failed' || work.phase === 'blocked' || work.phase === 'stale')
-      return nav('查看阻塞与下一步', tab, work.label || '本次制作需要处理后继续');
-    if (work.phase === 'prepare') return nav('准备当前画面', tab,
-      work.kind === 'image' ? '脚本已确认，下一步准备画面' : '参考图已确认，下一步准备视频');
+      return nav('说明这次问题', tab,
+        work.resultIsPrevious ? `上一份已生成${work.kind === 'video' ? '视频' : '图片'}仍可查看；${work.label}`
+          : work.label || '本次制作需要处理后继续');
+    if (work.phase === 'prepare') return result(
+      work.kind === 'image' ? '脚本已确认，下一步准备画面' : '参考图已确认，下一步准备视频',
+      {kind:'prepare',label:work.kind === 'image' ? '准备画面输入' : '准备这张图的视频输入',tab}, tab);
   }
   if (writing) {
     if (writing.stale || writing.integrity_ok === false) return nav('核对稿件变化', 'plan',
