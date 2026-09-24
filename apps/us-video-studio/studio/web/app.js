@@ -1456,7 +1456,7 @@ $("conversation-body").addEventListener("scroll", () => {
 });
 
 async function send(text) {
-  if ((state.busy && !canSteerJob(currentJob)) || steerPosting || state.decisionBusy || state.recoveryBlocked || !state.runId) return;
+  if (steerPosting || state.decisionBusy || state.recoveryBlocked || !state.runId) return;
   state.atBottom = true;
   setConversationOpen(true);
   const runId=state.runId;
@@ -1475,9 +1475,19 @@ async function send(text) {
     if (state.busy && canSteerJob(currentJob)) {
       if (typeof StudioComposer !== 'undefined' && StudioComposer.files(runId).length)
         throw Error('调整运行中的任务时请先移除待上传附件，或等本轮结束后发送。');
-      await submitSteer(runId, currentJob.job_id, {text, request_id:crypto.randomUUID(),
+      const adjusted = await submitSteer(runId, currentJob.job_id, {text, request_id:crypto.randomUUID(),
         expected_goal_revision:currentJob.goal_revision || 0});
-      return;
+      if (!adjusted || adjusted.ok !== false) return;
+      if (adjusted.reason !== 'job_not_active') return;
+      // Previous job already ended: keep this prompt and open a fresh turn.
+    }
+    if (state.busy && !canSteerJob(currentJob)) {
+      const stillRunning = currentJob && ['queued', 'running', 'cancelling'].includes(currentJob.status);
+      if (stillRunning) {
+        toast('团队仍在执行本轮；请先停止本轮，或等结束后再发送新的对话。', true);
+        return;
+      }
+      state.busy = false;
     }
     if(typeof StudioComposer!=='undefined' && StudioComposer.files(runId).length){
       state.busy=true;$('send').disabled=true;StudioComposer.render();
@@ -1500,7 +1510,7 @@ async function send(text) {
 
 function submit() {
   const value = $("chat-input").value.trim() || (typeof StudioComposer!=='undefined' && StudioComposer.files(state.runId).length ? '我附上了素材，请先确认我想如何使用。' : '');
-  if (!value || !state.runId || (state.busy && !canSteerJob(currentJob)) || steerPosting ||
+  if (!value || !state.runId || steerPosting ||
       state.decisionBusy || state.recoveryBlocked) return;
   $("chat-input").value = "";
   $("chat-input").style.height = "auto";

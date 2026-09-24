@@ -137,6 +137,36 @@ function harness(api) {
   return { context, nodes, storage, timers, body };
 }
 
+test("ended job does not keep the composer locked for a new prompt", () => {
+  const h = harness(async () => {});
+  h.context.showJob({job_id: "j1", job_kind: "conversation", status: "running", events: []});
+  assert.equal(h.context.state.busy, true);
+  h.context.showJob({job_id: "j1", job_kind: "conversation", status: "blocked",
+    reason: "交付未完成：direction 当前版本的独立审核通过记录", events: []});
+  assert.equal(h.context.state.busy, false);
+  assert.equal(h.nodes.get("send").disabled, false);
+});
+
+test("adjustment against an ended job reports job_not_active for a new-prompt fallback", async () => {
+  const h = harness(async () => {
+    const err = new Error("原任务已经结束，请刷新后发送新的指令。");
+    err.status = 409;
+    throw err;
+  });
+  h.context.showJob({job_id: "j1", job_kind: "conversation", status: "running", events: []});
+  h.context.restoreJob = async () => {
+    h.context.showJob({job_id: "j1", job_kind: "conversation", status: "blocked",
+      reason: "交付未完成", events: []});
+  };
+  const result = await h.context.submitSteer("run-a", "j1",
+    {text: "下一条指令", request_id: "r1", expected_goal_revision: 0});
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "job_not_active");
+  assert.equal(h.context.state.busy, false);
+  assert.equal(h.nodes.get("send").disabled, false);
+});
+
+
 test('uncertain acceptance retries the same request id and preserves the user message', async () => {
   const calls = [];
   const h = harness(async (url, options) => {

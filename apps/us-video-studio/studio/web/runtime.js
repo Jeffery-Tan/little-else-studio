@@ -405,7 +405,7 @@ async function restoreJob(runId) {
 }
 
 async function submitSteer(runId, jobId, payload) {
-  if (runId !== state.runId || steerPosting) return;
+  if (runId !== state.runId || steerPosting) return {ok:false, reason:'busy'};
   steerPosting = true;
   sessionStorage.setItem(pendingSteerKey(runId), JSON.stringify({...payload, job_id:jobId}));
   if (currentJob?.job_id === jobId) showJob(currentJob, '正在提交调整…');
@@ -414,13 +414,23 @@ async function submitSteer(runId, jobId, payload) {
       {method:'POST', body:JSON.stringify(payload)});
     sessionStorage.removeItem(pendingSteerKey(runId));
     if (runId === state.runId && currentJob?.job_id === jobId) showJob(updated);
+    return {ok:true, job:updated};
   } catch (err) {
     if (err.status >= 400 && err.status < 500) {
       sessionStorage.removeItem(pendingSteerKey(runId));
+      const notActive = err.status === 409 &&
+        /原任务已经结束|任务不在此进程运行/u.test(String(err.message || ''));
+      if (runId === state.runId && notActive) {
+        // The old job already ended server-side; refresh so send() can open a new one.
+        try { await restoreJob(runId); } catch (_) { /* best-effort refresh */ }
+        return {ok:false, reason:'job_not_active', error:err};
+      }
       if (runId === state.runId) { $('chat-input').value = payload.text; toast(err.message, true); }
+      return {ok:false, reason:'client', error:err};
     } else if (runId === state.runId) {
       showJob(currentJob, '调整结果尚未确认。刷新后可以用相同请求标识核对。');
     }
+    return {ok:false, reason:'unknown', error:err};
   } finally {
     steerPosting = false;
     if (runId === state.runId && currentJob) showJob(currentJob);
