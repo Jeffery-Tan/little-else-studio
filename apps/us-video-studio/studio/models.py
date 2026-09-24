@@ -76,6 +76,7 @@ class Run:
     brief: str
     market: str
     created_at: str
+    kind: str = "creative"  # creative | learning; absent on historical run.json
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -84,6 +85,7 @@ class Run:
             "brief": self.brief,
             "market": self.market,
             "created_at": self.created_at,
+            "kind": self.kind,
         }
 
 

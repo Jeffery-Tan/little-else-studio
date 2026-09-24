@@ -31,6 +31,7 @@ class RunIn(BaseModel):
     run_id: str = Field(min_length=1, max_length=64)
     title: str = Field(min_length=1, max_length=200)
     brief: str = Field(min_length=1, max_length=20000)
+    kind: Literal['creative', 'learning'] = 'creative'
     product_card: CardBinding | None = None
 
 
@@ -107,6 +108,14 @@ class LearningProposalIn(BaseModel):
 
 class LearningApplyIn(BaseModel):
     expected_library_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    expected_proposal_sha256: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
+    request_id: str | None = Field(default=None, min_length=1, max_length=128,
+                                   pattern=r'^[A-Za-z0-9_.:-]+$')
+
+
+class LearningRejectIn(BaseModel):
+    expected_proposal_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
 
 
 class DeepSeekCheckIn(BaseModel):

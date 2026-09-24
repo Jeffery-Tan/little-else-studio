@@ -40,8 +40,12 @@ function jobPresentation(job, recovery = null) {
   const events = job.events || [];
   const team = teamProgress(job);
   const active = JOB_ACTIVE.has(job.status);
-  if (job.job_kind === 'reference_video') return {active,label:JOB_LABELS[job.status] || '状态待确认',
-    detail:active ? '正在获取并分析参考视频；复刻任务会接续策划。' : job.status==='succeeded' ? '参考任务结果已保存，请查看分析报告和创作方案。' : '已完成的步骤会保留，可在参考视频入口继续或上传原视频。',guidance:jobGuidance(job)};
+  if (job.job_kind === 'reference_video') {
+    const learning=(state.runs||[]).find(run=>run.run_id===state.runId)?.kind==='learning';
+    return {active,label:JOB_LABELS[job.status] || '状态待确认',
+      detail:learning?(active?'正在获取并分析参考视频；观察会保留在学习记录中。':job.status==='succeeded'?'参考声画观察已保存，请在学习记录中核对覆盖范围。':'已完成的步骤会保留；请核对来源或上传原视频。'):
+        active ? '正在获取并分析参考视频；复刻任务会接续策划。' : job.status==='succeeded' ? '参考任务结果已保存，请查看分析报告和创作方案。' : '已完成的步骤会保留，可在参考视频入口继续或上传原视频。',guidance:jobGuidance(job)};
+  }
   if ((job.job_kind || '').startsWith('production_')) return {active, label:JOB_LABELS[job.status] || '状态待确认',
     detail:active?'正在处理制作任务；媒体生成进度与结果保存在制作页。':'本次制作状态已保存，请在制作页查看结果与用量。',guidance:jobGuidance(job)};
   if (job.job_kind === 'artifact_revision') return {active,label:JOB_LABELS[job.status] || '状态待确认',
@@ -424,11 +428,12 @@ async function submitSteer(runId, jobId, payload) {
 }
 
 async function submitJob(runId, payload, options = {}) {
-  if (runId !== state.runId) return;
+  if (runId !== state.runId) return {accepted:false,error:new Error('项目已切换，请重新打开当前项目。')};
   // Both conversation entry points display the same on-demand analysis notice.
   // This does not enable media generation; the main agent still needs an
   // explicit reference request, a supplied source and the bounded tool.
-  if (!payload.request_kind && payload.reference_consent === undefined) payload={...payload,reference_consent:true};
+  if (!payload.request_kind && payload.reference_consent === undefined)
+    payload={...payload,reference_consent:(state.runs||[]).find(run=>run.run_id===runId)?.kind!=='learning'};
   const generation = ++jobWatch;
   clearTimeout(jobTimer);
   closeJobSource();
@@ -448,7 +453,7 @@ async function submitJob(runId, payload, options = {}) {
       ? `edits/${encodeURIComponent(payload.stage)}/${encodeURIComponent(payload.draft_id)}/generate` : 'jobs';
     job = await api(`/api/runs/${runId}/${route}`, { method: "POST", body: JSON.stringify(payload) });
   } catch (err) {
-    if (runId !== state.runId || generation !== jobWatch) return;
+    if (runId !== state.runId || generation !== jobWatch) return {accepted:false,error:err};
     if (err.status >= 400 && err.status < 500) {
       clearPendingJob(runId);
       if (!payload.request_kind && !options.preserveComposerOnError && !$("chat-input").value.trim())
@@ -457,15 +462,16 @@ async function submitJob(runId, payload, options = {}) {
       await restoreJob(runId);
       toast(err.message, true);
     } else showUncertainSubmission(runId, payload, options);
-    return;
+    return {accepted:false,error:err,uncertain:!(err.status >= 400 && err.status < 500)};
   }
   clearPendingJob(runId);
-  if (runId !== state.runId || generation !== jobWatch) return;
+  if (runId !== state.runId || generation !== jobWatch) return {accepted:true};
   if (payload.feedback_target && JSON.stringify(state.feedbackTarget) === JSON.stringify(payload.feedback_target))
     clearFeedbackTarget();
   await watchJob(runId, job, generation);
   try { await refreshTimeline(); }
   catch (_) { toast("任务已接受，正在运行；对话暂时未刷新。", true); }
+  return {accepted:true};
 }
 
 if (typeof module !== "undefined") module.exports = { jobPresentation };

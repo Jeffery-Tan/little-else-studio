@@ -26,16 +26,17 @@ function inspirationCases(cases) {
 }
 function projectCardHtml(run, cover) {
   const id = escapeHtml(run.run_id), title = escapeHtml(run.title);
+  const learning=run.kind==='learning';
   const analysis=!run.content_format&&/只分析.{0,20}参考视频/u.test(run.brief||'');
-  const format=analysis?'分析':run.content_format==='photo'?'图文':run.content_format==='video'?'视频':'创作';
+  const format=learning?'学习':analysis?'分析':run.content_format==='photo'?'图文':run.content_format==='video'?'视频':'创作';
   const requestedCaption=/(?:与|和|及|附|加上|需要|附带|[+＋]).{0,6}(?:英文)?(?:发布文案|caption)/iu.test(run.brief||'');
-  const goal=run.creator_view?.goal|| (analysis?'参考视频拆解报告'
+  const goal=learning?'参考研究与知识变更':run.creator_view?.goal|| (analysis?'参考视频拆解报告'
     :run.content_format==='photo'?'带货图片与文案'
     :run.content_format==='video'?`商品视频${requestedCaption?'与发布文案':''}`:'交付形式待确认');
-  const next=run.creator_view?.current||'打开查看当前作品与下一步';
-  const visual = cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy">` : `<div class="project-cover-art">${studioIcon('film')}<span>${format}项目</span></div>`;
+  const next=learning?'打开原片、讨论与变更记录':run.creator_view?.current||'打开查看当前作品与下一步';
+  const visual = cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy">` : `<div class="project-cover-art">${studioIcon(learning?'spark':'film')}<span>${format}项目</span></div>`;
   const date=studioDate(run.updated_at||run.created_at);
-  return `<div class="project-card-item"><button class="project-card" data-open-project="${id}"><span class="project-cover">${visual}<span class="project-open">打开作品 ↗</span></span><span class="project-card-copy"><strong>${title}</strong>` +
+  return `<div class="project-card-item"><button class="project-card" data-open-project="${id}"><span class="project-cover">${visual}<span class="project-open">${learning?'打开研究':'打开作品'} ↗</span></span><span class="project-card-copy"><strong>${title}</strong>` +
     `<span class="project-next">${escapeHtml(next)}</span><span>目标：${escapeHtml(goal)} · 更新于 ${escapeHtml(date)}<i aria-hidden="true">↗</i></span></span></button><button class="project-delete ghost small" data-delete-project="${id}" aria-label="删除项目：${title}">删除</button></div>`;
 }
 function referenceCardHtml(item, hero=false) {
@@ -49,14 +50,28 @@ function setStudioView(view) {
   const project = view === 'project' && Boolean(state.runId);
   state.view = project ? 'project' : 'home';
   document.body.dataset.view = state.view;
+  const selectedRun=project?state.runs.find(r=>r.run_id===state.runId):null;
+  const learning=selectedRun?.kind==='learning';
+  document.body.dataset.runKind=selectedRun?.kind||'';
   $('workspace').hidden = project;
   $('project-workspace').hidden = !project;
+  $('project-workspace').setAttribute('aria-label',learning?'学习工作区':'项目工作区');
+  $('stage').setAttribute('role',learning?'region':'tabpanel');
+  if(learning){$('stage').removeAttribute('aria-labelledby');$('stage').setAttribute('aria-label','学习记录');}
+  else{$('stage').setAttribute('aria-labelledby','journey-tab-plan');$('stage').removeAttribute('aria-label');}
+  document.querySelector('.composer').setAttribute('aria-label',learning?'学习对话':'制片对话');
+  document.querySelector('.project-more summary').textContent=learning?'学习记录与设置':'项目与设置';
+  document.querySelector('.producer-heading strong').textContent=learning?'你的学习搭档':'你的制片团队';
+  document.querySelector('.producer-heading strong+span').textContent=learning?'讨论观察、疑问与方法变更':'讨论、分工与结果，都在这里';
+  document.querySelector('.conversation-bar>span').textContent=learning?'学习对话':'项目对话';
+  $('chat-input').setAttribute('aria-label',learning?'讨论参考与纠正观察':'与制片团队对话');
   $('page-heading').textContent = project ? (state.runs.find(r=>r.run_id===state.runId)?.title || '创作项目') : '工作空间';
   for (const [id, active] of [['nav-home',!project],['nav-project',project]]) {
     $(id).classList.toggle('active',active);
     if (active) $(id).setAttribute('aria-current','page'); else $(id).removeAttribute('aria-current');
   }
   document.querySelector('.skip-link').href = project ? '#stage' : '#workspace';
+  $('chat-input').placeholder=selectedRun?.kind==='learning'?'说说你对参考的判断、疑问或纠正…':'说说想做什么，也可直接粘贴 TK 链接…';
   $('spend-panel').hidden = true;
   if (!project) toggleMaterials(false);
   if(project){state.atBottom=true;requestAnimationFrame(scrollDown);}
@@ -102,6 +117,7 @@ function initStudioNavigation() {
     if (state.runId) setStudioView('project'); else newRunDialog();
   };
   $('top-create').onclick = ()=>newRunDialog();
+  $('start-learning').onclick=()=>StudioLearningSession.openCreateDialog();
   $('browse-inspiration').onclick = ()=>window.StudioLearning.open({tab:'cases'});
   $('project-search').oninput = renderProjects;
   $('material-upload').onchange = async event => {await uploadFiles([...event.target.files]);event.target.value='';};

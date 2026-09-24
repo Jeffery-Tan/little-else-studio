@@ -26,7 +26,9 @@ HTTP 入口在 [server.py](studio/server.py) 组合依赖和本机安全边界�
 
 ## 启动与检查
 
-左侧「灵感与方法」已接入三项 Skill、原案例与方法库、研究来源和反馈迭代。Agent 可按角色读取[登记方法卡](studio/learning.py)，补救、视频输入与图文输入卡只提取稳定执行规则，原历史研究和反馈仍限人工审计或原资格过滤。实际角色输入保存快照；反馈绑定准确版本，先看差异再应用。视频输入与图文审阅包可在「本轮参考」打开，见 [学习迁移说明](docs/learning-migration.md)。
+左侧「灵感与方法」已接入三项创作 Skill、原案例与方法库、研究来源和反馈迭代；独立学习记录另加载学习流程 Skill。Agent 可按角色读取[登记方法卡](studio/learning.py)，补救、视频输入与图文输入卡只提取稳定执行规则，原历史研究和反馈仍限人工审计或原资格过滤。实际角色输入保存快照；反馈绑定准确版本，先看差异再应用。视频输入与图文审阅包可在「本轮参考」打开，见 [学习迁移说明](docs/learning-migration.md)。
+
+首页「独立学习」从一句研究意图与可选原片建立 `learning` Run。上传不调用模型；如需声画分析，在学习记录里单独确认参考分析。学习对话只能读取当前来源、比较合资格方法并提出待审变更，不能提交生产阶段或媒体生成。用户可只分析后结束，或核对提案差异后保存、拒绝。正式共享库当前仍为 v1：页面提供只读 v2 迁移预览及单独确认，迁移保存原字节备份；测试不改正式库。新创作项目的方法摘要按适用条件独立召回，使用记录只表示 Agent 声明，实际脚本与效果仍需验收。
 
 真实运行数据必须位于 Git 外，使用 `STUDIO_DATA_ROOT` 明确选择。未设置时代码沿用历史 J 盘默认目录，它不代表当前电脑实际使用的位置；素材、台账、配置与凭据不得提交 Git。一个数据根只允许一个 Studio 写入进程；离线导入或恢复前停止该数据根的服务。
 
@@ -178,7 +180,7 @@ $env:STUDIO_DATA_ROOT = $studioPreview
 | `GET/POST /api/runs/{id}/material-observations` | 读取或追加准确素材观察；保存不调用模型 |
 | `GET /api/runs/{id}/recovery`；`POST .../recovery/reconcile`、`.../recovery/abandon` | 读取恢复状态及保留的管理员兼容操作；未知用量不需要核账，也不阻断继续使用 |
 | `GET /api/runs/{id}/history`、`/history/{document_id}` | 读取迁入历史目录或登记的精选文本；无在线导入入口 |
-| `GET /api/learning`；`GET /api/runs/{id}/learning`；`POST .../learning/proposals`、`.../learning/proposals/{proposal_id}/apply` | 共用方法库、实际快照、候选差异与用户明确入库 |
+| `GET /api/learning`、`/api/learning/migration-preview`；`GET /api/runs/{id}/learning/session`；`POST .../learning/proposals`、`.../apply`、`.../reject`、`.../close` | 独立学习记录、只读迁移预览、准确提案差异及用户确认或拒绝；真实库写入仅由确认路由执行 |
 | `GET /api/runs/{id}/delivery`、`/delivery/download`；`GET .../creative-packages`、`.../creative-packages/{package_id}/files/{filename}` | 当前交付、只读策划 ZIP 和本地创意包文件 |
 
 nonce 请求的查询参数必须包含 `stage`、`expected_version` 和 `expected_artifact_sha256`。决定 JSON 必须携带相同三项，加上 `nonce`、`decision`（`approved` / `returned`）；采用含选项的方向时还必须有有效 `selected_option_id`，退回填写 `note`，覆盖退回审核填写 `override_reason`。

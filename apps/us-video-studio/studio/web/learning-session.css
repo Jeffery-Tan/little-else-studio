@@ -1,0 +1,52 @@
+.learning-start-action{display:flex;justify-content:center;margin:14px 0 0}
+.learning-start-action button{min-height:38px}
+.learning-room{max-width:1000px;margin:0 auto;padding:24px 26px 42px;color:var(--ink)}
+.learning-room h2,.learning-room h3{line-height:1.35}
+.learning-room-intro{padding:4px 0 23px;border-bottom:1px solid var(--line)}
+.learning-room-intro h2{font-size:clamp(24px,2.4vw,34px);margin:3px 0 10px}
+.learning-room-intro>p{max-width:75ch;color:var(--ink-soft);line-height:1.7}
+.learning-room-intro details,.learning-room-section details{margin-top:12px;color:var(--ink-soft);font-size:13px}
+.learning-room summary{cursor:pointer}
+.learning-room-pre{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7}
+.learning-room-section{padding:26px 0;border-bottom:1px solid var(--line)}
+.learning-room-section-head{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-bottom:18px}
+.learning-room-section-head span{color:var(--ink-faint);font-size:11px;letter-spacing:.12em;text-transform:uppercase}
+.learning-room-section-head h2{font-size:20px;margin:4px 0 0}
+.learning-room-section-head>div:last-child{display:flex;gap:8px;flex-wrap:wrap}
+.learning-room-section>h3{font-size:15px;margin:23px 0 13px}
+.learning-room-list{display:grid;gap:12px}
+.learning-room-card{border:1px solid var(--line);border-radius:12px;padding:17px;background:var(--raised);min-width:0}
+.learning-room-card h3{font-size:16px;margin:0 0 6px}
+.learning-room-card p{margin:7px 0;color:var(--ink-soft);line-height:1.7;overflow-wrap:anywhere}
+.learning-room-card a{color:var(--accent);text-underline-offset:3px}
+.learning-room-source{display:grid;grid-template-columns:minmax(0,220px) minmax(0,1fr);gap:17px}
+.learning-room-source:not(:has(video,img)){display:block}
+.learning-room-source video,.learning-room-source img{width:100%;max-height:180px;object-fit:contain;background:var(--deep);border-radius:8px}
+.learning-room-observation{white-space:pre-wrap;color:var(--ink)!important;font-size:14px}
+.learning-room-fields{display:grid;gap:8px;margin:12px 0 0}
+.learning-room-fields>div{display:grid;grid-template-columns:95px minmax(0,1fr);gap:12px;font-size:12px;line-height:1.6}
+.learning-room-fields dt{color:var(--ink-faint)}.learning-room-fields dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
+.learning-room-empty{padding:20px;border:1px dashed var(--line);border-radius:10px;color:var(--ink-soft);line-height:1.7}
+.learning-room-pill{display:inline-block;font-size:11px;color:#cdecaf;padding:3px 7px;border:1px solid #6b8a55;border-radius:5px;margin-bottom:9px}
+.learning-room-proposal header{margin-bottom:8px}.learning-room-proposal details{border-top:1px solid var(--line);padding-top:12px}
+.learning-room-proposal pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--deep);border-radius:7px;padding:13px;font-size:12px;max-height:300px;overflow:auto}
+.learning-room-proposal button{margin-top:10px}
+.learning-room-proposal-actions{display:flex;gap:10px;flex-wrap:wrap}
+.learning-room-proposal .learning-room-action-status{min-height:1em;color:var(--ink-soft);font-size:12px}
+.learning-room-migration{margin-bottom:13px;border-color:#5a674b;background:#20271e}
+.learning-room-migration-diff{white-space:pre-wrap;overflow-wrap:anywhere;max-height:50dvh;overflow:auto;background:var(--deep);border:1px solid var(--line);border-radius:8px;padding:13px;font-size:12px}
+.learning-room-muted{color:var(--ink-faint)!important;font-size:12px;line-height:1.65}
+.learning-run-dialog{width:min(560px,calc(100vw - 28px));max-height:90dvh;overflow:auto;border:1px solid var(--line);border-radius:15px;background:var(--bg);color:var(--ink);padding:27px;box-shadow:0 20px 70px #0009}
+.learning-run-dialog::backdrop{background:#050507b8;backdrop-filter:blur(4px)}
+.learning-run-dialog form{display:grid;gap:14px}.learning-run-dialog h2{font-size:25px;margin:0}.learning-run-dialog p{margin:0;color:var(--ink-soft);line-height:1.65}
+.learning-run-dialog label{display:grid;gap:7px;color:var(--ink-soft);font-size:13px}
+.learning-run-dialog input,.learning-run-dialog textarea,.learning-run-dialog select{min-width:0;width:100%;border:1px solid var(--line);border-radius:8px;background:var(--raised);color:var(--ink);padding:10px 12px;font:inherit}
+.learning-run-dialog textarea{resize:vertical}.learning-run-dialog [role="alert"]{color:var(--bad);font-size:12px}
+.learning-run-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:6px}
+body[data-run-kind="learning"] .journey-tabs,body[data-run-kind="learning"] #project-stages,body[data-run-kind="learning"] #production-open,body[data-run-kind="learning"] #outcomes-open,body[data-run-kind="learning"] #delivery-open,body[data-run-kind="learning"] #history-open{display:none!important}
+body[data-run-kind="learning"] .project-canvas{overflow:auto}
+body[data-run-kind="learning"] .project-tools [data-project-focus="canvas"]{font-size:0}
+body[data-run-kind="learning"] .project-tools [data-project-focus="canvas"]::after{content:"看研究";font-size:12px}
+body[data-run-kind="learning"] .project-tools [data-project-focus="chat"]{font-size:0}
+body[data-run-kind="learning"] .project-tools [data-project-focus="chat"]::after{content:"聊理解";font-size:12px}
+@media(max-width:700px){.learning-room{padding:18px 15px}.learning-room-section-head{align-items:flex-start;flex-direction:column}.learning-room-source{grid-template-columns:1fr}.learning-room-source video,.learning-room-source img{max-height:45dvh}}

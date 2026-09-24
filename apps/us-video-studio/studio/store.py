@@ -136,12 +136,15 @@ class Store:
             raise PipelineError("store", f"invalid run id: {run_id!r}")
         return self.root / "runs" / run_id
 
-    def create_run(self, run_id: str, title: str, brief: str, market: str = MARKET) -> Run:
+    def create_run(self, run_id: str, title: str, brief: str, market: str = MARKET,
+                   kind: str = "creative") -> Run:
         if market != MARKET:
             raise PipelineError(
                 "market",
                 f"this studio is US-only; refusing to open a run for market {market!r}",
             )
+        if kind not in ("creative", "learning"):
+            raise PipelineError("store", "run kind must be creative or learning")
         run_dir = self.run_dir(run_id)
         run_file = run_dir / "run.json"
         if run_file.exists():
@@ -152,10 +155,13 @@ class Store:
             brief=brief.strip(),
             market=market,
             created_at=utcnow(),
+            kind=kind,
         )
         _atomic_write_text(
             run_file, json.dumps(run.to_dict(), ensure_ascii=False, indent=2) + "\n"
         )
+        if kind == "learning":
+            self.append_event(run_id, "learning_started", brief=run.brief)
         return run
 
     def read_run(self, run_id: str) -> Run:

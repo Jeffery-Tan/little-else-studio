@@ -197,6 +197,8 @@ def install_reference_video_routes(app, jobs, require_run, connections, settings
     @app.post('/api/runs/{run_id}/reference-videos')
     def start(run_id: str, payload: ReferenceIn):
         require_run(run_id)
+        if store.read_run(run_id).kind == 'learning' and payload.intent != 'analyze':
+            raise HTTPException(409, '学习记录只允许分析参考，不启动复刻策划。')
         try:
             return jobs.submit(run_id, '分析参考视频' if payload.intent == 'analyze' else '按参考视频复刻',
                 payload.request_id, kind='reference_video', payload=payload.model_dump(exclude={'request_id'}),

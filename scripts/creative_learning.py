@@ -66,6 +66,10 @@ def source_key(url=None, media=None):
 
 
 def validate(doc):
+    if not isinstance(doc, dict):
+        return ['learning library must be an object']
+    if doc.get('schema_version') == 2:
+        return validate_v2(doc)
     errors = []
     if doc.get('schema_version') != 1 or doc.get('market') != 'US':
         errors.append('Expected schema_version=1 and market=US.')
@@ -196,6 +200,238 @@ def validate(doc):
     return errors
 
 
+_ID = re.compile(r'[a-z0-9][a-z0-9-]*\Z')
+_SHA = re.compile(r'[a-f0-9]{64}\Z')
+_V2_METHOD_STATUSES = {'hypothesis', 'user_calibrated', 'trial', 'active', 'retired'}
+_V2_METHOD_KINDS = {'expression_method', 'persuasion_method', 'narrative_method'}
+
+
+def migrate_v1_to_v2(doc):
+    """Build a review candidate only. Caller owns backup, CAS and explicit commit.
+
+    Unknown provenance and missing method details stay unknown; IDs, feedback and
+    old case/method fields are retained for historical readers.
+    """
+    if not isinstance(doc, dict) or doc.get('schema_version') != 1:
+        raise ValueError('Migration requires a v1 library')
+    errors = validate(doc)
+    if errors:
+        raise ValueError('; '.join(errors))
+    result = copy.deepcopy(doc)
+    result['schema_version'] = 2
+    result['scope_market'] = result.pop('market')
+    result['preferences'] = []
+    result['library_version'] = doc.get('library_version', 1) + 1
+    for case in result['cases']:
+        case.pop('market', None)
+        case['source_platform'] = case.get('platform', 'unknown')
+        case['source_market'] = 'unknown'
+        case['migration_pending'] = ['observation provenance and coverage require source review']
+    for method in result['methods']:
+        method['revision'] = 1
+        method['legacy_status'] = method['status']
+        method['migration_pending'] = ['goal', 'required_inputs', 'procedure', 'must_preserve',
+                                       'can_vary', 'checks', 'market_validation']
+        method['support_refs'] = copy.deepcopy(method['supports'])
+        method['counterexample_refs'] = copy.deepcopy(method.get('counterexamples', []))
+        method['applicable_markets'] = ['US']
+        method['market_validation'] = 'unknown'
+    errors = validate_v2(result)
+    if errors:
+        raise ValueError('; '.join(errors))
+    return result
+
+
+def validate_v2(doc):
+    """Check the shared v2 library without upgrading evidence or effect claims."""
+    errors = []
+    if doc.get('schema_version') != 2 or doc.get('scope_market') != 'US' or 'market' in doc:
+        errors.append('Expected schema_version=2 and scope_market=US without a v1 root market')
+    if type(doc.get('library_version')) is not int or doc['library_version'] < 1:
+        errors.append('library_version must be a positive integer')
+    cases, methods, preferences = (doc.get(name) for name in ('cases', 'methods', 'preferences'))
+    if any(not isinstance(value, list) for value in (cases, methods, preferences)):
+        return errors + ['cases, methods and preferences must be lists']
+    case_ids, source_keys, media_hashes, evidence_refs, groups = set(), set(), set(), {}, {}
+    for case in cases:
+        if not isinstance(case, dict):
+            errors.append('case must be an object')
+            continue
+        cid = case.get('id')
+        if not isinstance(cid, str) or not _ID.fullmatch(cid) or cid in case_ids:
+            errors.append(f'invalid/duplicate case id: {cid}')
+            continue
+        case_ids.add(cid)
+        if case.get('source_market') not in ('US', 'CN', 'unknown'):
+            errors.append(f'{cid}: unsupported source_market')
+        if case.get('source_market') in ('US', 'CN') and not case.get('migration_pending') and not case.get('source_market_evidence'):
+            errors.append(f'{cid}: known source market needs independent source evidence')
+        if not isinstance(case.get('source_platform'), str) or not case['source_platform'].strip():
+            errors.append(f'{cid}: source_platform required')
+        if not isinstance(case.get('title'), str) or not case['title'].strip():
+            errors.append(f'{cid}: title required')
+        if not isinstance(case.get('tags'), list) or any(not isinstance(t, str) for t in case['tags']):
+            errors.append(f'{cid}: tags must be a text list')
+        key = case.get('source_key')
+        if not isinstance(key, str) or not key or key in source_keys:
+            errors.append(f'{cid}: missing/duplicate source_key')
+        source_keys.add(key)
+        if case.get('source_url') and case.get('source_platform') == 'tiktok':
+            try:
+                if source_key(url=case['source_url']) != key:
+                    errors.append(f'{cid}: source URL identity mismatch')
+            except ValueError:
+                errors.append(f'{cid}: source URL must be a resolved public TikTok video URL')
+        media = case.get('media')
+        if media is not None:
+            digest = media.get('sha256') if isinstance(media, dict) else None
+            if not isinstance(digest, str) or not _SHA.fullmatch(digest) or digest in media_hashes:
+                errors.append(f'{cid}: invalid/duplicate media hash')
+            media_hashes.add(digest)
+            if not case.get('migration_pending') and (not isinstance(media, dict) or
+                                                      not isinstance(media.get('resource_id'), str) or
+                                                      not media['resource_id'] or 'path' in media):
+                errors.append(f'{cid}: new media must use a resource ID, not a disk path')
+        partition = case.get('partition')
+        if partition not in ('pending', 'calibration', 'holdout'):
+            errors.append(f'{cid}: invalid partition')
+        group = case.get('comparison_group')
+        if not isinstance(group, str) or not group:
+            errors.append(f'{cid}: comparison_group required')
+        else:
+            groups.setdefault(group, set()).add(partition)
+        evidence = case.get('evidence')
+        if not isinstance(evidence, list):
+            errors.append(f'{cid}: evidence must be a list')
+            continue
+        seen = set()
+        for observation in evidence:
+            if not isinstance(observation, dict):
+                errors.append(f'{cid}: observation must be an object')
+                continue
+            eid = observation.get('id')
+            if not isinstance(eid, str) or not eid or eid in seen:
+                errors.append(f'{cid}: duplicate/missing observation id')
+                continue
+            seen.add(eid)
+            if not observation.get('source') or not observation.get('observation'):
+                errors.append(f'{cid}/{eid}: source and content required')
+            if observation.get('kind') not in ('visual_sample', 'asr_semantics', 'user_feedback', 'request_text',
+                                               'historical_report', 'full_av_review', 'model_av_observation'):
+                errors.append(f'{cid}/{eid}: unsupported observation kind')
+            if not case.get('migration_pending') and observation.get('kind') != 'user_feedback':
+                for field in ('source_ref', 'observer_type', 'observation_kind', 'coverage', 'review_state'):
+                    if not observation.get(field):
+                        errors.append(f'{cid}/{eid}: {field} required')
+                if observation.get('observer_type') not in ('model', 'user', 'researcher', 'system'):
+                    errors.append(f'{cid}/{eid}: invalid observer_type')
+                if observation.get('review_state') not in ('candidate', 'user_accepted', 'rejected'):
+                    errors.append(f'{cid}/{eid}: invalid review_state')
+            if observation.get('kind') == 'full_av_review' and (not observation.get('reviewer') or not observation.get('reviewed_at') or not observation.get('scope')):
+                errors.append(f'{cid}/{eid}: full audiovisual review needs reviewer, date and scope')
+        evidence_refs[cid] = seen
+        eligible = case.get('eligible_for', [])
+        if not isinstance(eligible, list) or any(p not in PURPOSES for p in eligible):
+            errors.append(f'{cid}: invalid eligible_for')
+            eligible = []
+        if eligible and (partition != 'calibration' or not evidence or not case.get('strategy') or not case.get('limits')):
+            errors.append(f'{cid}: eligible case needs calibrated evidence, strategy and limits')
+        if 'performance' in eligible and not any(e.get('kind') == 'full_av_review' for e in evidence if isinstance(e, dict)):
+            errors.append(f'{cid}: sampled/model observation cannot qualify performance')
+        for entry in case.get('feedback_history', []):
+            if not isinstance(entry, dict):
+                errors.append(f'{cid}: feedback history entry must be an object')
+                continue
+            event = {k: v for k, v in entry.items() if k not in ('id', 'library_version')}
+            errors.extend(f'{cid}: {e}' for e in feedback_errors(event))
+            if entry.get('id') != feedback_key(event) or entry['id'] not in seen:
+                errors.append(f'{cid}: feedback identity or evidence missing')
+        if case.get('market_effect') is not None and not case['market_effect'].get('source'):
+            errors.append(f'{cid}: market result needs a source')
+    for group, partitions in groups.items():
+        if {'calibration', 'holdout'} <= partitions:
+            errors.append(f'{group}: same-source calibration/holdout leakage')
+    mids = set()
+    for method in methods:
+        if not isinstance(method, dict):
+            errors.append('method must be an object')
+            continue
+        mid = method.get('id')
+        if not isinstance(mid, str) or not _ID.fullmatch(mid) or mid in mids:
+            errors.append(f'invalid/duplicate method id: {mid}')
+            continue
+        mids.add(mid)
+        if method.get('status') not in _V2_METHOD_STATUSES:
+            errors.append(f'{mid}: unsupported method status')
+        if type(method.get('revision')) is not int or method['revision'] < 1:
+            errors.append(f'{mid}: revision must be a positive integer')
+        for field in ('when', 'decision', 'countercondition'):
+            if not isinstance(method.get(field), str) or not method[field].strip():
+                errors.append(f'{mid}: {field} required')
+        if not method.get('migration_pending'):
+            if method.get('kind') not in _V2_METHOD_KINDS:
+                errors.append(f'{mid}: invalid method kind')
+            for field in ('name', 'retrieval_summary', 'goal'):
+                if not isinstance(method.get(field), str) or not method[field].strip():
+                    errors.append(f'{mid}: {field} required')
+            for field in ('use_when', 'avoid_when', 'required_inputs', 'procedure', 'must_preserve',
+                          'can_vary', 'limitations', 'checks'):
+                values = method.get(field)
+                if not isinstance(values, list) or not values or any(not isinstance(v, str) or not v.strip() for v in values):
+                    errors.append(f'{mid}: {field} must be a nonempty text list')
+            if not isinstance(method.get('source_proposal'), str) or not method['source_proposal']:
+                errors.append(f'{mid}: source_proposal required')
+        if method.get('applicable_markets') != ['US'] or method.get('market_validation') not in ('unknown', 'limited'):
+            errors.append(f'{mid}: US scope and non-claimed market validation required')
+        if method.get('supports') != method.get('support_refs') or method.get('counterexamples', []) != method.get('counterexample_refs', []):
+            errors.append(f'{mid}: evidence aliases disagree')
+        for field in ('support_refs', 'counterexample_refs'):
+            refs = method.get(field)
+            if not isinstance(refs, list) or (field == 'support_refs' and not refs) or any(not isinstance(r, str) for r in refs):
+                errors.append(f'{mid}: {field} must be evidence references')
+                continue
+            for ref in refs:
+                cid, sep, eid = ref.partition('/')
+                if not sep or eid not in evidence_refs.get(cid, set()):
+                    errors.append(f'{mid}: unresolved evidence {ref}')
+                elif method.get('status') != 'retired':
+                    case = next((c for c in cases if isinstance(c, dict) and c.get('id') == cid), None)
+                    if case is None or case.get('partition') != 'calibration':
+                        errors.append(f'{mid}: pending/holdout evidence cannot support a live method')
+        if method.get('status') == 'active' and not (method.get('transfer_assessment') or method.get('unverified_use_approved')):
+            errors.append(f'{mid}: active requires assessment or explicit unverified-use approval')
+        if method.get('status') == 'active' and method.get('unverified_use_approved'):
+            activation = method.get('activation')
+            if (not isinstance(activation, dict) or activation.get('kind') != 'unverified_user_permission' or
+                    not isinstance(activation.get('rationale'), str) or not activation['rationale'].strip() or
+                    activation.get('effectiveness') != 'unverified' or
+                    not isinstance(activation.get('scope'), dict) or
+                    activation['scope'].get('market') != 'US' or
+                    not activation.get('source_delta')):
+                errors.append(f'{mid}: active unverified use needs a scoped approval record')
+        if method.get('status') == 'trial':
+            scope = method.get('trial_scope')
+            if (not isinstance(scope, dict) or scope.get('market') != 'US' or
+                    scope.get('authorization') != 'user_applied_delta' or
+                    not isinstance(scope.get('purposes'), list) or not scope['purposes'] or
+                    any(p not in PURPOSES for p in scope['purposes'])):
+                errors.append(f'{mid}: trial requires explicit US purpose scope')
+    pids = set()
+    for preference in preferences:
+        if not isinstance(preference, dict):
+            errors.append('preference must be an object')
+            continue
+        pid = preference.get('id')
+        if not isinstance(pid, str) or not _ID.fullmatch(pid) or pid in pids:
+            errors.append(f'invalid/duplicate preference id: {pid}')
+        pids.add(pid)
+        if preference.get('scope') not in ('user', 'brand', 'project') or not preference.get('dimension') or not preference.get('quote') or not preference.get('source_ref'):
+            errors.append(f'{pid}: preference requires explicit scope, dimension, quote and source')
+        if preference.get('market_effect') is not None:
+            errors.append(f'{pid}: preference cannot assert market effect')
+    return errors
+
+
 def record_feedback(doc, case_id, event):
     """Append scoped evidence to an existing identity; never infer approval or execution authority."""
     errors = validate(doc) + feedback_errors(event)
@@ -262,7 +498,7 @@ def creator_library(doc, case_ids=None):
     for method in doc['methods']:
         refs = method.get('supports', []) + method.get('counterexamples', [])
         dependencies = {ref.split('/')[0] for ref in refs}
-        if method.get('status') == 'retired' or not dependencies & seeds or not dependencies <= available.keys():
+        if method.get('status') in ('retired', 'draft', 'trial') or not dependencies & seeds or not dependencies <= available.keys():
             continue
         if any(ref.partition('/')[2] not in {e['id'] for e in available[ref.partition('/')[0]]['evidence']} for ref in refs):
             continue
@@ -278,8 +514,14 @@ def creator_library(doc, case_ids=None):
         if before == chosen:
             break
     cases = [available[c['id']] for c in doc['cases'] if c['id'] in chosen]
-    return {'schema_version': doc['schema_version'], 'market': doc['market'],
-            'library_version': doc.get('library_version', 1), 'cases': cases, 'methods': methods}
+    result = {'schema_version': doc['schema_version'],
+              'library_version': doc.get('library_version', 1), 'cases': cases, 'methods': methods}
+    if doc['schema_version'] == 2:
+        result['scope_market'] = doc['scope_market']
+        result['preferences'] = []  # Preferences are not case/method evidence.
+    else:
+        result['market'] = doc['market']
+    return result
 
 
 def select(doc, tags, purpose, limit=4):
@@ -355,6 +597,11 @@ def candidate(cid, title, tags, url=None, media=None, origin='user_reference'):
 
 
 def register(doc, item):
+    item = copy.deepcopy(item)
+    if doc.get('schema_version') == 2:
+        item.pop('market', None)
+        item.setdefault('source_platform', item.get('platform', 'unknown'))
+        item.setdefault('source_market', 'unknown')
     result = dict(doc, cases=doc['cases'] + [item])
     errors = validate(result)
     if errors:

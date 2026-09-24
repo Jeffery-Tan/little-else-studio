@@ -7,6 +7,7 @@ nonces remain outside logs and model context; only the decision route approves.
 from __future__ import annotations
 
 import argparse
+import re
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -238,6 +239,23 @@ def build_app(
                 jobs.initialize()
             except PipelineError as exc:
                 return JSONResponse({'detail': str(exc)}, status_code=409)
+        # A learning run reuses the run store and JobManager but never enters the
+        # production state machine. This boundary also covers future route
+        # handlers that forget to check Run.kind themselves.
+        match = re.fullmatch(r'/api/runs/([a-z0-9][a-z0-9-]*)(?:/(.*))?', request.url.path)
+        if match and request.method in {'POST', 'PUT', 'PATCH'}:
+            try:
+                learning_run = store.read_run(match[1]).kind == 'learning'
+            except PipelineError:
+                learning_run = False
+            suffix = match[2] or ''
+            permitted = (suffix in {'restore', 'jobs', 'materials', 'material-observations',
+                                    'reference-videos', 'message'}
+                         or suffix.startswith('learning/')
+                         or bool(re.fullmatch(r'jobs/[^/]+/(cancel|steer|resume-steer)', suffix))
+                         or suffix.startswith('recovery/'))
+            if learning_run and not permitted:
+                return JSONResponse({'detail': '独立学习记录不能执行生产阶段、批准或媒体生成。'}, status_code=409)
         return await call_next(request)
 
     def require_run(run_id: str, *, include_deleted: bool = False) -> None:

@@ -49,6 +49,14 @@ function prepareProjectDraft(text) {
 function renderProjectProgress() {
   const host = $('project-progress');
   if (!host) return;
+  const learningRun=(state.runs||[]).find(run=>run.run_id===state.runId);
+  if(learningRun?.kind==='learning'){
+    const session=state.learningSession||{};
+    const status=StudioLearningSession.onlyNoChangeConclusion(session)?'已确认，无知识变更':
+      {collecting:'整理材料',discussing:'讨论中',pending_review:'有变更待确认',saved:'已保存，待迁移验证',closed:'已结束'}[session.status]||'研究中';
+    host.innerHTML=`<section class="creator-goal" aria-label="当前学习记录"><div class="creator-goal-main"><span class="creator-kicker">学习记录 · ${escapeHtml(status)}</span><div class="creator-goal-heading"><h1>${escapeHtml(learningRun.title)}</h1></div><p class="creator-goal-current">原片、讨论与知识变更都保留在这条记录中。</p></div></section>`;
+    return;
+  }
   if (typeof renderJourneyStatus === 'function') { renderJourneyStatus(); return; }
   const runId = state.runId, timeline = state.timeline;
   const brief = state.projectBrief || timeline?.brief;

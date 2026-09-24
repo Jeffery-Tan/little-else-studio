@@ -89,6 +89,21 @@ test('feedback freezes the displayed artifact and preserves user quote verbatim'
   assert.throws(()=>L.feedbackPayload(artifact,'原话','made-up-scope'));
 });
 
+test('method directory and usage record separate reading from claimed implementation',()=>{
+  const bad='<script>not evidence</script>';
+  const card=L.contextCard({role:'writer',purpose:'message',snapshot:{
+    skills:[],seed_case_ids:[],method_directory:{methods:[{id:'method-one',revision:2,retrieval_summary:bad}]},
+  }});
+  assert.match(card,/提供过，不代表选用/);
+  assert.doesNotMatch(card,/<script>/);
+  assert.match(card,/&lt;script&gt;/);
+  const usage=L.methodUsageCard({method_id:'method-one',revision:2,decision:'chosen',
+    reason:bad,artifact:{stage:'writing',version:3,passage:bad}});
+  assert.match(usage,/制片使用声明/);
+  assert.match(usage,/尚未独立核实/);
+  assert.doesNotMatch(usage,/<script>/);
+});
+
 test('preview posts one candidate, never applies it or invokes an agent',async()=>{
   const calls=[];
   const actions=L.createActions(async(url,opts)=>{calls.push({url,...opts});return{id:'p',status:'pending'};},'run-one');

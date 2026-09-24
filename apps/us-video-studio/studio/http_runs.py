@@ -23,6 +23,18 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
             if store.deletion_state(run.run_id):
                 continue
             totals = ledger.totals(run.run_id)
+            if run.kind == 'learning':
+                from .learning_session import session_phase
+                from .learning import LearningService
+                learning = getattr(store, 'reference_learning', None) or LearningService(store)
+                rows = store.read_events(run.run_id)
+                session = session_phase(store, learning, run.run_id, events=rows)
+                out.append({**run.to_dict(), 'spend': totals.to_dict(),
+                            'progress': {'title': session['summary'], 'detail': run.brief},
+                            'project_brief': {'title': session['summary'], 'detail': run.brief},
+                            'updated_at': rows[-1]['at'] if rows else run.created_at,
+                            'content_format': None})
+                continue
             state = pipeline.state(run.run_id).to_dict()
             rows = store.read_events(run.run_id)
             brief = project_brief(state, latest_execution(store, run.run_id, rows))
@@ -64,8 +76,10 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
     def create_run(payload: RunIn) -> dict[str, Any]:
         try:
             with jobs.lock:
+                if payload.kind == 'learning' and payload.product_card is not None:
+                    raise ValueError('学习记录不能创建生产商品卡。')
                 run = (create_with_card(store, payload) if payload.product_card
-                       else store.create_run(payload.run_id, payload.title, payload.brief))
+                       else store.create_run(payload.run_id, payload.title, payload.brief, kind=payload.kind))
         except (ValueError, PipelineError) as exc:
             raise HTTPException(400, str(exc)) from exc
         return run.to_dict()

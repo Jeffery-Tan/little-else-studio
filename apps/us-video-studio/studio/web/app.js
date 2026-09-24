@@ -53,6 +53,8 @@ const state = {
   currentJob: null,
   productionData: null,
   referenceTasks: [],
+  learningSession: null,
+  learningCatalog: null,
   creatorView: null,
   canvasTouched: false,
   feedbackTarget: null,
@@ -177,6 +179,8 @@ async function selectRun(runId) {
   state.currentJob = null;
   state.productionData = null;
   state.referenceTasks = [];
+  state.learningSession = null;
+  state.learningCatalog = null;
   state.creatorView = null;
   clearFeedbackTarget();
   state.rail = [];
@@ -206,10 +210,13 @@ async function selectRun(runId) {
 async function refreshTimeline() {
   if (!state.runId) return;
   const runId = state.runId, serial = ++state.refreshSerial;
-  const [tl, production, references] = await Promise.all([
+  const runKind=state.runs.find(item=>item.run_id===runId)?.kind;
+  const [tl, production, references, learningSession, learningCatalog] = await Promise.all([
     api(`/api/runs/${runId}/timeline`),
-    api(`/api/runs/${runId}/production`).catch(() => null),
+    runKind==='learning'?Promise.resolve(null):api(`/api/runs/${runId}/production`).catch(() => null),
     api(`/api/runs/${runId}/reference-videos`).catch(() => null),
+    runKind==='learning'?api(`/api/runs/${runId}/learning/session`).catch(error=>({load_error:error.message})):Promise.resolve(null),
+    runKind==='learning'?api('/api/learning').catch(error=>({load_error:error.message})):Promise.resolve(null),
   ]);
   if (state.runId !== runId || serial !== state.refreshSerial) return;
   state.timeline = tl;
@@ -217,6 +224,15 @@ async function refreshTimeline() {
   state.productionData = production;
   state.referenceTasks = references?.tasks || [];
   const run = state.runs.find(item => item.run_id === runId) || tl.run || {};
+  state.learningSession=learningSession;
+  state.learningCatalog=learningCatalog;
+  if (run.kind==='learning') {
+    state.creatorView=null;state.rail=[];state.activeStage=null;
+    state.materials=tl.materials||[];
+    $('rail').innerHTML='';
+    renderPane();renderConversation(tl);renderDraft();renderSpend(tl);renderMaterials();renderProjects();
+    return;
+  }
   const imageWork = production && typeof StudioProduction?.currentProductionWork === 'function'
     ? StudioProduction.currentProductionWork(production, 'image', runId) : null;
   const videoWork = production && typeof StudioProduction?.currentProductionWork === 'function'
@@ -336,6 +352,16 @@ function selectStage(stage) {
 
 function renderPane() {
   renderProjectProgress();
+  const run=state.runs.find(item=>item.run_id===state.runId);
+  if (run?.kind==='learning') {
+    const host=$('stage');
+    StudioLearningSession.mount({host,session:state.learningSession||{},run,materials:state.materials,
+      library:state.learningCatalog,
+      referenceTasks:state.referenceTasks,request:api,reload:refreshTimeline,notify:toast,
+      openMaterials:()=>toggleMaterials(true),openChat:()=>{setProjectFocus('chat');$('chat-input').focus();},
+      openAnalysis:()=>StudioLearningSession.openAnalysisDialog().catch(error=>toast(error.message,true))});
+    return;
+  }
   if (state.canvasTab && state.canvasTab !== 'plan') return;
   const host = $("stage");
   const step = (state.rail || []).find((s) => s.stage === state.activeStage);
@@ -882,11 +908,12 @@ function closeViewer() {
 
 function renderMaterials() {
   const list = state.materials;
+  const learning=state.runs.find(r=>r.run_id===state.runId)?.kind==='learning';
   $('materials-project-name').textContent = state.runs.find(r=>r.run_id===state.runId)?.title || '';
   const usable = list.filter((m) => m.usable);
   // The count rides on the chip as well as in the panel. A shelf he has to open
   // to find out whether anything is on it is a shelf he will forget about.
-  $("materials-toggle").textContent = list.length ? `项目素材 · ${usable.length}` : "项目素材";
+  $("materials-toggle").textContent = list.length ? `${learning?'参考素材':'项目素材'} · ${usable.length}` : learning?'参考素材':'项目素材';
   $("materials-count").textContent = list.length
     ? `${usable.length} 个能用 · 共 ${list.length} 个文件`
     : "还没有素材";
@@ -895,7 +922,7 @@ function renderMaterials() {
   grid.innerHTML = "";
   if (!list.length) {
     grid.appendChild(
-      box("p", "materials-empty", "添加商品照片、参考图或视频，再记录可确认的内容，供团队策划使用。")
+      box("p", "materials-empty", learning?"添加参考视频，随后按需分析实际声画；上传本身不会调用模型。":"添加商品照片、参考图或视频，再记录可确认的内容，供团队策划使用。")
     );
     return;
   }
@@ -1028,9 +1055,11 @@ function renderConversation(tl) {
     : "还没有对话";
   setConversationOpen(state.conversationOpen);
 
-  if (!tl.turns.length) host.innerHTML = '<div class="chat-welcome"><span class="chat-welcome-mark">le.</span><h3>从你的想法聊起</h3><p>说说商品、想打动的人，或者这次想尝试的表达。我们一起把方案做出来。</p><button class="chat-suggestion" type="button">帮我梳理这个项目的创意方向 ↗</button></div>';
+  if (!tl.turns.length) host.innerHTML = state.runs.find(r=>r.run_id===state.runId)?.kind==='learning'
+    ? '<div class="chat-welcome"><span class="chat-welcome-mark">le.</span><h3>一起研究这条参考</h3><p>说出你想理解的表达，也可以纠正已有观察。只有经你确认的变更才会保存到共享库。</p><button class="chat-suggestion" type="button">先说说这条参考的观察范围 ↗</button></div>'
+    : '<div class="chat-welcome"><span class="chat-welcome-mark">le.</span><h3>从你的想法聊起</h3><p>说说商品、想打动的人，或者这次想尝试的表达。我们一起把方案做出来。</p><button class="chat-suggestion" type="button">帮我梳理这个项目的创意方向 ↗</button></div>';
   const suggestion=host.querySelector('.chat-suggestion');
-  if (suggestion) suggestion.onclick=()=>{$('chat-input').value='先帮我梳理这个项目的创意方向。';$('chat-input').focus();};
+  if (suggestion) suggestion.onclick=()=>{$('chat-input').value=state.runs.find(r=>r.run_id===state.runId)?.kind==='learning'?'先说说这条参考目前实际观察到了什么、还没有观察到什么。':'先帮我梳理这个项目的创意方向。';$('chat-input').focus();};
   for (const turn of tl.turns) host.appendChild(renderTurn(turn));
   const decision = box('div','journey-decision');decision.id='journey-decision';host.append(decision);
   if (typeof renderJourneyDecision === 'function') renderJourneyDecision();

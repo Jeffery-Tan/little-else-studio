@@ -409,6 +409,8 @@ class Pipeline:
     # -------------------------------------------------------------- actions --
 
     def require_prerequisites(self, run_id: str, stage: str) -> dict[str, str]:
+        if self.store.read_run(run_id).kind == 'learning':
+            raise PipelineError('run_kind', 'Independent learning runs cannot start production stages')
         spec = STAGE_SPEC[stage]
         memo: dict = {}
         inputs: dict[str, str] = {}

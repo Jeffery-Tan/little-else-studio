@@ -20,7 +20,13 @@ async function loadMaterialWorkspace() {
         openReferenceVideo(runId,references.tasks.find(t=>t.reference_id===button.dataset.referenceResume),button).catch(err=>toast(err.message,true));
     }
     const referenceButton=$('reference-video-open');
-    if(referenceButton)referenceButton.onclick=()=>openReferenceVideo(runId,null,referenceButton).catch(err=>toast(err.message,true));
+    if(referenceButton){
+      const learning=state.runs.find(run=>run.run_id===runId)?.kind==='learning';
+      referenceButton.textContent=learning?'分析参考视频':'在对话中提供参考';
+      referenceButton.onclick=()=>learning
+        ? StudioLearningSession.openAnalysisDialog().catch(err=>toast(err.message,true))
+        : openReferenceVideo(runId,null,referenceButton).catch(err=>toast(err.message,true));
+    }
     for (const button of grid.querySelectorAll('[data-material-observe]')) button.onclick = () => {
       const material = data.materials.find(m=>m.name === button.dataset.materialObserve);
       if (material) openObservationEditor(runId, material, data, button);

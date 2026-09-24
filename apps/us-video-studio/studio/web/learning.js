@@ -55,8 +55,16 @@
   }
   function contextCard(context,renderText=esc) {
     const snapshot=context.snapshot||{},provided=list(snapshot.skills||context.skills);
-    const methods=list(snapshot.library?.methods),references=list(snapshot.seed_case_ids||context.seed_case_ids);
-    return `<article class="learning-card learning-context-card"><div class="learning-context-heading"><h4>${esc(roles[context.role]||"创作角色")}的参考</h4><span>${esc(name(context.purpose)||"创作准备")}</span></div><p>${provided.length?`本次提供了${provided.map(s=>esc(skills[s.id]?.title||s.title||"创作方法")).join("、")}。`:"本次没有提供创作方法文本。"}${references.length?`同时提供 ${references.length} 条参考案例。`:"未检索参考案例。"}</p>${methods.length?`<h5>本次提供的方法</h5>${bullets(methods.map(m=>m.decision))}`:""}${snapshot.text?`<details class="learning-details"><summary>阅读这次提供的完整内容</summary><article class="learning-prose">${renderText(snapshot.text)}</article></details>`:""}${audit(context,"核对完整快照与版本")}</article>`;
+    const methods=list(snapshot.library?.methods),directory=list(snapshot.method_directory?.methods),references=list(snapshot.seed_case_ids||context.seed_case_ids);
+    return `<article class="learning-card learning-context-card"><div class="learning-context-heading"><h4>${esc(roles[context.role]||"创作角色")}的参考</h4><span>${esc(name(context.purpose)||"创作准备")}</span></div><p>${provided.length?`本次提供了${provided.map(s=>esc(skills[s.id]?.title||s.title||"创作方法")).join("、")}。`:"本次没有提供创作方法文本。"}${references.length?`同时提供 ${references.length} 条参考案例。`:"未检索参考案例。"}</p>${directory.length?`<h5>合资格方法目录 · 提供过，不代表选用</h5>${bullets(directory.map(m=>`${m.id} · v${m.revision} · ${m.retrieval_summary||m.decision||''}`))}`:""}${methods.length?`<h5>案例关联的方法</h5>${bullets(methods.map(m=>m.decision))}`:""}${snapshot.text?`<details class="learning-details"><summary>阅读这次提供的完整内容</summary><article class="learning-prose">${renderText(snapshot.text)}</article></details>`:""}${audit(context,"核对完整快照与版本")}</article>`;
+  }
+  function methodUsageCard(item) {
+    const chosen=item.decision==='chosen',artifact=item.artifact||{};
+    return `<article class="learning-card"><h4>${esc(item.method_id||'方法')} · v${esc(item.revision||'?')} · ${chosen?'声明已用':'决定不用'}</h4>`+
+      `<p>${esc(item.reason||'未记录理由')}</p>`+
+      (chosen?`<p class="learning-note">对应 ${esc(stages[artifact.stage]||artifact.stage||'稿件')} 第 ${esc(artifact.version||'?')} 版：${esc(artifact.passage||'未记录段落')}</p>`:'')+
+      `<p class="learning-note">制片使用声明；实现情况和效果尚未独立核实。</p>`+
+      `${audit({method_id:item.method_id,revision:item.revision,library_sha256:item.library_sha256,artifact:item.artifact,task_profile:item.task_profile},"核对方法与作品版本")}</article>`;
   }
   function caseDetail(item) {
     const source=safeURL(item.source_url);
@@ -136,7 +144,7 @@
       apply:(proposal)=>{if(!runId || !proposal?.id || !proposal.base_library_sha256 || proposal.status!=="pending") throw new Error("此提案不能保存，请重新打开提案查看状态。"); return request(`${base}/${encodeURIComponent(proposal.id)}/apply`,{method:"POST",body:JSON.stringify({expected_library_sha256:proposal.base_library_sha256})});}
     };
   }
-  root.StudioLearning={esc,safeURL,fields,filtered,caseCard,methodCard,diffHtml,proposalHtml,feedbackPayload,createActions,documentHtml,skillCard,contextCard,mediaHtml,caseDetail,referenceForm,projectReferences,loadProjectReferences};
+  root.StudioLearning={esc,safeURL,fields,filtered,caseCard,methodCard,methodUsageCard,diffHtml,proposalHtml,feedbackPayload,createActions,documentHtml,skillCard,contextCard,mediaHtml,caseDetail,referenceForm,projectReferences,loadProjectReferences};
   if(typeof document==="undefined") return;
   const opener=document.getElementById("learning-open");
   if(!opener) return;
@@ -204,7 +212,7 @@
   function renderContext(){
     const fileNames={"review.md":"阅读方案","index.html":"打开图文包","prompt.txt":"生成提示词","caption.txt":"发布文案","prompts.md":"逐页文案与提示词"};
     const fileLink=f=>{const url=localFileURL(f.url);return url?`<a class="learning-file-link" href="${esc(url)}" target="_blank" rel="noopener">${esc(fileNames[f.name]||f.name)} ↗</a>`:"";};
-    setContent(`${projectReferences(referenceState.references,referenceState.capability)}<h3>这次创作参考了什么</h3><p class="learning-note">以下记录对应实际提供给各角色的内容。提供过，不等于内容或效果已经通过验证。</p><div class="learning-context-list">${list(run.contexts).map(c=>contextCard(c,prose)).join("")||empty("还没有本轮参考记录。开始创作后，这里会留下实际提供的方法和案例。")}</div><h3>方案与制作文件</h3><p class="learning-note">可阅读的方案、文案和制作输入。待生成的素材仍保持待生成。</p><div class="learning-grid">${list(run.packages).map(p=>`<article class="learning-card"><h4>${p.format==='photo'?'图文方案':'视频方案'} · ${esc(stages[p.stage]||p.stage)} 第 ${esc(p.version)} 版</h4><div class="learning-file-links">${list(p.files).filter(f=>fileNames[f.name]).map(fileLink).join("")}</div><details class="learning-details learning-audit"><summary>全部文件与版本记录</summary>${meta(p.artifact_sha256)}${list(p.files).map(fileLink).join("")}</details></article>`).join("")||empty("还没有保存的制作文件。")}</div>`);
+    setContent(`${projectReferences(referenceState.references,referenceState.capability)}<h3>这次创作参考了什么</h3><p class="learning-note">以下记录对应实际提供给各角色的内容。提供过，不等于内容或效果已经通过验证。</p><div class="learning-context-list">${list(run.contexts).map(c=>contextCard(c,prose)).join("")||empty("还没有本轮参考记录。开始创作后，这里会留下实际提供的方法和案例。")}</div><h3>方法选择与使用记录</h3><p class="learning-note">区分方法已提供、制片选择和稿件实际体现；以下选择记录仍待作品核实。</p><div class="learning-context-list">${list(run.method_usage).map(methodUsageCard).join("")||empty("尚无方法选择记录。")}</div><h3>方案与制作文件</h3><p class="learning-note">可阅读的方案、文案和制作输入。待生成的素材仍保持待生成。</p><div class="learning-grid">${list(run.packages).map(p=>`<article class="learning-card"><h4>${p.format==='photo'?'图文方案':'视频方案'} · ${esc(stages[p.stage]||p.stage)} 第 ${esc(p.version)} 版</h4><div class="learning-file-links">${list(p.files).filter(f=>fileNames[f.name]).map(fileLink).join("")}</div><details class="learning-details learning-audit"><summary>全部文件与版本记录</summary>${meta(p.artifact_sha256)}${list(p.files).map(fileLink).join("")}</details></article>`).join("")||empty("还没有保存的制作文件。")}</div>`);
   }
   function localFileURL(url){return typeof url==="string"&&/^\/api\/(runs|learning)\/[a-zA-Z0-9%_./?=&-]+$/.test(url)&&!url.includes("..")?url:null;}
   function renderFeedback(){
