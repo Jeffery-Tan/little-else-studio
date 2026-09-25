@@ -1607,6 +1607,18 @@ async function send(text) {
   if (state.decisionBusy) return {accepted: false, reason: '正在保存你的决定，请稍候。'};
   if (state.recoveryBlocked) return {accepted: false, reason: '请先处理待恢复事项。'};
   if (!state.runId) return {accepted: false, reason: '先打开一个项目。'};
+  // Every send entry funnels through here, so the admission check has to live
+  // here too: `submit()` checks before it clears the composer (its own draft
+  // snapshot), but the draft tray and any other direct caller come straight in
+  // and would otherwise open a second request identity while the first one's
+  // outcome — job or adjustment — is still unknown (U2).
+  const unresolvedPending = pendingSubmission(state.runId);
+  if (unresolvedPending) {
+    const pendingMessage = '上一次发送的结果还没有确认；请先在任务状态里确认提交，再发新的内容。';
+    toast(pendingMessage, true);
+    return {accepted: false, uncertain: true, reason: pendingMessage,
+            rejected_text: text, run_id: state.runId};
+  }
   state.atBottom = true;
   setConversationOpen(true);
   const runId=state.runId;
@@ -1630,15 +1642,17 @@ async function send(text) {
       if (!adjusted || adjusted.ok !== false) return {accepted: true};
       if (adjusted.reason === 'job_not_active') {
         // Previous job already ended: keep this prompt and open a fresh turn.
-      } else if (adjusted.reason === 'unknown') {
-        // The adjustment may or may not have been received. Its identity is kept
-        // by the runtime, so this is not a rejection and the words must not be
-        // presented as a draft that can simply be sent again (T2).
+      } else if (adjusted.reason === 'unknown' || adjusted.reason === 'pending_unknown') {
+        // The adjustment may or may not have been received — or an earlier one
+        // is still unresolved. Its identity is kept by the runtime, so this is
+        // not a rejection and the words must not be presented as a draft that
+        // can simply be sent again (T2/U2).
         return {accepted: false, uncertain: true,
                 reason: '调整是否收到还没有确认；请先确认提交状态，避免重复发出同一段话。',
                 rejected_text: text, run_id: runId};
       } else {
-        return {accepted: false, reason: adjusted.error?.message || '这次调整没有被接受。',
+        return {accepted: false, uncertain: false,
+                reason: adjusted.error?.message || '这次调整没有被接受。',
                 rejected_text: adjusted.rejected_text, run_id: runId};
       }
     }
@@ -1685,10 +1699,13 @@ async function send(text) {
     // holds what the user meant to send — questions only `submit`, which took
     // the snapshot, can answer (R5/T4).
     //
-    // This is a definite failure, not an unknown one: nothing here offered to
-    // confirm the submission. Marking it uncertain would be exactly the mistake
-    // this fix removes — a refusal dressed up as "we don't know", which invites
-    // a resend instead of returning the draft.
+    // Only failures raised *before* the request was handed to the transport
+    // reach this catch: `submitJob`/`submitSteer` classify Failed to fetch,
+    // timeouts and unreadable responses themselves as unknown, with the
+    // identity kept. A throw here therefore means the request never entered
+    // the send step — definite, so the words go back as a draft. Dressing a
+    // definite refusal up as "we don't know" (or the reverse) invites exactly
+    // the double-send this guard exists to prevent (T2/U2).
     toast(error.message,true);if(typeof StudioComposer!=='undefined')StudioComposer.render();
     return {accepted: false, reason: error.message, uncertain: false,
             rejected_text: text, run_id: runId};
@@ -1747,12 +1764,18 @@ async function submit() {
 /* The submission whose outcome this browser has not confirmed, if any.
  *
  * `runtime` writes this marker before the request leaves and clears it on any
- * definite answer, so its presence means "may have been received". Reading it
- * here is what keeps a second Enter from replacing that identity.
+ * definite answer, so its presence means "may have been received". Both kinds
+ * count: a new conversation turn (`studio-job-pending`) and a running
+ * adjustment (`studio-steer-pending`) are one submission each, and neither may
+ * be replaced by a second request identity (U2). Reading it here is what keeps
+ * a second Enter, button click or tray send from doing exactly that.
  */
 function pendingSubmission(runId) {
   if (!runId) return null;
-  try { return JSON.parse(sessionStorage.getItem(`studio-job-pending:${runId}`) || "null"); }
+  try {
+    return JSON.parse(sessionStorage.getItem(`studio-job-pending:${runId}`) || "null")
+        || JSON.parse(sessionStorage.getItem(`studio-steer-pending:${runId}`) || "null");
+  }
   catch { return null; }
 }
 

@@ -181,9 +181,14 @@ BOM**，**代码与配置（`.py`/`.json`/`.yaml`）用 UTF-8 不带 BOM**。加
     恢复自己禁用过的，不得把业务禁用的选项一律启用。
     对话输入**按每次提交与项目归还草稿**：一次提交捕获原 runId 与输入版本，只有同项目且期间
     没有更新的输入时才放回；`runtime` 的 `submitSteer` 不得自行写输入框，只返回事实（含
-    `rejected_text`）。**结果未知不等于被拒绝**：请求发出前写入按 run 的待确认标记，未知时保留
-    原 request_id 与核实入口，措辞与状态都不得降格成「没被接受」，该标记未决时 Enter 与按钮
-    同样拒绝再发；只有确认拒绝才清标记并放回草稿，调用未产生响应的确定性失败也清标记并归还草稿。
+    `rejected_text`）。**结果未知不等于被拒绝**：请求发出前写入按 run 的待确认标记——普通新任务为
+    `studio-job-pending`、运行中调整为 `studio-steer-pending`，两种标记进入**同一道准入判断**，
+    Enter、发送按钮、草稿盘等所有发送入口在任一标记未决时都拒绝另建请求身份，原 request_id 与原
+    负载不被覆盖；未知时保留原身份与核实入口，刷新后仍可用同一身份核实，措辞与状态都不得降格成
+    「没被接受」。**清理按身份比较**：仅当当前保存的 request_id 等于本次结果的 request_id 才删除标记，
+    旧响应不得清除另一请求的记录，跨项目互不污染。只有确认拒绝才清标记并放回草稿；只有掌握请求
+    **未进入发送步骤**的明确证据（如发送前的本地校验失败）才按未发送处理——Failed to fetch、超时、
+    响应解析失败等没有 HTTP 响应的情况一律属于结果未知，不清标记、不归还为可重发草稿。
     `submit` 原样返回 `submitJob` 的 accepted/uncertain，不自行改写结果。
     `open_questions.kind=brief_amendment` 不进 ask_user。审核 findings 可带 `clause_ids`，
     引用不存在的 id 拒记；direction 退回且 gate blocked 时缺省会补上 blockers 的 id。

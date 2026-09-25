@@ -127,9 +127,18 @@ function readPendingJobOptions(runId, payload) {
   }
   catch (_) { return {}; }
 }
-function clearPendingJob(runId) {
+/* Clearing is by identity, never by key alone (U2): a late answer for one
+ * request must not delete the marker standing for a different unresolved one. */
+function clearPendingJob(runId, requestId) {
+  const stored = readPendingJob(runId);
+  if (stored && stored.request_id !== requestId) return;
   sessionStorage.removeItem(pendingJobKey(runId));
   sessionStorage.removeItem(pendingJobUiKey(runId));
+}
+function clearPendingSteer(runId, requestId) {
+  const stored = readPendingSteer(runId);
+  if (stored && stored.request_id !== requestId) return;
+  sessionStorage.removeItem(pendingSteerKey(runId));
 }
 
 function showJob(job, notice = "") {
@@ -381,12 +390,12 @@ async function restoreJob(runId) {
     const job = await api(`/api/runs/${runId}/jobs/latest`);
     if (runId !== state.runId || generation !== jobWatch) return;
     const pending = readPendingJob(runId);
-    if (pending && job?.request_id === pending.request_id) clearPendingJob(runId);
+    if (pending && job?.request_id === pending.request_id) clearPendingJob(runId, pending.request_id);
     else if (pending) { showUncertainSubmission(runId, pending, readPendingJobOptions(runId, pending)); return; }
     const steer = readPendingSteer(runId);
     if (steer && (job?.parent_job_id === steer.job_id ||
         (job?.job_id === steer.job_id && Number(job.goal_revision || 0) > steer.expected_goal_revision))) {
-      sessionStorage.removeItem(pendingSteerKey(runId));
+      clearPendingSteer(runId, steer.request_id);
     } else if (steer) {
       showJob(job, '调整是否收到尚未确认。请确认提交状态。');
       const retry = box('button','ghost small','确认调整状态');
@@ -406,18 +415,25 @@ async function restoreJob(runId) {
 
 async function submitSteer(runId, jobId, payload) {
   if (runId !== state.runId || steerPosting) return {ok:false, reason:'busy'};
+  // An adjustment whose answer is still unknown owns this run's marker. A
+  // second identity must neither go out nor overwrite that record — the
+  // original request_id and payload are what the confirm entry retries (U2).
+  const unresolved = readPendingSteer(runId);
+  if (unresolved && unresolved.request_id !== payload.request_id)
+    return {ok:false, reason:'pending_unknown',
+            error:new Error('上一次调整的结果还没有确认；请先在任务状态里确认提交。')};
   steerPosting = true;
   sessionStorage.setItem(pendingSteerKey(runId), JSON.stringify({...payload, job_id:jobId}));
   if (currentJob?.job_id === jobId) showJob(currentJob, '正在提交调整…');
   try {
     const updated = await api(`/api/runs/${runId}/jobs/${jobId}/steer`,
       {method:'POST', body:JSON.stringify(payload)});
-    sessionStorage.removeItem(pendingSteerKey(runId));
+    clearPendingSteer(runId, payload.request_id);
     if (runId === state.runId && currentJob?.job_id === jobId) showJob(updated);
     return {ok:true, job:updated};
   } catch (err) {
     if (err.status >= 400 && err.status < 500) {
-      sessionStorage.removeItem(pendingSteerKey(runId));
+      clearPendingSteer(runId, payload.request_id);
       const notActive = err.status === 409 &&
         /原任务已经结束|任务不在此进程运行/u.test(String(err.message || ''));
       if (runId === state.runId && notActive) {
@@ -443,6 +459,16 @@ async function submitSteer(runId, jobId, payload) {
 
 async function submitJob(runId, payload, options = {}) {
   if (runId !== state.runId) return {accepted:false,error:new Error('项目已切换，请重新打开当前项目。')};
+  // One unresolved submission identity per project (U2). A new request_id must
+  // not displace — or silently replace — the record whose outcome is still
+  // unknown; the confirm entry for that original identity stays on screen.
+  const unresolved = readPendingJob(runId);
+  if (unresolved && unresolved.request_id !== payload.request_id) {
+    showUncertainSubmission(runId, unresolved, readPendingJobOptions(runId, unresolved));
+    return {accepted:false, uncertain:true,
+            error:new Error('上一次发送的结果还没有确认；请先在任务状态里确认提交。'),
+            request_id:unresolved.request_id, rejected_text:payload.text};
+  }
   // Both conversation entry points display the same on-demand analysis notice.
   // This does not enable media generation; the main agent still needs an
   // explicit reference request, a supplied source and the bounded tool.
@@ -469,7 +495,7 @@ async function submitJob(runId, payload, options = {}) {
   } catch (err) {
     if (runId !== state.runId || generation !== jobWatch) return {accepted:false,error:err};
     if (err.status >= 400 && err.status < 500) {
-      clearPendingJob(runId);
+      clearPendingJob(runId, payload.request_id);
       // A definite rejection: the words go back only if the composer is still
       // empty. `preserveComposerOnError` means the caller owns the draft (it has
       // a newer copy than this closure does), so this must not touch it.
@@ -482,11 +508,16 @@ async function submitJob(runId, payload, options = {}) {
     return {accepted:false, error:err, uncertain:!(err.status >= 400 && err.status < 500),
             request_id:payload.request_id, rejected_text:payload.text};
   }
-  clearPendingJob(runId);
+  clearPendingJob(runId, payload.request_id);
   if (runId !== state.runId || generation !== jobWatch) return {accepted:true};
   if (payload.feedback_target && JSON.stringify(state.feedbackTarget) === JSON.stringify(payload.feedback_target))
     clearFeedbackTarget();
-  await watchJob(runId, job, generation);
+  // The request has been accepted and its marker settled. A failure from the
+  // renderer after this point must not escape as a thrown error: `send()` would
+  // read that as a definite pre-send failure and hand the words back for a
+  // resend that could run the prompt twice. The job itself is already durable.
+  try { await watchJob(runId, job, generation); }
+  catch (_) { try { showJob(job); } catch (_) { /* the status panel is best-effort */ } }
   try { await refreshTimeline(); }
   catch (_) { toast("任务已接受，正在运行；对话暂时未刷新。", true); }
   return {accepted:true};

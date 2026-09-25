@@ -390,7 +390,7 @@ function canSteerJob(job) {
  * `RUNTIME_SHIM`); `observed` collects every request for assertions.
  */
 export function loadApp({routes = {}, globals = {}, dom = makeDom(), storage = makeStorage(),
-                         observed = [], baseUrl = ''} = {}) {
+                         observed = [], baseUrl = '', runtime = 'shim'} = {}) {
   const {document} = dom;  const ctx = {
     console,
     document,
@@ -436,7 +436,16 @@ export function loadApp({routes = {}, globals = {}, dom = makeDom(), storage = m
   };
 
   vm.createContext(ctx);
-  vm.runInContext(RUNTIME_SHIM, ctx, {filename: 'runtime-shim.js'});
+  if (runtime === 'real') {
+    // The page's real load order (index.html): team-progress.js → runtime.js →
+    // … → app.js, all classic scripts sharing one global scope. Only `fetch`
+    // and the clock are replaced, so the pending/identity logic under test is
+    // the code that ships.
+    vm.runInContext(webSource('team-progress.js'), ctx, {filename: 'team-progress.js'});
+    vm.runInContext(webSource('runtime.js'), ctx, {filename: 'runtime.js'});
+  } else {
+    vm.runInContext(RUNTIME_SHIM, ctx, {filename: 'runtime-shim.js'});
+  }
   vm.runInContext(webSource('app.js'), ctx, {filename: 'app.js'});
   return {ctx, observed, elements: dom.elements, document, storage};
 }
