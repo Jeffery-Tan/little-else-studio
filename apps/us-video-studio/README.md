@@ -46,6 +46,15 @@ if (!(Test-Path -LiteralPath $studioPython)) { py -3.12 -m venv $studioRuntime }
 & $studioPython -m pytest apps/us-video-studio/tests -q
 node --test apps/us-video-studio/tests/js/*.mjs
 
+# 可选：对已运行的服务做真实页面检查（默认跳过，必须显式给 URL）
+# check_live_page 只读；smoke_live_server 会写入一条简报修订，只允许指向 preview 数据根
+$env:STUDIO_CHECK_URL = 'http://127.0.0.1:4760'
+$env:STUDIO_CHECK_RUNS = '<run-id>[,<run-id>...]'
+node --test apps/us-video-studio/tests/js/check_live_page.mjs
+$env:STUDIO_SMOKE_URL = '<preview 服务的 URL>'
+$env:STUDIO_SMOKE_RUN = 'preview-brief-blocked-01'
+node --test apps/us-video-studio/tests/js/smoke_live_server.mjs
+
 # 同一入口先诊断，再启动；失效解释器、依赖、数据根、writer 锁和端口有对应提示
 powershell -NoProfile -ExecutionPolicy Bypass -File apps/us-video-studio/scripts/start.ps1 -DataRoot $studioData -CheckOnly
 powershell -NoProfile -ExecutionPolicy Bypass -File apps/us-video-studio/scripts/start.ps1 -DataRoot $studioData
