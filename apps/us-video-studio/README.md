@@ -64,7 +64,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File apps/us-video-studio/scripts
 
 默认仅绑定 `127.0.0.1`，访问 `http://127.0.0.1:4760/`。本应用没有公网身份验证，未配置开机启动或公网部署；不要直接暴露服务。
 
-换电脑继续工作：代码通过 Git 拉取，项目与素材从私有 Release 备份恢复到新的 Git 外数据根。完整安装依赖见 `requirements-runtime.txt`，下载、恢复与后续接续步骤见 [跨电脑恢复](docs/portable-projects.md)。登录与 API Key 留在各自电脑，不随备份传输。
+`start.ps1` 走 `studio.doctor --start`，它在这条命令自己的进程里前台运行 uvicorn：**关掉那个终端或让启动它的父进程结束，服务就一起退出**（表现为 4760 连接被拒，磁盘上只留下一个内容为 `0` 的 `.studio-writer.lock`，它不是残留锁）。需要服务在启动它的会话结束后继续跑时，用独立进程启动，并显式核对 `/api/runtime` 指纹：
+
+```powershell
+Start-Process -FilePath $studioPython `
+  -ArgumentList '-m','studio.doctor','--data-root',$studioData,'--port','4760','--start' `
+  -WorkingDirectory '<repo>/apps/us-video-studio' -WindowStyle Hidden `
+  -RedirectStandardOutput "$env:TEMP\studio-4760.out.log" -RedirectStandardError "$env:TEMP\studio-4760.err.log"
+```
+
+换电脑继续工作：代码通过 Git 拉取，项目与素材从私有 Release 备份恢复到新的 Git 外数据根。完整安装依赖见 `requirements-runtime.txt`，下载、恢复与后续接续步骤见 [跨电脑恢复](docs/portable-projects.md)。登录与 API Key 留在各自电脑，不随备份传输：备份会移除连接里的加密凭据，恢复出来的 `connections.json` 没有 Key，必须在站内「模型设置」重新填写，或从同一台电脑、同一 Windows 用户下仍在用的那份数据根复制 `connections.json`（DPAPI 密文只能由创建它的用户解密）。
 
 ### Agent 与模型
 
