@@ -478,10 +478,12 @@ def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]],
                               if _sign(c.get("id"), c.get("text")) != signature]
                 by_id.pop(signature[0], None)
 
-    def _doubt(clause_id: str, row: dict[str, Any], *sources: str,
+    def _doubt(clause_id: str, row: dict[str, Any] | None, *sources: str,
                sign_clause_id: str | None = None) -> None:
         """Record one unresolved doubt about a requirement.
 
+        ``row`` is the conflict this doubt owns, or None when the doubt only
+        tracks a re-added clause for later settling (no user-facing conflict).
         ``sign_clause_id`` names the clause the doubt's *recovered row* lives
         under when that differs from the record's own id — a body-aligned
         replay can land the decision under the id it resolved to, and settling
@@ -649,46 +651,55 @@ def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]],
             if resolved == "goal.primary" or new_row["id"] == "goal.primary":
                 goal = _amended_goal(text)
         elif resolved and text:
-            # The decision's own body is in the current brief — found by text
-            # rather than by the id the record names. It is *already* the compiled
-            # clause, so nothing is added; and because the id differs from the one
-            # the record was decided against, the divergence is reported rather
-            # than presented as an aligned replay.
-            kind = str(next((c.get("kind") for c in clauses
-                             if c.get("id") == resolved), "must") or "must")
-            if resolved not in by_id:
-                clauses.append({
-                    "id": resolved, "kind": kind, "text": text,
-                    "check": _check_for(kind, text), "source": "brief_amendment",
-                    "authority": "amendment", "scope": "global",
-                    "status": "confirmed",
-                })
-                by_id[resolved] = clauses[-1]
-            id_diverged = clause_id != resolved
-            if id_diverged:
-                conflicts.append({
-                    "amendment_clause_id": clause_id,
-                    "kind": BLOCKER_AMENDMENT_UNRESOLVED,
-                    "base_text": base_text,
-                    "detail": (
-                        f"已批准的修订（针对条款 {clause_id}）把这条要求改成了「{text}」，"
-                        f"当前简报里能找到这条正文但条款 id 已变为 {resolved}；"
-                        "两者不一致，采用前需要你确认：可以重新提出这条修订，"
-                        "或退回让团队按当前简报重做。"
-                    ),
-                })
-            _settle(clause_id, base_text, text)
-            if id_diverged:
+            # The row this change aligned to was consumed by the settle above.
+            # If the decided body *already stands* in the brief — the intake
+            # restated the final decision, or an earlier record landed it —
+            # the decision is carried: re-adding it under `resolved` would fork
+            # one requirement into two same-text aliases with different ids
+            # that a later replace or retire can only ever reach one of (H1:
+            # A→B→A→C with intake=C). One body, one requirement; the id drift
+            # against a settled intermediate is bookkeeping, not a divergence
+            # the user has to confirm. Same text-matching standard align()
+            # already uses for realignment.
+            body_present = any(_text_key(c.get("text")) == _text_key(text)
+                               for c in clauses)
+            if body_present:
+                _settle(clause_id, base_text, text)
+            else:
+                kind = str(next((c.get("kind") for c in clauses
+                                 if c.get("id") == resolved), "must") or "must")
+                if resolved not in by_id:
+                    clauses.append({
+                        "id": resolved, "kind": kind, "text": text,
+                        "check": _check_for(kind, text), "source": "brief_amendment",
+                        "authority": "amendment", "scope": "global",
+                        "status": "confirmed",
+                    })
+                    by_id[resolved] = clauses[-1]
+                id_diverged = clause_id != resolved
+                if id_diverged:
+                    conflicts.append({
+                        "amendment_clause_id": clause_id,
+                        "kind": BLOCKER_AMENDMENT_UNRESOLVED,
+                        "base_text": base_text,
+                        "detail": (
+                            f"已批准的修订（针对条款 {clause_id}）把这条要求改成了「{text}」，"
+                            f"当前简报里能找到这条正文但条款 id 已变为 {resolved}；"
+                            "两者不一致，采用前需要你确认：可以重新提出这条修订，"
+                            "或退回让团队按当前简报重做。"
+                        ),
+                    })
+                _settle(clause_id, base_text, text)
+                # *Every* row this branch re-adds gets a doubt, conflict or not
+                # (H1): the row is an intermediate claim on the requirement, and
+                # without a doubt the next record about these bodies cannot
+                # retire it — C→D after a revert left the old C standing next
+                # to D with conflicts=[]. When no conflict was recorded the
+                # doubt carries no row; it still tracks the clause for settling.
                 # Registered *after* the settle above: same sources, so a doubt
                 # written before it would retire its own conflict on the spot.
-                # Same contract as the unresolved branch: a conflict this replay
-                # can settle has to be a doubt, or the next record about this
-                # requirement cannot retire it — and the row just re-added under
-                # `resolved` stays behind as a stale copy of an intermediate
-                # decision (U1: A→B→C→D with the final intake left C next to D
-                # plus this conflict forever).
-                _doubt(clause_id, conflicts[-1], base_text, text,
-                       sign_clause_id=resolved)
+                _doubt(clause_id, conflicts[-1] if id_diverged else None,
+                       base_text, text, sign_clause_id=resolved)
         elif resolved == "goal.primary" and text:
             goal = _amended_goal(text)
             clauses = [c for c in clauses if c.get("id") != "goal.primary"]

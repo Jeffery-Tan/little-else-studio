@@ -1369,3 +1369,97 @@ def test_the_replayed_brief_feeds_the_real_direction_gate_and_decision(store):
     approval = pipe.record_approval(RUN, "direction", nonce=nonce, decision="approved",
                                     selected_option_id="A")
     assert approval.selected_option_id == "A"
+
+
+# ------------------------------------------------------------------ H1 ---- #
+# A revert inside the history (A→B→A→C) must not fork the requirement into
+# two aliases once the intake already carries the final body — and whatever
+# comes next (replace or retire) has to reach the *whole* requirement.
+
+H1_A = "台词自然"
+H1_B = "台词活泼"
+H1_C = "台词克制"
+H1_D = "台词热情"
+
+
+def _h1_id(store, text):
+    return next(c["id"] for c in ab.compile_active_brief(store, RUN)["clauses"]
+                if c["text"] == text)
+
+
+def _h1_revert_chain(store, pipe, *, rewrite, extra=()):
+    """Approve A→B→A→C against the live brief, then rewrite intake.
+
+    Every decision uses the clause id the *preceding* compile returned — the
+    identities a real page would carry — never hand-invented ids.
+    """
+    submit_intake(pipe, constraints=tuple([H1_A, *extra]))
+    _approve_clause(store, _h1_id(store, H1_A), H1_B)
+    _approve_clause(store, _h1_id(store, H1_B), H1_A)
+    _approve_clause(store, _h1_id(store, H1_A), H1_C)
+    _rewrite_intake(pipe, rewrite)
+    return ab.compile_active_brief(store, RUN)
+
+
+def test_a_revert_chain_against_the_final_intake_leaves_one_clause(store):
+    """H1-1: A→B→A→C with intake=C — exactly one C, no stale conflict."""
+    pipe = Pipeline(store)
+    brief = _h1_revert_chain(store, pipe, rewrite=[H1_C])
+
+    texts = _u1_texts(brief)
+    assert texts.count(H1_C) == 1, "one requirement, one clause — not two aliases"
+    assert H1_A not in texts and H1_B not in texts, "no superseded body survives"
+    assert brief["conflicts"] == [], "the settled chain leaves no stale conflict"
+    ids = [c["id"] for c in brief["clauses"]]
+    assert len(ids) == len(set(ids)), "ids stay unique — and one body one row"
+
+
+def test_the_revert_chain_continues_to_the_next_decision(store):
+    """H1-2: on that result, C→D leaves only D — the alias cannot linger."""
+    pipe = Pipeline(store)
+    _h1_revert_chain(store, pipe, rewrite=[H1_C])
+    _approve_clause(store, _h1_id(store, H1_C), H1_D)
+    _rewrite_intake(pipe, [H1_D])
+
+    brief = ab.compile_active_brief(store, RUN)
+    texts = _u1_texts(brief)
+    assert texts.count(H1_D) == 1
+    assert H1_C not in texts, "the replaced body is gone from every identity"
+    assert H1_A not in texts and H1_B not in texts
+    assert brief["conflicts"] == []
+
+
+def test_retiring_the_reverted_requirement_removes_it_entirely(store):
+    """H1-3: retiring C kills the requirement — no second C keeps standing."""
+    pipe = Pipeline(store)
+    _h1_revert_chain(store, pipe, rewrite=[H1_C])
+    ab.apply_brief_amendment(store, RUN, changes=[{
+        "clause_id": _h1_id(store, H1_C), "op": "retire"}], approve=True)
+
+    brief = ab.compile_active_brief(store, RUN)
+    texts = _u1_texts(brief)
+    assert H1_C not in texts, "the retired requirement is truly gone"
+    assert brief["conflicts"] == []
+
+
+def test_the_revert_chain_leaves_an_independent_requirement_alone(store):
+    """H1-4: interleaved with another requirement, each chain ends its own way."""
+    pipe = Pipeline(store)
+    other = "画面保持明亮"
+    other_final = "画面保持明亮且干净"
+    submit_intake(pipe, constraints=(H1_A, other))
+    # Interleave the two histories so cross-talk would have somewhere to happen.
+    _approve_clause(store, _h1_id(store, H1_A), H1_B)
+    _approve_clause(store, _h1_id(store, other), other_final)
+    _approve_clause(store, _h1_id(store, H1_B), H1_A)
+    _approve_clause(store, _h1_id(store, H1_A), H1_C)
+    _rewrite_intake(pipe, [H1_C, other_final])
+
+    brief = ab.compile_active_brief(store, RUN)
+    texts = _u1_texts(brief)
+    assert texts.count(H1_C) == 1, "the reverted chain still ends in one clause"
+    assert texts.count(other_final) == 1, "the independent requirement kept its own final"
+    assert H1_A not in texts and H1_B not in texts and other not in texts
+    assert brief["conflicts"] == []
+    ids = [c["id"] for c in brief["clauses"]]
+    assert len(ids) == len(set(ids))
