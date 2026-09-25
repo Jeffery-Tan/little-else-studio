@@ -1127,17 +1127,11 @@ function renderTurn(turn) {
   const pendingClarification = turn.pending_clarification_id
     && interaction?.id === turn.pending_clarification_id
     ? interaction : null;
-  if (pendingClarification) {
-    const bubble = box("div", "msg assistant");
-    bubble.append(box("div", "who", "制片团队"));
-    const cardHost = box("div", "body question-host");
-    const shell = document.createElement("div");
-    shell.innerHTML = questionCardHtml(pendingClarification);
-    while (shell.firstChild) cardHost.appendChild(shell.firstChild);
-    bubble.appendChild(cardHost);
-    if (typeof bindQuestionChoices === "function") bindQuestionChoices(bubble, pendingClarification);
-    wrap.appendChild(bubble);
-  } else if (turn.reply) {
+  // The conclusion is ALWAYS its own bubble. A pending clarification used to
+  // replace it (else-if), hiding the very answer the user asked for — mature
+  // chat UIs treat the question as an additional card *after* the reply, not
+  // instead of it.
+  if (turn.reply) {
     const bubble = box("div", "msg assistant");
     const who = box("div", "who", "制片团队");
     const body = box("div", "body");
@@ -1147,6 +1141,28 @@ function renderTurn(turn) {
       full.append(box('summary','','展开完整回复'),body);
       bubble.append(who,box('p','muted','这条回复较长。当前进度见顶部，方案可从本轮成果打开。'),full);
     } else bubble.append(who, body);
+    wrap.appendChild(bubble);
+  } else if (!state.busy && (turn.user?.text || work.length)) {
+    // A finished round that produced no reply still answers — honest silence
+    // was read as the assistant never coming back. The live status row owns
+    // the in-progress state, so this only appears once the round is over.
+    const bubble = box("div", "msg assistant");
+    const body = box("div", "body");
+    body.append(box("p", "muted", work.length
+      ? "本轮没有留下结论回复；过程与原因见上方的「本轮工作记录」。"
+      : "本轮没有留下结论回复。"));
+    bubble.append(box("div", "who", "制片团队"), body);
+    wrap.appendChild(bubble);
+  }
+  if (pendingClarification) {
+    const bubble = box("div", "msg assistant");
+    bubble.append(box("div", "who", "制片团队"));
+    const cardHost = box("div", "body question-host");
+    const shell = document.createElement("div");
+    shell.innerHTML = questionCardHtml(pendingClarification);
+    while (shell.firstChild) cardHost.appendChild(shell.firstChild);
+    bubble.appendChild(cardHost);
+    if (typeof bindQuestionChoices === "function") bindQuestionChoices(bubble, pendingClarification);
     wrap.appendChild(bubble);
   }
 

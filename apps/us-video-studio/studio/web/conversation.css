@@ -1,7 +1,7 @@
 /* The conversation is a primary reading surface, with its own full workspace. */
 .project-workspace {grid-template-rows:auto minmax(0,1fr)}
 .project-chrome {grid-column:1/-1;grid-row:1;display:flex;min-width:0}
-.project-chrome>#project-progress {flex:1;min-width:0}
+.project-chrome>#project-progress {flex:1;min-width:0;display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:6px 0}
 .project-chrome>.project-tools {flex:none}
 .project-canvas {grid-area:2/1/3/2}
 .project-workspace>.composer {grid-area:2/2/3/3}

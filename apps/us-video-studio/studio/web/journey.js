@@ -52,55 +52,57 @@ function journeyGateHtml(pending, step) {
 }
 
 function renderJourneyStatus() {
-  const tl=state.timeline, view=state.creatorView;
-  const run=(state.runs || []).find(item=>item.run_id===state.runId) || tl?.run || {};
+  const view=state.creatorView;
   if (!view) { $('project-progress').replaceChildren(); return; }
   const visibleTarget=view.action?.kind==='navigate' && view.action.tab===state.canvasTab &&
     (view.action.tab!=='plan'||!view.action.stage||view.action.stage===state.activeStage);
   const next=state.busy||visibleTarget ? null : view.action;
-  const fullTitle=String(run.title||'未命名作品');
-  const shownTitle=(typeof shortTitle==='function'?shortTitle(fullTitle):fullTitle.slice(0,18));
-  $('project-progress').innerHTML=`<section class="creator-goal" aria-label="当前作品与下一步">`+
-    `<div class="creator-goal-main"><div class="creator-goal-heading"><span class="creator-kicker">最终交付 · ${escapeHtml(view.goal)}</span><h1 title="${escapeHtml(fullTitle)}">${escapeHtml(shownTitle)}</h1></div>`+
-    `<p class="creator-goal-current"><span class="small-dot"></span><strong>现在：${escapeHtml(view.current)}</strong></p>`+
-    (view.detail?`<p class="creator-goal-detail">${escapeHtml(view.detail)}</p>`:'')+
-    (run.brief?`<details class="creator-goal-source"><summary>查看原始需求</summary><p>${escapeHtml(run.brief)}</p></details>`:'')+`</div>`+
-    (next?`<button type="button" class="primary creator-next" data-creator-next>${escapeHtml(next.label)}</button>`:'')+
-    `</section>`;
-  const button=$('project-progress').querySelector('[data-creator-next]');
-  if(button)button.onclick=async()=>{
-    const action=view.action;
-    if(action.kind==='continue'){$('journey-decision')?.querySelector('[data-resume-decision]')?.click();return;}
-    if(action.kind==='brief-redo'){$('journey-decision')?.querySelector('[data-resume-brief-redo]')?.click();return;}
-    if(action.kind==='question'){setProjectFocus('chat');$('journey-decision')?.scrollIntoView({block:'nearest'});return;}
-    if(action.kind==='review_stage'){
-      button.disabled=true;
-      submitJob(state.runId,{request_kind:'stage_review',request_id:crypto.randomUUID(),stage:action.stage,
-        expected_version:action.version,expected_artifact_sha256:action.sha256});return;
-    }
-    if(action.kind==='reference'){toggleMaterials(true);return;}
-    if(action.kind==='settings'){$('connections-open')?.click();return;}
-    if(action.kind==='chat'){setProjectFocus('chat');$('chat-input').focus();return;}
-    if(action.kind==='prepare'){
-      const runId=state.runId;
-      button.disabled=true;
-      await showJourneyTab(action.tab);
-      if(state.runId!==runId)return;
-      setProjectFocus('canvas');
-      const prepare=document.querySelector('.production-embedded [data-prepare]');
-      if(prepare&&!prepare.disabled)prepare.click();
-      else button.disabled=false;
-      return;
-    }
-    if(action.kind==='navigate'){
-      showJourneyTab(action.tab);
-      if(action.tab==='plan'&&action.stage)selectStage(action.stage);
-      setProjectFocus('canvas');
-      const target=action.tab==='plan' ? document.getElementById('stage-decision')||$('stage')
-        : document.querySelector('.production-embedded .production-card')||$(action.tab==='video'?'journey-video':'journey-storyboard');
-      target?.scrollIntoView({block:'nearest'});
-    }
-  };
+  // No status band. Title lives in the project selector, live status in the
+  // job strip, pending decisions and conclusions in the conversation — the
+  // chrome slot carries only the one next action, as a plain toolbar control
+  // (the pattern mature chat UIs use: chrome shows actions, the stream shows
+  // state). Rebuilt whole, so going busy clears the button with it.
+  const host=$('project-progress');
+  host.replaceChildren();
+  if(next){
+    const button=box('button','ghost small creator-next',next.label);
+    button.type='button';
+    button.setAttribute('data-creator-next','');
+    button.onclick=async()=>{
+      const action=view.action;
+      if(action.kind==='continue'){$('journey-decision')?.querySelector('[data-resume-decision]')?.click();return;}
+      if(action.kind==='brief-redo'){$('journey-decision')?.querySelector('[data-resume-brief-redo]')?.click();return;}
+      if(action.kind==='question'){setProjectFocus('chat');$('journey-decision')?.scrollIntoView({block:'nearest'});return;}
+      if(action.kind==='review_stage'){
+        button.disabled=true;
+        submitJob(state.runId,{request_kind:'stage_review',request_id:crypto.randomUUID(),stage:action.stage,
+          expected_version:action.version,expected_artifact_sha256:action.sha256});return;
+      }
+      if(action.kind==='reference'){toggleMaterials(true);return;}
+      if(action.kind==='settings'){$('connections-open')?.click();return;}
+      if(action.kind==='chat'){setProjectFocus('chat');$('chat-input').focus();return;}
+      if(action.kind==='prepare'){
+        const runId=state.runId;
+        button.disabled=true;
+        await showJourneyTab(action.tab);
+        if(state.runId!==runId)return;
+        setProjectFocus('canvas');
+        const prepare=document.querySelector('.production-embedded [data-prepare]');
+        if(prepare&&!prepare.disabled)prepare.click();
+        else button.disabled=false;
+        return;
+      }
+      if(action.kind==='navigate'){
+        showJourneyTab(action.tab);
+        if(action.tab==='plan'&&action.stage)selectStage(action.stage);
+        setProjectFocus('canvas');
+        const target=action.tab==='plan' ? document.getElementById('stage-decision')||$('stage')
+          : document.querySelector('.production-embedded .production-card')||$(action.tab==='video'?'journey-video':'journey-storyboard');
+        target?.scrollIntoView({block:'nearest'});
+      }
+    };
+    host.append(button);
+  }
   if(typeof StudioComposer!=='undefined')StudioComposer.render();
 }
 

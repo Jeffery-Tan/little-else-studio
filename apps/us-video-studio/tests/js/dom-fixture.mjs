@@ -89,7 +89,13 @@ class El {
 
   set innerHTML(html) {
     this._html = String(html);
-    this.children = parseHtml(this._html, this);
+    // Parsed nodes belong to *this* element (real DOM semantics): re-parent
+    // them and take an independent copy of the list, so a later appendChild
+    // that moves a node out actually shrinks *our* children — otherwise
+    // `while (el.firstChild) host.appendChild(el.firstChild)` never ends.
+    const kids = parseHtml(this._html, this);
+    this.children = kids.slice();
+    for (const child of this.children) child.parentNode = this;
     this._text = '';
   }
 
@@ -119,12 +125,23 @@ class El {
   removeAttribute(name) { this.attributes.delete(name); }
   hasAttribute(name) { return this.getAttribute(name) !== null; }
   appendChild(node) {
+    // Real DOM semantics: appending a node that already has a parent MOVES it.
+    if (node.parentNode && node.parentNode !== this) {
+      const old = node.parentNode;
+      old.children = old.children.filter(c => c !== node);
+    }
     node.parentNode = this;
     this.children.push(node);
     adoptIds(node, this.ownerDocument || null);
     return node;
   }
   append(...nodes) { for (const node of nodes) this.appendChild(node); }
+  get firstChild() { return this.children[0] || null; }
+  get nextSibling() {
+    if (!this.parentNode) return null;
+    const i = this.parentNode.children.indexOf(this);
+    return this.parentNode.children[i + 1] || null;
+  }
   prepend(...nodes) { for (const node of nodes.reverse()) { node.parentNode = this; this.children.unshift(node); } }
   replaceChildren(...nodes) {
     this.children = [];
@@ -258,8 +275,10 @@ function parseCompound(clause) {
     else tests.push(el => el.getAttribute(name) === value);
     return '';
   });
-  const className = withoutAttrs.match(/\.([A-Za-z0-9_-]+)/);
-  if (className) tests.push(el => el.classList.contains(className[1]));
+  // Every class in the compound must match — `.msg.assistant` is not `.msg`.
+  for (const [, cls] of withoutAttrs.matchAll(/\.([A-Za-z0-9_-]+)/g)) {
+    tests.push(el => el.classList.contains(cls));
+  }
   const id = withoutAttrs.match(/#([A-Za-z0-9_-]+)/);
   if (id) tests.push(el => el.getAttribute('id') === id[1]);
   const tag = withoutAttrs.replace(/[.#][A-Za-z0-9_-]+/g, '').replace(/[>+~]/g, '').trim();
