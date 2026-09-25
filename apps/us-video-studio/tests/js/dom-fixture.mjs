@@ -437,12 +437,13 @@ export function loadApp({routes = {}, globals = {}, dom = makeDom(), storage = m
 
   vm.createContext(ctx);
   if (runtime === 'real') {
-    // The page's real load order (index.html): team-progress.js → runtime.js →
-    // … → app.js, all classic scripts sharing one global scope. Only `fetch`
-    // and the clock are replaced, so the pending/identity logic under test is
-    // the code that ships.
+    // The page's real load order (index.html): team-progress.js → runtime.js
+    // → … → journey.js → app.js, all classic scripts sharing one global scope.
+    // Only `fetch` and the clock are replaced, so the pending/identity logic
+    // under test is the code that ships.
     vm.runInContext(webSource('team-progress.js'), ctx, {filename: 'team-progress.js'});
     vm.runInContext(webSource('runtime.js'), ctx, {filename: 'runtime.js'});
+    vm.runInContext(webSource('journey.js'), ctx, {filename: 'journey.js'});
   } else {
     vm.runInContext(RUNTIME_SHIM, ctx, {filename: 'runtime-shim.js'});
   }

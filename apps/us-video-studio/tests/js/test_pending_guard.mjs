@@ -383,3 +383,109 @@ test('the draft tray cannot send through an unresolved adjustment either', async
   assert.equal(read(p, 'state.draft.q1.text'), '自然美式英语', 'the drafted answers survive');
   assert.match(p.toastText, /还没有确认/);
 });
+
+/* --------------------------------------------------- H2 cross entries ---- */
+
+/* `send()`/`submit()` guard both markers, but the page also reaches the
+ * transport directly — the journey review button posts `stage_review` jobs
+ * without ever passing the composer. The send layer itself has to know both
+ * kinds, while still letting the *original* identity be verified. */
+const ENDED = {job_id: 'j1', job_kind: 'conversation', status: 'succeeded',
+               goal_revision: 0, events: []};
+const STEER_SEED = {text: '调整为十二秒', request_id: 'req-1',
+                    job_id: 'j1', expected_goal_revision: 0};
+
+test('an unresolved adjustment blocks a direct submitJob call', async () => {
+  const jobs = jobsTransport((n) => ({job_id: `job-${n}`, job_kind: 'stage_review',
+                                      status: 'succeeded', events: []}));
+  const p = page({routes: {'jobs/latest': () => ENDED, '/jobs': jobs}});
+  p.storage.setItem('studio-steer-pending:run-1', JSON.stringify(STEER_SEED));
+  openRun(p, ENDED, {busy: false});
+
+  const result = await p.ctx.submitJob('run-1',
+    {request_kind: 'stage_review', request_id: 'req-2', stage: 'direction',
+     expected_version: 1, expected_artifact_sha256: 'a'.repeat(64)});
+  assert.equal(result.accepted, false, 'no new identity while the adjustment is unresolved');
+  assert.equal(result.uncertain, true, 'the old request is unknown, not rejected');
+  assert.equal(result.pending_kind, 'steer', 'the caller learns which original needs verification');
+  assert.equal(jobs.calls.length, 0, 'and nothing went out');
+  assert.equal(JSON.parse(p.storage.getItem('studio-steer-pending:run-1')).request_id,
+    'req-1', 'the adjustment record keeps its identity');
+});
+
+test('an unresolved job blocks a direct submitSteer call', async () => {
+  const steer = steerTransport(() => ACCEPTED_STEER);
+  const p = page({routes: {'/steer': steer, 'jobs/latest': () => RUNNING}});
+  p.storage.setItem('studio-job-pending:run-1', JSON.stringify(
+    {text: '上一条还没确认', request_id: 'req-1'}));
+  openRun(p, RUNNING);
+
+  const result = await p.ctx.submitSteer('run-1', 'j1',
+    {text: '新的调整', request_id: 'req-2', expected_goal_revision: 0});
+  assert.equal(result.ok, false, 'the job marker gates this entry too');
+  assert.equal(result.pending_kind, 'job', 'and names the original kind to verify');
+  assert.equal(steer.calls.length, 0, 'no steer went out under a new identity');
+  assert.equal(JSON.parse(p.storage.getItem('studio-job-pending:run-1')).request_id,
+    'req-1', 'the job record keeps its identity');
+});
+
+test('the original identity still verifies through either entry', async () => {
+  // Same type, same id: the confirm/retry entries must keep working (H2).
+  const jobs = jobsTransport((n) => ({job_id: `job-${n}`, job_kind: 'conversation',
+                                      status: 'succeeded', events: []}));
+  const p = page({routes: {'jobs/latest': () => ENDED, '/jobs': jobs}});
+  p.storage.setItem('studio-job-pending:run-1', JSON.stringify(
+    {text: '旧请求', request_id: 'req-1'}));
+  openRun(p, ENDED, {busy: false});
+  const jobRetry = await p.ctx.submitJob('run-1', {text: '旧请求', request_id: 'req-1'});
+  assert.equal(jobRetry.accepted, true, 'the job confirm entry still resolves');
+  assert.equal(jobs.calls.length, 1);
+  assert.equal(jobs.calls[0].request_id, 'req-1');
+  assert.equal(p.storage.getItem('studio-job-pending:run-1'), null, 'settled by identity');
+
+  const steer = steerTransport(() => ACCEPTED_STEER);
+  const q = page({routes: {'/steer': steer, 'jobs/latest': () => RUNNING}});
+  q.storage.setItem('studio-steer-pending:run-1', JSON.stringify(STEER_SEED));
+  openRun(q, RUNNING);
+  const steerRetry = await q.ctx.submitSteer('run-1', 'j1',
+    {text: STEER_SEED.text, request_id: STEER_SEED.request_id,
+     expected_goal_revision: STEER_SEED.expected_goal_revision});
+  assert.equal(steerRetry.ok, true, 'the adjustment confirm entry still resolves');
+  assert.equal(steer.calls.length, 1);
+  assert.equal(steer.calls[0].request_id, 'req-1');
+  assert.equal(q.storage.getItem('studio-steer-pending:run-1'), null);
+});
+
+test('the journey review button opens no task while an adjustment is unresolved', async () => {
+  /* The reachable bypass: the old job has ended (so the composer is idle and
+   * `renderJourneyStatus` offers the real review action) while the lost
+   * adjustment is still unresolved. That button posts a stage_review job
+   * directly — it must hit the same admission, send nothing, and leave the
+   * original adjustment's verification entry on screen. */
+  const jobs = jobsTransport((n) => ({job_id: `job-${n}`, job_kind: 'stage_review',
+                                      status: 'succeeded', events: []}));
+  const p = page({routes: {'jobs/latest': () => ENDED, '/jobs': jobs}});
+  p.storage.setItem('studio-steer-pending:run-1', JSON.stringify(STEER_SEED));
+  openRun(p, ENDED, {busy: false});
+
+  vm.runInContext(`
+    state.creatorView = {goal: '交付一部短片', current: '等待重试审核', detail: '',
+      action: {kind: 'review_stage', label: '重试本版审核', stage: 'direction',
+               version: 1, sha256: ${JSON.stringify('a'.repeat(64))}}, tab: 'plan'};
+    renderJourneyStatus();
+    null;
+  `, p.ctx);
+  const button = el(p, 'project-progress').querySelector('[data-creator-next]');
+  assert.ok(button, 'the idle page offers the real review action');
+  assert.equal(button.textContent, '重试本版审核');
+
+  await button.onclick();          // the shipped handler: submitJob, fire-and-forget
+  await settle();
+
+  assert.equal(jobs.calls.length, 0, 'the review button opened no new task');
+  assert.equal(JSON.parse(p.storage.getItem('studio-steer-pending:run-1')).request_id,
+    'req-1', 'the unresolved adjustment record survives untouched');
+  const entry = descendants(el(p, 'job-status'),
+    n => n.textContent === '确认调整状态')[0];
+  assert.ok(entry, 'the original request keeps its own verification entry');
+});

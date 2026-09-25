@@ -420,8 +420,21 @@ async function submitSteer(runId, jobId, payload) {
   // original request_id and payload are what the confirm entry retries (U2).
   const unresolved = readPendingSteer(runId);
   if (unresolved && unresolved.request_id !== payload.request_id)
-    return {ok:false, reason:'pending_unknown',
+    return {ok:false, reason:'pending_unknown', pending_kind:'steer',
             error:new Error('上一次调整的结果还没有确认；请先在任务状态里确认提交。')};
+  if (!unresolved) {
+    // Cross entry (H2): a *job* submission is what this run is still
+    // verifying — a direct adjuster (nothing here is behind `send()`) must
+    // not open a second request family while that is unknown. Refuse, name
+    // which original needs verification, and surface that original's own
+    // entry; the two marker formats stay separate.
+    const jobPending = readPendingJob(runId);
+    if (jobPending) {
+      try { await restoreJob(runId); } catch (_) { /* best-effort entry */ }
+      return {ok:false, reason:'pending_unknown', pending_kind:'job',
+              error:new Error('上一次发送的结果还没有确认；请先在任务状态里确认提交。')};
+    }
+  }
   steerPosting = true;
   sessionStorage.setItem(pendingSteerKey(runId), JSON.stringify({...payload, job_id:jobId}));
   if (currentJob?.job_id === jobId) showJob(currentJob, '正在提交调整…');
@@ -465,9 +478,23 @@ async function submitJob(runId, payload, options = {}) {
   const unresolved = readPendingJob(runId);
   if (unresolved && unresolved.request_id !== payload.request_id) {
     showUncertainSubmission(runId, unresolved, readPendingJobOptions(runId, unresolved));
-    return {accepted:false, uncertain:true,
+    return {accepted:false, uncertain:true, pending_kind:'job',
             error:new Error('上一次发送的结果还没有确认；请先在任务状态里确认提交。'),
             request_id:unresolved.request_id, rejected_text:payload.text};
+  }
+  if (!unresolved) {
+    // Cross entry (H2): an *adjustment* is what this run is still verifying.
+    // The page posts jobs directly — the journey review button, production
+    // actions — without passing `send()`, so the transport itself refuses the
+    // new identity, reports which original needs verification, and reopens
+    // that original's own confirmation entry instead.
+    const steerPending = readPendingSteer(runId);
+    if (steerPending) {
+      try { await restoreJob(runId); } catch (_) { /* best-effort entry */ }
+      return {accepted:false, uncertain:true, pending_kind:'steer',
+              error:new Error('上一次调整的结果还没有确认；请先在任务状态里确认提交。'),
+              request_id:steerPending.request_id, rejected_text:payload.text};
+    }
   }
   // Both conversation entry points display the same on-demand analysis notice.
   // This does not enable media generation; the main agent still needs an
