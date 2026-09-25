@@ -763,6 +763,7 @@ def propose_amendment(
     note: str = "",
     source: str = "user",
     approve: bool = False,
+    request_id: str = "",
 ) -> dict[str, Any]:
     """Record a brief amendment. ``approve=True`` applies it immediately
     (one explicit user click from the blocked gate); otherwise status=pending
@@ -774,6 +775,9 @@ def propose_amendment(
     silently discarding the decision (R2); ``apply_brief_amendment`` does the
     validating, because only a new proposal has to still line up with the
     current brief.
+
+    ``request_id`` is the caller's identity for the submission, stored on the row
+    so a retry resolves to this amendment instead of recording a second one.
     """
     store.read_run(run_id)  # existence
     cleaned: list[dict[str, Any]] = []
@@ -810,6 +814,8 @@ def propose_amendment(
         "created_at": utcnow(),
         "decided_at": utcnow() if approve else None,
     }
+    if request_id:
+        amendment["request_id"] = str(request_id).strip()[:120]
     rows.append(amendment)
     _save_amendments(store, run_id, rows)
     return amendment
@@ -848,8 +854,22 @@ def apply_brief_amendment(
     source: str = "user",
     approve: bool = False,
     expected_brief_fingerprint: str | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     """Record one user decision about the brief, validated against *that* brief.
+
+    **One request, one amendment.** ``request_id`` is the identity of *this
+    submission*, minted by the caller and reused when the same click is retried —
+    the same shape the decision-continuation path uses. If an amendment already
+    carries it, that amendment is returned and nothing is written: a retried
+    request after a lost response must not buy a second decision, and must not be
+    refused either, since the baseline it was framed against is the one it
+    already changed.
+
+    It cannot be derived from the content. Two identical decisions made minutes
+    apart are indistinguishable on the server, and the second one is legitimate;
+    only the caller knows whether it is retrying. Without the key this route is
+    therefore *not* idempotent, which is what the 409 asked the page to resolve.
 
     Two refusals live here rather than deeper down, because both are about the
     request being a *new* decision:
@@ -867,6 +887,11 @@ def apply_brief_amendment(
     onto a later intake revision can recognise the clause it was decided against
     instead of dropping it (R2).
     """
+    key = str(request_id or "").strip()
+    if key:
+        for row in load_amendments(store, run_id):
+            if str(row.get("request_id") or "") == key:
+                return row
     brief = compile_active_brief(store, run_id)
     validate_changes_against(brief, changes)
     if expected_brief_fingerprint is not None:
@@ -886,7 +911,7 @@ def apply_brief_amendment(
                                 else str(index.get(clause_id, {}).get("text") or ""))
         stamped.append(row)
     return propose_amendment(store, run_id, changes=stamped, note=note,
-                             source=source, approve=approve)
+                             source=source, approve=approve, request_id=key)
 
 
 class BriefBaselineChanged(ValueError):

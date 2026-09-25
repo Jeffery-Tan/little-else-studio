@@ -27,6 +27,36 @@ def install_approval_routes(app, jobs, pipeline, store, require_run, continuatio
             return {"status": "not_started", "reason": str(exc)}
         return {"status": "started", "job_id": job["job_id"]}
 
+    def _amendment_by_request(run_id: str, request_id: str) -> dict[str, Any] | None:
+        """The amendment this submission already recorded, if it is a retry."""
+        from .active_brief import load_amendments
+
+        key = str(request_id or "").strip()
+        if not key:
+            return None
+        return next((row for row in load_amendments(store, run_id)
+                     if str(row.get("request_id") or "") == key), None)
+
+    def _amendment_result(run_id: str, amendment: dict[str, Any],
+                          approve: bool) -> dict[str, Any]:
+        """The response for one amendment, whether new or resolved as a retry.
+
+        A retry lands here too, so it has to produce the same shape — including
+        the redo. Resolving the redo is idempotent by construction (its identity
+        is the amendment id), so a retry looks up the original job rather than
+        starting a second one.
+        """
+        from .active_brief import compile_active_brief, fingerprint as brief_fp
+
+        result = dict(amendment)
+        if approve:
+            result["brief_fingerprint"] = brief_fp(compile_active_brief(store, run_id))
+            # F5: the approval invalidates the current direction version, so the
+            # same click has to restart the team's work. The amendment is saved
+            # either way; a failed start is reported as such, not swallowed.
+            result["redo"] = _start_amendment_redo(run_id, amendment["id"])
+        return result
+
     @app.post("/api/runs/{run_id}/brief-amendment")
     def propose_brief_amendment(run_id: str, payload: BriefAmendmentIn) -> dict[str, Any]:
         """Propose (and optionally approve) an ActiveBrief amendment.
@@ -36,7 +66,10 @@ def install_approval_routes(app, jobs, pipeline, store, require_run, continuatio
         against a version he is no longer reading — and bound to the *brief*
         itself via ``expected_brief_fingerprint``, because the direction can
         stand still while a second amendment moves the brief underneath it
-        (A1). ``apply_brief_amendment`` does the change-level validation.
+        (A1). ``request_id`` is this submission's identity: a retry carrying the
+        one it used before resolves to the amendment it already recorded, so a
+        lost response is answered with neither a second decision nor a 409.
+        ``apply_brief_amendment`` does the change-level validation.
         """
         from .active_brief import (
             BriefBaselineChanged,
@@ -46,6 +79,16 @@ def install_approval_routes(app, jobs, pipeline, store, require_run, continuatio
         )
 
         require_run(run_id)
+        # Resolved before the busy guard. A retry is not a new decision: the
+        # amendment is already on disk, and answering it records nothing — but
+        # the first request's own redo is exactly what makes the run busy, so
+        # checking busy first would refuse the retry it is meant to resolve.
+        # `_amendment_result` re-resolves the redo by amendment id, which looks
+        # up the running job rather than starting another.
+        if payload.request_id:
+            existing = _amendment_by_request(run_id, payload.request_id)
+            if existing is not None:
+                return _amendment_result(run_id, existing, payload.approve)
         try:
             with jobs.lock:
                 if jobs.busy(run_id):
@@ -65,6 +108,7 @@ def install_approval_routes(app, jobs, pipeline, store, require_run, continuatio
                     source="user",
                     approve=payload.approve,
                     expected_brief_fingerprint=payload.expected_brief_fingerprint,
+                    request_id=payload.request_id,
                 )
         except BriefBaselineChanged as exc:
             # Not a bad request: the decision was real, it simply belongs to a
@@ -79,15 +123,7 @@ def install_approval_routes(app, jobs, pipeline, store, require_run, continuatio
             raise HTTPException(400, str(exc)) from exc
         except PipelineError as exc:
             raise HTTPException(409, str(exc)) from exc
-        result = dict(amendment)
-        if payload.approve:
-            from .active_brief import compile_active_brief
-            result["brief_fingerprint"] = brief_fp(compile_active_brief(store, run_id))
-            # F5: the approval invalidates the current direction version, so the
-            # same click has to restart the team's work. The amendment is saved
-            # either way; a failed start is reported as such, not swallowed.
-            result["redo"] = _start_amendment_redo(run_id, amendment["id"])
-        return result
+        return _amendment_result(run_id, amendment, payload.approve)
 
     @app.post("/api/runs/{run_id}/brief-amendment/{amendment_id}/redo")
     def resume_brief_amendment_redo(run_id: str, amendment_id: str) -> dict[str, Any]:

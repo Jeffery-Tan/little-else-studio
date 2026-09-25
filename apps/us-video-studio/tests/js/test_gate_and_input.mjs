@@ -722,6 +722,32 @@ test('clearing a settled request never takes an unresolved one with it', async (
     'the later request\'s marker is gone, and nothing else was touched');
 });
 
+/* ----------------------------------------------------------------- A1 ----- */
+
+test('a retried amendment click reuses the submission identity', async () => {
+  /* A lost response is resolved by the server returning the amendment it already
+   * recorded, which only works if the retry names the same submission. The page
+   * keeps that key until the request is answered, then drops it. */
+  const failure = Object.assign(new Error('网络中断'), {status: 500});
+  const app = wire({routes: {'brief-amendment': failure}});
+  const pending = decisionPending({
+    brief_fingerprint: 'brief-v1-retry',
+    amend: {clause_id: 'goal.primary', op: 'replace', text: '新目标',
+            current_text: '旧目标', valid: true, reason: '', recommended: 'A', key: 'A'},
+  });
+  const gate = bind(app, mountGate({}, pending));
+  gate.querySelector('[data-act="amend_brief"]').click();
+  await settle();
+  gate.querySelector('[data-act="amend_brief"]').click();
+  await settle();
+
+  const posts = app.observed.filter(call => call.path.endsWith('/brief-amendment'));
+  assert.equal(posts.length, 2, 'the click was attempted twice');
+  assert.ok(posts[0].body.request_id, 'the first attempt carries an identity');
+  assert.equal(posts[1].body.request_id, posts[0].body.request_id,
+    'and the retry reuses it, so the server resolves instead of duplicating');
+});
+
 /* ----------------------------------------------------------------- F6 ---- */
 
 /* Drive the real composer: set the textarea, then call the same `submit()` the

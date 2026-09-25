@@ -122,6 +122,12 @@ class BriefAmendmentIn(BaseModel):
     #: working, but a page that sends it cannot rebase a decision onto a brief
     #: that moved while the direction version stood still (A1).
     expected_brief_fingerprint: str | None = Field(default=None, max_length=120)
+    #: Identity of *this submission*, minted by the page and reused when the same
+    #: click is retried. An amendment already carrying it is returned instead of
+    #: recording a second decision. Optional, because only the caller knows
+    #: whether a request is a retry — two identical decisions minutes apart are
+    #: indistinguishable here, and the second one is legitimate.
+    request_id: str | None = Field(default=None, max_length=120)
 
 
 class BriefAmendmentDecisionIn(BaseModel):

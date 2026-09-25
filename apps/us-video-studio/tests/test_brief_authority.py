@@ -469,6 +469,88 @@ def test_replaying_the_whole_history_is_stable(store):
     assert "台词用自然美式英语" not in [c["text"] for c in first_pass["clauses"]]
 
 
+# ------------------------------------------------------------------ A1 ----- #
+
+
+def test_a_retried_amendment_request_records_one_decision(http_client):
+    """The lost-response case, which is why the baseline guard used to bite.
+
+    The first request is recorded and then its answer is lost. Retrying the same
+    click with the same request_id must resolve to that amendment — not buy a
+    second decision, and not answer 409 because the brief it named has already
+    changed underneath it. Retrying is the moment the guard would otherwise
+    fire, since the request's own effect is what moved the brief.
+    """
+    http, store, pipe = http_client["http"], http_client["store"], http_client["pipe"]
+    http.post("/api/runs", json={"run_id": RUN, "title": "t", "brief": "做一个种草视频。"})
+    submit_intake(pipe)
+    brief = ab.compile_active_brief(store, RUN)
+    body = {
+        "changes": [{"clause_id": "goal.primary", "op": "replace",
+                     "text": "目标收窄为设计细节种草"}],
+        "approve": True,
+        "expected_brief_fingerprint": ab.fingerprint(brief),
+        "request_id": "click-7f3a",
+    }
+
+    first = http.post(f"/api/runs/{RUN}/brief-amendment", json=body)
+    assert first.status_code == 200, first.text
+    assert len(ab.load_amendments(store, RUN)) == 1
+
+    # Same click again: the page never saw the first answer.
+    second = http.post(f"/api/runs/{RUN}/brief-amendment", json=body)
+    assert second.status_code == 200, second.text
+    assert second.json()["id"] == first.json()["id"], "the same decision, not a new one"
+    assert len(ab.load_amendments(store, RUN)) == 1, "nothing was written twice"
+    assert second.json()["brief_fingerprint"] == first.json()["brief_fingerprint"]
+    # The redo is resolved by the amendment id, so the retry looks up the job
+    # instead of starting a second one.
+    assert second.json()["redo"]["job_id"] == first.json()["redo"]["job_id"]
+    assert len(_job_creations(store)) == 1
+
+
+def test_the_same_content_without_a_request_id_is_a_second_decision(http_client):
+    """The boundary the key exists for.
+
+    Two identical decisions minutes apart are indistinguishable on the server,
+    and the second one is legitimate — so deduplicating by content would be
+    wrong. Only a caller-supplied key makes a retry recognisable.
+    """
+    http, store, pipe = http_client["http"], http_client["store"], http_client["pipe"]
+    http.post("/api/runs", json={"run_id": RUN, "title": "t", "brief": "做一个种草视频。"})
+    submit_intake(pipe)
+    first = http.post(f"/api/runs/{RUN}/brief-amendment", json={
+        "changes": [{"clause_id": "goal.primary", "op": "replace",
+                     "text": "目标收窄为设计细节种草"}],
+        "approve": True, "request_id": "click-1",
+    })
+    assert first.status_code == 200, first.text
+
+    # A different key is a different click, even with identical content — and it
+    # is refused, because the brief already says this. (The first click's redo
+    # may also still be running, which is its own valid refusal; what matters is
+    # that this request was treated as new rather than deduplicated.)
+    second = http.post(f"/api/runs/{RUN}/brief-amendment", json={
+        "changes": [{"clause_id": "goal.primary", "op": "replace",
+                     "text": "目标收窄为设计细节种草"}],
+        "approve": True, "request_id": "click-2",
+    })
+    assert second.status_code in (400, 409), second.text
+    assert second.status_code != 200
+    assert len(ab.load_amendments(store, RUN)) == 1, "no second amendment was written"
+
+    # And with no key at all the route records a new decision, as documented:
+    # idempotency here is a property of the key, not of the content.
+    fresh = ab.apply_brief_amendment(
+        store, RUN,
+        changes=[{"clause_id": "goal.primary", "op": "replace",
+                  "text": "目标改为保温实测对比"}],
+        approve=False)
+    assert fresh["id"] != first.json()["id"]
+    assert len(ab.load_amendments(store, RUN)) == 2
+    assert "request_id" not in fresh, "a keyless proposal stores no identity to match on"
+
+
 # ------------------------------------------------------------------ F4 ----- #
 
 

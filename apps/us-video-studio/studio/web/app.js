@@ -1295,6 +1295,14 @@ function wireGate(host) {
       gate.dataset.saving = "1";
       for (const control of gateControls(gate)) control.disabled = true;
       status.textContent = "正在批准简报修订…";
+      // This submission's identity, kept across retries of the same click. The
+      // server returns the amendment it already recorded instead of writing a
+      // second one, so a lost response is not answered with either a duplicate
+      // decision or a 409 against a brief this very click already changed.
+      const clickKey = `studio-amendment:${state.runId}:${clause}`;
+      let requestId;
+      try { requestId = localStorage.getItem(clickKey) || crypto.randomUUID(); localStorage.setItem(clickKey, requestId); }
+      catch { requestId = crypto.randomUUID(); }
       try {
         const result = await api(`/api/runs/${state.runId}/brief-amendment`, {
           method: "POST",
@@ -1302,6 +1310,7 @@ function wireGate(host) {
             changes: [{ clause_id: clause, op: "replace", text }],
             note: reason.value.trim() || "用户在方向门禁上批准简报修订",
             approve: true,
+            request_id: requestId,
             // The brief this decision was framed against. The direction guard
             // below cannot cover this: a second amendment moves the brief while
             // the direction version stays put, and then this request would
@@ -1311,6 +1320,7 @@ function wireGate(host) {
             expected_version: gate.dataset.version ? Number(gate.dataset.version) : null,
           }),
         });
+        try { localStorage.removeItem(clickKey); } catch {}
         try { localStorage.removeItem(key); localStorage.removeItem(legacyJourneyKey); } catch {}
         // The approval invalidates this direction version, so report both halves
         // honestly: decided, and whether the team actually restarted (F5).
