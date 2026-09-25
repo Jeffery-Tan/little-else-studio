@@ -667,7 +667,7 @@ def test_timeline_amendment_without_proposal_carries_no_replacement_text(tmp_pat
     assert pending["amend"]["clause_id"] == "", "the clause id is not a body either"
     assert pending["amend"]["reason"]
     # The diagnosis stays visible, but as a blocker — never as the new goal.
-    assert any("未声明" in str(b.get("detail") or "") for b in pending["blockers"])
+    assert any("还没有说明" in str(b.get("detail") or "") for b in pending["blockers"])
 
 
 def test_timeline_keeps_normal_decision_when_gate_ok(tmp_path):

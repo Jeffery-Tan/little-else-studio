@@ -1353,7 +1353,7 @@ function wireGate(host) {
       // below either owns *this* payload or is not used at all (U3).
       const body = {
         changes: [{ clause_id: clause, op: "replace", text }],
-        note: reason.value.trim() || "用户在方向门禁上批准简报修订",
+        note: reason.value.trim() || "用户在方向卡上批准简报修订",
         approve: true,
         // The brief this decision was framed against. The direction guard
         // cannot cover this: a second amendment moves the brief while the

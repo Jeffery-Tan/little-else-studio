@@ -466,9 +466,9 @@ def _pending_action(state: dict[str, Any], ledger: Any,
                 "passed": passed,
                 "headline": "这份方向稿没有可以采用的选择。",
                 "body": (
-                    "每个方向都没有通过当前有效简报的检查（逐条原因见下）。"
-                    "可以批准下方的简报修订（之后本版会作废、团队按新简报重做），"
-                    "或退回要求在原简报下重做。不能勾选方向硬过。"
+                    "每个方向都还和当前有效简报对不上，逐条原因见下。"
+                    "可以批准下方的简报修订（本版作废，团队按新简报重做），"
+                    "或退回让团队在原简报下重做；不能直接勾选采用。"
                 ),
                 "findings": [
                     {"kind": f.get("kind", ""), "issue": f.get("issue", "")} for f in findings
@@ -500,7 +500,7 @@ def _pending_action(state: dict[str, Any], ledger: Any,
             head = f"「{v.stage_label(stage)}」写好了，但审核没有通过它。"
             body = "你可以退回重做，或者看完之后明知有问题仍然通过——那样要写明理由。"
         if stage == "direction" and any(not row["admissible"] for row in option_rows):
-            body += " 有方向没有通过当前有效简报的检查，那些选项不能采用；原因写在各自选项旁。"
+            body += " 有方向和当前有效简报对不上，那些选项不能采用；原因写在各自选项旁。"
 
         # What approving this one opens, and what that has cost before. The
         # price sits on the button rather than in a budget page, because the

@@ -614,12 +614,14 @@ def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]],
                 "amendment_clause_id": clause_id,
                 "kind": BLOCKER_AMENDMENT_UNRESOLVED,
                 "base_text": base_text,
+                # For the person deciding: their approval, quoted in their words,
+                # and the two ways out — no clause ids, no replay mechanics
+                # (the id stays on the row's own field for machines).
                 "detail": (
-                    f"已批准的修订（针对条款 {clause_id}）把这条要求改成了「{text}」，"
-                    "但模型重写 intake 时"
-                    + (f"已经没有这一条（原文「{base_text}」）" if base_text else "已经把这一条换掉了")
-                    + "。这份简报保留了你的版本，但两者不一致，采用前需要你确认："
-                      "可以重新提出这条修订，或退回让团队按当前简报重做。"
+                    f"你批准过把一条要求改成「{text}」，但现在的整理稿里"
+                    + (f"已经找不到它（原本是「{base_text}」）" if base_text else "已经把这一条换掉了")
+                    + "。你的版本先保留着；采用任何方向前需要你确认一次——"
+                      "重新提出这条修订，或退回让团队按当前简报重做。"
                 ),
             })
             _doubt(clause_id, conflicts[-1], base_text, text)
@@ -683,10 +685,9 @@ def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]],
                         "kind": BLOCKER_AMENDMENT_UNRESOLVED,
                         "base_text": base_text,
                         "detail": (
-                            f"已批准的修订（针对条款 {clause_id}）把这条要求改成了「{text}」，"
-                            f"当前简报里能找到这条正文但条款 id 已变为 {resolved}；"
-                            "两者不一致，采用前需要你确认：可以重新提出这条修订，"
-                            "或退回让团队按当前简报重做。"
+                            f"你批准过把一条要求改成「{text}」，它在当前稿里对应的位置"
+                            "和当初批准时对不上了；采用前需要你确认："
+                            "重新提出这条修订，或退回让团队按当前简报重做。"
                         ),
                     })
                 _settle(clause_id, base_text, text)
@@ -1239,8 +1240,8 @@ def brief_gate(store: Store, run_id: str,
             if bound and key:
                 own.append({
                     "key": key, "kind": BLOCKER_UNMAPPED, "clause_id": goal_id or "",
-                    "detail": "这一版没有声明它满足哪条有效简报条款；"
-                              "未声明不等于符合约束，不能直接采用。",
+                    "detail": "这一版还没有说明它和当前目标的关系；"
+                              "没有说明就不算数，先说明（或调整目标）才能采用。",
                 })
         else:
             mapped_any = True
@@ -1254,7 +1255,7 @@ def brief_gate(store: Store, run_id: str,
                     "key": key, "kind": BLOCKER_NEEDS_AMENDMENT, "clause_id": amend,
                     # Diagnosis only — never a replacement body. ``amend_proposal``
                     # is the proposal; see ``option_amend_proposal``.
-                    "detail": proposal or f"方案要求先修订 {amend}，但没有写出修订正文。",
+                    "detail": proposal or "这个方向要先修改目标，但没有写出要改成什么。",
                     "proposed_text": proposal,
                 })
             if bound:
@@ -1263,7 +1264,8 @@ def brief_gate(store: Store, run_id: str,
                     if cid not in known:
                         own.append({
                             "key": key, "kind": BLOCKER_UNKNOWN_CLAUSE, "clause_id": cid,
-                            "detail": f"引用的简报条款 {cid} 不在当前有效简报中。",
+                            "detail": "引用的一条要求已经不在当前目标里了；"
+                                      "需要时可在技术记录里查看编号。",
                         })
             # Every adoptable option has to claim the product goal — not only the
             # one the director recommended. An option that proposes the goal's
@@ -1272,8 +1274,8 @@ def brief_gate(store: Store, run_id: str,
             if key and goal_id and goal_id not in satisfies and not amends_goal:
                 own.append({
                     "key": key, "kind": BLOCKER_GOAL_UNCOVERED, "clause_id": goal_id,
-                    "detail": f"方案 {key} 未声明满足 {goal_id}，也未提出该条款的简报修订；"
-                              "未声明不等于符合约束，不能直接采用。",
+                    "detail": f"方向 {key} 没有说明它如何达成作品目标，也没提出修改目标的建议；"
+                              "没有说明就不算数，先说明（或调整目标）才能采用。",
                 })
         # The brief's own unresolved amendments block every option: adopting
         # against a brief that failed to reapply a user decision would be

@@ -445,7 +445,9 @@ class Orchestrator:
             "读状态和产物、自己写 intake、把阶段派给角色 Agent、送审。",
             "用户提出创作需求时，prepare_creative_context显式设置deliverable=direction：本轮先理解意图、调用observe_images实际检查商品图片，再保存需求、内部dispatch导演形成创意方向并request_review完成独立审核，最终直接呈现具体开头、故事推进、推荐理由。不要以‘下一步建议派导演’结束，也不要在交付未完成且无需用户决策时停下写总结。仅用户明确只要需求整理时选intake；后续制作或只读任务选follow_up。",
             "有图片不能只读list_materials就宣称无观察能力。主语言模型不支持图片时，observe_images仍可通过现有百炼视觉能力看到像素并返回带来源的观察。图片可见特征可用于构思，不须先让用户逐条确认；尺寸/性能/实测效果保持未知。不把看图、分工或方法选择发回用户。状态/暂停/反馈不启动观察。",
-            "**你不能批准任何东西**，也没有这个工具。门禁由 Jeffery 在界面上点。",
+            "**你不能批准任何东西**，也没有这个工具。采用或退回，由 Jeffery 在界面上亲自确认。",
+            "对用户说话用他的语言：说目标、方向卡、采用与退回；不要用「门禁」、条款编号（如 goal.primary/must.xxx）、"
+            "blocker 状态码（如 unmapped）或「准入/冲突」这类内部词，也不要把英文状态码念给他听。",
             "",
             "# 当前项目摘要（界面与对话共用）\n" + json.dumps(
                 project_brief(self.pipeline.state(self.run_id).to_dict(), latest_execution(self.store, self.run_id)), ensure_ascii=False),

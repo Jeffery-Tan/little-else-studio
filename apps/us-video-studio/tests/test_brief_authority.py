@@ -137,7 +137,7 @@ def test_an_alternative_that_only_maps_a_side_clause_is_blocked(store):
     assert gate["status"] == "ok", "the recommendation is compliant"
     b_blockers = [b for b in gate["blockers"] if b["key"] == "B"]
     assert [b["kind"] for b in b_blockers] == ["goal_uncovered"]
-    assert "goal.primary" in b_blockers[0]["detail"]
+    assert "作品目标" in b_blockers[0]["detail"], "human words, not the clause id"
 
     nonce = pipe.issue_nonce(RUN, "direction")
     with pytest.raises(PipelineError) as err:
@@ -674,7 +674,7 @@ def test_an_amendment_that_cannot_be_realigned_keeps_the_decision_and_reports_it
 
     assert recompiled["conflicts"], "the divergence must be reported"
     assert recompiled["conflicts"][0]["kind"] == "amendment_unresolved"
-    assert original["id"] in recompiled["conflicts"][0]["detail"]
+    assert f"「{approved_text}」" in recompiled["conflicts"][0]["detail"], "identified by its quoted body, not by id"
 
     # And the gate refuses to admit anything against such a brief.
     gate = ab.brief_gate(store, RUN, {
@@ -702,7 +702,7 @@ def test_blocker_detail_is_a_diagnosis_and_proposed_text_is_the_proposal(store):
     gate = pipe.stage_state(RUN, "direction").brief_gate
     needs = next(b for b in gate["blockers"] if b["kind"] == "needs_amendment")
     assert needs["proposed_text"] == "", "no proposal was written"
-    assert "没有写出修订正文" in needs["detail"]
+    assert "没有写出要改成什么" in needs["detail"]
     assert needs["detail"] != needs["proposed_text"], "the diagnosis is not the body"
 
 

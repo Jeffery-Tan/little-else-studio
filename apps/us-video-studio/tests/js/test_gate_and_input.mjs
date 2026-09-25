@@ -359,11 +359,28 @@ test('a card with no proposal still offers only the return, never a fabricated b
 test('an unresolved brief amendment blocks the card and says which one', () => {
   const gate = mountGate({}, decisionPending({
     conflicts: [{amendment_clause_id: 'must.c7e124e4', kind: 'amendment_unresolved',
-                 detail: '已批准的修订（针对条款 must.c7e124e4）把这条要求改成了「…」…'}],
+                 detail: '你批准过把一条要求改成「台词克制」，但现在的整理稿里已经找不到它。'}],
   }));
   assert.ok(gate.querySelector('.gate-conflicts'), 'the conflict is visible on the card');
-  assert.ok(gate.textContent.includes('must.c7e124e4'));
-  assert.ok(gate.textContent.includes('任何方向都不能被采用'));
+  assert.ok(gate.textContent.includes('台词克制'), 'and says which requirement, by its own words');
+  assert.ok(gate.textContent.includes('方向都先不能采用'));
+});
+
+test('blocker reasons are words, not raw state codes', () => {
+  /* The brief-amendment card prints the stage-level blockers — it used to say
+   * `方向 A · unmapped：…`. English state codes are machine fields, not language
+   * for the person deciding (Microsoft Writing Style Guide: write like you
+   * speak, avoid jargon); the code stays on the element as data. */
+  const gate = mountGate({}, amendmentPending({
+    blockers: [{key: 'A', kind: 'unmapped', clause_id: 'goal.primary',
+                detail: '这一版还没有说明它和当前目标的关系；没有说明就不算数。'}],
+  }));
+  const row = gate.querySelector('.gate-brief-blockers li');
+  assert.ok(row, 'the blocker row renders');
+  assert.match(row.textContent, /还没说明和目标的关系/, 'a human label, not the code');
+  assert.ok(!row.textContent.includes('unmapped'), 'the raw code is not spoken');
+  assert.equal(row.getAttribute('data-kind'), 'unmapped',
+    'the code stays machine-readable on the element');
 });
 
 test('a stale brief is reported as a decision to redo, not a failed request', async () => {

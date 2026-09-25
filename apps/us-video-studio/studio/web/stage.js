@@ -410,9 +410,9 @@ function conflictsHtml(pending) {
   const rows = pending.conflicts || [];
   if (!rows.length) return "";
   return `<div class="gate-conflicts" role="alert">` +
-    `<strong>这份有效简报里有一条已批准的修订无法自动对齐</strong>` +
+    `<strong>目标里有一条你以前批准过的改动，和当前稿对不上了</strong>` +
     `<ul>${rows.map(row => `<li>${escapeHtml(String(row.detail || ""))}</li>`).join("")}</ul>` +
-    `<p>在它解决之前，任何方向都不能被采用。</p></div>`;
+    `<p>在处理它之前，方向都先不能采用。</p></div>`;
 }
 
 /* The amendment attributes the binder reads. Declaration only: when there is no
@@ -435,9 +435,18 @@ function findingsHtml(pending) {
 }
 
 function blockersHtml(pending) {
+  // Human labels for machine kinds: `unmapped` is a state the system knows,
+  // not a word for the person deciding (write like you speak — no jargon).
+  const labels = {
+    unmapped: '还没说明和目标的关系',
+    goal_uncovered: '没有对上作品目标',
+    unknown_clause: '引用的要求已不在目标里',
+    needs_amendment: '要先修改目标',
+    violates: '和目标冲突',
+  };
   return pending.blockers?.length
     ? `<ul class="gate-brief-blockers">${pending.blockers.map(b =>
-        `<li>方向 ${escapeHtml(String(b.key || ""))} · ${escapeHtml(String(b.kind || ""))}：${escapeHtml(String(b.detail || b.clause_id || ""))}</li>`
+        `<li data-kind="${escapeHtml(String(b.kind || ""))}">方向 ${escapeHtml(String(b.key || ""))} · ${escapeHtml(labels[b.kind] || "需要处理")}：${escapeHtml(String(b.detail || b.clause_id || ""))}</li>`
       ).join("")}</ul>`
     : "";
 }
