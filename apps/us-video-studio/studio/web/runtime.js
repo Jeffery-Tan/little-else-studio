@@ -425,8 +425,12 @@ async function submitSteer(runId, jobId, payload) {
         try { await restoreJob(runId); } catch (_) { /* best-effort refresh */ }
         return {ok:false, reason:'job_not_active', error:err};
       }
-      if (runId === state.runId) { $('chat-input').value = payload.text; toast(err.message, true); }
-      return {ok:false, reason:'client', error:err};
+      if (runId === state.runId) toast(err.message, true);
+      // The rejected text is *returned*, not written into the composer. Only the
+      // layer that owns the request — the one that took the draft snapshot — can
+      // decide whether those words may still go back, and writing them here
+      // overwrote whatever the user typed while this was in flight (T4).
+      return {ok:false, reason:'client', error:err, rejected_text:payload.text};
     } else if (runId === state.runId) {
       showJob(currentJob, '调整结果尚未确认。刷新后可以用相同请求标识核对。');
     }
@@ -466,13 +470,17 @@ async function submitJob(runId, payload, options = {}) {
     if (runId !== state.runId || generation !== jobWatch) return {accepted:false,error:err};
     if (err.status >= 400 && err.status < 500) {
       clearPendingJob(runId);
+      // A definite rejection: the words go back only if the composer is still
+      // empty. `preserveComposerOnError` means the caller owns the draft (it has
+      // a newer copy than this closure does), so this must not touch it.
       if (!payload.request_kind && !options.preserveComposerOnError && !$("chat-input").value.trim())
         $("chat-input").value = payload.text;
       showJob(null, err.message);
       await restoreJob(runId);
       toast(err.message, true);
     } else showUncertainSubmission(runId, payload, options);
-    return {accepted:false,error:err,uncertain:!(err.status >= 400 && err.status < 500)};
+    return {accepted:false, error:err, uncertain:!(err.status >= 400 && err.status < 500),
+            request_id:payload.request_id, rejected_text:payload.text};
   }
   clearPendingJob(runId);
   if (runId !== state.runId || generation !== jobWatch) return {accepted:true};

@@ -382,6 +382,123 @@ test('a stale brief is reported as a decision to redo, not a failed request', as
   assert.ok(gate.querySelector('.gate-reload'), 'and it offers a way to reload');
 });
 
+/* ----------------------------------------------------------------- T3 ---- */
+
+/* The screen people actually use is the structured card list, which renders
+ * through `directionWorkHtml`'s inline gate — not through `stageDecisionGateHtml`.
+ * A test whose `blocks` are empty exercises the fallback form and proves nothing
+ * about the real path, which is how the per-option rule went unapplied here. */
+function structuredStep(pending, {selected = null, decision = null} = {}) {
+  const cards = (pending.options || []).map(o => ({
+    head: `方向 ${o.key}`,
+    fields: [{label: '主张', value: `主张 ${o.key}`}, {label: '前 3 秒', value: `开场 ${o.key}`}],
+  }));
+  return {
+    stage: 'direction', label: '创意方向', has_doc: true, version: pending.version,
+    artifact_sha256: pending.artifact_sha256, blocks: [{type: 'cards', title: '方向', cards}],
+    review: null, team_issues: [], approval_decision: decision, selected_option_id: selected,
+  };
+}
+
+function mountStructuredGate(pending, stepOverrides = {}) {
+  const html = stageMod.stageHtml(structuredStep(pending, stepOverrides),
+    {artifactBody: undefined, questions: [], drafts: {}, pending, contentFormat: 'video'});
+  const shell = parseHtml(`<div id="host">${html}</div>`)[0];
+  return {shell, gate: shell.querySelector('.gate')};
+}
+
+test('the structured direction cards enforce the same per-option admission', () => {
+  const pending = decisionPending({
+    options: [
+      {key: 'A', recommended: true, label: '方向 A', admissible: false,
+       blocked_reason: '方案 A 未声明满足 goal.primary。'},
+      {key: 'B', recommended: false, label: '方向 B', admissible: true},
+    ],
+  });
+  const {gate} = mountStructuredGate(pending);
+  assert.ok(gate, 'the inline gate is the one on screen');
+
+  const buttons = gate.querySelectorAll('[data-act="approve"]');
+  assert.equal(buttons.length, 1, 'only the admissible option gets an adopt button');
+  assert.equal(buttons[0].getAttribute('data-option-key'), 'B');
+  assert.ok(gate.textContent.includes('不能采用'), 'the refused option says so');
+  assert.ok(gate.textContent.includes('未声明满足 goal.primary'), 'and why');
+  const blockedCard = gate.querySelector('[data-direction-card="A"]');
+  assert.ok(blockedCard.classList.contains('is-blocked'));
+  assert.equal(blockedCard.querySelector('[data-act="approve"]'), null);
+});
+
+test('the structured gate carries the brief binding and the amendment entry', async () => {
+  const app = wire({routes: {'brief-amendment': {id: 'amd-t3', status: 'approved',
+    redo: {status: 'started', job_id: 'job-t3'}}}});
+  const pending = decisionPending({
+    brief_fingerprint: 'brief-v1-t3',
+    options: [
+      {key: 'A', recommended: true, label: '方向 A', admissible: false,
+       blocked_reason: '方案 A 未声明满足 goal.primary。'},
+      {key: 'B', recommended: false, label: '方向 B', admissible: true},
+    ],
+    amend: {clause_id: 'goal.primary', op: 'replace', text: '目标收窄为设计细节种草',
+            current_text: '做一个种草视频', valid: true, reason: '',
+            recommended: 'A', key: 'A'},
+  });
+  const {shell, gate} = mountStructuredGate(pending);
+  assert.equal(gate.dataset.briefFp, 'brief-v1-t3', 'the card is bound to the brief it shows');
+  assert.equal(gate.dataset.amendText, '目标收窄为设计细节种草');
+  bind(app, gate);
+
+  const amender = gate.querySelector('[data-act="amend_brief"]');
+  assert.ok(amender, 'the proposal has an entry from the card that proposed it');
+  amender.click();
+  await settle();
+  const post = app.observed.find(call => call.path.endsWith('/brief-amendment'));
+  assert.equal(post.body.expected_brief_fingerprint, 'brief-v1-t3');
+  assert.equal(post.body.changes[0].text, '目标收窄为设计细节种草');
+  assert.ok(shell, 'the pane markup is intact');
+});
+
+test('a failed decision leaves the refused option disabled', async () => {
+  const failure = Object.assign(new Error('连接中断'), {status: 500});
+  const app = wire({routes: {nonce: {stage: 'direction', nonce: 'n-t3'}, decision: failure,
+                             timeline: {rail: [], questions: [], turns: [], progress: {}, pending: null}}});
+  const pending = decisionPending({
+    options: [
+      {key: 'A', recommended: true, label: '方向 A', admissible: false,
+       blocked_reason: '方案 A 未声明满足 goal.primary。'},
+      {key: 'B', recommended: false, label: '方向 B', admissible: true},
+    ],
+  });
+  const {gate} = mountStructuredGate(pending);
+  bind(app, gate);
+  const blocked = gate.querySelector('[data-direction-card="A"] [data-act="approve"]');
+  assert.equal(blocked, null, 'there was never a button to re-enable');
+
+  const adoptB = gate.querySelector('[data-direction-card="B"] [data-act="approve"]');
+  adoptB.click();
+  await settle();
+  // The failed save re-enables what it disabled — but not the refused option.
+  assert.equal(gate.querySelector('[data-direction-card="A"] [data-act="approve"]'), null);
+  assert.equal(adoptB.disabled, false, 'the admissible option is usable again for a retry');
+  assert.match(gate.querySelector('.gate-feedback').textContent, /连接中断|失败/);
+});
+
+test('the fallback form and the structured cards agree on admission', () => {
+  const pending = decisionPending({
+    options: [
+      {key: 'A', recommended: true, label: '方向 A', admissible: false,
+       blocked_reason: '方案 A 未声明满足 goal.primary。'},
+      {key: 'B', recommended: false, label: '方向 B', admissible: true},
+    ],
+  });
+  const structured = mountStructuredGate(pending).gate;
+  const fallback = mountGate({}, pending);
+  const admitted = (gate) => [...gate.querySelectorAll('[data-act="approve"]')]
+    .map(button => button.getAttribute('data-option-key') || 'B');
+  assert.deepEqual(admitted(structured), ['B']);
+  assert.deepEqual(admitted(fallback), ['B'], 'both consumers read the same verdict');
+  assert.equal(fallback.querySelectorAll('input[type="radio"]')[0].disabled, true);
+});
+
 /* ----------------------------------------------------------------- R5 ---- */
 
 test('a refusal from another project never overwrites the visible draft', async () => {
@@ -433,6 +550,178 @@ test('submit reports the runtime result instead of assuming it was accepted', as
   assert.equal(result.accepted, true, 'an accepted adjustment is reported as accepted');
 });
 
+test('an unknown result keeps its request identity instead of becoming a draft', async () => {
+  /* T2: the answer was lost, so the browser does not know whether the server has
+   * the request. `submitJob` kept the original request_id and offered to confirm
+   * it; putting the text back as an editable draft invited a resend under a new
+   * id, which is how one prompt could run twice. */
+  const requests = [];
+  const app = composer({
+    submitJobResult: {accepted: false, uncertain: true, request_id: 'request-1',
+                      rejected_text: '请重做创意方向'},
+    onSubmitJob: ({payload, sessionStorage}) => {
+      requests.push(payload.request_id);
+      sessionStorage.setItem('studio-job-pending:run-1',
+        JSON.stringify({request_id: payload.request_id, text: payload.text}));
+    },
+  });
+  const input = app.ctx.document.getElementById('chat-input');
+  input.value = '请重做创意方向';
+  const first = await app.ctx.submit();
+  assert.equal(first.accepted, false);
+  assert.equal(first.uncertain, true, 'unknown is reported as unknown');
+  assert.equal(first.draft_restored, false, 'and is not handed back as a draft');
+  assert.equal(input.value, '', 'so the words are not sitting there to be resent');
+  assert.match(app.toastText, /尚未确认/);
+  assert.doesNotMatch(app.toastText, /没有被接受/, 'unknown must not be downgraded to refused');
+
+  // A second Enter is refused while that identity is unresolved.
+  input.value = '请重做创意方向';
+  const second = await app.ctx.submit();
+  assert.equal(second.uncertain, true);
+  assert.equal(requests.length, 1, 'no second request identity was created');
+  assert.equal(input.value, '请重做创意方向', 'and the newer draft is left alone');
+});
+
+test('a definite rejection still returns the draft', async () => {
+  const app = composer({
+    submitJobResult: {accepted: false, uncertain: false, request_id: 'request-2',
+                      reason: '这一轮已经结束了。'},
+  });
+  const input = app.ctx.document.getElementById('chat-input');
+  input.value = '再试一次';
+  const result = await app.ctx.submit();
+  assert.equal(result.accepted, false);
+  assert.equal(result.uncertain, false);
+  assert.equal(result.draft_restored, true, 'a refusal returns the words');
+  assert.equal(input.value, '再试一次');
+});
+
+test('the real submitSteer path does not overwrite a newer same-project draft', async () => {
+  /* T4: the outer draft-version lock was correct, but the real transport wrote
+   * the text into the composer itself before returning, defeating it. This
+   * exercises `submitSteer`'s own branch (not a stubbed return) against a 409. */
+  const app = composer({busy: true,
+    currentJob: {job_id: 'j7', job_kind: 'conversation', status: 'running', goal_revision: 3},
+    steerError: Object.assign(new Error('任务目标已更新，请刷新后按当前目标调整。'), {status: 409})});
+  const input = app.ctx.document.getElementById('chat-input');
+  input.value = '第一次调整';
+  const pending = app.ctx.submit();
+  // The user keeps typing while the adjustment is in flight.
+  input.value = '后来写的新想法';
+  app.ctx.updatesComposerVersion?.();
+  const result = await pending;
+  assert.equal(result.accepted, false);
+  assert.equal(input.value, '后来写的新想法', 'the newer draft survives the late 409');
+  assert.equal(result.draft_restored, false);
+});
+
+test('switching project and back keeps each draft separate', async () => {
+  const app = composer();
+  const input = app.ctx.document.getElementById('chat-input');
+  input.value = '属于 A 的草稿';
+  vm.runInContext(`
+    state.chatDrafts = state.chatDrafts || new Map();
+    state.chatDrafts.set('run-1', $('chat-input').value);
+    state.runId = 'run-2';
+    $('chat-input').value = '属于 B 的草稿';
+    state.chatDrafts.set('run-2', $('chat-input').value);
+    null;
+  `, app.ctx);
+  assert.equal(input.value, '属于 B 的草稿');
+  vm.runInContext(`
+    $('chat-input').value = state.chatDrafts.get('run-1');
+    null;
+  `, app.ctx);
+  assert.equal(input.value, '属于 A 的草稿', 'A keeps its own words');
+  vm.runInContext(`$('chat-input').value = state.chatDrafts.get('run-2'); null;`, app.ctx);
+  assert.equal(input.value, '属于 B 的草稿', 'and B keeps its own');
+});
+
+test('the real submitSteer returns the rejected text instead of writing the composer', async () => {
+  /* T4 asked for the real transport function, not a stand-in: the outer draft
+   * lock was correct and this branch defeated it by writing `chat-input` itself
+   * before returning. The whole `runtime.js` is loaded the way the browser loads
+   * it, with only `api` faked, so the code under test is the code that ships. */
+  const input = {value: '后来写的新想法'};
+  const toasts = [];
+  let calls = 0;
+  const ctx = {
+    state: {runId: 'run-1'},
+    sessionStorage: {setItem: () => {}, removeItem: () => {}},
+    $: (id) => (id === 'chat-input' ? input : {disabled: false, append: () => {}}),
+    box: () => ({onclick: null}),
+    toast: (message, isError) => toasts.push({message, isError}),
+    renderRecoveryPanel: () => {},
+    restoreJob: async () => {},
+    refreshTimeline: async () => {},
+    followJobEvents: () => {},
+    EventSource: function EventSource() {},
+    api: async () => {
+      calls += 1;
+      throw Object.assign(new Error('任务目标已更新，请刷新后按当前目标调整。'), {status: 409});
+    },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(webSource('runtime.js'), ctx, {filename: 'runtime.js'});
+  assert.equal(typeof ctx.submitSteer, 'function', 'the shipped function is reachable');
+
+  const result = await ctx.submitSteer('run-1', 'j7',
+    {text: '第一次调整', request_id: 'req-1', expected_goal_revision: 3});
+
+  assert.equal(calls, 1, 'the request really went out');
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'client');
+  assert.equal(result.rejected_text, '第一次调整', 'the text comes back as data');
+  assert.equal(input.value, '后来写的新想法', 'and the composer is left alone');
+  assert.equal(toasts.length, 1, 'the failure is still reported');
+});
+
+test('clearing a settled request never takes an unresolved one with it', async () => {
+  /* T2's third case: the cleanup that runs after a later request must not remove
+   * the marker standing for an *earlier* request whose outcome is unknown. The
+   * markers are keyed per request id, so clearing one is not clearing the other.
+   */
+  const markers = new Map([
+    ['studio-job-pending:run-1', JSON.stringify({request_id: 'request-1', text: '第一次'})],
+  ]);
+  const app = loadApp({
+    dom: makeDom(['chat-input', 'send', 'toast']),
+    storage: {getItem: k => (markers.has(k) ? markers.get(k) : null),
+              setItem: (k, v) => markers.set(k, String(v)),
+              removeItem: k => markers.delete(k), clear: () => markers.clear()},
+    globals: {
+      __submitJob: async () => ({accepted: false, uncertain: false, request_id: 'request-9',
+                                 reason: '这一轮已经结束了。'}),
+      __submitSteer: async () => ({ok: false, reason: 'job_scope'}),
+      __canSteerJob: () => false,
+    },
+  });
+  app.ctx.__job = null;
+  vm.runInContext(`state.runId='run-1';state.rail=[];state.timeline={questions:[]};
+    state.busy=true;state.recoveryBlocked=false;currentJob=globalThis.__job;
+    renderDraft=()=>{};renderPane=()=>{};renderConversation=()=>{};setConversationOpen=()=>{};setProjectFocus=()=>{};null;`, app.ctx);
+  const input = app.ctx.document.getElementById('chat-input');
+
+  // The unresolved first request is what blocks a resend — the mechanism that
+  // makes the identity worth keeping at all.
+  input.value = '第二次';
+  const blocked = await app.ctx.submit();
+  assert.equal(blocked.uncertain, true);
+  assert.match(String(blocked.reason), /还没有确认/);
+  assert.equal(markers.size, 1, 'still just the original marker');
+
+  // Once that outcome is settled, a later request proceeds — and its own
+  // definite rejection clears only its own marker.
+  markers.clear();
+  input.value = '第三次';
+  const sent = await app.ctx.submit();
+  assert.equal(sent.accepted, false);
+  assert.equal(sent.uncertain, false);
+  assert.ok(!markers.has('studio-job-pending:run-1'),
+    'the later request\'s marker is gone, and nothing else was touched');
+});
+
 /* ----------------------------------------------------------------- F6 ---- */
 
 /* Drive the real composer: set the textarea, then call the same `submit()` the
@@ -440,7 +729,8 @@ test('submit reports the runtime result instead of assuming it was accepted', as
  * so are its busy/steer/refusal branches; only `submitJob`/`submitSteer` are
  * replaced, through the runtime seam the real page also goes through. */
 function composer({busy = false, currentJob = null, recoveryBlocked = false, accept = true,
-                   steer = {ok: true}} = {}) {
+                   steer = {ok: true}, submitJobResult = null, onSubmitJob = null,
+                   steerError = null} = {}) {
   const jobs = [];
   const steers = [];
   const app = loadApp({
@@ -448,12 +738,15 @@ function composer({busy = false, currentJob = null, recoveryBlocked = false, acc
     globals: {
       __submitJob: async (runId, payload) => {
         jobs.push({runId, payload});
+        if (onSubmitJob) onSubmitJob({payload, runId,
+          sessionStorage: app.ctx.sessionStorage, calls: app.observed});
         if (app.ctx.__holdSend) await app.ctx.__holdSend;
         if (app.ctx.__switchTo) {
           app.ctx.__switchTo = false;
           vm.runInContext(`state.runId = 'run-2';`, app.ctx);
           throw new Error('项目已切换');
         }
+        if (submitJobResult) return submitJobResult;
         if (!accept) throw new Error('拒绝');
       },
       // `runtime.submitSteer` resolves `{ok:true}` when the adjustment is
@@ -461,6 +754,7 @@ function composer({busy = false, currentJob = null, recoveryBlocked = false, acc
       // already settled; only the second one lets `send` open a new turn.
       __submitSteer: async (runId, jobId, payload) => {
         steers.push({runId, jobId, payload});
+        if (steerError) throw steerError;
         return steer;
       },
       __canSteerJob: (job) => Boolean(job && job.job_kind === 'conversation'

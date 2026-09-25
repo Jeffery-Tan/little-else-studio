@@ -123,6 +123,13 @@ function directionWorkHtml(step, pending, ctx) {
     const story = fieldValue(card, ['画面与表达', '故事概述']);
     const opening = fieldValue(card, ['开场', '前 3 秒', '开场句']);
     const selectedHere = Boolean(selected && selected === key);
+    // The same per-option verdict the gate enforces, read off the option the
+    // server sent. This branch used to offer "采用这个方向" for every card, so a
+    // refused option still showed a button the server would reject, and the
+    // amendment it proposed had no path from the card that proposed it (T3).
+    const admission = inlineGate
+      ? options.find(option => option.key === key) || {} : {};
+    const blocked = admission.admissible === false;
     const used = new Set(['标题', '名称', '创意名称', '主张', '创意主张', '画面与表达', '故事概述', '开场', '前 3 秒', '开场句']);
     const background = new Set(['依据', '证据强度', '素材依赖', '素材需求', '执行难度']);
     const choiceRisk = new Set(['方案取舍', '取舍', '风险', '可能失败', '限制']);
@@ -132,7 +139,7 @@ function directionWorkHtml(step, pending, ctx) {
     const dependencyRows = dependencies?.rows || [];
     const optionIndex = (dependencies?.columns || []).indexOf(key);
     const choiceDependencies = optionIndex < 0 ? [] : dependencyRows.filter(row => row.cells?.[optionIndex] && row.label);
-    return `<article class="creator-direction-card${selectedHere ? ' is-selected' : ''}" data-direction-card="${escapeHtml(key)}">` +
+    return `<article class="creator-direction-card${selectedHere ? ' is-selected' : ''}${blocked ? ' is-blocked' : ''}" data-direction-card="${escapeHtml(key)}">` +
       (card.media ? `<div class="creator-direction-media" data-media="${escapeHtml(card.media)}"></div>` : '') +
       `<div class="creator-direction-body"><span class="creator-kicker">${selectedHere ? `${selectedLabel} · ` : ''}${recommended.has(key) ? '团队推荐 · ' : ''}方向 ${escapeHtml(key)}</span>` +
       `<h3>${escapeHtml(title)}</h3>` +
@@ -142,7 +149,12 @@ function directionWorkHtml(step, pending, ctx) {
       (visible.length ? `<dl class="creator-direction-fields">${visible.map(field => `<dt>${escapeHtml(field.label)}</dt><dd>${escapeHtml(field.value)}</dd>`).join('')}</dl>` : '') +
       (choiceDependencies.length ? `<div class="creator-direction-risk"><strong>选择前要核对</strong><ul>${choiceDependencies.map(row => `<li>「${escapeHtml(row.label)}」未解决时，这个方向不能成立</li>`).join('')}</ul></div>` : '') +
       (details.length ? `<details class="creator-direction-details"><summary>研究依据与制作条件</summary><dl>${details.map(field => `<dt>${escapeHtml(field.label)}</dt><dd>${escapeHtml(field.value)}</dd>`).join('')}</dl></details>` : '') +
-      (inlineGate ? `<button type="button" class="good creator-direction-choose" data-act="approve" data-option-key="${escapeHtml(key)}">采用这个方向并继续</button>` : '') +
+      (inlineGate && blocked
+        ? `<div class="creator-direction-blocked"><strong>不能采用</strong>` +
+          (admission.blocked_reason ? `<p>${escapeHtml(admission.blocked_reason)}</p>` : '') + `</div>`
+        : inlineGate
+          ? `<button type="button" class="good creator-direction-choose" data-act="approve" data-option-key="${escapeHtml(key)}" data-admissible="1">采用这个方向并继续</button>`
+          : '') +
       `</div></article>`;
   };
   const selectedCard = selected && !inlineGate ? ordered.find(card => keyOf(card) === selected) : null;
@@ -159,8 +171,17 @@ function directionWorkHtml(step, pending, ctx) {
     (recommendation.items?.length || recommendationShort !== recommendationText ? `<details><summary>完整说明与成立前提</summary>` +
       (recommendationShort !== recommendationText ? `<p>${escapeHtml(recommendationText)}</p>` : '') +
       (recommendation.items?.length ? `<ul>${recommendation.items.map(item => `<li>${escapeHtml(item.text)}</li>`).join('')}</ul>` : '') + '</details>' : '') + '</div>' : '';
-  const gateAttrs = inlineGate ? ` id="stage-decision" class="gate creator-direction-gate" role="group" aria-label="选择这一版创意方向" data-stage="direction" data-version="${escapeHtml(pending.version)}" data-sha="${escapeHtml(pending.artifact_sha256 || '')}" data-passed="${pending.passed ? '1' : '0'}" data-needs-choice="1"` : ' class="creator-direction-work"';
-  const footer = inlineGate ? `<div class="creator-direction-footer"><label class="gate-note-label">${pending.passed ? '补充意见' : '覆盖审核或退回的具体理由'}<textarea class="reason" rows="3" maxlength="8000" aria-label="决定意见" placeholder="想保留什么，哪里需要调整？"></textarea></label><p class="gate-feedback" role="status">选择方向才会提交；推荐不代表已选</p><button type="button" class="bad small" data-act="reject">都不合适，退回修改</button><p class="gate-limit">仅确认这一版策划，不开始图片或视频生成。</p><details class="gate-next"><summary>后续阶段与历史用量</summary>${pending.next_stage_label ? `<div>下一步：${escapeHtml(pending.next_stage_label)} · ${escapeHtml(pending.next_owner)}</div>` : ''}<div class="gate-next-cost">${escapeHtml(pending.next_cost_sentence || '')}</div></details></div>` : '';
+  const gateAttrs = inlineGate ? ` id="stage-decision" class="gate creator-direction-gate" role="group" aria-label="选择这一版创意方向" data-stage="direction" data-version="${escapeHtml(pending.version)}" data-sha="${escapeHtml(pending.artifact_sha256 || '')}" data-passed="${pending.passed ? '1' : '0'}" data-needs-choice="1"` + gateAmendAttrs(pending) : ' class="creator-direction-work"';
+  // The inline card is the screen people actually use, so it has to carry the
+  // same three things the fallback form does: the brief the decision is bound
+  // to, the amendment an option proposed, and the brief's own conflicts (T3).
+  const footer = inlineGate ? `<div class="creator-direction-footer">` + conflictsHtml(pending) +
+    `<label class="gate-note-label">${pending.passed ? '补充意见' : '覆盖审核或退回的具体理由'}<textarea class="reason" rows="3" maxlength="8000" aria-label="决定意见" placeholder="想保留什么，哪里需要调整？"></textarea></label>` +
+    `<p class="gate-feedback" role="status">选择方向才会提交；推荐不代表已选</p>` +
+    amendBlockHtml(pending) +
+    `<button type="button" class="bad small" data-act="reject">都不合适，退回修改</button>` +
+    `<p class="gate-limit">仅确认这一版策划，不开始图片或视频生成。</p>` +
+    `<details class="gate-next"><summary>后续阶段与历史用量</summary>${pending.next_stage_label ? `<div>下一步：${escapeHtml(pending.next_stage_label)} · ${escapeHtml(pending.next_owner)}</div>` : ''}<div class="gate-next-cost">${escapeHtml(pending.next_cost_sentence || '')}</div></details></div>` : '';
   const html = `<div class="pane-doc"><section${gateAttrs}><div class="creator-decision-intro"><span class="creator-kicker">${inlineGate ? '现在需要你决定' : '当前创意'}</span><h2>${inlineGate ? '选一个方向，继续写成方案' : selected ? `${selectedLabel}的方向` : '看看这些创意方向'}</h2></div>${decision}${selectedCard ? cardList + recommendationHtml : recommendationHtml + findings + cardList}${footer}${other.length ? `<details class="creator-direction-support"><summary>完整依据与其他内容</summary>${blocksHtml(other)}</details>` : ''}${sourceSummaryHtml(step)}</section></div>`;
   return {html, inlineGate};
 }

@@ -163,15 +163,24 @@ BOM**，**代码与配置（`.py`/`.json`/`.yaml`）用 UTF-8 不带 BOM**。加
     改 `goal.primary` 只能 `POST /brief-amendment`：`add` 按新身份校验正文不重复，`replace`/`retire`
     要求目标存在且正文确有不同——诊断文字与 clause id 都不是修订正文，不得兜底成 `replace.text`。
     每条改动记录决定时的原条款正文（`base_text`）与 `expected_brief_fingerprint`：前者让模型改写
-    intake 后仍能重新对齐，找不到对齐目标时**保留用户批准的正文并记 `conflicts`**（不得静默丢弃、
-    也不得拿模型新写的正文冒充已批准）；后者不一致返回 409，不静默换基线。
+    intake 后仍能重新对齐（按 id → 用户批准正文 → 原条款正文），找不到对齐目标时**保留用户批准的
+    正文并记 `conflicts`**（不得静默丢弃、也不得拿模型新写的正文冒充已批准）；后者不一致返回 409，
+    不静默换基线。**重放的是整段批准历史，冲突不是只增不减**：后续修订沿正文血缘消解先前遗留的
+    冲突与它恢复的旧条款——用户已用更新的决定取代或退休该要求时，旧冲突随之消退；只有真实未决的
+    分歧继续阻断。同一条要求连续改两次、intake 已含最新版时，不得再冒出旧冲突或旧条款。
     批准后按 amendment id 派生固定 request identity 启动一次重做
     （`POST /brief-amendment/{id}/redo` 是显式恢复入口）；「已保存但未启动」在 timeline 的
     `pending_brief_redo` 显示，只对**最新一条**已批准修订、且当前简报尚无合规方向稿时成立；
     重试只解析原任务、不重复开任务，也不提交任何媒体生成。
-    对话输入**按每次提交与项目归还草稿**：一次提交捕获原 runId 与输入版本，只有同一项目且期间
-    没有更新的输入时才放回，失败不得覆盖别的项目或后来输入的文字；`submit` 原样返回
-    `submitJob` 的 accepted/uncertain，不自行改写结果。
+    **每个消费者都读同一个准入结果**：结构化方向卡（`directionWorkHtml` 的 inline gate）与通用
+    回退表单共用 per-option 禁用、原因展示、修订入口与 `data-brief-fp`；保存失败后恢复控件时只
+    恢复自己禁用过的，不得把业务禁用的选项一律启用。
+    对话输入**按每次提交与项目归还草稿**：一次提交捕获原 runId 与输入版本，只有同项目且期间
+    没有更新的输入时才放回；`runtime` 的 `submitSteer` 不得自行写输入框，只返回事实（含
+    `rejected_text`）。**结果未知不等于被拒绝**：请求发出前写入按 run 的待确认标记，未知时保留
+    原 request_id 与核实入口，措辞与状态都不得降格成「没被接受」，该标记未决时 Enter 与按钮
+    同样拒绝再发；只有确认拒绝才清标记并放回草稿，调用未产生响应的确定性失败也清标记并归还草稿。
+    `submit` 原样返回 `submitJob` 的 accepted/uncertain，不自行改写结果。
     `open_questions.kind=brief_amendment` 不进 ask_user。审核 findings 可带 `clause_ids`，
     引用不存在的 id 拒记；direction 退回且 gate blocked 时缺省会补上 blockers 的 id。
     详见 `studio/active_brief.py`、`tests/test_active_brief.py` 与 `tests/test_brief_authority.py`。

@@ -404,8 +404,8 @@ def _text_key(value: Any) -> str:
 
 
 def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]],
-                   conflicts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Apply approved change ops in order, realigning them onto the live clauses.
+                   collector: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Apply one approved change set in order, realigning it onto the live clauses.
 
     An amendment is a decision about a *requirement*, and clause ids here are
     derived from clause text. So a later intake revision that rewords the clause
@@ -416,17 +416,76 @@ def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]],
     recorded at proposal time). Resolution order:
 
     1. the id, if the brief still has it;
-    2. otherwise a live clause with the same body, and the change moves onto that
-       clause's id — the model reworded it, the decision still applies;
-    3. otherwise a conflict, reported and never silently skipped.
+    2. otherwise a live clause with the body the user approved — the model kept
+       the decision but recompiled it under another id;
+    3. otherwise a live clause with the body the user decided against — the model
+       reworded the original and dropped the decision;
+    4. otherwise a conflict: the approved body is kept under the id it was
+       approved as, and the divergence is reported rather than silently skipped.
 
     Retiring a clause the brief no longer has is *not* a conflict: the
     requirement is already gone, which is what the user asked for.
+
+    ``collector`` carries ``conflicts`` and the cross-change bookkeeping across
+    the *whole* replay, because one amendment's doubt can be settled by the next
+    amendment in a separate call — ``{"conflicts": [], "doubts": [], "voided":
+    set(), "voided_bodies": set()}``. Tracking it per change set was the bug: the
+    tables reset between records, so the second record could not see what the
+    first had left behind (T1).
     """
     goal = dict(brief["goal"]) if brief.get("goal") else None
     clauses = [dict(c) for c in brief.get("clauses") or []]
     by_id = {c.get("id"): c for c in clauses}
-    conflicts = conflicts if conflicts is not None else []
+    collector = collector if collector is not None else {}
+    conflicts: list[dict[str, Any]] = collector.setdefault("conflicts", [])
+    #: One entry per unresolved doubt: the clauses and bodies it is about. Later
+    #: changes settle an entry by touching any of those bodies, because a body is
+    #: what identifies a requirement — the clause id is derived from the text, so
+    #: an amendment moves it and an id-based link would never match (T1).
+    doubts: list[dict[str, Any]] = collector.setdefault("doubts", [])
+    #: (clause id, body) pairs a later decision has already superseded. Clause
+    #: objects are rebuilt on every change set, so this signature — not object
+    #: identity — is what stays comparable across the replay.
+    voided: set[tuple[str, str]] = collector.setdefault("voided", set())
+    #: The bodies of those pairs, for the case where two records name the same
+    #: requirement by different ids: the id differs, the requirement does not.
+    voided_bodies: set[str] = collector.setdefault("voided_bodies", set())
+
+    def _sign(clause_id: str, text: str) -> tuple[str, str]:
+        return (str(clause_id or ""), _text_key(text))
+
+    def _settle(*sources: str) -> None:
+        """Retire the doubts this change speaks for.
+
+        Called once per change, where the change *resolved* its target. A change
+        that could not be resolved keeps its doubt, and a later change that also
+        fails adds its own rather than replacing a real divergence.
+        """
+        keys = {_text_key(source) for source in sources if _text_key(source)}
+        ids = {str(source or "") for source in sources}
+        for doubt in list(doubts):
+            if not (doubt["keys"] & keys or any(i in doubt["ids"] for i in ids)):
+                continue
+            doubts.remove(doubt)
+            if doubt["row"] in conflicts:
+                conflicts.remove(doubt["row"])
+            for signature in doubt["signs"]:
+                voided.add(signature)
+                voided_bodies.add(signature[1])
+                # A body this replay recovered for that requirement is history
+                # now: the newer decision is what the requirement says.
+                clauses[:] = [c for c in clauses
+                              if _sign(c.get("id"), c.get("text")) != signature]
+                by_id.pop(signature[0], None)
+
+    def _doubt(clause_id: str, row: dict[str, Any], *sources: str) -> None:
+        """Record one unresolved doubt about a requirement."""
+        doubts.append({
+            "ids": {str(clause_id)},
+            "keys": {_text_key(source) for source in sources if _text_key(source)},
+            "signs": {_sign(clause_id, sources[-1] if sources else "")},
+            "row": row,
+        })
 
     def align(clause_id: str, base_text: str, decided_text: str) -> str:
         """Which live clause this decision is about, or "" if none is.
@@ -489,8 +548,18 @@ def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]],
                 clauses = [c for c in clauses if c.get("id") != new_id]
                 clauses.append(row)
                 by_id[new_id] = row
+            # An explicit add settles whatever this id used to be in doubt about.
+            _settle(new_id)
             continue
         resolved = align(clause_id, base_text, text)
+        # One change settles the whole requirement: the ids it names and the
+        # bodies it is about. Done before acting, so a doubt cannot re-add a body
+        # a later decision has already replaced (T1). The body this change
+        # *moves away from* is voided here too, so a still-earlier record that
+        # cannot be realigned does not resurrect it.
+        voided.add(_sign(clause_id, base_text))
+        voided_bodies.add(_text_key(base_text))
+        _settle(clause_id, base_text, text)
         if op == "retire":
             if resolved and resolved != "goal.primary":
                 clauses = [c for c in clauses if c.get("id") != resolved]
@@ -505,7 +574,13 @@ def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]],
             # outright. Dropping the decision here is the defect this fixes, and
             # so is resurrecting the model's text as if the user had approved it.
             # What the user approved becomes the clause, under the id they
-            # approved it as, and the divergence is reported.
+            # approved it as, and the divergence is reported — unless the same
+            # requirement has already been settled in this replay: either this
+            # exact (id, body), or that body under whatever id an earlier record
+            # named it by. Two records about one requirement must not leave two
+            # rows and two blocks behind (T1).
+            if _sign(clause_id, text) in voided or (text and _text_key(text) in voided_bodies):
+                continue
             kind = str(next((c.get("kind") for c in clauses if c.get("id") == clause_id),
                             "must") or "must")
             clauses = [c for c in clauses if c.get("id") != clause_id]
@@ -521,6 +596,10 @@ def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]],
             }
             clauses.append(kept)
             by_id[clause_id] = kept
+            # Recorded as a doubt about *this requirement*, not appended blindly:
+            # a later amendment about the same body supersedes both the doubt and
+            # the body this path recovered, so one decision cannot leave a
+            # permanent block — or a stale copy of the requirement — behind.
             conflicts.append({
                 "amendment_clause_id": clause_id,
                 "kind": BLOCKER_AMENDMENT_UNRESOLVED,
@@ -533,6 +612,7 @@ def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]],
                       "可以重新提出这条修订，或退回让团队按当前简报重做。"
                 ),
             })
+            _doubt(clause_id, conflicts[-1], base_text, text)
             continue
         target = by_id.get(resolved)
         if target is not None:
@@ -551,6 +631,35 @@ def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]],
             by_id[new_row["id"]] = new_row
             if resolved == "goal.primary" or new_row["id"] == "goal.primary":
                 goal = _amended_goal(text)
+        elif resolved and text:
+            # The decision's own body is in the current brief — found by text
+            # rather than by the id the record names. It is *already* the compiled
+            # clause, so nothing is added; and because the id differs from the one
+            # the record was decided against, the divergence is reported rather
+            # than presented as an aligned replay.
+            kind = str(next((c.get("kind") for c in clauses
+                             if c.get("id") == resolved), "must") or "must")
+            if resolved not in by_id:
+                clauses.append({
+                    "id": resolved, "kind": kind, "text": text,
+                    "check": _check_for(kind, text), "source": "brief_amendment",
+                    "authority": "amendment", "scope": "global",
+                    "status": "confirmed",
+                })
+                by_id[resolved] = clauses[-1]
+            if clause_id != resolved:
+                conflicts.append({
+                    "amendment_clause_id": clause_id,
+                    "kind": BLOCKER_AMENDMENT_UNRESOLVED,
+                    "base_text": base_text,
+                    "detail": (
+                        f"已批准的修订（针对条款 {clause_id}）把这条要求改成了「{text}」，"
+                        f"当前简报里能找到这条正文但条款 id 已变为 {resolved}；"
+                        "两者不一致，采用前需要你确认：可以重新提出这条修订，"
+                        "或退回让团队按当前简报重做。"
+                    ),
+                })
+            _settle(clause_id, base_text, text)
         elif resolved == "goal.primary" and text:
             goal = _amended_goal(text)
             clauses = [c for c in clauses if c.get("id") != "goal.primary"]
@@ -633,12 +742,14 @@ def compile_active_brief(store: Store, run_id: str, *, version: int | None = Non
     # Approved amendments are replayed in order. Anything that cannot be
     # realigned onto the current clauses becomes a reported conflict instead of
     # a silent skip (R2) — a brief that quietly dropped a user decision must not
-    # look like a brief that carries it.
-    conflicts: list[dict[str, Any]] = []
+    # look like a brief that carries it. The bookkeeping is shared across the
+    # whole replay so a later amendment can settle an earlier one's doubt (T1).
+    collector: dict[str, Any] = {"conflicts": [], "doubts": [], "voided": set(),
+                                 "voided_bodies": set()}
     for row in approved:
-        brief = _apply_changes(brief, row.get("changes") or [], conflicts)
+        brief = _apply_changes(brief, row.get("changes") or [], collector)
     brief["version"] = int(version) if version is not None else 1 + len(approved)
-    brief["conflicts"] = conflicts
+    brief["conflicts"] = collector["conflicts"]
     brief["brief_id"] = f"brf-{content_sha({'goal': brief.get('goal'), 'clauses': brief.get('clauses')})[:12]}"
     # ``compiled_at`` must not enter content hashes / fingerprints.
     return brief

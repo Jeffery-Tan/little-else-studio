@@ -351,6 +351,124 @@ def test_ordinary_fact_additions_are_not_treated_as_a_goal_change(store):
     assert before["version"] == 1
 
 
+# ------------------------------------------------------------------ T1 ----- #
+
+
+def _approve_clause(store, clause_id, text):
+    return ab.apply_brief_amendment(store, RUN, changes=[{
+        "clause_id": clause_id, "op": "replace", "text": text}], approve=True)
+
+
+def _rewrite_intake(pipe, constraints):
+    attempt = pipe.start_attempt(RUN, "intake")
+    pipe.submit(RUN, "intake", attempt.token, content="intake rewrite", summary="s",
+                structured={
+                    "facts": [{"label": "交付形态", "value": "US 线时尚达人种草向带货视频",
+                              "source": "u"}],
+                    "constraints": list(constraints),
+                    "open_questions": [],
+                })
+
+
+def test_a_chain_of_amendments_leaves_only_the_latest_decision(store):
+    """T1: A → B → C, and the intake already carries C.
+
+    Replaying the first record found neither A's id nor A's or B's body, so it
+    recovered B and raised a conflict that the second record then failed to clear
+    — the brief ended up carrying both B and C plus a doubt the user had already
+    settled, and that doubt blocked every direction.
+    """
+    pipe = Pipeline(store)
+    submit_intake(pipe, constraints=("台词用美式英语",))
+    a = next(c for c in ab.compile_active_brief(store, RUN)["clauses"]
+             if c["text"] == "台词用美式英语")
+    b_text = "台词用美式英语，且不得虚构购买经历"
+    c_text = "台词用自然美式英语，且不得虚构购买经历和保温实测"
+    _approve_clause(store, a["id"], b_text)
+    b_id = next(c["id"] for c in ab.compile_active_brief(store, RUN)["clauses"]
+                if c["text"] == b_text)
+    _approve_clause(store, b_id, c_text)
+
+    # The team re-summarises intake and keeps exactly the newest approved C.
+    _rewrite_intake(pipe, [c_text])
+
+    brief = ab.compile_active_brief(store, RUN)
+    texts = [c["text"] for c in brief["clauses"]]
+    assert c_text in texts
+    assert b_text not in texts, "the superseded decision is not a second clause"
+    assert texts.count(c_text) == 1, "and the current one is not duplicated"
+    assert brief["conflicts"] == [], "a settled disagreement is not an open conflict"
+
+
+def test_a_chain_still_blocks_when_the_intake_truly_diverges(store):
+    """The counter-case: a real divergence must survive the supersede logic."""
+    pipe = Pipeline(store)
+    submit_intake(pipe, constraints=("台词用美式英语",))
+    a = next(c for c in ab.compile_active_brief(store, RUN)["clauses"]
+             if c["text"] == "台词用美式英语")
+    b_text = "台词用美式英语，且不得虚构购买经历"
+    c_text = "台词用自然美式英语，且不得虚构购买经历和保温实测"
+    _approve_clause(store, a["id"], b_text)
+    b_id = next(c["id"] for c in ab.compile_active_brief(store, RUN)["clauses"]
+                if c["text"] == b_text)
+    _approve_clause(store, b_id, c_text)
+
+    # Now intake carries neither the user's versions nor anything equivalent.
+    _rewrite_intake(pipe, ["全片必须出现容量对比画面"])
+
+    brief = ab.compile_active_brief(store, RUN)
+    assert c_text in [c["text"] for c in brief["clauses"]], "the decision is still carried"
+    assert brief["conflicts"], "and the divergence is still reported"
+    assert brief["conflicts"][0]["amendment_clause_id"] == b_id
+
+    gate = ab.brief_gate(store, RUN, {
+        "options": [{"key": "A", "satisfies": "goal.primary"}], "recommended": "A"},
+        bound=True)
+    assert gate["options"][0]["admissible"] is False, "and it still blocks adoption"
+
+
+def test_retiring_a_conflicting_clause_settles_the_conflict(store):
+    """T1's third case: the user resolves it, so the block must go with it."""
+    pipe = Pipeline(store)
+    submit_intake(pipe, constraints=("台词用美式英语",))
+    a = next(c for c in ab.compile_active_brief(store, RUN)["clauses"]
+             if c["text"] == "台词用美式英语")
+    b_text = "台词用美式英语，且不得虚构购买经历"
+    _approve_clause(store, a["id"], b_text)
+    _rewrite_intake(pipe, ["全片必须出现容量对比画面"])
+    assert ab.compile_active_brief(store, RUN)["conflicts"]
+
+    ab.apply_brief_amendment(store, RUN, changes=[{
+        "clause_id": b_text and a["id"], "op": "retire"}], approve=True)
+
+    brief = ab.compile_active_brief(store, RUN)
+    assert b_text not in [c["text"] for c in brief["clauses"]]
+    assert brief["conflicts"] == [], "the user settled it, so it stops blocking"
+    gate = ab.brief_gate(store, RUN, {
+        "options": [{"key": "A", "satisfies": "goal.primary"}], "recommended": "A"},
+        bound=True)
+    assert gate["options"][0]["admissible"] is True
+
+
+def test_replaying_the_whole_history_is_stable(store):
+    """Assert on the compiled brief, not on one change at a time."""
+    pipe = Pipeline(store)
+    submit_intake(pipe, constraints=("台词用美式英语", "不得虚构购买经历"))
+    ids = {c["text"]: c["id"] for c in ab.compile_active_brief(store, RUN)["clauses"]}
+    _approve_clause(store, ids["台词用美式英语"], "台词用自然美式英语")
+    second = next(c["id"] for c in ab.compile_active_brief(store, RUN)["clauses"]
+                  if c["text"] == "台词用自然美式英语")
+    _approve_clause(store, second, "台词用自然美式英语，语速偏快")
+    _rewrite_intake(pipe, ["台词用自然美式英语，语速偏快", "不得虚构购买经历"])
+
+    first_pass = ab.compile_active_brief(store, RUN)
+    second_pass = ab.compile_active_brief(store, RUN)
+    assert first_pass["clauses"] == second_pass["clauses"], "compiling twice is idempotent"
+    assert first_pass["conflicts"] == []
+    assert [c["text"] for c in first_pass["clauses"]].count("台词用自然美式英语，语速偏快") == 1
+    assert "台词用自然美式英语" not in [c["text"] for c in first_pass["clauses"]]
+
+
 # ------------------------------------------------------------------ F4 ----- #
 
 

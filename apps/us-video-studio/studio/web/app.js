@@ -1207,6 +1207,23 @@ function renderApproval(item) {
   return card;
 }
 
+/* Every control in a gate panel, with the disabled state it had before a save.
+ *
+ * Re-enabling everything after a failed save would hand back options the server
+ * refuses (a blocked direction, a radio with no admissible choice) — the card
+ * would then offer a click that cannot happen, which is the defect this whole
+ * area exists to remove. The business state is snapshotted on the way in and
+ * restored on the way out.
+ */
+function gateControls(gate) {
+  const controls = [...gate.querySelectorAll("button,input,textarea")];
+  if (!gate.dataset.controlsSnapshotted) {
+    for (const control of controls) control.dataset.wasDisabled = control.disabled ? "1" : "0";
+    gate.dataset.controlsSnapshotted = "1";
+  }
+  return controls;
+}
+
 /* What a click in the gate panel does.
  *
  * The markup is `stage.js`'s; the effects are here, and that split is the same
@@ -1276,7 +1293,7 @@ function wireGate(host) {
       }
       state.decisionBusy = true;
       gate.dataset.saving = "1";
-      for (const control of gate.querySelectorAll("button,input,textarea")) control.disabled = true;
+      for (const control of gateControls(gate)) control.disabled = true;
       status.textContent = "正在批准简报修订…";
       try {
         const result = await api(`/api/runs/${state.runId}/brief-amendment`, {
@@ -1323,7 +1340,7 @@ function wireGate(host) {
       } finally {
         state.decisionBusy = false;
         gate.dataset.saving = "0";
-        for (const control of gate.querySelectorAll("button,input,textarea")) control.disabled = false;
+        for (const control of gateControls(gate)) control.disabled = control.dataset.wasDisabled === "1";
       }
       return;
     }
@@ -1344,7 +1361,7 @@ function wireGate(host) {
     state.decisionBusy = true;
     $("run-select").disabled = true; $("send").disabled = true;
     gate.dataset.saving = "1";
-    for (const control of gate.querySelectorAll('button,input,textarea')) control.disabled = true;
+    for (const control of gateControls(gate)) control.disabled = true;
     const shown = { stage: gate.dataset.stage, expected_version: Number(gate.dataset.version), expected_artifact_sha256: gate.dataset.sha };
     let startedJob = false;
     save(); status.textContent = "正在保存…";
@@ -1378,7 +1395,7 @@ function wireGate(host) {
       state.decisionBusy = false;
       $("run-select").disabled = false; $("send").disabled = (state.busy && !canSteerJob(currentJob)) || state.recoveryBlocked;
       gate.dataset.saving = "0";
-      for (const control of gate.querySelectorAll('button,input,textarea')) control.disabled = false;
+      for (const control of gateControls(gate)) control.disabled = control.dataset.wasDisabled === "1";
     }
     if (startedJob && runId === state.runId) void restoreJob(runId);
   };
@@ -1601,8 +1618,19 @@ async function send(text) {
       const adjusted = await submitSteer(runId, currentJob.job_id, {text, request_id:crypto.randomUUID(),
         expected_goal_revision:currentJob.goal_revision || 0});
       if (!adjusted || adjusted.ok !== false) return {accepted: true};
-      if (adjusted.reason !== 'job_not_active') return {accepted: false, reason: adjusted.message};
-      // Previous job already ended: keep this prompt and open a fresh turn.
+      if (adjusted.reason === 'job_not_active') {
+        // Previous job already ended: keep this prompt and open a fresh turn.
+      } else if (adjusted.reason === 'unknown') {
+        // The adjustment may or may not have been received. Its identity is kept
+        // by the runtime, so this is not a rejection and the words must not be
+        // presented as a draft that can simply be sent again (T2).
+        return {accepted: false, uncertain: true,
+                reason: '调整是否收到还没有确认；请先确认提交状态，避免重复发出同一段话。',
+                rejected_text: text, run_id: runId};
+      } else {
+        return {accepted: false, reason: adjusted.error?.message || '这次调整没有被接受。',
+                rejected_text: adjusted.rejected_text, run_id: runId};
+      }
     }
     if (state.busy && !canSteerJob(currentJob)) {
       const stillRunning = currentJob && ['queued', 'running', 'cancelling'].includes(currentJob.status);
@@ -1629,7 +1657,13 @@ async function send(text) {
     // picture of what happened wrong for every outcome but one (A3).
     const result = await submitJob(runId, payload);
     if (result && result.accepted === false) {
-      toast(result.reason || result.message || '这次发送没有被接受。', true);
+      // An unknown result is not a rejection. Saying so would invite a resend
+      // under a fresh request id, which is how one prompt could run twice (T2);
+      // the runtime already keeps the original identity and its "确认提交状态"
+      // entry, so the wording has to keep that distinction.
+      toast(result.uncertain
+        ? '发送结果尚未确认，请在任务状态里确认这次提交，不要直接重发。'
+        : (result.reason || result.message || '这次发送没有被接受。'), true);
       if (typeof StudioComposer !== 'undefined') StudioComposer.render();
       return {...result, run_id: runId};
     }
@@ -1639,22 +1673,33 @@ async function send(text) {
     // The composer is *not* written here. Whether these words can go back into
     // the box depends on which project is on screen and whether that box still
     // holds what the user meant to send — questions only `submit`, which took
-    // the snapshot, can answer (R5). Restoring here overwrote another project's
-    // draft.
+    // the snapshot, can answer (R5/T4).
+    //
+    // This is a definite failure, not an unknown one: nothing here offered to
+    // confirm the submission. Marking it uncertain would be exactly the mistake
+    // this fix removes — a refusal dressed up as "we don't know", which invites
+    // a resend instead of returning the draft.
     toast(error.message,true);if(typeof StudioComposer!=='undefined')StudioComposer.render();
-    return {accepted: false, reason: error.message, uncertain: true, run_id: runId};
+    return {accepted: false, reason: error.message, uncertain: false,
+            rejected_text: text, run_id: runId};
   }
 }
 
 /* ---------------------------------------------------------------- input -- */
 
-/* Send what is in the composer, and put it back if it did not go.
+/* Send what is in the composer, and put it back if it definitely did not go.
  *
- * The draft belongs to one project and one moment. So this captures both: the
- * run that owns the words, and a version stamp for what the box held. If the
- * request comes back not-accepted, the words are returned only when the same
- * project is still on screen *and* the box has not moved on since — otherwise
- * restoring them would replace a newer draft, or another project's (R5).
+ * The draft belongs to one project and one moment, so this captures both: the
+ * run that owns the words, and a version stamp for what the box held. The words
+ * are returned to the composer only when the request was *rejected*, the same
+ * project is still on screen, and the box has not moved on since — otherwise
+ * restoring them would replace a newer draft, or another project's (R5/T4).
+ *
+ * An **unknown** result is not a rejection. The server may have it: the runtime
+ * keeps the original request identity and offers to confirm the submission, and
+ * putting the text back as an editable draft invites a resend under a fresh
+ * request id — the same prompt running twice. Unknown therefore reports itself
+ * as unknown and leaves the composer alone (T2).
  *
  * `send` owns the pass-through of the server's answer; this function owns what
  * the composer does about it. Neither decides the other's question.
@@ -1664,12 +1709,21 @@ async function submit() {
   const value = input.value.trim() || (typeof StudioComposer!=='undefined' && StudioComposer.files(state.runId).length ? '我附上了素材，请先确认我想如何使用。' : '');
   if (!value || !state.runId || steerPosting ||
       state.decisionBusy || state.recoveryBlocked) return {accepted: false, reason: '现在不能发送。'};
+  // One request in flight per project. While a submission's outcome is unknown,
+  // a second one would be a second request identity for the same words; send the
+  // user to the confirmation entry instead.
+  const unresolved = pendingSubmission(state.runId);
+  if (unresolved) {
+    const message = '上一次发送的结果还没有确认；请先在任务状态里确认提交，再发新的内容。';
+    toast(message, true);
+    return {accepted: false, uncertain: true, reason: message, run_id: state.runId};
+  }
   const owner = state.runId;
   const stamp = (state.composerVersion = (state.composerVersion || 0) + 1);
   input.value = "";
   input.style.height = "auto";
   const result = await send(value);
-  const restorable = result && result.accepted === false
+  const restorable = result && result.accepted === false && !result.uncertain
     && state.runId === owner
     && state.composerVersion === stamp;
   if (restorable) {
@@ -1678,6 +1732,18 @@ async function submit() {
     input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
   }
   return {...result, draft_restored: Boolean(restorable)};
+}
+
+/* The submission whose outcome this browser has not confirmed, if any.
+ *
+ * `runtime` writes this marker before the request leaves and clears it on any
+ * definite answer, so its presence means "may have been received". Reading it
+ * here is what keeps a second Enter from replacing that identity.
+ */
+function pendingSubmission(runId) {
+  if (!runId) return null;
+  try { return JSON.parse(sessionStorage.getItem(`studio-job-pending:${runId}`) || "null"); }
+  catch { return null; }
 }
 
 function updatesComposerVersion() { state.composerVersion = (state.composerVersion || 0) + 1; }
