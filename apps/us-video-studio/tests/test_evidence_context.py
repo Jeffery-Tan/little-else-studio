@@ -36,7 +36,8 @@ def submit(pipeline, stage, content, structured=None):
 def make_writing_ready(store, pipeline):
     submit(pipeline, "intake", "intake-only-marker; shipping remains UNKNOWN")
     submit(pipeline, "direction", "A speaks. B stays quiet.", {
-        "options": [{"key": "A", "claim": "speaks"}, {"key": "B", "claim": "quiet"}],
+        "options": [{"key": "A", "claim": "speaks", "satisfies": "goal.primary"},
+                    {"key": "B", "claim": "quiet", "satisfies": "goal.primary"}],
         "recommended": "A",
     })
     pipeline.record_review(RUN, "direction", verdict="pass", findings=[])

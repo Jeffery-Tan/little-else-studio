@@ -69,6 +69,9 @@ const state = {
   materials: [],
   busy: false,
   decisionBusy: false,
+  // True while a send is awaiting its HTTP result. A refusal is not a failure:
+  // see `submit`, which restores the composer only when the request never left.
+  sendInFlight: false,
   refreshSerial: 0,
   machineDetail: false,
   materialsOpen: false,
@@ -723,16 +726,22 @@ function renderDraft() {
   const sendBtn = box("button", "primary small", "发送");
   sendBtn.type = "button";
   sendBtn.disabled = state.busy || state.decisionBusy || state.recoveryBlocked;
-  sendBtn.onclick = () => {
+  sendBtn.onclick = async () => {
     const text = composeDraft();
     if (!text || state.busy || state.decisionBusy || state.recoveryBlocked || !state.runId) return;
-    state.draft = {};
-    saveDraft();
-    renderDraft();
-    // Cleared by rebuilding the pane, which is safe here: he is clicking a
-    // button, not typing.
-    renderPane();
-    send(text);
+    // Same rule as the composer: the drafted answers are cleared once the
+    // request is accepted, not before. They stay in the tray on a refusal — the
+    // renderer would have to rebuild the pane under his hands to put them back.
+    state.sendInFlight = false;
+    const result = await send(text);
+    if ((!result || result.accepted !== false) && !state.sendInFlight) {
+      state.draft = {};
+      saveDraft();
+      renderDraft();
+      // Cleared by rebuilding the pane, which is safe here: he is clicking a
+      // button, not typing.
+      renderPane();
+    }
   };
   host.appendChild(sendBtn);
 }
@@ -1204,14 +1213,29 @@ function renderApproval(item) {
  * panel knows what a `decide` is, and this file never composes a sentence about
  * one — the gate's headline, its option labels and the reason each option would
  * record all arrive written.
+ *
+ * THE DOM CONTRACT IS DECLARED, NOT ASSUMED. Every gate type renders `.reason`
+ * and `.gate-feedback` (see `gateHtml`), and both are required before any button
+ * is bound: `.reason` is read on approve and on return, and `.gate-feedback` is
+ * where every failure and retry result is reported. A gate that is missing them
+ * gets a visible, actionable message rather than a thrown `TypeError` that
+ * leaves the whole card — including its buttons — dead.
  */
 function wireGate(host) {
   const gate = host.querySelector(".gate");
   if (!gate) return;
   const reason = gate.querySelector(".reason");
+  const status = gate.querySelector(".gate-feedback");
+  if (!reason || !status) {
+    // A programming error in a renderer, not a user error. Say so where the
+    // button would have been, and leave the rest of the panel usable.
+    const broken = box("p", "gate-feedback", "这个决定卡片不完整，暂时不能在这里提交。请刷新项目；问题仍在时请反馈。");
+    broken.setAttribute("role", "alert");
+    gate.appendChild(broken);
+    return;
+  }
   const key = `studio-decision:${state.runId}:${gate.dataset.stage}:${gate.dataset.sha}:stage`;
   const legacyJourneyKey = `studio-decision:${state.runId}:${gate.dataset.stage}:${gate.dataset.sha}:journey`;
-  const status = gate.querySelector(".gate-feedback");
   let draft = { note: "", option: null, nonce: null };
   try { draft = { ...draft, ...JSON.parse(localStorage.getItem(key) || localStorage.getItem(legacyJourneyKey) || "{}") }; } catch {}
   reason.value = draft.note || "";
@@ -1236,9 +1260,11 @@ function wireGate(host) {
     if (btn.dataset.act === "amend_brief") {
       const clause = (gate.dataset.amendClause || "").trim();
       const text = (gate.dataset.amendText || "").trim();
-      if (!clause) {
-        const statusEl = gate.querySelector(".gate-feedback") || status;
-        status.textContent = "没有可写入的修订条款；请退回重做或刷新状态。";
+      // An amendment needs a clause to change *and* the body it should have.
+      // The clause id is an identifier, never a replacement body: sending it as
+      // one is how an error message became a new product goal (F4).
+      if (gate.dataset.amendValid === "0" || !clause || !text) {
+        status.textContent = "这一版没有可批准的修订正文；请退回让团队写出要改成什么。";
         return;
       }
       state.decisionBusy = true;
@@ -1249,17 +1275,25 @@ function wireGate(host) {
         const result = await api(`/api/runs/${state.runId}/brief-amendment`, {
           method: "POST",
           body: JSON.stringify({
-            changes: [{ clause_id: clause, op: "replace", text: text || clause }],
-            note: "用户在方向门禁上批准简报修订",
+            changes: [{ clause_id: clause, op: "replace", text }],
+            note: reason.value.trim() || "用户在方向门禁上批准简报修订",
             approve: true,
             expected_artifact_sha256: gate.dataset.sha || null,
             expected_version: gate.dataset.version ? Number(gate.dataset.version) : null,
           }),
         });
-        toast("简报已修订；当前方向版本将作废，团队需按新简报重做。");
         try { localStorage.removeItem(key); localStorage.removeItem(legacyJourneyKey); } catch {}
-        await refreshTimeline();
-        void result;
+        // The approval invalidates this direction version, so report both halves
+        // honestly: decided, and whether the team actually restarted (F5).
+        const redo = result?.redo || {};
+        const started = redo.status === "started";
+        state.canvasTouched = false;
+        toast(started
+          ? "简报已修订，团队正按新简报重做方向。"
+          : `简报已修订；团队重做尚未启动。${redo.reason || "请检查连接后继续。"}`, !started);
+        try { await refreshTimeline(); }
+        catch { toast("简报已修订，但页面暂时无法刷新。请重新打开项目查看接续状态。", true); }
+        if (started && state.runId) void restoreJob(state.runId);
       } catch (err) {
         status.textContent = `修订失败：${String(err.message || err)}。草稿仍保留。`;
       } finally {
@@ -1507,8 +1541,21 @@ $("conversation-body").addEventListener("scroll", () => {
   state.atBottom = host.scrollHeight - host.scrollTop - host.clientHeight < 60;
 });
 
+/* Sending, and what happens to the words when it does not happen.
+ *
+ * Every path that refuses a message returns `{accepted: false, reason}` instead
+ * of a bare `return`. That is not bookkeeping: `submit` clears the composer, so
+ * a refusal that only raised a toast *and* dropped the text left him with
+ * nothing to resend — which is exactly what Enter did while a task was queued,
+ * or while the running task was one that cannot be adjusted (F6). The composer
+ * is now cleared only for a request that was accepted (or durably saved), and
+ * the keyboard and the button share this one admission rule.
+ */
 async function send(text) {
-  if (steerPosting || state.decisionBusy || state.recoveryBlocked || !state.runId) return;
+  if (steerPosting) return {accepted: false, reason: '正在提交上一次调整，请稍候。'};
+  if (state.decisionBusy) return {accepted: false, reason: '正在保存你的决定，请稍候。'};
+  if (state.recoveryBlocked) return {accepted: false, reason: '请先处理待恢复事项。'};
+  if (!state.runId) return {accepted: false, reason: '先打开一个项目。'};
   state.atBottom = true;
   setConversationOpen(true);
   const runId=state.runId;
@@ -1529,15 +1576,16 @@ async function send(text) {
         throw Error('调整运行中的任务时请先移除待上传附件，或等本轮结束后发送。');
       const adjusted = await submitSteer(runId, currentJob.job_id, {text, request_id:crypto.randomUUID(),
         expected_goal_revision:currentJob.goal_revision || 0});
-      if (!adjusted || adjusted.ok !== false) return;
-      if (adjusted.reason !== 'job_not_active') return;
+      if (!adjusted || adjusted.ok !== false) return {accepted: true};
+      if (adjusted.reason !== 'job_not_active') return {accepted: false, reason: adjusted.message};
       // Previous job already ended: keep this prompt and open a fresh turn.
     }
     if (state.busy && !canSteerJob(currentJob)) {
       const stillRunning = currentJob && ['queued', 'running', 'cancelling'].includes(currentJob.status);
       if (stillRunning) {
-        toast('团队仍在执行本轮；请先停止本轮，或等结束后再发送新的对话。', true);
-        return;
+        const message = '团队仍在执行本轮；请先停止本轮，或等结束后再发送新的对话。';
+        toast(message, true);
+        return {accepted: false, reason: message};
       }
       state.busy = false;
     }
@@ -1551,29 +1599,56 @@ async function send(text) {
     const payload = target
       ? {text, request_id:crypto.randomUUID(), feedback_target:target}
       : {text, request_id:crypto.randomUUID()};
+    // Set for the request itself, not just for the response: `submitJob`
+    // persists a pending marker first, so a send that dies mid-flight must not
+    // be reported as "refused, your words are safe" — they are not.
+    state.sendInFlight = true;
     await submitJob(runId, payload);
+    state.sendInFlight = false;
+    return {accepted: true};
   } catch(error){
-    state.busy=false;$('send').disabled=false;$('chat-input').value=text;
+    state.busy=false;$('send').disabled=false;
+    // Only put the text back into the composer he is looking at. A rejected
+    // request must not write into whatever project he moved to meanwhile.
+    if (state.runId === runId) $('chat-input').value = text;
     toast(error.message,true);if(typeof StudioComposer!=='undefined')StudioComposer.render();
+    return {accepted: false, reason: error.message, kept: state.runId === runId};
   }
 }
 
 /* ---------------------------------------------------------------- input -- */
 
-function submit() {
-  const value = $("chat-input").value.trim() || (typeof StudioComposer!=='undefined' && StudioComposer.files(state.runId).length ? '我附上了素材，请先确认我想如何使用。' : '');
+/* Returns the send result so callers can tell "sent" from "refused".
+ *
+ * The composer is emptied only once the request was accepted, and every refusal
+ * puts the text back. A refusal that clears the box is a lost message, and Enter
+ * during a running task is the easiest way to hit one: the send button is
+ * disabled there, but the keydown listener is not. `sendInFlight` is what
+ * distinguishes "refused, your words are safe" from "the request actually
+ * failed" — `state.busy` is cleared by both, so it cannot tell them apart.
+ */
+async function submit() {
+  const input = $("chat-input");
+  const value = input.value.trim() || (typeof StudioComposer!=='undefined' && StudioComposer.files(state.runId).length ? '我附上了素材，请先确认我想如何使用。' : '');
   if (!value || !state.runId || steerPosting ||
-      state.decisionBusy || state.recoveryBlocked) return;
-  $("chat-input").value = "";
-  $("chat-input").style.height = "auto";
-  send(value);
+      state.decisionBusy || state.recoveryBlocked) return {accepted: false, reason: '现在不能发送。'};
+  input.value = "";
+  input.style.height = "auto";
+  state.sendInFlight = false;
+  const result = await send(value);
+  if (result && result.accepted === false && state.runId && !state.sendInFlight) {
+    input.value = value;
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
+  }
+  return result;
 }
 
-$("send").onclick = submit;
+$("send").onclick = () => { void submit(); };
 $("chat-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
-    submit();
+    void submit();
   }
 });
 $("chat-input").addEventListener("input", (e) => {

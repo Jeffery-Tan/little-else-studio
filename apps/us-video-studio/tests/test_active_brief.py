@@ -68,15 +68,25 @@ def test_compile_is_read_only(store):
 # -------------------------------------------------------------------- goal --
 
 
-def test_intake_delivery_form_wins_over_run_brief(store):
+def test_run_brief_is_the_goal_and_intake_cannot_override_it(store):
+    """F3: the user's own request owns the goal; intake is the model's reading.
+
+    ``run.brief`` is written once at project creation. An intake rewrite may add
+    facts and constraints, but it must not redefine what is being made — that
+    was the path by which a model rewrite narrowed the objective and the system
+    went on self-consistently against a goal the user never agreed to.
+    """
     _seed_intake(store, facts=[{
         "label": "交付形态",
         "value": "US 线时尚达人种草向带货视频，主语言美式英语",
         "source": "Jeffery 本轮原话",
     }])
     brief = ab.compile_active_brief(store, RUN)
-    assert "达人种草" in brief["goal"]["text"]
-    assert brief["goal"]["source"].startswith("intake-v1")
+    assert brief["goal"]["source"] == "run.brief"
+    assert brief["goal"]["authority"] == "user"
+    assert "时尚达人种草" in brief["goal"]["text"]
+    # The intake's own reading is not thrown away — it still lands as a clause.
+    assert any("美式英语" in c["text"] for c in brief["clauses"])
 
 
 # ---------------------------------------------------------------- clauses --
@@ -614,13 +624,50 @@ def test_timeline_pending_is_brief_amendment_when_blocked(tmp_path):
     pipe.record_review(RUN, "direction", verdict="return", findings=[
         {"kind": "content", "stage": "direction", "issue": "未承接种草"},
     ])
-    pending = _pending_action(pipe.state(RUN).to_dict(), None)
+    pending = _pending_action(pipe.state(RUN).to_dict(), None, s)
     assert pending is not None
     assert pending["kind"] == "brief_amendment"
     assert pending["options"] == []
     assert pending["amend"]["clause_id"] == "goal.primary"
     assert "设计细节种草" in pending["amend"]["text"]
+    assert pending["amend"]["valid"] is True
+    assert "时尚达人种草" in pending["amend"]["current_text"]
     assert pending["blockers"]
+
+
+def test_timeline_amendment_without_proposal_carries_no_replacement_text(tmp_path):
+    """F4: a diagnosis is not a change proposal.
+
+    The recommended option declares no goal and proposes no amendment, so the
+    gate's blocker text is an error message about the *draft*. It must never be
+    projected as the body that would replace the product goal.
+    """
+    from studio.pipeline import Pipeline
+    from studio.timeline import _pending_action
+
+    s = Store(tmp_path)
+    s.create_run(RUN, "t", "时尚达人种草向带货视频")
+    pipe = Pipeline(s)
+    a = pipe.start_attempt(RUN, "intake")
+    pipe.submit(RUN, "intake", a.token, content="i", summary="s",
+                structured={"facts": [{"label": "交付形态", "value": "种草视频", "source": "u"}],
+                            "constraints": [], "open_questions": []})
+    d = pipe.start_attempt(RUN, "direction")
+    pipe.submit(RUN, "direction", d.token, content="d", summary="d",
+                structured={
+                    "options": [{"key": "A", "title": "别的方向", "claim": "没声明满足目标"}],
+                    "recommended": "A",
+                })
+    pipe.record_review(RUN, "direction", verdict="pass", findings=[])
+
+    pending = _pending_action(pipe.state(RUN).to_dict(), None, s)
+    assert pending["kind"] == "brief_amendment"
+    assert pending["amend"]["valid"] is False
+    assert pending["amend"]["text"] == "", "no proposal means no replacement body"
+    assert pending["amend"]["clause_id"] == "", "the clause id is not a body either"
+    assert pending["amend"]["reason"]
+    # The diagnosis stays visible, but as a blocker — never as the new goal.
+    assert any("未声明" in str(b.get("detail") or "") for b in pending["blockers"])
 
 
 def test_timeline_keeps_normal_decision_when_gate_ok(tmp_path):
@@ -653,7 +700,7 @@ def test_timeline_keeps_normal_decision_when_gate_ok(tmp_path):
                     "recommended": "A",
                 })
     pipe.record_review(RUN, "direction", verdict="pass", findings=[])
-    pending = _pending_action(pipe.state(RUN).to_dict(), ledger)
+    pending = _pending_action(pipe.state(RUN).to_dict(), ledger, s)
     assert pending["kind"] == "decision_request"
     assert [o["key"] for o in pending["options"]] == ["A"]
 

@@ -302,8 +302,10 @@ def test_a_returned_stage_asks_him_in_its_own_words(env):
     assert [f["issue"] for f in pending["findings"]] == ["主推 SKU 没定"]
 
 
-#: Three options with a readable recommendation — the document shape ② is
-#: supposed to produce. `write_direction`'s default text has none.
+#: Three options with a readable recommendation but **no** ActiveBrief mapping.
+#: `satisfies`/`violates`/`amend_*` are how an option states its relation to the
+#: effective brief; a draft that declares nothing has not been checked against
+#: it, and "not checked" is not "符合约束" (F2).
 THREE_WAY = {
     "options": [
         {"key": "A", "claim": "通勤路上八秒看懂"},
@@ -312,6 +314,38 @@ THREE_WAY = {
     ],
     "recommended": "推荐 B",
 }
+
+#: The same three directions, each declaring what it satisfies — the shape a
+#: draft written against the current brief has.
+THREE_WAY_MAPPED = {
+    "options": [
+        {"key": "A", "claim": "通勤路上八秒看懂", "satisfies": "goal.primary"},
+        {"key": "B", "claim": "办公室午饭场景", "satisfies": "goal.primary"},
+        {"key": "C", "claim": "容量实测", "satisfies": "goal.primary"},
+    ],
+    "recommended": "推荐 B",
+}
+
+
+def test_a_draft_that_declares_nothing_cannot_be_adopted(env):
+    """F2: an unmapped draft is visible and readable, but the gate refuses it.
+
+    Before this, "this option carries no clause mapping" was read as "no
+    blockers" and the option could be adopted. The correct reading is the
+    opposite: absence of a declaration is absence of a check, so the card shows
+    the diagnosis and offers return-with-reason instead of adopt-or-override.
+    """
+    store, pipeline, ledger = env
+    store.append_chat(RUN, "user", "出个方向。")
+    write_intake(pipeline)
+    write_direction(pipeline, structured=THREE_WAY)
+    pipeline.record_review(RUN, "direction", verdict="pass", findings=[])
+
+    pending = timeline(store, pipeline, ledger)["pending"]
+    assert pending["kind"] == "brief_amendment", "no adopt radios for an unchecked draft"
+    assert pending["options"] == []
+    assert any(b["kind"] == "unmapped" for b in pending["blockers"])
+    assert pending["amend"]["valid"] is False
 
 
 def test_the_gate_card_offers_the_options_the_document_actually_lays_out(env):
@@ -325,7 +359,7 @@ def test_the_gate_card_offers_the_options_the_document_actually_lays_out(env):
     store, pipeline, ledger = env
     store.append_chat(RUN, "user", "出个方向。")
     write_intake(pipeline)
-    write_direction(pipeline, structured=THREE_WAY)
+    write_direction(pipeline, structured=THREE_WAY_MAPPED)
     pipeline.record_review(RUN, "direction", verdict="pass", findings=[])
 
     pending = timeline(store, pipeline, ledger)["pending"]
@@ -345,7 +379,7 @@ def test_a_button_that_is_not_the_recommendation_says_what_it_will_record(env):
     store, pipeline, ledger = env
     store.append_chat(RUN, "user", "出个方向。")
     write_intake(pipeline)
-    write_direction(pipeline, structured=THREE_WAY)
+    write_direction(pipeline, structured=THREE_WAY_MAPPED)
     pipeline.record_review(RUN, "direction", verdict="pass", findings=[])
 
     pending = timeline(store, pipeline, ledger)["pending"]
@@ -367,7 +401,7 @@ def test_a_rejected_document_offers_no_options(env):
     store, pipeline, ledger = env
     store.append_chat(RUN, "user", "出个方向。")
     write_intake(pipeline)
-    write_direction(pipeline, structured=THREE_WAY)
+    write_direction(pipeline, structured=THREE_WAY_MAPPED)
     pipeline.record_review(
         RUN, "direction", verdict="return", findings=[{"kind": "gap", "issue": "主推 SKU 没定"}]
     )
@@ -385,7 +419,7 @@ def test_a_document_with_no_readable_recommendation_offers_no_options(env):
     store.append_chat(RUN, "user", "出个方向。")
     write_intake(pipeline)
     write_direction(pipeline, structured={
-        "options": THREE_WAY["options"],
+        "options": THREE_WAY_MAPPED["options"],
         "recommended": "A 和 B 都行，看你想要哪个",
     })
     pipeline.record_review(RUN, "direction", verdict="pass", findings=[])

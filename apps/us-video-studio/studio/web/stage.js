@@ -239,55 +239,119 @@ function gateRejectLabel(surface) {
 
 /* Read the work before deciding. A top link reaches this exact-version card;
  * findings and historical usage remain available without overtaking the work.
+ *
+ * ONE SHAPE FOR EVERY GATE. Both gate kinds carry the same two nodes —
+ * `.reason` (what he wrote) and `.gate-feedback` (what just happened) — plus
+ * `.gate-actions`. That is not cosmetic: `wireGate` binds those two by selector
+ * before it binds any button, and the brief-amendment card used to ship without
+ * them, so the card threw on open and its buttons were never wired. The note box
+ * is genuinely needed on both: approving past a failing review needs a reason,
+ * and returning always does.
+ *
+ * The data contract is declared, not inferred — `data-gate-act` on the action
+ * row, `data-passed` for whether a note is mandatory. A test can assert the
+ * markup and the binder agree without a browser.
  */
 function gateHtml(pending) {
   const amend = pending.kind === "brief_amendment";
+  return amend ? briefAmendmentGateHtml(pending) : stageDecisionGateHtml(pending);
+}
+
+/* The note box and the action row. Every gate type carries both — see the
+ * contract note above `gateHtml`. `acts` is written into `data-gate-act` so the
+ * markup itself says which actions this card offers, and the binder's job is to
+ * match it rather than to guess.
+ */
+function gateReasonHtml(placeholder) {
+  return `<label class="gate-note-label">补充意见` +
+    `<textarea class="reason" rows="3" maxlength="8000" aria-label="决定意见" ` +
+    `placeholder="${escapeHtml(placeholder)}"></textarea></label>`;
+}
+
+function gateActionsHtml(acts, hint, buttons) {
+  return `<div class="gate-actions" data-gate-act="${acts.map(a => escapeHtml(a)).join(" ")}">` +
+    buttons +
+    `<p class="gate-feedback" role="status">${escapeHtml(hint)}</p></div>`;
+}
+
+/* The blocked-alignment card.
+ *
+ * It only offers a change it can actually make. A brief amendment is a new
+ * clause body the author wrote down (`amend_proposal`); when there is none, the
+ * blocker text is a *diagnosis* ("未声明满足 goal.primary"), and pasting that in
+ * as the replacement body would have rewritten the product goal with an error
+ * message. So with no real proposal the card shows the diagnosis, offers the
+ * return-with-reason, and says the team has to propose the change first — the
+ * decision stays possible, it just isn't a fabricated one.
+ */
+function briefAmendmentGateHtml(pending) {
+  const amend = pending.amend || {};
+  const diff = amend.valid !== false && amend.text
+    ? `<div class="gate-amend-diff">` +
+        `<div class="gate-amend-row"><span class="gate-amend-what">现在是</span>` +
+        `<span class="gate-amend-was">${escapeHtml(amend.current_text || "（这一版简报没有这条内容）")}</span></div>` +
+        `<div class="gate-amend-row"><span class="gate-amend-what">改为</span>` +
+        `<span class="gate-amend-now">${escapeHtml(amend.text)}</span></div>` +
+      `</div>`
+    : "";
+  const missing = amend.valid === false
+    ? `<p class="gate-amend-missing">${escapeHtml(amend.reason || "这一版没有提出可批准的简报修订正文。")}` +
+      `需要改目标时，请退回让团队先写出要改成什么。</p>`
+    : "";
+  return `<section id="stage-decision" class="gate gate-brief-amendment" role="group" aria-label="简报修订" ` +
+    `data-stage="${escapeHtml(pending.stage)}" data-version="${escapeHtml(pending.version)}" ` +
+    `data-sha="${escapeHtml(pending.artifact_sha256 || '')}" data-passed="${pending.passed ? '1' : '0'}" ` +
+    `data-pending-kind="brief_amendment" data-amend-valid="${amend.valid === false ? "0" : "1"}" ` +
+    `data-amend-clause="${escapeHtml(amend.clause_id || '')}" data-amend-text="${escapeHtml(amend.text || '')}">` +
+    `<div class="gate-head">下一步 · ${escapeHtml(pending.stage_label)}</div>` +
+    `<p class="gate-headline">${escapeHtml(pending.headline)}</p>` +
+    `<p>${escapeHtml(pending.body || "")}</p>` + findingsHtml(pending) + blockersHtml(pending) +
+    diff + missing +
+    gateReasonHtml(amend.valid === false ? "退回时请写明要在原简报下改什么" : "批准或退回的补充说明（可留空）") +
+    gateActionsHtml(amend.valid === false ? ["reject"] : ["amend_brief", "reject"],
+      amend.valid === false ? "这一版不能批准修订；可以退回重做。" : "批准后会立即按新简报重做",
+      (amend.valid === false ? "" :
+        `<button type="button" class="good small" data-act="amend_brief">` +
+        `批准修订简报（本版作废，团队重做）</button>`) +
+      `<button type="button" class="bad small" data-act="reject" data-stage="${escapeHtml(pending.stage)}">` +
+      `${escapeHtml(gateRejectLabel("stage"))}</button>`) +
+    `<p class="gate-limit">批准修订会改产品目标/简报版本，不会直接通过当前方向。</p>` +
+    (pending.next_cost_sentence ? `<div class="gate-next-cost">${escapeHtml(pending.next_cost_sentence)}</div>` : "") +
+    `</section>`;
+}
+
+function stageDecisionGateHtml(pending) {
   const options = pending.options || [];
   const choices = options.length ? `<fieldset class="gate-options"><legend>采用哪个方向</legend>` +
     options.map(o => `<label class="gate-choice"><input type="radio" name="direction-choice" value="${escapeHtml(o.key)}">` +
       `<span>方向 ${escapeHtml(o.key)}${o.recommended ? '<small>推荐</small>' : ''}</span></label>`).join("") + `</fieldset>` : "";
-  const findings = pending.findings?.length ? `<details class="gate-findings"><summary>审核提的 ${pending.findings.length} 点</summary>` +
-    pending.findings.map(findingHtml).join("") + `</details>` : "";
-  const blockers = amend && pending.blockers?.length
-    ? `<ul class="gate-brief-blockers">${pending.blockers.map(b =>
-        `<li>方向 ${escapeHtml(String(b.key || ""))} · ${escapeHtml(String(b.kind || ""))}：${escapeHtml(String(b.detail || b.clause_id || ""))}</li>`
-      ).join("")}</ul>`
-    : "";
-  if (amend) {
-    const clause = pending.amend?.clause_id || "";
-    const proposal = pending.amend?.text || "";
-    return `<section id="stage-decision" class="gate gate-brief-amendment" role="group" aria-label="简报修订" ` +
-      `data-stage="${escapeHtml(pending.stage)}" data-version="${escapeHtml(pending.version)}" ` +
-      `data-sha="${escapeHtml(pending.artifact_sha256 || '')}" data-passed="${pending.passed ? '1' : '0'}" ` +
-      `data-pending-kind="brief_amendment" ` +
-      `data-amend-clause="${escapeHtml(clause)}" data-amend-text="${escapeHtml(proposal)}">` +
-      `<div class="gate-head">下一步 · ${escapeHtml(pending.stage_label)}</div>` +
-      `<p class="gate-headline">${escapeHtml(pending.headline)}</p>` +
-      `<p>${escapeHtml(pending.body || "")}</p>` + findings + blockers +
-      (clause ? `<details class="gate-amend-proposal"><summary>将写入的简报修订</summary>` +
-        `<p><strong>${escapeHtml(clause)}</strong> → ${escapeHtml(proposal)}</p></details>` : "") +
-      `<div class="gate-actions">` +
-      `<button type="button" class="good small" data-act="amend_brief">批准修订简报（本版作废，团队重做）</button>` +
-      `<button type="button" class="bad small" data-act="reject" data-stage="${escapeHtml(pending.stage)}">${escapeHtml(gateRejectLabel("stage"))}</button>` +
-      `</div>` +
-      `<p class="gate-limit">批准修订会改产品目标/简报版本，不会直接通过当前方向。</p>` +
-      (pending.next_cost_sentence ? `<div class="gate-next-cost">${escapeHtml(pending.next_cost_sentence)}</div>` : "") +
-      `</section>`;
-  }
   return `<section id="stage-decision" class="gate" role="group" aria-label="等你决定的这一版" ` +
     `data-stage="${escapeHtml(pending.stage)}" data-version="${escapeHtml(pending.version)}" ` +
     `data-sha="${escapeHtml(pending.artifact_sha256 || '')}" data-passed="${pending.passed ? '1' : '0'}">` +
     `<div class="gate-head">下一步 · ${escapeHtml(pending.stage_label)}</div>` +
-    `<p class="gate-headline">${escapeHtml(pending.headline)}</p>` + findings + choices +
-    `<label class="gate-note-label">补充意见<textarea class="reason" rows="3" maxlength="8000" aria-label="决定意见" placeholder="想保留什么，哪里需要调整？"></textarea></label>` +
-    `<p class="gate-feedback" role="status">选择不会立即提交</p>` +
-    `<div class="gate-actions"><button type="button" class="good small" data-act="approve" data-stage="${escapeHtml(pending.stage)}">` +
-    `${escapeHtml(gateApproveLabel(pending, "stage"))}</button>` +
-    `<button type="button" class="bad small" data-act="reject" data-stage="${escapeHtml(pending.stage)}">${escapeHtml(gateRejectLabel("stage"))}</button></div>` +
+    `<p class="gate-headline">${escapeHtml(pending.headline)}</p>` + findingsHtml(pending) + choices +
+    gateReasonHtml("想保留什么，哪里需要调整？") +
+    gateActionsHtml(["approve", "reject"], "选择不会立即提交",
+      `<button type="button" class="good small" data-act="approve" data-stage="${escapeHtml(pending.stage)}">` +
+      `${escapeHtml(gateApproveLabel(pending, "stage"))}</button>` +
+      `<button type="button" class="bad small" data-act="reject" data-stage="${escapeHtml(pending.stage)}">${escapeHtml(gateRejectLabel("stage"))}</button>`) +
     `<details class="gate-next"><summary>后续阶段与历史用量</summary>` +
     (pending.next_stage_label ? `<div>下一步：${escapeHtml(pending.next_stage_label)} · ${escapeHtml(pending.next_owner)}</div>` : '') +
     `<div class="gate-next-cost">${escapeHtml(pending.next_cost_sentence || '')}</div></details>` +
     `<p class="gate-limit">仅确认这一版策划，不开始图片或视频生成。</p></section>`;
+}
+
+function findingsHtml(pending) {
+  return pending.findings?.length ? `<details class="gate-findings"><summary>审核提的 ${pending.findings.length} 点</summary>` +
+    pending.findings.map(findingHtml).join("") + `</details>` : "";
+}
+
+function blockersHtml(pending) {
+  return pending.blockers?.length
+    ? `<ul class="gate-brief-blockers">${pending.blockers.map(b =>
+        `<li>方向 ${escapeHtml(String(b.key || ""))} · ${escapeHtml(String(b.kind || ""))}：${escapeHtml(String(b.detail || b.clause_id || ""))}</li>`
+      ).join("")}</ul>`
+    : "";
 }
 
 function findingHtml(f) {

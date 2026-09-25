@@ -63,6 +63,7 @@
 | 领域 | 入口与职责 |
 | --- | --- |
 | 项目/产物 | `/api/runs`；run 的 `/state`、`/timeline`、`/chat`、`/events`、`/ledger`、`/artifacts`；GET 指定版本，POST `/nonce` 与 `/decision` 执行用户决定；决定已保存但后续任务未创建时 POST `/decision-continuation` 幂等接续 |
+| 有效简报修订 | POST `/brief-amendment` 提出或批准一条修订：写入前校验条款存在于当前有效简报、正文与原条款确有不同，`goal.primary` 不可 retire；`approve:true` 时按 amendment id 派生固定 request_id 启动一次团队重做。已批准但重做未启动时 POST `/brief-amendment/{amendment_id}/redo` 幂等恢复，timeline 的 `pending_brief_redo` 是该状态的唯一出口。两者都只启动文字策划，不提交媒体生成 |
 | 对话入口/回收站 | POST `/api/conversations` 幂等建立项目；DELETE `/api/runs/{run_id}` 移入回收站，GET `/api/trash` 列表，POST run 的 `/restore` 恢复 |
 | 连接/任务 | GET/PUT `/api/connections`；GET `/api/capabilities` 与 `/api/runtime` 分别给出声明能力和已加载进程信息；GET `/api/connections/codex/models` 从本机 CLI 只读列出可见文字模型，POST `/api/connections/deepseek/check` 只读验密钥；run 的 POST `/jobs`、GET `/jobs/latest` 或 `/jobs/{job_id}`、POST `/jobs/{job_id}/cancel` |
 | Codex 登录 | GET `/api/connections/codex/status`；POST `/api/connections/codex/login` 显式启动官方浏览器登录，POST `/api/connections/codex/login/cancel` 取消对应 attempt_id；与模型任务互斥，不读取凭据或自动登出 |

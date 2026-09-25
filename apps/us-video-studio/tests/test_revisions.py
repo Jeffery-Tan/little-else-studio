@@ -23,8 +23,8 @@ def seed(store):
                            structured=structure, evidence=['original source'], limitations=['unknown size'])
     write('intake', 'brief', {})
     base = write('direction', 'A: original hook. B: keep this direction. Extra prose stays.', {
-        'options': [{'key':'A','claim':'Bring lunch','hook':'Original hook'},
-                    {'key':'B','claim':'Weekend picnic','hook':'Keep hook'}],
+        'options': [{'key':'A','claim':'Bring lunch','hook':'Original hook','satisfies':'goal.primary'},
+                    {'key':'B','claim':'Weekend picnic','hook':'Keep hook','satisfies':'goal.primary'}],
         'recommended':'A','recommended_because':'Original reason','prerequisites':['Need product image']})
     pipe.record_review(RUN,'direction',verdict='pass',findings=[])
     pipe.record_approval(RUN,'direction',nonce=pipe.issue_nonce(RUN,'direction'),decision='approved',selected_option_id='A')

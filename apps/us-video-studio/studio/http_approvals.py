@@ -6,8 +6,26 @@ from .http_contracts import BriefAmendmentDecisionIn, BriefAmendmentIn, Decision
 from .models import PipelineError, STAGE_SPEC
 
 
-def install_approval_routes(app, jobs, pipeline, store, require_run, continuation_job):
+def install_approval_routes(app, jobs, pipeline, store, require_run, continuation_job,
+                            amendment_redo_job=None):
     # -------------------------------------------------------------- brief amendments --
+
+    def _start_amendment_redo(run_id: str, amendment_id: str) -> dict[str, Any]:
+        """Start (or resolve) the redo that an approved amendment owes.
+
+        The user's click is the decision; the redo is what makes the decision
+        mean something. Identity comes from the amendment id, so a retried
+        request — or the explicit recovery button after a failed start — looks
+        up the original job instead of submitting a second one. This only ever
+        starts文字策划 work; it cannot submit image or video generation.
+        """
+        if amendment_redo_job is None:
+            return {"status": "not_started", "reason": "当前服务没有接通重做入口。"}
+        try:
+            job = amendment_redo_job(run_id, amendment_id)
+        except (PipelineError, ValueError) as exc:
+            return {"status": "not_started", "reason": str(exc)}
+        return {"status": "started", "job_id": job["job_id"]}
 
     @app.post("/api/runs/{run_id}/brief-amendment")
     def propose_brief_amendment(run_id: str, payload: BriefAmendmentIn) -> dict[str, Any]:
@@ -47,6 +65,28 @@ def install_approval_routes(app, jobs, pipeline, store, require_run, continuatio
         if payload.approve:
             from .active_brief import compile_active_brief
             result["brief_fingerprint"] = brief_fp(compile_active_brief(store, run_id))
+            # F5: the approval invalidates the current direction version, so the
+            # same click has to restart the team's work. The amendment is saved
+            # either way; a failed start is reported as such, not swallowed.
+            result["redo"] = _start_amendment_redo(run_id, amendment["id"])
+        return result
+
+    @app.post("/api/runs/{run_id}/brief-amendment/{amendment_id}/redo")
+    def resume_brief_amendment_redo(run_id: str, amendment_id: str) -> dict[str, Any]:
+        """Explicit recovery for an amendment whose redo never started."""
+        from .active_brief import load_amendments
+
+        require_run(run_id)
+        with jobs.lock:
+            row = next((r for r in load_amendments(store, run_id)
+                        if r.get("id") == amendment_id), None)
+            if row is None:
+                raise HTTPException(409, "没有这条简报修订记录。")
+            if row.get("status") != "approved":
+                raise HTTPException(409, "这条简报修订还没有被批准。")
+            result = _start_amendment_redo(run_id, amendment_id)
+        if result["status"] != "started":
+            raise HTTPException(409, result.get("reason") or "重做任务暂时无法启动。")
         return result
 
     @app.post("/api/runs/{run_id}/brief-amendment/decide")

@@ -40,8 +40,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr('studio.learning.LearningService.prepare_context', lambda *a, **k: {
         'text': 'FIXTURE_METHOD', 'snapshot_sha256': 'f' * 64, 'evidence_ref': 'fixture-method'})
     write(pipe, 'intake', {'facts': [{'label': 'Product', 'value': 'Bag', 'source': 'fixture'}]})
-    write(pipe, 'direction', {'options': [{'key': 'A', 'claim': 'Lunch', 'hook': 'Desk'},
-                                        {'key': 'B', 'claim': 'Picnic', 'hook': 'Park'}], 'recommended': 'B'})
+    write(pipe, 'direction', {'options': [{'key': 'A', 'claim': 'Lunch', 'hook': 'Desk', 'satisfies': 'goal.primary'},
+                                        {'key': 'B', 'claim': 'Picnic', 'hook': 'Park', 'satisfies': 'goal.primary'}],
+                              'recommended': 'B'})
     approve(pipe, 'direction', 'A')
     write(pipe, 'material_plan', {'items': [{'shot': 'Desk', 'status': '不确定', 'note': 'Keep this'}]})
     write(pipe, 'writing', {'segments': [

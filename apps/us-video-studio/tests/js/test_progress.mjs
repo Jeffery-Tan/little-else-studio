@@ -63,11 +63,17 @@ test('a stale next-action button cannot put another project or version into the 
 });
 
 test('recovery arriving after a drafted-answer render preserves unsent answers', () => {
-  const app = fs.readFileSync(new URL('../../studio/web/app.js',import.meta.url),'utf8');
-  const start = app.indexOf('  sendBtn.onclick = () => {');
-  const end = app.indexOf('\n  };',start);
+  // The drafted answers are cleared only once the request was accepted. This
+  // drives the real handler body out of `app.js` with a refusing `send`, which
+  // is the state a refresh mid-typing can leave behind. The end-to-end version
+  // of this (including the accepted side) is in `test_gate_and_input.mjs`.
+  const app = fs.readFileSync(new URL('../../studio/web/app.js', import.meta.url), 'utf8');
+  const start = app.indexOf('  sendBtn.onclick = async () => {');
+  const end = app.indexOf('\n  };', start);
   const button = {}, state = {runId:'fixture',busy:false,recoveryBlocked:true,draft:{answer:'Keep me'}};
-  const ctx = vm.createContext({sendBtn:button,state,composeDraft:()=> 'Keep me',saveDraft(){throw new Error('draft cleared');}});
+  const ctx = vm.createContext({sendBtn:button,state,composeDraft:()=> 'Keep me',
+    send:async()=>({accepted:false}),saveDraft(){throw new Error('draft cleared');},
+    renderDraft(){},renderPane(){}});
   vm.runInContext(app.slice(start,end+5),ctx);
-  button.onclick(); assert.equal(state.draft.answer,'Keep me');
+  return button.onclick().then(()=>assert.equal(state.draft.answer,'Keep me'));
 });

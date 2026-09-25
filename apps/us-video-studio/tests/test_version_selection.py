@@ -16,8 +16,9 @@ from studio.store import Store, sha256_text
 from studio.tools.workspace import Workspace
 
 RUN = "version-case"
-OPTIONS = {"options": [{"key": "A", "claim": "Spoken idea"},
-                       {"key": "B", "claim": "Quiet idea"}], "recommended": "A"}
+OPTIONS = {"options": [{"key": "A", "claim": "Spoken idea", "satisfies": "goal.primary"},
+                       {"key": "B", "claim": "Quiet idea", "satisfies": "goal.primary"}],
+           "recommended": "A"}
 
 
 @pytest.fixture

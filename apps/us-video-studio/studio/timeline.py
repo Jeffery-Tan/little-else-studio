@@ -54,7 +54,7 @@ def build_timeline(
     items = _collect_items(events, artifacts, reviews, approvals, chat)
     turns = _group_into_turns(chat, items, events, rows)
 
-    pending = _pending_action(state, ledger)
+    pending = _pending_action(state, ledger, store)
     if pending is not None:
         if turns:
             turns[-1]["items"].append(pending)
@@ -357,7 +357,8 @@ def _detail(rows: list[Any], events: list[dict[str, Any]]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-def _pending_action(state: dict[str, Any], ledger: Any) -> dict[str, Any] | None:
+def _pending_action(state: dict[str, Any], ledger: Any,
+                    store: Store) -> dict[str, Any] | None:
     """The one thing waiting on him, or None.
 
     Only approvals wait on him. Reviews are the orchestrator's to request; a
@@ -388,19 +389,38 @@ def _pending_action(state: dict[str, Any], ledger: Any) -> dict[str, Any] | None
         # P2: blocked brief alignment is its own pending action — no A/B/C
         # adopt radios, no override path. Amend the brief or rework.
         if stage == "direction" and gate.get("status") == "blocked":
+            from .active_brief import clause_index, compile_active_brief, option_amend_proposal
+
             blockers = gate.get("blockers") or []
             rec = str(gate.get("recommended") or "")
+            # Which option's amendment is on the table. A recommendation is only
+            # advice, so its proposal is the one to show; a blocker that asks for
+            # an amendment outranks a plain violation.
             rec_amend = next(
                 (b for b in blockers
                  if b.get("kind") == "needs_amendment"
                  and (not rec or str(b.get("key") or "").upper() == rec)),
                 blockers[0] if blockers else None,
             )
-            options_row = next(
-                (o for o in ((latest.get("structured") or {}).get("options") or [])
-                 if isinstance(o, dict) and str(o.get("key") or "").upper() == rec),
-                {},
+            amend_key = str((rec_amend or {}).get("key") or rec or "")
+            proposal = option_amend_proposal(latest.get("structured") or {}, amend_key)
+
+            # A proposal is only approvable when it is a real change to a clause
+            # this brief actually has. The blocker's ``detail`` is a diagnosis
+            # and the clause id is an identifier; using either as the new brief
+            # text is the F4 defect, so there is no fallback here at all.
+            run_id = str((state.get("run") or {}).get("run_id") or "")
+            brief = compile_active_brief(store, run_id) if run_id else {"clauses": []}
+            index = clause_index(brief)
+            if (brief.get("goal") or {}).get("id"):
+                index.setdefault("goal.primary", dict(brief["goal"]))
+            clause_id = proposal["clause_id"]
+            current_text = str(index.get(clause_id, {}).get("text") or "").strip()
+            new_text = proposal["text"].strip()
+            amend_valid = bool(
+                clause_id and new_text and new_text != current_text and clause_id in index
             )
+
             return {
                 "kind": "brief_amendment",
                 "at": latest.get("created_at", utcnow()),
@@ -419,11 +439,16 @@ def _pending_action(state: dict[str, Any], ledger: Any) -> dict[str, Any] | None
                 ],
                 "blockers": blockers,
                 "amend": {
-                    "clause_id": rec_amend.get("clause_id") if rec_amend else "",
+                    "clause_id": clause_id,
                     "op": "replace",
-                    "text": str(options_row.get("amend_proposal") or "")
-                            or (rec_amend.get("detail") if rec_amend else ""),
+                    "text": new_text,
+                    "current_text": current_text,
+                    # False = show the diagnosis and let him return for rework or
+                    # ask the team for a proposal. Never a fabricated change.
+                    "valid": amend_valid,
+                    "reason": "" if amend_valid else "这一版没有提出可批准的简报修订正文。",
                     "recommended": rec,
+                    "key": amend_key,
                 },
                 "next_stage_label": "",
                 "next_owner": "",

@@ -266,7 +266,9 @@ class Pipeline:
         # checked — pre-P1 versions without brief:snapshot stay readable and
         # are not mass-invalidated on deploy. New attempts always stamp it.
         brief_gate: dict[str, Any] | None = None
+        brief_bound = False
         if latest is not None and stage != "intake" and "brief:snapshot" in latest.inputs:
+            brief_bound = True
             from .active_brief import compile_active_brief, fingerprint as brief_fp
             if "__brief_fingerprint__" not in memo:
                 memo["__brief_fingerprint__"] = brief_fp(compile_active_brief(self.store, run_id))
@@ -278,7 +280,10 @@ class Pipeline:
                 )
         if latest is not None and stage == "direction":
             from .active_brief import brief_gate as compute_gate
-            brief_gate = compute_gate(self.store, run_id, latest.structured)
+            # ``bound`` is what makes "the author declared nothing" a blocker:
+            # only for a draft written for this brief, never for an old one.
+            brief_gate = compute_gate(self.store, run_id, latest.structured,
+                                      bound=brief_bound)
 
         integrity_ok = True
         if latest is not None:
@@ -865,20 +870,18 @@ class Pipeline:
                 recorded = "approved_override"
                 note = (note + f"\n[override] {override_reason.strip()}").strip()
             # Brief gate (P2): a selected option that still violates / needs an
-            # amendment cannot be adopted — not even with override_reason.
-            # The product goal only moves through amend_brief, never through a
-            # gate click. Return-with-note remains available.
+            # amendment / declares nothing / cites an unknown clause cannot be
+            # adopted — not even with override_reason. The product goal only
+            # moves through amend_brief, never through a gate click.
+            # Return-with-note remains available.
             if selected_option_id and state.brief_gate:
-                sel = str(selected_option_id).upper()
-                sel_blockers = [
-                    b for b in (state.brief_gate.get("blockers") or [])
-                    if str(b.get("key") or "").upper() == sel
-                ]
+                from .active_brief import gate_blockers_for
+                sel_blockers = gate_blockers_for(state.brief_gate, selected_option_id)
                 if sel_blockers:
                     kinds = "、".join(sorted({str(b.get("kind") or "") for b in sel_blockers}))
                     raise PipelineError(
                         "brief",
-                        f"方向 {sel} 未满足当前有效简报（{kinds}）。"
+                        f"方向 {str(selected_option_id).upper()} 未满足当前有效简报（{kinds}）。"
                         "请先批准简报修订并让团队按新简报重做，或退回按原简报重做；"
                         "不能用 override 直接采用。",
                     )

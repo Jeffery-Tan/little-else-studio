@@ -23,6 +23,7 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
     (Date.parse(currentProjectJob.at || '') || 0) > referenceStarted;
   const referenceCurrent = !analysisOnly && referenceStarted > 0 && referenceAfterCreative &&
     !newerCreativeJob && !timeline.pending && !timeline.pending_continuation &&
+    !timeline.pending_brief_redo &&
     !timeline.interaction && (!timeline.brief?.execution?.active || currentProjectJob?.job_kind === 'reference_video');
   const hasCaption = Boolean((writing?.blocks || []).find(block =>
     block.type === 'text' && block.title === '发布文案' && block.text));
@@ -42,6 +43,10 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
     result(current, {kind: 'navigate', label, tab, stage}, tab, stage, detail);
   const pending = timeline.pending;
   const continuation = timeline.pending_continuation;
+  // An approved brief amendment whose redo job never started. Same recovery
+  // shape, different resolution: it is keyed by the amendment, not by a version
+  // the amendment itself invalidated.
+  const briefRedo = timeline.pending_brief_redo;
   const interaction = timeline.interaction;
   const active = timeline.brief?.execution?.active;
   const tokenCap = currentProjectJob?.status === 'blocked'
@@ -72,6 +77,8 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
     '已保存的作品仍可阅读；新结果会在完成后显示。');
   if (continuation) return result('决定已保存，下一份作品尚未开始准备',
     {kind: 'continue', label: '继续准备'}, 'plan', continuation.stage);
+  if (briefRedo) return result('简报修订已保存，团队重做尚未开始',
+    {kind: 'brief-redo', label: '继续重做方向'}, 'plan', 'direction');
   if (interaction) return result(interaction.question || '有一项需要你确认',
     {kind: 'question', label: '回答这个问题'}, 'plan');
   if (pending?.stage === 'direction') return nav('选择创意方向', 'plan',

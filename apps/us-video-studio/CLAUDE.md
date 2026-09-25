@@ -148,14 +148,24 @@ BOM**，**代码与配置（`.py`/`.json`/`.yaml`）用 UTF-8 不带 BOM**。加
     准确输入、范围与费用的用户确认处，图审不构成生成授权；只读打开项目不能启动准备任务。
 
 18. **产品目标只经 ActiveBrief 显式修订，不经采用绕过。** 意图编译为 `studio/active_brief.py`
-    的有效简报（intake + 已确认问答 + 已批准修订）；非 intake 阶段 attempt 写入
+    的有效简报（intake + 已确认问答 + 已批准修订）。**目标授权来源与 intake 改写权限分开**：
+    `goal.primary` 只来自 `run.brief`（建项目时的用户原话，之后不再改写）或已批准 amendment，
+    绝不取最新 intake；intake 可自由重写事实与硬约束，它自己的交付形态读法只作为
+    `authority=intake_proposal` 条款可见，不改变有效目标。非 intake 阶段 attempt 写入
     `inputs["brief:snapshot"]`，指纹变化使**已带该 key** 的产物 stale（无 key 的旧版不批量作废）。
-    direction 各 option 用 `satisfies`/`violates`/`amend_*` 声明条款；推荐项不满足即
-    `brief_gate=blocked`，pending 只暴露「批准修订简报 / 退回重做」，**无 override 硬过路径**。
-    改 `goal.primary` 只能 `POST /brief-amendment`（`runs/<id>/briefs/amendments.json`）；
+    direction 各 option 用 `satisfies`/`violates`/`amend_*` 声明条款；**带 `brief:snapshot`
+    的产物必须声明**（`bound=True`）：未声明的 option 记 `unmapped` blocker，引用当前简报中不存在的
+    clause id 记 `unknown_clause`，检查的是**实际选中项**而非推荐项；不带该 key 的旧稿只报
+    `unmapped`、不加 blocker、不批量作废。推荐项有 blocker 时 `brief_gate=blocked`，pending 只暴露
+    「批准修订简报 / 退回重做」，**无 override 硬过路径**。
+    改 `goal.primary` 只能 `POST /brief-amendment`（`runs/<id>/briefs/amendments.json`），且写入前
+    校验条款存在、正文与原条款不同——诊断文字与 clause id 都不是修订正文，不得兜底成
+    `replace.text`。批准后按 amendment id 派生固定 request identity 启动一次重做
+    （`POST /brief-amendment/{id}/redo` 是显式恢复入口）；「已保存但未启动」在 timeline 的
+    `pending_brief_redo` 显示，重试只解析原任务、不重复开任务，也不提交任何媒体生成。
     `open_questions.kind=brief_amendment` 不进 ask_user。审核 findings 可带 `clause_ids`，
     引用不存在的 id 拒记；direction 退回且 gate blocked 时缺省会补上 blockers 的 id。
-    详见 `studio/active_brief.py` 与 `tests/test_active_brief.py`。
+    详见 `studio/active_brief.py`、`tests/test_active_brief.py` 与 `tests/test_brief_authority.py`。
 
 ## 运行与上下文约束
 

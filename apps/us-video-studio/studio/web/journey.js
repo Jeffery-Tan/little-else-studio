@@ -71,6 +71,7 @@ function renderJourneyStatus() {
   if(button)button.onclick=async()=>{
     const action=view.action;
     if(action.kind==='continue'){$('journey-decision')?.querySelector('[data-resume-decision]')?.click();return;}
+    if(action.kind==='brief-redo'){$('journey-decision')?.querySelector('[data-resume-brief-redo]')?.click();return;}
     if(action.kind==='question'){setProjectFocus('chat');$('journey-decision')?.scrollIntoView({block:'nearest'});return;}
     if(action.kind==='review_stage'){
       button.disabled=true;
@@ -120,13 +121,29 @@ function renderJourneyDecision() {
   const host=$('journey-decision'),tl=state.timeline;
   if (!host || !tl) return;
   const q=tl.interaction, pending=tl.pending, continuation=tl.pending_continuation;
+  const briefRedo=tl.pending_brief_redo;
   const key=JSON.stringify([state.runId,q?.id,pending?.version,pending?.artifact_sha256,
-    continuation?.expected_version,continuation?.expected_artifact_sha256,Boolean(state.busy)]);
+    continuation?.expected_version,continuation?.expected_artifact_sha256,
+    briefRedo?.amendment_id,Boolean(state.busy)]);
   if(host.dataset.key===key)return;
   host.dataset.key=key;
   host.innerHTML='';
   if (state.busy) return;
-  if (continuation) {
+  if (briefRedo) {
+    host.innerHTML='<section class="conversation-question"><h3>简报修订已保存</h3><p>方向版本已按新简报作废，但团队重做还没有启动。请检查模型连接，然后继续重做方向。</p><button type="button" class="primary" data-resume-brief-redo>继续重做方向</button><p role="status" data-feedback></p></section>';
+    const redoButton=host.querySelector('[data-resume-brief-redo]'), runId=state.runId;
+    redoButton.onclick=async()=>{
+      redoButton.disabled=true;
+      try {
+        await api(`/api/runs/${encodeURIComponent(runId)}/brief-amendment/${encodeURIComponent(briefRedo.amendment_id)}/redo`,{method:'POST',body:'{}'});
+        if(runId!==state.runId)return;
+        state.canvasTouched=false;
+        try { await refreshTimeline(); }
+        catch { const feedback=host.querySelector('[data-feedback]');if(feedback)feedback.textContent='任务已接受，页面暂时无法刷新；正在恢复运行状态。'; }
+        void restoreJob(runId);
+      } catch(err) { const feedback=host.querySelector('[data-feedback]');if(feedback)feedback.textContent=err.message;redoButton.disabled=false; }
+    };
+  } else if (continuation) {
     host.innerHTML='<section class="conversation-question"><h3>决定已保存</h3><p>下一步尚未启动。请检查模型连接，然后继续准备。</p><button type="button" class="primary" data-resume-decision>继续准备</button><p role="status" data-feedback></p></section>';
     const button=host.querySelector('[data-resume-decision]'), runId=state.runId;
     button.onclick=async()=>{

@@ -14,7 +14,8 @@ from .timeline import build_timeline
 from . import vocabulary
 
 
-def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run, pending_continuation):
+def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run, pending_continuation,
+                       pending_brief_redo=None):
     # ------------------------------------------------------------------ runs --
 
     @app.get("/api/runs")
@@ -207,4 +208,6 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
             from .creation_mode import current
             result['creation_mode'] = current(store, run_id)
             result['pending_continuation'] = pending_continuation(run_id)
+            if pending_brief_redo is not None:
+                result['pending_brief_redo'] = pending_brief_redo(run_id)
             return result

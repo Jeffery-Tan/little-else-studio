@@ -47,6 +47,7 @@ from .http_runs import install_run_routes
 from .http_materials import install_material_routes
 from .http_approvals import install_approval_routes
 from .http_execution import install_execution_routes
+from .active_brief import load_amendments
 
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -175,6 +176,43 @@ def build_app(
     def continuation_job(run_id, approval):
         return jobs.submit(run_id, continuation_text(approval), continuation_request_id(approval))
 
+    # ---- brief amendment → team redo (F5) --------------------------------- #
+    #
+    # Approving a brief amendment invalidates the current direction version, so
+    # the click that approves it is also the click that has to restart the work.
+    # The request identity is derived from the amendment id, never from a
+    # timestamp: retrying a lost response, or pressing the explicit "继续重做"
+    # button, resolves the *same* job instead of buying a second one.
+    def amendment_redo_request_id(amendment_id):
+        return f'brief-amendment:{amendment_id}'
+
+    def amendment_redo_text():
+        return ('有效简报已按我的决定修订；原先的方向方案写的是旧简报，本版作废。'
+                '请团队按新简报重新做创意方向，完成内部审核后再展示给我确认。'
+                '先不要提交图片或视频生成。')
+
+    def amendment_redo_job(run_id, amendment_id):
+        return jobs.submit(run_id, amendment_redo_text(),
+                           amendment_redo_request_id(amendment_id))
+
+    def pending_amendment_redo(run_id):
+        """An approved amendment whose redo never started, as a recovery entry.
+
+        It cannot reuse the approval-shaped entry: that one resolves a decision
+        strictly by version + sha, and an approved amendment deliberately
+        invalidates the very direction version it was decided against.
+        """
+        created = {row.get('request_id') for row in store.read_events(run_id)
+                   if row.get('kind') == 'job_created'}
+        for amendment in reversed(load_amendments(store, run_id)):
+            if amendment.get('status') != 'approved':
+                continue
+            if amendment_redo_request_id(amendment.get('id')) in created:
+                continue
+            return {'amendment_id': amendment.get('id'),
+                    'message': '简报修订已保存，团队重做还没有启动。请检查连接后点击继续。'}
+        return None
+
     def pending_continuation(run_id):
         rows = store.read_events(run_id)
         created = {row.get('request_id') for row in rows if row.get('kind') == 'job_created'}
@@ -286,11 +324,13 @@ def build_app(
 
     install_learning_routes(app, learning, learning_assets, creative_packages, store, pipeline, jobs, require_run)
 
-    install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run, pending_continuation)
+    install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run, pending_continuation,
+                       pending_amendment_redo)
 
     install_material_routes(app, store, jobs, require_run)
 
-    install_approval_routes(app, jobs, pipeline, store, require_run, continuation_job)
+    install_approval_routes(app, jobs, pipeline, store, require_run, continuation_job,
+                            amendment_redo_job)
 
     install_execution_routes(app, connections, settings, ledger, jobs, store, pipeline, require_run, prepare_job, client_factory)
 

@@ -184,20 +184,28 @@ store.append_chat(RUN, "assistant", "需求整理完了。有四件事没答，�
 # --------------------------------------------------------------- ② direction --
 
 direction = {
+    # `satisfies` is how an option states which ActiveBrief clause it meets.
+    # A draft bound to the current brief (it carries `brief:snapshot`) has to
+    # declare this: an undeclared option records an `unmapped` blocker and cannot
+    # be adopted. These fixtures therefore declare it, which is also what the
+    # director role is told to produce.
     "options": [
-        {"key": "A", "claim": "把外观/视觉当成唯一主张。可用且已核实的事实只有一条：三个颜色、两个容量档。",
+        {"key": "A", "satisfies": "goal.primary",
+         "claim": "把外观/视觉当成唯一主张。可用且已核实的事实只有一条：三个颜色、两个容量档。",
          "audience_moment": "在信息流里消费带饭/日用品外观类内容、对颜色与生活质感有反应的人。",
          "hook": "只说画面，不给卖点、不给价格。",
          "gives_up": "放弃「讲清楚为什么值得买」，信息量最低；主张完全无法事前验证。",
          "evidence_strength": "弱", "difficulty": "中",
          "asset_needs": "零实拍不成立。连官方图也没有 → A 现在即失效。"},
-        {"key": "B", "claim": "主张「先帮你决定 15L 还是 25L」，不主推单一 SKU，把两条容量线摆成一道选择题。",
+        {"key": "B", "satisfies": "goal.primary",
+         "claim": "主张「先帮你决定 15L 还是 25L」，不主推单一 SKU，把两条容量线摆成一道选择题。",
          "audience_moment": "正在挑午餐包、在「小一点够用 / 大一点更能装」之间犹豫的人。",
          "hook": "把两档容量的差异变成一个待回答的问题。",
          "gives_up": "放弃外观吸引与情绪；对无购买意图的泛流量近乎无效。",
          "evidence_strength": "事实中—强 / 假设弱", "difficulty": "中",
          "asset_needs": "需两档官方产品图（不需实拍视频）。拿不到两档图 → B 不成立。"},
-        {"key": "C", "claim": "主张不是给观众购买理由，而是测产线：没有实拍、没有官方图，能不能出一条 15 秒。",
+        {"key": "C", "satisfies": "goal.primary",
+         "claim": "主张不是给观众购买理由，而是测产线：没有实拍、没有官方图，能不能出一条 15 秒。",
          "audience_moment": "目标观众不是消费者，是分发端——判断这条线要不要继续的人。",
          "hook": "「一条没有产品画面的 15 秒」本身构成反差。",
          "gives_up": "放弃消费者说服力；跑不动只能说明形态不行，不能说明产品不行。",
@@ -617,6 +625,102 @@ for role, stage, tokens in [
         estimated_usd=tokens / 1_000_000 * 0.28, pricing_source="预览用的假价目表",
     ))
 
+# ------------------------------------- run 4: 简报门禁挡住的方向（F1 / F4） --
+#
+# The state the review's F1 and F4 are about, and the one no other fixture can
+# reach: the recommended direction does not satisfy the effective brief, so the
+# gate withholds adoption and offers a brief amendment instead of A/B/C radios.
+#
+# Two options, on purpose, because they are the two halves of the card:
+#   A carries a real `amend_proposal` — the card shows the before/after diff and
+#     one button that approves it;
+#   B asks for an amendment but writes no body — the card must show the
+#     diagnosis and offer only "退回重做". It must NOT offer a change, because
+#     the only available text would be the diagnosis itself, and that used to be
+#     pasted in as the new product goal.
+
+RUN_FOUR = "preview-brief-blocked-01"
+SHELF_FOUR = ROOT / "runs" / RUN_FOUR / "materials"
+SHELF_FOUR.mkdir(parents=True)
+
+store.create_run(RUN_FOUR, "保温午餐包 15 秒（简报门禁预览）",
+                 "给已采购的保温午餐包做一条 15 秒短视频，投 TikTok Shop 美国线。")
+store.append_chat(RUN_FOUR, "user", "方向出来我看看。")
+store.append_chat(RUN_FOUR, "assistant", "好。有一条方向跟现在的有效简报对不上，我到时把它摊开给你。")
+
+attempt = pipeline.start_attempt(RUN_FOUR, "intake")
+pipeline.submit(
+    RUN_FOUR, "intake", attempt.token,
+    content=(
+        "# intake — 保温午餐包 15 秒（US 线）\n\n"
+        "## 1. 你说的\n\n"
+        "给已经采购的保温午餐包做一条 15 秒的短视频，投 TikTok Shop 美国线。\n\n"
+        "## 2. 未确认\n\n"
+        "目标观众、主推 SKU、可售日期、素材情况——四件事没答。\n"
+    ),
+    summary="把你说的话整理成需求记录，四件事没答，单独标出来了。",
+    evidence=["三个颜色、两个容量档、90 件——来自你的消息"],
+    limitations=["可售日期、目标观众、主推 SKU、素材情况均未确认"],
+    structured=copy.deepcopy(intake),
+)
+
+attempt = pipeline.start_attempt(RUN_FOUR, "direction")
+pipeline.submit(
+    RUN_FOUR, "direction", attempt.token,
+    content=(
+        "# direction — 午餐包 15 秒（US 线）\n\n"
+        "## 两条选项\n\n"
+        "A 只拍设计细节 / B 只测产线形态。\n\n"
+        "## 两条都与当前有效简报不一致\n\n"
+        "A 写出了要改成什么；B 只说要对不上，没写改法。\n"
+    ),
+    summary="两条方向都不满足当前有效简报：A 带修订正文，B 没有。",
+    evidence=["90 件采购（15L 三色各 10、25L 三色各 20），来自 intake"],
+    limitations=["两条都改动了原始交付目标，需要显式修订简报才能采用"],
+    structured={
+        "options": [
+            {"key": "A", "claim": "只拍设计细节，不要求出镜穿搭。",
+             "violates": "goal.primary",
+             "amend_clause": "goal.primary",
+             "amend_proposal": "US 线设计细节种草短片，不要求真人出镜穿搭"},
+            {"key": "B", "claim": "测产线：没有素材能不能出一条 15 秒。",
+             "violates": "goal.primary",
+             "amend_clause": "goal.primary"},
+        ],
+        "recommended": "A",
+        "recommended_because": "只有 A 说清楚了要把目标改成什么；B 需要团队先补出修订正文。",
+        "prerequisites": ["设计细节是否足以支撑 15 秒，零证据。"],
+        "open_questions": [
+            {"question": "是否接受把目标收窄为设计细节？",
+             "blocks": "不接受就要按原简报重做方向。", "owner": "user", "timing": "now",
+             "reason": "产品目标的变更只能由用户决定。"},
+        ],
+    },
+)
+
+pipeline.record_review(
+    RUN_FOUR, "direction", verdict="return",
+    findings=[
+        {"kind": "content", "issue": "两条方向都没有承接「时尚达人种草」这个原始目标；A 提出了收窄，B 只提出了问题。",
+         "clause_ids": ["goal.primary"]},
+    ],
+)
+
+store.append_chat(RUN_FOUR, "assistant",
+                  "两条方向都跟当前有效简报对不上，所以门禁没让你直接选。A 写了要改成什么，B 没写。")
+
+for role, stage, tokens in [
+    ("orchestrator", "intake", 44_900),
+    ("intake", "intake", 11_200),
+    ("director", "direction", 36_400),
+    ("reviewer", "direction", 25_100),
+]:
+    store.append_ledger(RUN_FOUR, LedgerEntry(
+        at="2026-09-17T12:00:00Z", run_id=RUN_FOUR, role=role, stage=stage,
+        model="deepseek-flash", input_tokens=tokens, output_tokens=0,
+        estimated_usd=tokens / 1_000_000 * 0.28, pricing_source="预览用的假价目表",
+    ))
+
 print("seeded:", ROOT)
 print("run 1 :", RUN)
 print("state : ①②③④ 都已产出，①的门禁已通过，④的门禁开着（审核退回）")
@@ -624,3 +728,5 @@ print("run 2 :", RUN_TWO)
 print("state : ①② 已产出，②的门禁开着（审核通过）—— 选项按钮在这里")
 print("run 3 :", RUN_THREE)
 print("state : ①②③④ 都已产出，两个门都批过 —— 没有任何东西在等你")
+print("run 4 :", RUN_FOUR)
+print("state : ①② 已产出，②的门禁开着（简报门禁挡住）—— 简报修订卡在这里")

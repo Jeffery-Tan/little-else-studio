@@ -42,7 +42,9 @@ def seed(store):
         attempt = pipe.start_attempt(RUN, stage)
         pipe.submit(RUN, stage, attempt.token, content='Synthetic ' + stage, summary=stage,
                     evidence=['Fixture only'], limitations=['Not market evidence'],
-                    structured={'options': [{'key': 'A', 'claim': 'Synthetic claim'}]} if stage == 'direction' else {})
+                    structured={'options': [{'key': 'A', 'claim': 'Synthetic claim',
+                                             'satisfies': 'goal.primary'}]}
+                    if stage == 'direction' else {})
         if stage in {'direction', 'writing'}:
             pipe.record_review(RUN, stage, verdict='pass', findings=[])
             pipe.record_approval(RUN, stage, nonce=pipe.issue_nonce(RUN, stage), decision='approved',

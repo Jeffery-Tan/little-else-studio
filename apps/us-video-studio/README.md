@@ -175,6 +175,8 @@ $env:STUDIO_DATA_ROOT = $studioPreview
 | `POST /api/runs/{id}/message` | 旧 SSE 兼容入口；观察同一持久任务 |
 | `POST /api/runs/{id}/nonce` | 为页面实际展示版本签发审批 nonce |
 | `POST /api/runs/{id}/decision` | 用户提交采用或退回决定 |
+| `POST /api/runs/{id}/brief-amendment` | 用户批准/提出有效简报修订；批准时按修订 id 幂等启动一次重做 |
+| `POST /api/runs/{id}/brief-amendment/{amendment_id}/redo` | 已批准但重做未启动时的显式恢复入口；只查回原任务 |
 | `GET/POST /api/runs/{id}/materials` | 查看素材列表或上传素材 |
 | `GET /api/runs/{id}/materials/{name}` | 读取素材文件 |
 | `GET/POST /api/runs/{id}/material-observations` | 读取或追加准确素材观察；保存不调用模型 |

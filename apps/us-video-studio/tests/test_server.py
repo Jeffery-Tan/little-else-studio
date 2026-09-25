@@ -323,11 +323,13 @@ def test_decision_rejects_non_hex_hash_without_consuming_nonce(client_factory):
 
 
 #: ② the shape the gate card grows buttons from: three options, one recommended.
+#: Each option declares which ActiveBrief clause it satisfies — a draft written
+#: against the current brief has to say so, or the gate refuses adoption (F2).
 DIRECTION_PAYLOAD = {
     "options": [
-        {"key": "A", "claim": "通勤路上八秒看懂"},
-        {"key": "B", "claim": "办公室午饭场景"},
-        {"key": "C", "claim": "容量实测"},
+        {"key": "A", "claim": "通勤路上八秒看懂", "satisfies": "goal.primary"},
+        {"key": "B", "claim": "办公室午饭场景", "satisfies": "goal.primary"},
+        {"key": "C", "claim": "容量实测", "satisfies": "goal.primary"},
     ],
     "recommended": "推荐 B",
 }
