@@ -1,8 +1,10 @@
 ﻿# 产品实现与验收状态
 
-整理日期：2026-09-24。本文是应用能力、服务加载及验收边界的当前入口，不替代飞书业务任务状态。使用和接口见 [README](../README.md)，运行机制与排障见 [独立运行说明](independent-runtime.md)。早期实施记录中的“已加载”或“未加载”只描述对应时点；实际运行状态以本节最新检查为准。
+整理日期：2026-09-25。本文是应用能力、服务加载及验收边界的当前入口，不替代飞书业务任务状态。使用和接口见 [README](../README.md)，运行机制与排障见 [独立运行说明](independent-runtime.md)。早期实施记录中的“已加载”或“未加载”只描述对应时点；实际运行状态以本节最新检查为准。
 
 ## 当前代码与本机服务
+
+- 2026-09-25 `b2679f7` ActiveBrief 机检简报（P0–P3，已推 `origin/main`）：`studio/active_brief.py` 从 intake/问答编译有效简报并出指纹；非 intake attempt 写入 `brief:snapshot`（仅**已带 key** 的产物才因简报变化 stale）；direction option 增 `satisfies`/`violates`/`amend_*`；`brief_gate=blocked` 时 pending 为 `brief_amendment`（批准修订 / 退回），`record_approval` 对违规选项拒绝且 **override 无效**；`POST /brief-amendment` 写 `briefs/amendments.json`，批准后 version+1；`open_questions.kind` 四分型，`brief_amendment` 不进 ask_user；reviewer 注入简报清单，`finish_review.clause_ids` 校验存在。离线全量 **1300 Python passed / 2 skipped**、**343 JavaScript passed**、编码 PASS。**本机 4760 正式服务尚未从含本 commit 的工作区重启**（当时仍为 HTTP transport worktree），界面门禁与真实项目上的 brief 卡片未做 live verify；真实模型审核质量与生成链路未验收。规则见 [CLAUDE.md 红线 18](../CLAUDE.md)。
 
 - 2026-09-24 `cd5600f` 评审收尾：已播放视频的发布文案按其实际脚本版本与 SHA256 配对；历史稿可从原版本读取，缺失时明确说明，新版文案单列并注明未对应当前视频。已有明确制作检查意见或失败尝试时，作品主动作可一键把准确制作稿与尝试交给原团队诊断并提出修正；自由描述仍在，结果未知只核实原任务，诊断不提交媒体生成。隔离真实形状数据在 `127.0.0.1:4774` 验证同版视频、旧视频加新版失败、旧视频加新版 unknown 和一键绑定；离线连接按预期拒绝模型执行，准确 `production_draft` 与失败 `attempt_id` 已记录，媒体尝试数未增加。正式服务此前一度离线，现从隔离工作树于 **15:45:30+08:00** 重启至 `127.0.0.1:4760`；`/api/runtime` 后端指纹 `b273835a762b52da`、数据根标识 `57dd73122626`，首页加载更新后的前端资源，真实旧项目只读打开且浏览器无脚本错误。`timeline.budget.limit_mode=none`，两个额度值为空。全量离线回归 **1219 Python passed / 2 skipped、329 JavaScript passed**，文本编码检查通过。真实模型的诊断质量和从图审到生成的正常项目全链路仍待实际验收；本次没有对真实项目提交模型或媒体生成。
 

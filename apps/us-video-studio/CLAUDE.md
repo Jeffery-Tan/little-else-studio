@@ -147,6 +147,16 @@ BOM**，**代码与配置（`.py`/`.json`/`.yaml`）用 UTF-8 不带 BOM**。加
     输入；只针对获批图片及当前已采用脚本，复用原任务幂等机制，失败时保留显式恢复。生成始终停在
     准确输入、范围与费用的用户确认处，图审不构成生成授权；只读打开项目不能启动准备任务。
 
+18. **产品目标只经 ActiveBrief 显式修订，不经采用绕过。** 意图编译为 `studio/active_brief.py`
+    的有效简报（intake + 已确认问答 + 已批准修订）；非 intake 阶段 attempt 写入
+    `inputs["brief:snapshot"]`，指纹变化使**已带该 key** 的产物 stale（无 key 的旧版不批量作废）。
+    direction 各 option 用 `satisfies`/`violates`/`amend_*` 声明条款；推荐项不满足即
+    `brief_gate=blocked`，pending 只暴露「批准修订简报 / 退回重做」，**无 override 硬过路径**。
+    改 `goal.primary` 只能 `POST /brief-amendment`（`runs/<id>/briefs/amendments.json`）；
+    `open_questions.kind=brief_amendment` 不进 ask_user。审核 findings 可带 `clause_ids`，
+    引用不存在的 id 拒记；direction 退回且 gate blocked 时缺省会补上 blockers 的 id。
+    详见 `studio/active_brief.py` 与 `tests/test_active_brief.py`。
+
 ## 运行与上下文约束
 
 ### 首轮创意交付与主动看图（2026-09-21）
