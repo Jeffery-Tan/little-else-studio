@@ -478,12 +478,20 @@ def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]],
                               if _sign(c.get("id"), c.get("text")) != signature]
                 by_id.pop(signature[0], None)
 
-    def _doubt(clause_id: str, row: dict[str, Any], *sources: str) -> None:
-        """Record one unresolved doubt about a requirement."""
+    def _doubt(clause_id: str, row: dict[str, Any], *sources: str,
+               sign_clause_id: str | None = None) -> None:
+        """Record one unresolved doubt about a requirement.
+
+        ``sign_clause_id`` names the clause the doubt's *recovered row* lives
+        under when that differs from the record's own id — a body-aligned
+        replay can land the decision under the id it resolved to, and settling
+        has to remove that row along with the conflict (U1).
+        """
+        doubt_id = clause_id if sign_clause_id is None else sign_clause_id
         doubts.append({
-            "ids": {str(clause_id)},
+            "ids": {str(clause_id)} | ({str(sign_clause_id)} if sign_clause_id is not None else set()),
             "keys": {_text_key(source) for source in sources if _text_key(source)},
-            "signs": {_sign(clause_id, sources[-1] if sources else "")},
+            "signs": {_sign(doubt_id, sources[-1] if sources else "")},
             "row": row,
         })
 
@@ -626,7 +634,16 @@ def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]],
             # keep id stable for goal.primary
             if resolved == "goal.primary":
                 new_row["id"] = "goal.primary"
-            clauses = [c for c in clauses if c.get("id") != target["id"]]
+            # Content-stable ids mean one id is one identity: if the intake
+            # already carries this exact identity (it reworded the requirement
+            # into the very body this decision lands on), the decision and the
+            # intake statement are the same requirement and must not become two
+            # rows — a same-id clash with a different body is an edit, and the
+            # newest statement of that identity wins (the same rule the `add`
+            # branch applies above). Never a silent {id: row} collapse at the
+            # end: this is the write path stating its identity rule (U1).
+            clauses = [c for c in clauses
+                       if c.get("id") != target["id"] and c.get("id") != new_row["id"]]
             clauses.append(new_row)
             by_id[new_row["id"]] = new_row
             if resolved == "goal.primary" or new_row["id"] == "goal.primary":
@@ -647,7 +664,8 @@ def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]],
                     "status": "confirmed",
                 })
                 by_id[resolved] = clauses[-1]
-            if clause_id != resolved:
+            id_diverged = clause_id != resolved
+            if id_diverged:
                 conflicts.append({
                     "amendment_clause_id": clause_id,
                     "kind": BLOCKER_AMENDMENT_UNRESOLVED,
@@ -660,6 +678,17 @@ def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]],
                     ),
                 })
             _settle(clause_id, base_text, text)
+            if id_diverged:
+                # Registered *after* the settle above: same sources, so a doubt
+                # written before it would retire its own conflict on the spot.
+                # Same contract as the unresolved branch: a conflict this replay
+                # can settle has to be a doubt, or the next record about this
+                # requirement cannot retire it — and the row just re-added under
+                # `resolved` stays behind as a stale copy of an intermediate
+                # decision (U1: A→B→C→D with the final intake left C next to D
+                # plus this conflict forever).
+                _doubt(clause_id, conflicts[-1], base_text, text,
+                       sign_clause_id=resolved)
         elif resolved == "goal.primary" and text:
             goal = _amended_goal(text)
             clauses = [c for c in clauses if c.get("id") != "goal.primary"]

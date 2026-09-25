@@ -1154,3 +1154,218 @@ def test_a_new_identity_applies_a_new_decision_without_body_dedup(http_client, m
     assert second.json()["id"] != first.json()["id"]
     assert len(ab.load_amendments(store, RUN)) == 2
     assert ab.compile_active_brief(store, RUN)["goal"]["text"] == "改回真人出镜种草"
+
+
+# ------------------------------------------------------------------ U1 ----- #
+# The final decision does not change with how long the history is.
+
+U1_A = "台词用美式英语"
+U1_B = "台词用美式英语，且不得虚构购买经历"
+U1_C = "台词用自然美式英语，且不得虚构购买经历和保温实测"
+U1_D = "台词用自然美式英语，不虚构购买经历或保温实测，结尾不报价格"
+U1_UNRELATED = "字幕必须全程出现"
+
+
+def _u1_chain(store, pipe, bodies, *, start=U1_A, rewrite):
+    """Approve each body in order against the live brief, then rewrite intake.
+
+    Every approval goes through the real ``apply_brief_amendment`` (which
+    stamps ``base_text`` from the brief the user was looking at) and the
+    rewrite through the real Pipeline — no hand-built collectors.
+    """
+    current = start
+    current_id = next(c["id"] for c in ab.compile_active_brief(store, RUN)["clauses"]
+                      if c["text"] == current)
+    for body in bodies:
+        _approve_clause(store, current_id, body)
+        current = body
+        current_id = next(c["id"] for c in ab.compile_active_brief(store, RUN)["clauses"]
+                          if c["text"] == current)
+    _rewrite_intake(pipe, rewrite)
+    return ab.compile_active_brief(store, RUN)
+
+
+def _u1_texts(brief):
+    return [c["text"] for c in brief["clauses"]]
+
+
+def test_the_full_history_against_the_final_intake_leaves_only_the_final_decision(store):
+    """U1: A → B → C → D approved; intake re-summarised to exactly D.
+
+    The fourth round watched this fail: the replay kept C next to D plus one
+    stale conflict — every direction blocked — while the newest intake already
+    carried the final decision. Expected: only D, no leftovers of B or C, no
+    settled conflict, unrelated requirements untouched, and the gate open.
+    """
+    pipe = Pipeline(store)
+    submit_intake(pipe, constraints=(U1_A, U1_UNRELATED))
+    goal_before = ab.compile_active_brief(store, RUN)["goal"]["text"]
+    brief = _u1_chain(store, pipe, [U1_B, U1_C, U1_D],
+                      rewrite=[U1_D, U1_UNRELATED])
+
+    texts = _u1_texts(brief)
+    assert texts.count(U1_D) == 1, "the final decision appears exactly once"
+    assert U1_B not in texts and U1_C not in texts, "superseded bodies never survive"
+    assert U1_UNRELATED in texts, "unrelated requirements survive the replay"
+    assert brief["conflicts"] == [], "a decision the intake already carries is not a conflict"
+    ids = [c["id"] for c in brief["clauses"]]
+    assert len(ids) == len(set(ids)), "one clause per id — no silent duplicate rows"
+    assert ab.fingerprint(brief) == ab.fingerprint(ab.compile_active_brief(store, RUN)), \
+        "compiling again is stable"
+    assert brief["goal"]["text"] == goal_before, "the replay never moves the goal"
+
+
+@pytest.mark.parametrize("length", [1, 2, 3, 4, 5])
+def test_the_history_length_never_changes_the_final_decision(store, length):
+    """History of 1..5 approvals: the newest one is what the brief says."""
+    pipe = Pipeline(store)
+    submit_intake(pipe, constraints=(U1_A,))
+    bodies = [f"台词要求修订第 {i} 版" for i in range(1, length + 1)]
+    brief = _u1_chain(store, pipe, bodies, rewrite=[bodies[-1]])
+
+    texts = _u1_texts(brief)
+    assert texts.count(bodies[-1]) == 1
+    for stale in bodies[:-1]:
+        assert stale not in texts, f"intermediate #{stale} left behind at length {length}"
+    assert brief["conflicts"] == []
+    ids = [c["id"] for c in brief["clauses"]]
+    assert len(ids) == len(set(ids))
+
+
+@pytest.mark.parametrize("state,rewrite,expect_conflict", [
+    ("original", [U1_A], False),
+    ("intermediate_b", [U1_B], False),
+    ("intermediate_c", [U1_C], False),
+    ("final", [U1_D], False),
+    ("unrelated", ["英文台词采用美式表达"], True),
+    ("missing", ["全片必须出现容量对比画面"], True),
+])
+def test_the_full_chain_against_each_intake_state(store, state, rewrite, expect_conflict):
+    """The same A→B→C→D history, replayed onto every intake state.
+
+    When intake still names the requirement (its original body, an
+    intermediate, or the final one) the chain realigns onto it and only the
+    final decision remains. When intake dropped or reworded it beyond
+    recognition, the final decision is still carried — and the divergence with
+    intake is reported rather than quietly dropped (the counter-case pinned by
+    the 2-step test above, held for every history length).
+    """
+    pipe = Pipeline(store)
+    submit_intake(pipe, constraints=(U1_A,))
+    brief = _u1_chain(store, pipe, [U1_B, U1_C, U1_D], rewrite=rewrite)
+
+    texts = _u1_texts(brief)
+    assert texts.count(U1_D) == 1, "the final approved body is carried, once"
+    assert U1_B not in texts and U1_C not in texts, "and only it"
+    if state == "original":
+        assert U1_A not in texts, "the original body is history once the chain replaced it"
+    if state == "unrelated":
+        assert "英文台词采用美式表达" in texts, "the reworded requirement keeps standing"
+    if state == "missing":
+        assert "全片必须出现容量对比画面" in texts, "the unrelated requirement keeps standing"
+    assert bool(brief["conflicts"]) is expect_conflict, \
+        (state, brief["conflicts"])
+    ids = [c["id"] for c in brief["clauses"]]
+    assert len(ids) == len(set(ids))
+
+
+def test_an_added_requirement_that_is_then_replaced_leaves_one_body(store):
+    """add then replace: the amendment's own lifecycle, no duplicates."""
+    pipe = Pipeline(store)
+    submit_intake(pipe, constraints=(U1_A,))
+    added = "结尾必须报价格"
+    ab.apply_brief_amendment(store, RUN, changes=[{
+        "clause_id": "must.price-notice", "op": "add", "text": added}],
+        approve=True)
+    added_id = next(c["id"] for c in ab.compile_active_brief(store, RUN)["clauses"]
+                    if c["text"] == added)
+    final = "结尾只报到手价，不报原价"
+    _approve_clause(store, added_id, final)
+    _rewrite_intake(pipe, [U1_A, final])
+
+    texts = _u1_texts(ab.compile_active_brief(store, RUN))
+    assert texts.count(final) == 1
+    assert added not in texts, "the superseded add does not survive its own replacement"
+    brief = ab.compile_active_brief(store, RUN)
+    assert brief["conflicts"] == []
+    ids = [c["id"] for c in brief["clauses"]]
+    assert len(ids) == len(set(ids))
+
+
+def test_returning_to_an_earlier_body_leaves_only_that_body(store):
+    """Modified, then back to the earlier wording: B never comes back."""
+    pipe = Pipeline(store)
+    submit_intake(pipe, constraints=(U1_A,))
+    _approve_clause(store, next(c["id"] for c in ab.compile_active_brief(store, RUN)["clauses"]
+                                if c["text"] == U1_A), U1_B)
+    b_id = next(c["id"] for c in ab.compile_active_brief(store, RUN)["clauses"]
+                if c["text"] == U1_B)
+    _approve_clause(store, b_id, U1_A)   # user changes their mind back
+    _rewrite_intake(pipe, [U1_A])
+
+    brief = ab.compile_active_brief(store, RUN)
+    texts = _u1_texts(brief)
+    assert texts.count(U1_A) == 1, "exactly the body the user last approved"
+    assert U1_B not in texts, "the superseded B does not resurrect"
+    assert brief["conflicts"] == []
+
+
+def test_two_interleaved_requirements_do_not_cross_talk(store):
+    """Two independent chains, alternating: each ends at its own final."""
+    pipe = Pipeline(store)
+    submit_intake(pipe, constraints=(U1_A, "画面保持明亮"))
+    r1 = [U1_B, U1_C, U1_D]
+    r2 = ["画面保持明亮，偏暖色调", "画面保持明亮，偏暖色调，避免夜景"]
+
+    def id_of(text):
+        return next(c["id"] for c in ab.compile_active_brief(store, RUN)["clauses"]
+                    if c["text"] == text)
+
+    current1, current2 = U1_A, "画面保持明亮"
+    # Alternate the approvals so the two histories interleave.
+    for i in range(max(len(r1), len(r2))):
+        if i < len(r1):
+            _approve_clause(store, id_of(current1), r1[i])
+            current1 = r1[i]
+        if i < len(r2):
+            _approve_clause(store, id_of(current2), r2[i])
+            current2 = r2[i]
+    _rewrite_intake(pipe, [r1[-1], r2[-1]])
+
+    brief = ab.compile_active_brief(store, RUN)
+    texts = _u1_texts(brief)
+    assert texts.count(r1[-1]) == 1 and texts.count(r2[-1]) == 1
+    for stale in r1[:-1] + r2[:-1]:
+        assert stale not in texts, f"{stale} leaked across or survived its chain"
+    assert brief["conflicts"] == []
+    ids = [c["id"] for c in brief["clauses"]]
+    assert len(ids) == len(set(ids))
+
+
+def test_the_replayed_brief_feeds_the_real_direction_gate_and_decision(store):
+    """Real chain after the U1 scenario: compile → gate → review → approval.
+
+    The fixed replay must leave the working path working — and the violating
+    path still refused.
+    """
+    pipe = Pipeline(store)
+    submit_intake(pipe, constraints=(U1_A,))
+    brief = _u1_chain(store, pipe, [U1_B, U1_C, U1_D], rewrite=[U1_D])
+    assert brief["conflicts"] == []
+
+    attempt = pipe.start_attempt(RUN, "direction")
+    artifact = pipe.submit(RUN, "direction", attempt.token, content="方向正文", summary="方向",
+                           structured={"options": [
+                               {"key": "A", "satisfies": "goal.primary"},
+                               {"key": "B", "violates": "goal.primary"}],
+                               "recommended": "A"})
+    assert "brief:snapshot" in artifact.inputs
+    gate = pipe.stage_state(RUN, "direction").brief_gate
+    assert gate["options"][0]["admissible"] is True, "the compliant option opens"
+    assert gate["options"][1]["admissible"] is False, "the violating one stays refused"
+
+    pipe.record_review(RUN, "direction", verdict="pass", findings=[])
+    nonce = pipe.issue_nonce(RUN, "direction")
+    approval = pipe.record_approval(RUN, "direction", nonce=nonce, decision="approved",
+                                    selected_option_id="A")
+    assert approval.selected_option_id == "A"
