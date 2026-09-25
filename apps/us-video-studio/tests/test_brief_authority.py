@@ -931,3 +931,226 @@ def test_a_stale_redo_stops_being_offered_once_newer_work_covers_it(http_client,
                       "text": "目标收窄为设计细节种草，时长压到 8 秒，保留容量对比"}])
     assert third["redo"]["status"] == "started"
     assert redo_entry() is None
+
+
+# ------------------------------------------------------------------ U3 ----- #
+# One submission identity stands for exactly one immutable payload. The id is
+# only a *retry* token: it resolves to the recorded amendment when — and only
+# when — the request still carries the payload that id was minted for.
+
+
+def _u3_brief_fp(store):
+    return ab.fingerprint(ab.compile_active_brief(store, RUN))
+
+
+def _u3_post(http, *, request_id, text, fp, approve=True, note=None):
+    body = {
+        "changes": [{"clause_id": "goal.primary", "op": "replace", "text": text}],
+        "approve": approve,
+        "expected_brief_fingerprint": fp,
+        "request_id": request_id,
+    }
+    if note is not None:
+        body["note"] = note
+    return http.post(f"/api/runs/{RUN}/brief-amendment", json=body)
+
+
+def _u3_started(http_client):
+    http, store, pipe = http_client["http"], http_client["store"], http_client["pipe"]
+    http.post("/api/runs", json={"run_id": RUN, "title": "t", "brief": "做一个种草视频。"})
+    submit_intake(pipe)
+    return http, store, pipe
+
+
+@pytest.mark.parametrize("field", ["text", "note", "approve", "brief"])
+def test_a_changed_payload_under_the_same_request_id_is_a_conflict(http_client, field):
+    """Same id, different payload: an explicit conflict, never the old success.
+
+    Each field is one the decision actually turns on — the body, the user's
+    note, whether it was approved, and the brief baseline it was framed
+    against. Returning the recorded amendment for any of these would answer
+    "yes" to a request the server never saw (U3).
+    """
+    http, store, pipe = _u3_started(http_client)
+    fp = _u3_brief_fp(store)
+    first = _u3_post(http, request_id="click-same", text="目标收窄为设计细节种草",
+                     fp=fp, note="第一次")
+    assert first.status_code == 200, first.text
+    original = first.json()["id"]
+
+    overrides = {
+        "text": {"text": "改回真人出镜种草"},
+        "note": {"note": "补充意见"},
+        "approve": {"approve": False},
+        "brief": {"fp": "brief-since-moved"},
+    }[field]
+    second = _u3_post(http, request_id="click-same",
+                      text=overrides.get("text", "目标收窄为设计细节种草"),
+                      fp=overrides.get("fp", fp),
+                      note=overrides.get("note", "第一次"),
+                      approve=overrides.get("approve", True))
+
+    assert second.status_code == 409, second.text
+    detail = second.json()["detail"]
+    assert detail["reason"] == "request_conflict", detail
+    rows = ab.load_amendments(store, RUN)
+    assert len(rows) == 1, "the conflict wrote nothing"
+    assert rows[0]["id"] == original, "and did not swap the recorded decision"
+    assert ab.compile_active_brief(store, RUN)["goal"]["text"] == "目标收窄为设计细节种草", \
+        "the old decision stands; the new payload never executed"
+
+
+def test_a_pending_record_does_not_gain_approval_from_a_retry(http_client):
+    """The retry's approve flag cannot promote what the record never was.
+
+    A propose-only submission is pending. Re-sending it with approve=true is a
+    *different* payload — it conflicts; it must not start the redo and must not
+    read as approved (U3).
+    """
+    http, store, pipe = _u3_started(http_client)
+    fp = _u3_brief_fp(store)
+    first = _u3_post(http, request_id="click-pending", text="目标收窄为设计细节种草",
+                     fp=fp, approve=False)
+    assert first.status_code == 200, first.text
+    assert first.json()["status"] == "pending"
+    assert _job_creations(store) == []
+
+    promoted = _u3_post(http, request_id="click-pending", text="目标收窄为设计细节种草",
+                        fp=fp, approve=True)
+    assert promoted.status_code == 409, promoted.text
+    assert promoted.json()["detail"]["reason"] == "request_conflict"
+    rows = ab.load_amendments(store, RUN)
+    assert rows[0]["status"] == "pending", "the record kept what it actually is"
+    assert _job_creations(store) == [], "an unapproved record owes no redo"
+
+
+def _u3_refuse_redo(monkeypatch):
+    """Silence the background redo so assertions race no running job."""
+    from studio.jobs import JobManager
+    from studio.models import PipelineError
+
+    real_submit = JobManager.submit
+
+    def refuse(self, run_id, text, request_id, **kwargs):
+        if str(request_id).startswith("brief-amendment:"):
+            raise PipelineError("job_busy", "制片室正在运行另一个任务。")
+        return real_submit(self, run_id, text, request_id, **kwargs)
+
+    monkeypatch.setattr(JobManager, "submit", refuse)
+
+
+def test_the_lost_response_scenario_new_proposal_applies_under_its_own_identity(http_client, monkeypatch):
+    """The full U3 flow: B recorded, response lost, C proposed after a refresh.
+
+    C carries the same click id the page still holds — the server must refuse
+    that id with an explicit conflict (it names a different decision), keep B,
+    and accept C once the page mints a fresh identity for it.
+    """
+    _u3_refuse_redo(monkeypatch)
+    http, store, pipe = _u3_started(http_client)
+    fp_before = _u3_brief_fp(store)
+    first = _u3_post(http, request_id="click-lost", text="只拍设计细节种草", fp=fp_before)
+    assert first.status_code == 200, first.text
+    amd_b = first.json()["id"]
+    assert len(ab.load_amendments(store, RUN)) == 1
+
+    # The page never saw that answer. Refreshed, it now proposes C — same id
+    # still in localStorage, but a different body and a different brief.
+    fp_after = _u3_brief_fp(store)
+    assert fp_after != fp_before, "approving B moved the brief"
+    second = _u3_post(http, request_id="click-lost", text="改回真人出镜种草", fp=fp_after)
+    assert second.status_code == 409, second.text
+    assert second.json()["detail"]["reason"] == "request_conflict"
+    rows = ab.load_amendments(store, RUN)
+    assert len(rows) == 1 and rows[0]["id"] == amd_b, "B is untouched; C did not execute"
+    assert ab.compile_active_brief(store, RUN)["goal"]["text"] == "只拍设计细节种草"
+
+    # With its own identity, the same decision C is a legitimate new amendment.
+    third = _u3_post(http, request_id="click-fresh", text="改回真人出镜种草", fp=fp_after)
+    assert third.status_code == 200, third.text
+    assert third.json()["id"] != amd_b
+    assert len(ab.load_amendments(store, RUN)) == 2
+    assert ab.compile_active_brief(store, RUN)["goal"]["text"] == "改回真人出镜种草"
+    assert third.json()["redo"]["status"] == "not_started", "the decision is saved either way"
+
+
+def test_a_legacy_row_without_a_frozen_payload_still_checks_what_it_kept(http_client):
+    """Compatibility for rows written before payloads were frozen.
+
+    Such a row carries the changes and the note — that much can still be
+    compared. Fields it never stored are not claimed as verified; a retry that
+    *disagrees* on what IS stored still conflicts, instead of resolving to a
+    success it cannot vouch for.
+    """
+    http, store, pipe = _u3_started(http_client)
+    fp = _u3_brief_fp(store)
+    first = _u3_post(http, request_id="click-legacy", text="目标收窄为设计细节种草",
+                     fp=fp, note="第一次")
+    assert first.status_code == 200, first.text
+
+    # Simulate a pre-fix row: no frozen request payload on it.
+    rows = ab.load_amendments(store, RUN)
+    assert rows[0].pop("request_fingerprint"), "new rows freeze their payload"
+    ab._save_amendments(store, RUN, rows)
+
+    same = _u3_post(http, request_id="click-legacy", text="目标收窄为设计细节种草",
+                    fp=fp, note="第一次")
+    assert same.status_code == 200, same.text
+    assert same.json()["id"] == first.json()["id"]
+
+    different = _u3_post(http, request_id="click-legacy", text="改回真人出镜种草",
+                         fp=fp, note="第一次")
+    assert different.status_code == 409, different.text
+    assert different.json()["detail"]["reason"] == "request_conflict"
+    assert len(ab.load_amendments(store, RUN)) == 1
+
+
+def test_the_locked_retry_scan_resolves_only_identical_payloads(store):
+    """The in-lock path (HTTP's early scan can miss a concurrent twin).
+
+    The busy lock serialises writers, so the authoritative check is the scan
+    inside ``apply_brief_amendment``: the second arrival of the *same* request
+    resolves to one amendment; the same id wearing a different payload is
+    refused there too — one identity, one payload, whoever wins the race.
+    """
+    pipe = Pipeline(store)
+    submit_intake(pipe)
+    fp = _u3_brief_fp(store)
+    changes = [{"clause_id": "goal.primary", "op": "replace",
+                "text": "目标收窄为设计细节种草"}]
+
+    first = ab.apply_brief_amendment(store, RUN, changes=changes, approve=True,
+                                     expected_brief_fingerprint=fp, request_id="race-1")
+    same = ab.apply_brief_amendment(store, RUN, changes=changes, approve=True,
+                                    expected_brief_fingerprint=fp, request_id="race-1")
+    assert same["id"] == first["id"]
+    assert len(ab.load_amendments(store, RUN)) == 1
+
+    with pytest.raises(ab.BriefRequestConflict):
+        ab.apply_brief_amendment(
+            store, RUN,
+            changes=[{"clause_id": "goal.primary", "op": "replace",
+                      "text": "改回真人出镜种草"}],
+            approve=True, expected_brief_fingerprint=fp, request_id="race-1")
+    assert len(ab.load_amendments(store, RUN)) == 1, "the refused twin wrote nothing"
+    assert ab.compile_active_brief(store, RUN)["goal"]["text"] == "目标收窄为设计细节种草"
+
+
+def test_a_new_identity_applies_a_new_decision_without_body_dedup(http_client, monkeypatch):
+    """New id, legitimate new decision: normal validation, no old success.
+
+    Two different decisions minutes apart are indistinguishable by content and
+    both are legitimate — the id is what distinguishes a retry, and without
+    one this route has never promised idempotency (kept deliberate).
+    """
+    _u3_refuse_redo(monkeypatch)
+    http, store, pipe = _u3_started(http_client)
+    fp0 = _u3_brief_fp(store)
+    first = _u3_post(http, request_id="click-a", text="目标收窄为设计细节种草", fp=fp0)
+    assert first.status_code == 200, first.text
+    fp1 = _u3_brief_fp(store)
+    second = _u3_post(http, request_id="click-b", text="改回真人出镜种草", fp=fp1)
+    assert second.status_code == 200, second.text
+    assert second.json()["id"] != first.json()["id"]
+    assert len(ab.load_amendments(store, RUN)) == 2
+    assert ab.compile_active_brief(store, RUN)["goal"]["text"] == "改回真人出镜种草"

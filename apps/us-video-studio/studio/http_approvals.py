@@ -27,29 +27,20 @@ def install_approval_routes(app, jobs, pipeline, store, require_run, continuatio
             return {"status": "not_started", "reason": str(exc)}
         return {"status": "started", "job_id": job["job_id"]}
 
-    def _amendment_by_request(run_id: str, request_id: str) -> dict[str, Any] | None:
-        """The amendment this submission already recorded, if it is a retry."""
-        from .active_brief import load_amendments
-
-        key = str(request_id or "").strip()
-        if not key:
-            return None
-        return next((row for row in load_amendments(store, run_id)
-                     if str(row.get("request_id") or "") == key), None)
-
-    def _amendment_result(run_id: str, amendment: dict[str, Any],
-                          approve: bool) -> dict[str, Any]:
+    def _amendment_result(run_id: str, amendment: dict[str, Any]) -> dict[str, Any]:
         """The response for one amendment, whether new or resolved as a retry.
 
         A retry lands here too, so it has to produce the same shape — including
         the redo. Resolving the redo is idempotent by construction (its identity
         is the amendment id), so a retry looks up the original job rather than
-        starting a second one.
+        starting a second one. What the *record* says decides that, not a flag
+        on this request: a pending or rejected row gains nothing from a retry
+        that happens to carry approve=true (U3).
         """
         from .active_brief import compile_active_brief, fingerprint as brief_fp
 
         result = dict(amendment)
-        if approve:
+        if amendment.get("status") == "approved":
             result["brief_fingerprint"] = brief_fp(compile_active_brief(store, run_id))
             # F5: the approval invalidates the current direction version, so the
             # same click has to restart the team's work. The amendment is saved
@@ -67,15 +58,21 @@ def install_approval_routes(app, jobs, pipeline, store, require_run, continuatio
         itself via ``expected_brief_fingerprint``, because the direction can
         stand still while a second amendment moves the brief underneath it
         (A1). ``request_id`` is this submission's identity: a retry carrying the
-        one it used before resolves to the amendment it already recorded, so a
-        lost response is answered with neither a second decision nor a 409.
-        ``apply_brief_amendment`` does the change-level validation.
+        one it used before — *and the payload that identity was minted for* —
+        resolves to the amendment it already recorded, so a lost response is
+        answered with neither a second decision nor a 409. The same id wearing
+        a different payload is an explicit ``request_conflict`` (U3): the
+        server compares the frozen payload, not just the id, so a new decision
+        can never borrow an old decision's success. ``apply_brief_amendment``
+        does the change-level validation.
         """
         from .active_brief import (
             BriefBaselineChanged,
+            BriefRequestConflict,
             apply_brief_amendment,
             compile_active_brief,
             fingerprint as brief_fp,
+            resolve_amendment_by_request,
         )
 
         require_run(run_id)
@@ -86,9 +83,26 @@ def install_approval_routes(app, jobs, pipeline, store, require_run, continuatio
         # `_amendment_result` re-resolves the redo by amendment id, which looks
         # up the running job rather than starting another.
         if payload.request_id:
-            existing = _amendment_by_request(run_id, payload.request_id)
+            try:
+                existing = resolve_amendment_by_request(
+                    store, run_id,
+                    request_id=payload.request_id,
+                    changes=[c.model_dump(exclude_none=True) for c in payload.changes],
+                    note=payload.note,
+                    approve=payload.approve,
+                    expected_brief_fingerprint=payload.expected_brief_fingerprint,
+                    expected_artifact_sha256=payload.expected_artifact_sha256,
+                    expected_version=payload.expected_version,
+                )
+            except BriefRequestConflict as exc:
+                raise HTTPException(409, {
+                    "detail": str(exc),
+                    "reason": "request_conflict",
+                }) from exc
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
             if existing is not None:
-                return _amendment_result(run_id, existing, payload.approve)
+                return _amendment_result(run_id, existing)
         try:
             with jobs.lock:
                 if jobs.busy(run_id):
@@ -109,7 +123,16 @@ def install_approval_routes(app, jobs, pipeline, store, require_run, continuatio
                     approve=payload.approve,
                     expected_brief_fingerprint=payload.expected_brief_fingerprint,
                     request_id=payload.request_id,
+                    expected_artifact_sha256=payload.expected_artifact_sha256,
+                    expected_version=payload.expected_version,
                 )
+        except BriefRequestConflict as exc:
+            # A concurrent twin wrote this id first with a different payload —
+            # the in-lock scan caught what the early scan could not (U3).
+            raise HTTPException(409, {
+                "detail": str(exc),
+                "reason": "request_conflict",
+            }) from exc
         except BriefBaselineChanged as exc:
             # Not a bad request: the decision was real, it simply belongs to a
             # brief that has since moved. Say which brief is current so the page
@@ -123,7 +146,7 @@ def install_approval_routes(app, jobs, pipeline, store, require_run, continuatio
             raise HTTPException(400, str(exc)) from exc
         except PipelineError as exc:
             raise HTTPException(409, str(exc)) from exc
-        return _amendment_result(run_id, amendment, payload.approve)
+        return _amendment_result(run_id, amendment)
 
     @app.post("/api/runs/{run_id}/brief-amendment/{amendment_id}/redo")
     def resume_brief_amendment_redo(run_id: str, amendment_id: str) -> dict[str, Any]:

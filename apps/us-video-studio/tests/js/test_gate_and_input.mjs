@@ -18,7 +18,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import vm from 'node:vm';
-import {loadApp, makeDom, parseHtml, webSource} from './dom-fixture.mjs';
+import {loadApp, makeDom, makeStorage, parseHtml, webSource} from './dom-fixture.mjs';
 
 const require = createRequire(import.meta.url);
 // The page loads these before it loads `app.js`, and `stage.js` calls both as
@@ -123,8 +123,9 @@ function decisionPending(overrides = {}) {
  * are not properties of the global object. `toast` is observable through the
  * toast element, because the real `toast()` is what runs.
  */
-function wire({routes = {}} = {}) {
-  const app = loadApp({dom: makeDom(['chat-input', 'send', 'stage', 'toast']), routes});
+function wire({routes = {}, storage} = {}) {
+  const app = loadApp({dom: makeDom(['chat-input', 'send', 'stage', 'toast']), routes,
+                       ...(storage ? {storage} : {})});
   vm.runInContext(`
     state.runId = 'run-1';
     state.rail = [];
@@ -947,4 +948,173 @@ test('the composer draft tray also clears only after the request is accepted', a
 
   assert.equal(await run(false), false, 'a refused send must not discard the drafted answers');
   assert.equal(await run(true), true, 'an accepted send does clear them');
+});
+
+/* ----------------------------------------------------------------- U3 ---- */
+
+/* One submission identity stands for exactly one immutable payload. The id in
+ * localStorage is a *retry token* for that payload: the same click retries it,
+ * a new decision mints a new one, and an unresolved old record keeps its own
+ * verification path instead of being overwritten by the next proposal. */
+const AMEND_KEY = 'studio-amendment:run-1:goal.primary';
+
+function storedAmendment(storage) {
+  const raw = storage.getItem(AMEND_KEY);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+const lostResponse = () => { throw new TypeError('Failed to fetch'); };
+
+function proposalGate(text, extra = {}) {
+  return {...proposalPending(text, '做一个种草视频'), ...extra};
+}
+
+test('a lost amendment response keeps its full submission record', async () => {
+  const storage = makeStorage();
+  const app = wire({routes: {'brief-amendment': lostResponse}, storage});
+  const gate = bind(app, mountGate({}, proposalGate('只拍设计细节种草')));
+
+  gate.querySelector('[data-act="amend_brief"]').click();
+  await settle();
+
+  const record = storedAmendment(storage);
+  assert.ok(record, 'the page keeps what it sent, not just a bare id');
+  assert.equal(record.unresolved, true, 'and knows its outcome is still unknown');
+  assert.equal(record.run_id, 'run-1');
+  assert.equal(record.request_id, 'req-1');
+  assert.equal(record.body.changes[0].text, '只拍设计细节种草');
+  assert.equal(record.body.approve, true);
+  assert.match(gate.querySelector('.gate-feedback').textContent, /修订失败/);
+});
+
+test('a new proposal does not reuse the lost response identity', async () => {
+  /* The full U3 flow across a refresh: B is written server-side, its answer is
+   * lost, the page reloads onto a direction proposing C for the same clause.
+   * C must neither go out under B's id nor overwrite B's record — the entry
+   * directs to confirming B first, then C gets its own identity. */
+  const storage = makeStorage();
+  const before = wire({routes: {'brief-amendment': lostResponse}, storage});
+  const gateB = bind(before, mountGate({}, proposalGate('只拍设计细节种草')));
+  gateB.querySelector('[data-act="amend_brief"]').click();
+  await settle();
+  const original = storedAmendment(storage);
+  assert.ok(original, 'B is recorded as unresolved');
+
+  const posts = [];
+  const after = wire({
+    routes: {'brief-amendment': ({body}) => {
+      posts.push(body);
+      return {id: 'amd-1', status: 'approved', redo: {status: 'started', job_id: 'job-amend'}};
+    }},
+    storage,
+  });
+  const gateC = bind(after, mountGate({}, proposalGate('改回真人出镜种草',
+    {artifact_sha256: SHA_B, version: 3, brief_fingerprint: 'brief-v2-xyz'})));
+
+  gateC.querySelector('[data-act="amend_brief"]').click();
+  await settle();
+  assert.equal(posts.length, 0, 'the new decision did not go out under the old id');
+  assert.match(gateC.querySelector('.gate-feedback').textContent, /还没有确认/);
+  const still = storedAmendment(storage);
+  assert.equal(still.request_id, original.request_id, 'B’s record was not overwritten');
+  assert.equal(still.body.changes[0].text, '只拍设计细节种草');
+  const confirm = gateC.querySelector('.gate-confirm');
+  assert.ok(confirm, 'the card offers the way to confirm the old submission first');
+
+  confirm.click();
+  await settle();
+  assert.equal(posts.length, 1, 'confirming resends exactly the original submission');
+  assert.equal(posts[0].request_id, original.request_id, 'same identity, verbatim payload');
+  assert.equal(posts[0].changes[0].text, '只拍设计细节种草');
+  assert.equal(posts[0].expected_brief_fingerprint,
+    original.body.expected_brief_fingerprint, 'the original baseline, not the current card’s');
+  assert.equal(storedAmendment(storage), null, 'the confirmed identity is settled');
+  assert.match(gateC.querySelector('.gate-feedback').textContent, /已确认记录/);
+
+  gateC.querySelector('[data-act="amend_brief"]').click();
+  await settle();
+  assert.equal(posts.length, 2, 'and now the new decision can go');
+  assert.notEqual(posts[1].request_id, original.request_id, 'under its own identity');
+  assert.equal(posts[1].changes[0].text, '改回真人出镜种草');
+  assert.equal(posts[1].expected_brief_fingerprint, 'brief-v2-xyz');
+  assert.equal(storedAmendment(storage), null, 'and settles on success');
+});
+
+test('a definite rejection clears the submission record', async () => {
+  const storage = makeStorage();
+  const posts = [];
+  const app = wire({
+    routes: {'brief-amendment': ({body}) => {
+      posts.push(body);
+      throw Object.assign(new Error('没有实际变更'), {status: 400});
+    }},
+    storage,
+  });
+  const gate = bind(app, mountGate({}, proposalGate('目标收窄为设计细节种草')));
+
+  gate.querySelector('[data-act="amend_brief"]').click();
+  await settle();
+  assert.equal(posts.length, 1);
+  assert.equal(storedAmendment(storage), null,
+    'a 4xx means the server refused it — there is no submission left to confirm');
+
+  gate.querySelector('[data-act="amend_brief"]').click();
+  await settle();
+  assert.equal(posts.length, 2);
+  assert.notEqual(posts[1].request_id, posts[0].request_id,
+    'the next attempt is a new submission, not a replay of a refused one');
+});
+
+test('the structured direction card follows the same one-identity rule', async () => {
+  const storage = makeStorage();
+  const before = wire({routes: {'brief-amendment': lostResponse}, storage});
+  const firstCard = decisionPending({
+    version: 1, artifact_sha256: SHA, brief_fingerprint: 'brief-v1',
+    amend: {clause_id: 'goal.primary', op: 'replace', text: '只拍设计细节种草',
+            current_text: '做一个种草视频', valid: true, reason: '',
+            recommended: 'A', key: 'A'},
+  });
+  const {gate: gateB} = mountStructuredGate(firstCard);
+  bind(before, gateB);
+  gateB.querySelector('[data-act="amend_brief"]').click();
+  await settle();
+  const original = storedAmendment(storage);
+  assert.ok(original, 'the structured card records the lost submission too');
+
+  const posts = [];
+  const after = wire({
+    routes: {'brief-amendment': ({body}) => {
+      posts.push(body);
+      return {id: 'amd-2', status: 'approved', redo: {status: 'started', job_id: 'job-amend-2'}};
+    }},
+    storage,
+  });
+  const nextCard = decisionPending({
+    version: 3, artifact_sha256: SHA_B, brief_fingerprint: 'brief-v2',
+    amend: {clause_id: 'goal.primary', op: 'replace', text: '改回真人出镜种草',
+            current_text: '做一个种草视频', valid: true, reason: '',
+            recommended: 'A', key: 'A'},
+  });
+  const {gate: gateC} = mountStructuredGate(nextCard);
+  bind(after, gateC);
+
+  gateC.querySelector('[data-act="amend_brief"]').click();
+  await settle();
+  assert.equal(posts.length, 0, 'the structured card refuses the identity swap too');
+  assert.match(gateC.querySelector('.gate-feedback').textContent, /还没有确认/);
+  assert.equal(storedAmendment(storage).request_id, original.request_id);
+
+  const confirm = gateC.querySelector('.gate-confirm');
+  assert.ok(confirm, 'and offers the same confirmation entry');
+  confirm.click();
+  await settle();
+  assert.equal(posts[0].request_id, original.request_id);
+  assert.equal(posts[0].changes[0].text, '只拍设计细节种草');
+
+  gateC.querySelector('[data-act="amend_brief"]').click();
+  await settle();
+  assert.equal(posts.length, 2);
+  assert.notEqual(posts[1].request_id, original.request_id);
+  assert.equal(posts[1].changes[0].text, '改回真人出镜种草');
 });

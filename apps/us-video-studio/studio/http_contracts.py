@@ -123,9 +123,11 @@ class BriefAmendmentIn(BaseModel):
     #: that moved while the direction version stood still (A1).
     expected_brief_fingerprint: str | None = Field(default=None, max_length=120)
     #: Identity of *this submission*, minted by the page and reused when the same
-    #: click is retried. An amendment already carrying it is returned instead of
-    #: recording a second decision. Optional, because only the caller knows
-    #: whether a request is a retry — two identical decisions minutes apart are
+    #: click is retried. An amendment already carrying it *and this payload* is
+    #: returned instead of recording a second decision; the same id wearing a
+    #: different payload is a 409 ``request_conflict`` — one identity, one
+    #: frozen payload (U3). Optional, because only the caller knows whether a
+    #: request is a retry — two identical decisions minutes apart are
     #: indistinguishable here, and the second one is legitimate.
     request_id: str | None = Field(default=None, max_length=120)
 

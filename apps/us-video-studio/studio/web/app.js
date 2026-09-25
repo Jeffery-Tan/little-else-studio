@@ -1224,6 +1224,41 @@ function gateControls(gate) {
   return controls;
 }
 
+/* The submission record a gate click keeps in localStorage (U3).
+ *
+ * One record per run + clause, and it owns exactly one request identity
+ * *together with the payload that identity was minted for*. A retry of the
+ * same decision resends that payload verbatim; a different decision mints a
+ * new id and confirms the old submission first — it never overwrites a record
+ * whose outcome is still unknown, and never wears its identity. Rows from
+ * older code are bare ids with no payload: there is nothing to verify
+ * against, so they are dropped for a fresh id (the server compares payloads
+ * too, so the orphaned id cannot masquerade as the new decision). */
+function readAmendmentSubmission(runId, clause) {
+  try {
+    const raw = localStorage.getItem(`studio-amendment:${runId}:${clause}`);
+    const record = raw ? JSON.parse(raw) : null;
+    if (record && record.version === 1 && record.request_id && record.body
+        && record.run_id === runId) return record;
+  } catch { /* a bare id or an unreadable row: no verifiable payload */ }
+  return null;
+}
+function writeAmendmentSubmission(runId, clause, record) {
+  try { localStorage.setItem(`studio-amendment:${runId}:${clause}`, JSON.stringify(record)); }
+  catch { /* storage unavailable: retries degrade to a fresh identity */ }
+}
+function clearAmendmentSubmission(runId, clause) {
+  try { localStorage.removeItem(`studio-amendment:${runId}:${clause}`); } catch {}
+}
+/** Same decision? Compare everything except which id carries it. */
+function sameAmendmentPayload(a, b) {
+  const strip = (payload) => {
+    const {request_id: _id, ...rest} = payload;
+    return JSON.stringify(rest);
+  };
+  return strip(a) === strip(b);
+}
+
 /* What a click in the gate panel does.
  *
  * The markup is `stage.js`'s; the effects are here, and that split is the same
@@ -1295,32 +1330,83 @@ function wireGate(host) {
       gate.dataset.saving = "1";
       for (const control of gateControls(gate)) control.disabled = true;
       status.textContent = "正在批准简报修订…";
-      // This submission's identity, kept across retries of the same click. The
-      // server returns the amendment it already recorded instead of writing a
-      // second one, so a lost response is not answered with either a duplicate
-      // decision or a 409 against a brief this very click already changed.
-      const clickKey = `studio-amendment:${state.runId}:${clause}`;
-      let requestId;
-      try { requestId = localStorage.getItem(clickKey) || crypto.randomUUID(); localStorage.setItem(clickKey, requestId); }
-      catch { requestId = crypto.randomUUID(); }
+      // This submission's payload, built before anything is sent. The identity
+      // below either owns *this* payload or is not used at all (U3).
+      const body = {
+        changes: [{ clause_id: clause, op: "replace", text }],
+        note: reason.value.trim() || "用户在方向门禁上批准简报修订",
+        approve: true,
+        // The brief this decision was framed against. The direction guard
+        // cannot cover this: a second amendment moves the brief while the
+        // direction version stays put, and then this request would silently
+        // rebase onto a brief the user never read (A1).
+        expected_brief_fingerprint: pendingBriefFingerprint(),
+        expected_artifact_sha256: gate.dataset.sha || null,
+        expected_version: gate.dataset.version ? Number(gate.dataset.version) : null,
+      };
       try {
+        const prior = readAmendmentSubmission(state.runId, clause);
+        if (prior && !sameAmendmentPayload(prior.body, body)) {
+          // A *different* decision while the previous submission's answer is
+          // still unknown. It keeps its record and its verification path: this
+          // click neither overwrites them nor borrows its id — the entry
+          // points at confirming the old submission first, and the current
+          // card keeps everything the user typed.
+          status.textContent = "上一次修订的提交结果还没有确认；请先确认后再批准当前这版的修订。";
+          if (!gate.querySelector(".gate-confirm")) {
+            const confirm = box("button", "ghost small gate-confirm", "确认上一次提交");
+            confirm.type = "button";
+            confirm.onclick = async () => {
+              const record = readAmendmentSubmission(state.runId, clause);
+              if (!record || state.decisionBusy || gate.dataset.saving === "1") return;
+              state.decisionBusy = true;
+              confirm.disabled = true;
+              try {
+                // Verbatim replay: the recorded payload and its own identity —
+                // the server resolves it to whatever that request actually did.
+                await api(`/api/runs/${state.runId}/brief-amendment`, {
+                  method: "POST",
+                  body: JSON.stringify(record.body),
+                });
+                clearAmendmentSubmission(state.runId, clause);
+                status.textContent = "上一次修订已确认记录；请重新批准当前这版的修订。";
+                confirm.remove();
+              } catch (err) {
+                const message = String(err.message || err);
+                if (err.status >= 400 && err.status < 500) {
+                  // Definitively not recorded: nothing left to confirm, and the
+                  // new decision may proceed on its own identity.
+                  clearAmendmentSubmission(state.runId, clause);
+                  status.textContent =
+                    `上一次修订没有被接受：${message}；请重新批准当前这版的修订。`;
+                  confirm.remove();
+                } else {
+                  status.textContent =
+                    "上一次修订的提交结果仍未知；请稍后再确认，不要直接批准新的修订。";
+                  confirm.disabled = false;
+                }
+              } finally {
+                state.decisionBusy = false;
+              }
+            };
+            gate.appendChild(confirm);
+          }
+          return;
+        }
+        // Same decision retried → its identity; a first attempt → a new one.
+        const requestId = prior ? prior.request_id : crypto.randomUUID();
+        const submission = {...body, request_id: requestId};
+        if (!prior) {
+          writeAmendmentSubmission(state.runId, clause, {
+            version: 1, request_id: requestId, run_id: state.runId,
+            unresolved: true, body: submission,
+          });
+        }
         const result = await api(`/api/runs/${state.runId}/brief-amendment`, {
           method: "POST",
-          body: JSON.stringify({
-            changes: [{ clause_id: clause, op: "replace", text }],
-            note: reason.value.trim() || "用户在方向门禁上批准简报修订",
-            approve: true,
-            request_id: requestId,
-            // The brief this decision was framed against. The direction guard
-            // below cannot cover this: a second amendment moves the brief while
-            // the direction version stays put, and then this request would
-            // silently rebase onto a brief the user never read (A1).
-            expected_brief_fingerprint: pendingBriefFingerprint(),
-            expected_artifact_sha256: gate.dataset.sha || null,
-            expected_version: gate.dataset.version ? Number(gate.dataset.version) : null,
-          }),
+          body: JSON.stringify(submission),
         });
-        try { localStorage.removeItem(clickKey); } catch {}
+        clearAmendmentSubmission(state.runId, clause);
         try { localStorage.removeItem(key); localStorage.removeItem(legacyJourneyKey); } catch {}
         // The approval invalidates this direction version, so report both halves
         // honestly: decided, and whether the team actually restarted (F5).
@@ -1335,6 +1421,12 @@ function wireGate(host) {
         if (started && state.runId) void restoreJob(state.runId);
       } catch (err) {
         const message = String(err.message || err);
+        // A 4xx is definitive: the server refused it, so no submission is left
+        // to confirm and the record must not linger as "unknown". Anything
+        // else — no response, a lost answer — keeps it: the request may have
+        // been recorded, and only that record's identity can find out (U3).
+        if (err.status >= 400 && err.status < 500)
+          clearAmendmentSubmission(state.runId, clause);
         // A moved brief is not a failed request: the decision was real, it just
         // belongs to a brief that is no longer current. Say which, and say what
         // to do, rather than reporting it as an error the user caused.

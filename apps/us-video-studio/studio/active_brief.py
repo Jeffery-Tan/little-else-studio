@@ -755,31 +755,10 @@ def compile_active_brief(store: Store, run_id: str, *, version: int | None = Non
     return brief
 
 
-def propose_amendment(
-    store: Store,
-    run_id: str,
-    *,
-    changes: list[dict[str, Any]],
-    note: str = "",
-    source: str = "user",
-    approve: bool = False,
-    request_id: str = "",
-) -> dict[str, Any]:
-    """Record a brief amendment. ``approve=True`` applies it immediately
-    (one explicit user click from the blocked gate); otherwise status=pending
-    until ``decide_amendment``.
-
-    Each change is stamped with ``base_text`` — the body of the clause as the
-    *user saw it* when deciding — plus the brief fingerprint that body came
-    from. That is what lets a later intake revision reword the clause without
-    silently discarding the decision (R2); ``apply_brief_amendment`` does the
-    validating, because only a new proposal has to still line up with the
-    current brief.
-
-    ``request_id`` is the caller's identity for the submission, stored on the row
-    so a retry resolves to this amendment instead of recording a second one.
-    """
-    store.read_run(run_id)  # existence
+def _clean_changes(changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The normalised shape of an amendment's changes — write path and
+    fingerprint path share it, so "the same payload" means the same thing
+    in both (U3)."""
     cleaned: list[dict[str, Any]] = []
     for ch in changes or []:
         if not isinstance(ch, dict):
@@ -803,6 +782,133 @@ def propose_amendment(
         cleaned.append(row)
     if not cleaned:
         raise ValueError("amendment needs at least one change")
+    return cleaned
+
+
+def amendment_request_fingerprint(*, changes: list[dict[str, Any]], note: str = "",
+                                  approve: bool = False,
+                                  expected_brief_fingerprint: str | None = None,
+                                  expected_artifact_sha256: str | None = None,
+                                  expected_version: int | None = None) -> str:
+    """Canonical hash of the payload a submission identity is minted for (U3).
+
+    Covers every field that can change what this decision means — the cleaned
+    changes, the note, approve, and the declared brief / direction baselines —
+    and nothing the server generates (timestamps, amendment ids, compile
+    times), so a verbatim retry hashes the same. It is frozen onto the row at
+    write time; a later request under the same id must hash to it, or it is a
+    different request wearing a stolen identity.
+    """
+    payload: dict[str, Any] = {
+        "approve": bool(approve),
+        "changes": _clean_changes(changes),
+        "note": (note or "").strip(),
+    }
+    if expected_brief_fingerprint is not None:
+        payload["expected_brief_fingerprint"] = str(expected_brief_fingerprint)
+    if expected_artifact_sha256 is not None:
+        payload["expected_artifact_sha256"] = str(expected_artifact_sha256)
+    if expected_version is not None:
+        payload["expected_version"] = int(expected_version)
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _legacy_changes_match(stored: Any, incoming: list[dict[str, Any]]) -> bool:
+    """Compare against a row written before payloads were frozen.
+
+    Only what the record actually kept can be checked — the changes (with
+    ``base_text`` required only when this request declared one; the write path
+    stamps it from the brief, and that stamp is not part of *this* request).
+    Fields the row never stored are not claimed as verified.
+    """
+    old_rows = [r for r in (stored or []) if isinstance(r, dict)]
+    try:
+        new_rows = _clean_changes(incoming)
+    except ValueError:
+        return False
+    if len(old_rows) != len(new_rows):
+        return False
+    for old, new in zip(old_rows, new_rows):
+        for field in ("clause_id", "op", "text", "kind"):
+            if str(old.get(field) or "") != str(new.get(field) or ""):
+                return False
+        if new.get("base_text") is not None and \
+                str(old.get("base_text") or "") != str(new.get("base_text") or ""):
+            return False
+    return True
+
+
+def resolve_amendment_by_request(
+    store: Store, run_id: str, *, request_id: str,
+    changes: list[dict[str, Any]], note: str = "", approve: bool = False,
+    expected_brief_fingerprint: str | None = None,
+    expected_artifact_sha256: str | None = None,
+    expected_version: int | None = None,
+) -> dict[str, Any] | None:
+    """The amendment this request_id already recorded — or None.
+
+    One identity, one frozen payload: when the id is found but the incoming
+    request carries a *different* payload, raises ``BriefRequestConflict``
+    instead of resolving to the old decision's success — a changed request
+    must never be answered "yes" by a record it does not describe (U3).
+    """
+    key = str(request_id or "").strip()
+    if not key:
+        return None
+    row = next((r for r in load_amendments(store, run_id)
+                if str(r.get("request_id") or "") == key), None)
+    if row is None:
+        return None
+    frozen = row.get("request_fingerprint")
+    if frozen:
+        incoming = amendment_request_fingerprint(
+            changes=changes, note=note, approve=approve,
+            expected_brief_fingerprint=expected_brief_fingerprint,
+            expected_artifact_sha256=expected_artifact_sha256,
+            expected_version=expected_version)
+        if not secrets.compare_digest(str(frozen), incoming):
+            raise BriefRequestConflict(key)
+        return row
+    # Legacy row (written before payloads were frozen): compare the fields it
+    # does carry — changes and note — and nothing else. Absent history is not
+    # invented into a claim that the baselines matched.
+    if not _legacy_changes_match(row.get("changes"), changes) or \
+            str(row.get("note") or "").strip() != (note or "").strip()[:2000]:
+        raise BriefRequestConflict(key)
+    return row
+
+
+def propose_amendment(
+    store: Store,
+    run_id: str,
+    *,
+    changes: list[dict[str, Any]],
+    note: str = "",
+    source: str = "user",
+    approve: bool = False,
+    request_id: str = "",
+    request_fingerprint: str = "",
+) -> dict[str, Any]:
+    """Record a brief amendment. ``approve=True`` applies it immediately
+    (one explicit user click from the blocked gate); otherwise status=pending
+    until ``decide_amendment``.
+
+    Each change is stamped with ``base_text`` — the body of the clause as the
+    *user saw it* when deciding — plus the brief fingerprint that body came
+    from. That is what lets a later intake revision reword the clause without
+    silently discarding the decision (R2); ``apply_brief_amendment`` does the
+    validating, because only a new proposal has to still line up with the
+    current brief.
+
+    ``request_id`` is the caller's identity for the submission, stored on the row
+    so a retry resolves to this amendment instead of recording a second one.
+    ``request_fingerprint`` freezes the payload that identity was minted for,
+    so the same id carrying a different decision later is a conflict, not a
+    retry (U3).
+    """
+    store.read_run(run_id)  # existence
+    cleaned = _clean_changes(changes)
 
     rows = load_amendments(store, run_id)
     amendment = {
@@ -816,6 +922,8 @@ def propose_amendment(
     }
     if request_id:
         amendment["request_id"] = str(request_id).strip()[:120]
+        if request_fingerprint:
+            amendment["request_fingerprint"] = str(request_fingerprint)
     rows.append(amendment)
     _save_amendments(store, run_id, rows)
     return amendment
@@ -855,16 +963,24 @@ def apply_brief_amendment(
     approve: bool = False,
     expected_brief_fingerprint: str | None = None,
     request_id: str | None = None,
+    expected_artifact_sha256: str | None = None,
+    expected_version: int | None = None,
 ) -> dict[str, Any]:
     """Record one user decision about the brief, validated against *that* brief.
 
-    **One request, one amendment.** ``request_id`` is the identity of *this
-    submission*, minted by the caller and reused when the same click is retried —
-    the same shape the decision-continuation path uses. If an amendment already
-    carries it, that amendment is returned and nothing is written: a retried
-    request after a lost response must not buy a second decision, and must not be
-    refused either, since the baseline it was framed against is the one it
-    already changed.
+    **One request, one amendment — and one payload.** ``request_id`` is the
+    identity of *this* submission*, minted by the caller and reused when the
+    same click is retried — the same shape the decision-continuation path uses.
+    If an amendment already carries it **and still carries this request's
+    payload**, that amendment is returned and nothing is written: a retried
+    request after a lost response must not buy a second decision, and must not
+    be refused either, since the baseline it was framed against is the one it
+    already changed. If the id comes back wearing a *different* payload, that
+    is a conflict (``BriefRequestConflict``) — resolving it to the recorded
+    amendment would answer a request the server never saw with a decision it
+    does not describe (U3). The payload is frozen on the row as a fingerprint
+    when it is written; rows from before that only get compared on the fields
+    they actually kept.
 
     It cannot be derived from the content. Two identical decisions made minutes
     apart are indistinguishable on the server, and the second one is legitimate;
@@ -889,9 +1005,17 @@ def apply_brief_amendment(
     """
     key = str(request_id or "").strip()
     if key:
-        for row in load_amendments(store, run_id):
-            if str(row.get("request_id") or "") == key:
-                return row
+        # Resolved here as well as at the HTTP layer: this scan runs under the
+        # write lock, so the concurrent twin that slipped past the earlier
+        # check still meets the same one-identity-one-payload rule.
+        existing = resolve_amendment_by_request(
+            store, run_id, request_id=key, changes=changes, note=note,
+            approve=approve,
+            expected_brief_fingerprint=expected_brief_fingerprint,
+            expected_artifact_sha256=expected_artifact_sha256,
+            expected_version=expected_version)
+        if existing is not None:
+            return existing
     brief = compile_active_brief(store, run_id)
     validate_changes_against(brief, changes)
     if expected_brief_fingerprint is not None:
@@ -910,8 +1034,14 @@ def apply_brief_amendment(
             row["base_text"] = (goal_text if clause_id == "goal.primary"
                                 else str(index.get(clause_id, {}).get("text") or ""))
         stamped.append(row)
+    frozen = amendment_request_fingerprint(
+        changes=changes, note=note, approve=approve,
+        expected_brief_fingerprint=expected_brief_fingerprint,
+        expected_artifact_sha256=expected_artifact_sha256,
+        expected_version=expected_version)
     return propose_amendment(store, run_id, changes=stamped, note=note,
-                             source=source, approve=approve, request_id=key)
+                             source=source, approve=approve, request_id=key,
+                             request_fingerprint=frozen if key else "")
 
 
 class BriefBaselineChanged(ValueError):
@@ -927,6 +1057,23 @@ class BriefBaselineChanged(ValueError):
             "请重新阅读当前简报后再决定。"
         )
         self.current_fingerprint = current_fingerprint
+
+
+class BriefRequestConflict(ValueError):
+    """The same request_id arrived carrying a different payload (U3).
+
+    One identity stands for one frozen submission. Reusing it for another
+    decision — a changed body, note, approve flag or baseline — must be an
+    explicit conflict: never a write, never a generated task, and never the
+    old record's success dressed up as the answer to the new request.
+    """
+
+    def __init__(self, request_id: str) -> None:
+        super().__init__(
+            f"提交标识「{request_id}」已用于另一份不同的修订请求；"
+            "请核对当前决定后重新提交。"
+        )
+        self.request_id = request_id
 
 
 def fingerprint_for(store: Store, run_id: str) -> str:
