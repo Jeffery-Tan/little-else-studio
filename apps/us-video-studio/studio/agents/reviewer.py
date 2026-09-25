@@ -149,6 +149,15 @@ def run_review(
         if name == "finish_review":
             verdict = args.get("verdict")
             findings = args.get("findings") or []
+            # Normalize optional clause_ids so the pipeline can validate them.
+            normalized = []
+            for f in findings:
+                row = dict(f) if isinstance(f, dict) else {"issue": str(f)}
+                cids = row.get("clause_ids")
+                if isinstance(cids, list):
+                    row["clause_ids"] = [str(c) for c in cids if str(c).strip()]
+                normalized.append(row)
+            findings = normalized
             review = pipeline.record_review(
                 run_id, stage, verdict=verdict, findings=findings,
                 expected_artifact_sha256=state.latest.sha256,
@@ -171,6 +180,9 @@ def run_review(
         outcome.error = "审核输入已经变化，请读取当前版本后重新审核"
         return outcome
 
+    from ..active_brief import compile_active_brief as compile_brief
+    brief = compile_brief(store, run_id)
+
     try:
         result = run_agent_loop(
             budgeted,
@@ -182,6 +194,20 @@ def run_review(
                     f"阶段：{stage}（第 {state.latest.version} 版）\n"
                     f"你可以读取的产物：{'、'.join(workspace.readable)}\n\n"
                     "你看不到创作者是谁、怎么想的、怎么自我评价的。这是故意的。\n\n" + context["text"]
+                    + "\n\n# 有效简报（ActiveBrief）核对清单\n\n"
+                    "先对照下列条款逐条判断产物是否满足，再写 findings。"
+                    "涉及产品目标或简报条款的退回，必须在 findings 里填 `clause_ids`（条款 id）。\n"
+                    + json.dumps(
+                        {
+                            "version": brief.get("version"),
+                            "goal": brief.get("goal"),
+                            "clauses": [
+                                {"id": c.get("id"), "kind": c.get("kind"), "text": c.get("text")}
+                                for c in (brief.get("clauses") or [])
+                            ],
+                        },
+                        ensure_ascii=False, indent=2,
+                    )
                     + "\n登记方法目录（只读，不包含原始研究和旧审核）：\n"
                     + json.dumps(learning_service.skill_catalog('reviewer'), ensure_ascii=False)
                 ),
@@ -248,7 +274,8 @@ def _seed(workspace: Workspace, stage: str, run, *, versions: dict[str, int] | N
     parts += [
         "# 怎么判",
         "",
-        "按你的标准逐条检查，然后调用 finish_review 给出判定。",
+        "先对照系统提示里的有效简报（ActiveBrief）条款清单，再按你的标准逐条检查，",
+        "然后调用 finish_review 给出判定。涉及目标/简报的 finding 必须带 clause_ids。",
         "通过要说明通过的理由；退回要给出具体问题，每条指名责任阶段。",
         "不要因为「看起来完整」就通过。字段齐全不构成通过的理由。",
     ]

@@ -348,7 +348,9 @@ _TOOLS: tuple[Tool, ...] = (
         description=(
             "Record your verdict on the version you were given. 'return' requires at "
             "least one specific finding that names the stage responsible and what is "
-            "wrong. You have no other way to affect the run, and no way to approve."
+            "wrong. Findings about the product goal / ActiveBrief must carry "
+            "clause_ids (ids from the brief checklist). You have no other way to "
+            "affect the run, and no way to approve."
         ),
         input_schema=_obj(
             {
@@ -362,6 +364,11 @@ _TOOLS: tuple[Tool, ...] = (
                             "kind": {
                                 "type": "string",
                                 "enum": ["content", "feasibility", "evidence", "unverified"],
+                            },
+                            "clause_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "ActiveBrief clause ids this finding is about (e.g. goal.primary).",
                             },
                         },
                         ["issue"],

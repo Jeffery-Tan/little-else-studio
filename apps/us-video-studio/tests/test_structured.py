@@ -31,7 +31,7 @@ def test_every_stage_can_report_open_questions():
         field = shape.field("open_questions")
         assert field is not None, f"{stage} has nowhere to put its open questions"
         assert field.kind == "rows"
-        assert field.columns == ("question", "blocks", "owner", "timing", "reason")
+        assert field.columns == ("question", "blocks", "owner", "timing", "reason", "kind")
 
 
 def test_the_direction_shape_covers_what_the_role_is_told_to_write():

@@ -122,7 +122,9 @@ def test_dispatch_runs_the_role_in_its_own_context(env, tmp_path):
     context_event = [e for e in store.read_events(RUN) if e["kind"] == "learning_context_loaded"][-1]
     assert artifact.evidence == ["intake 里说到上班族", context_event["evidence_ref"]]
     assert artifact.limitations == ["没有商品实拍图"]
-    assert set(artifact.inputs) == {"intake", "evidence:snapshot", "evidence:generation"}
+    assert set(artifact.inputs) == {
+        "intake", "evidence:snapshot", "evidence:generation", "brief:snapshot",
+    }
 
     # The sub-agent saw the upstream artifact, and its tool list is its own.
     request = model.calls[0]

@@ -30,7 +30,7 @@ def latest_execution(store, run_id: str, rows=None) -> dict | None:
 
 
 def stage_issues(stage: dict) -> list[dict]:
-    from .structured import is_user_question
+    from .structured import is_ask_user_question, question_kind
 
     artifact = stage.get("latest") or {}
     active = (not stage.get("stale") and stage.get("integrity_ok", True)
@@ -41,15 +41,15 @@ def stage_issues(stage: dict) -> list[dict]:
         if not isinstance(row, dict) or not row.get("question"):
             continue
         explicit = row.get("owner") in {"user", "team"} and row.get("timing") in {"now", "later"}
-        issues.append({**row, "stage": stage["stage"], "version": artifact.get("version"),
+        kind = question_kind(row)
+        issues.append({**row, "kind": kind, "stage": stage["stage"], "version": artifact.get("version"),
                        "artifact_sha256": artifact.get("sha256"),
                        "owner": row.get("owner") if explicit else "team",
                        "timing": row.get("timing") if explicit else "later",
                        "needs_triage": not explicit, "active": active,
-                       # The row-level rule lives in `structured`; only the
-                       # stage-level question ("is this the stage to ask now?")
-                       # belongs here.
-                       "ask_user": bool(active and is_user_question(row))})
+                       # brief_amendment is never an ask_user blank — it means
+                       # the product goal has to change via amend_brief.
+                       "ask_user": bool(active and is_ask_user_question(row))})
     return issues
 
 

@@ -241,12 +241,39 @@ function gateRejectLabel(surface) {
  * findings and historical usage remain available without overtaking the work.
  */
 function gateHtml(pending) {
+  const amend = pending.kind === "brief_amendment";
   const options = pending.options || [];
   const choices = options.length ? `<fieldset class="gate-options"><legend>采用哪个方向</legend>` +
     options.map(o => `<label class="gate-choice"><input type="radio" name="direction-choice" value="${escapeHtml(o.key)}">` +
       `<span>方向 ${escapeHtml(o.key)}${o.recommended ? '<small>推荐</small>' : ''}</span></label>`).join("") + `</fieldset>` : "";
   const findings = pending.findings?.length ? `<details class="gate-findings"><summary>审核提的 ${pending.findings.length} 点</summary>` +
     pending.findings.map(findingHtml).join("") + `</details>` : "";
+  const blockers = amend && pending.blockers?.length
+    ? `<ul class="gate-brief-blockers">${pending.blockers.map(b =>
+        `<li>方向 ${escapeHtml(String(b.key || ""))} · ${escapeHtml(String(b.kind || ""))}：${escapeHtml(String(b.detail || b.clause_id || ""))}</li>`
+      ).join("")}</ul>`
+    : "";
+  if (amend) {
+    const clause = pending.amend?.clause_id || "";
+    const proposal = pending.amend?.text || "";
+    return `<section id="stage-decision" class="gate gate-brief-amendment" role="group" aria-label="简报修订" ` +
+      `data-stage="${escapeHtml(pending.stage)}" data-version="${escapeHtml(pending.version)}" ` +
+      `data-sha="${escapeHtml(pending.artifact_sha256 || '')}" data-passed="${pending.passed ? '1' : '0'}" ` +
+      `data-pending-kind="brief_amendment" ` +
+      `data-amend-clause="${escapeHtml(clause)}" data-amend-text="${escapeHtml(proposal)}">` +
+      `<div class="gate-head">下一步 · ${escapeHtml(pending.stage_label)}</div>` +
+      `<p class="gate-headline">${escapeHtml(pending.headline)}</p>` +
+      `<p>${escapeHtml(pending.body || "")}</p>` + findings + blockers +
+      (clause ? `<details class="gate-amend-proposal"><summary>将写入的简报修订</summary>` +
+        `<p><strong>${escapeHtml(clause)}</strong> → ${escapeHtml(proposal)}</p></details>` : "") +
+      `<div class="gate-actions">` +
+      `<button type="button" class="good small" data-act="amend_brief">批准修订简报（本版作废，团队重做）</button>` +
+      `<button type="button" class="bad small" data-act="reject" data-stage="${escapeHtml(pending.stage)}">${escapeHtml(gateRejectLabel("stage"))}</button>` +
+      `</div>` +
+      `<p class="gate-limit">批准修订会改产品目标/简报版本，不会直接通过当前方向。</p>` +
+      (pending.next_cost_sentence ? `<div class="gate-next-cost">${escapeHtml(pending.next_cost_sentence)}</div>` : "") +
+      `</section>`;
+  }
   return `<section id="stage-decision" class="gate" role="group" aria-label="等你决定的这一版" ` +
     `data-stage="${escapeHtml(pending.stage)}" data-version="${escapeHtml(pending.version)}" ` +
     `data-sha="${escapeHtml(pending.artifact_sha256 || '')}" data-passed="${pending.passed ? '1' : '0'}">` +

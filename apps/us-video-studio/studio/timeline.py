@@ -383,6 +383,55 @@ def _pending_action(state: dict[str, Any], ledger: Any) -> dict[str, Any] | None
         review = st.get("review") or {}
         passed = review.get("verdict") == "pass"
         findings = review.get("findings") or []
+        gate = st.get("brief_gate") or {}
+
+        # P2: blocked brief alignment is its own pending action — no A/B/C
+        # adopt radios, no override path. Amend the brief or rework.
+        if stage == "direction" and gate.get("status") == "blocked":
+            blockers = gate.get("blockers") or []
+            rec = str(gate.get("recommended") or "")
+            rec_amend = next(
+                (b for b in blockers
+                 if b.get("kind") == "needs_amendment"
+                 and (not rec or str(b.get("key") or "").upper() == rec)),
+                blockers[0] if blockers else None,
+            )
+            options_row = next(
+                (o for o in ((latest.get("structured") or {}).get("options") or [])
+                 if isinstance(o, dict) and str(o.get("key") or "").upper() == rec),
+                {},
+            )
+            return {
+                "kind": "brief_amendment",
+                "at": latest.get("created_at", utcnow()),
+                "stage": stage,
+                "stage_label": v.stage_label(stage),
+                "version": latest.get("version"),
+                "artifact_sha256": latest.get("sha256"),
+                "passed": passed,
+                "headline": "推荐方向与当前有效简报不一致，不能直接采用。",
+                "body": (
+                    "可以批准下方的简报修订（之后本版会作废、团队按新简报重做），"
+                    "或退回要求在原简报下重做。不能勾选方向硬过。"
+                ),
+                "findings": [
+                    {"kind": f.get("kind", ""), "issue": f.get("issue", "")} for f in findings
+                ],
+                "blockers": blockers,
+                "amend": {
+                    "clause_id": rec_amend.get("clause_id") if rec_amend else "",
+                    "op": "replace",
+                    "text": str(options_row.get("amend_proposal") or "")
+                            or (rec_amend.get("detail") if rec_amend else ""),
+                    "recommended": rec,
+                },
+                "next_stage_label": "",
+                "next_owner": "",
+                "next_cost_sentence": "修订简报后本版作废，下一步在重做之后才花钱。",
+                "options": [],
+                "options_hint": "",
+            }
+
         if passed:
             head = f"「{v.stage_label(stage)}」写好了，审核也通过了。"
             if findings:

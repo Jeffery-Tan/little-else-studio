@@ -44,7 +44,10 @@ MAX_CELL = 4000
 #: Most rows kept per list field. A model that emits 400 shots has misunderstood
 #: something, and the sidecar should not grow to match.
 MAX_ROWS = 200
-QUESTION_COLUMNS = ("question", "blocks", "owner", "timing", "reason")
+QUESTION_COLUMNS = ("question", "blocks", "owner", "timing", "reason", "kind")
+#: How a user-facing question must be answered. ``brief_amendment`` is never
+#: an ask_user blank — it means the brief itself has to change (see amend_brief).
+QUESTION_KINDS = ("fact", "product_choice", "local_design", "brief_amendment")
 
 
 @dataclass(frozen=True)
@@ -93,9 +96,13 @@ SHAPES: dict[str, Shape] = {
     )),
     "direction": Shape("direction", (
         # A/B/C × the existing attributes, with an optional short creative title.
+        # satisfies / violates / amend_* bind each option to ActiveBrief clause
+        # ids (see active_brief.py). Cells are comma-separated ids so the
+        # normaliser's string cells stay the only wire type.
         Field("options", "rows", (
             "key", "title", "claim", "audience_moment", "hook", "story",
             "gives_up", "evidence_strength", "difficulty", "asset_needs",
+            "satisfies", "violates", "amend_clause", "amend_proposal",
         )),
         Field("recommended", "text"),
         Field("recommended_because", "text"),
@@ -165,6 +172,10 @@ BRIEF: dict[str, str] = {
   `story` 写清开场、关键动作、结尾回报及必要的样例对白，让用户看得见这条片子。
   `gives_up` 是创作方案的取舍，不要求角色必须放弃物品或承担代价。`evidence_strength` 证据强度。
   `difficulty` 执行难度。`asset_needs` 素材依赖。
+  `satisfies`：本方案满足的有效简报条款 id，逗号分隔（如 `goal.primary,not.abc12345`）。
+  `violates`：未修订即不满足的条款 id；有违反就不要把本方案写成推荐。
+  `amend_clause` / `amend_proposal`：若要推荐本方案必须先修订哪条简报、怎么改；
+  不需要修订则留空。不要只在正文里承认「做不到种草」却空着这些字段。
 - `recommended` / `recommended_because`：你推荐哪个，为什么。
 - `prerequisites`：**推荐成立的前提**，一条一行。写具体、写可验证的——
   这几条只要有一条不成立，你的推荐就不成立。
@@ -208,9 +219,11 @@ def brief(stage: str) -> str:
         "优先只在 `structured` 中写完整产物，`content` 传空字符串。程序从同一份内容生成正文与创作板，"
         "不要再写第二份重复正文。不能用现有结构完整表达的产物可以使用非空 content 正文，但必须保持展示一致。\n\n"
         f"{text}\n"
-        "- `open_questions`：仅保留实际未决事项，可以为空。每条包含 question、blocks、owner、timing、reason。"
+        "- `open_questions`：仅保留实际未决事项，可以为空。每条包含 question、blocks、owner、timing、reason、kind。"
         "owner 为 user 或 team；timing 为 now 或 later；reason 说明为什么必须由该责任人处理。"
-        "只有 owner=user、timing=now 且理由明确的事项会请用户回答。素材检查、版本对应、工具能力、"
+        "kind 四选一：`fact`（缺事实）、`product_choice`（产品二选一）、`local_design`（本版局部设计）、"
+        "`brief_amendment`（要改产品目标/有效简报——不要用普通提问，走简报修订）。"
+        "只有 owner=user、timing=now、kind≠brief_amendment 且理由明确的事项会请用户回答。素材检查、版本对应、工具能力、"
         "试读时长和内部审核都由 team 处理；执行细节在相应阶段处理。不要重复已回答的问题，"
         "不要为了填满字段制造问题。创意假设不自动成为必须由用户证明的事实。\n"
         "结构化正文缺少核心内容或发生字段丢失会返回错误，请补全后再提交；不要用空正文掩盖丢失内容。"
@@ -363,6 +376,23 @@ def is_user_question(row: Any) -> bool:
             and isinstance(reason, str) and bool(reason.strip()))
 
 
+def question_kind(row: Any) -> str:
+    """Normalized kind for one open_questions row (default ``fact``)."""
+    if not isinstance(row, dict):
+        return "fact"
+    kind = str(row.get("kind") or "").strip()
+    return kind if kind in QUESTION_KINDS else "fact"
+
+
+def is_ask_user_question(row: Any) -> bool:
+    """A question the conversation may actually put to him as ask_user.
+
+    ``brief_amendment`` is excluded on purpose: 「这算不算种草」 is not a blank
+    to fill — it changes the product goal and must go through amend_brief.
+    """
+    return is_user_question(row) and question_kind(row) != "brief_amendment"
+
+
 def open_questions(structured: dict[str, Any], stage: str) -> list[dict[str, str]]:
     """This stage's unanswered questions, tagged with where they came from.
 
@@ -370,12 +400,14 @@ def open_questions(structured: dict[str, Any], stage: str) -> list[dict[str, str
     ``limitations`` is the model explaining itself and reads as a disclaimer.
     The same facts routed through a field called ``open_questions`` are a
     request addressed to the only person who can answer them.
+
+    ``brief_amendment`` rows are omitted here — they are not ask_user work.
     """
     rows = (structured or {}).get("open_questions") or []
     return [
         {"stage": stage, "question": r.get("question", ""), "blocks": r.get("blocks", "")}
         for r in rows
-        if is_user_question(r)
+        if is_ask_user_question(r)
     ]
 
 
@@ -396,7 +428,7 @@ def canonical_document(stage: str, data: dict[str, Any]) -> str:
         "need": "前提", "shot": "画面", "purpose": "作用", "status": "状态", "note": "说明", "file": "素材文件",
         "gap": "缺口", "consequence": "影响", "tc": "段落", "picture": "画面", "line": "台词或字幕",
         "sound": "声音", "duration": "时长", "question": "事项", "blocks": "影响", "owner": "责任人",
-        "timing": "处理时机", "reason": "责任说明",
+        "timing": "处理时机", "reason": "责任说明", "kind": "类型",
     }
     lines = [f"# {labels[stage]}", "", "<!-- studio:structured-document-v1 -->"]
     for field in SHAPES[stage].fields:
@@ -459,6 +491,9 @@ def validate_canonical_input(stage: str, payload: dict) -> None:
                     if key == 'open_questions' and item.get('question'):
                         if item.get('owner') not in {'user', 'team'} or item.get('timing') not in {'now', 'later'} or not (item.get('reason') or '').strip():
                             raise ValueError("待处理事项需要明确 owner、timing 和 reason；内部工作归 team。")
+                        kind = item.get('kind')
+                        if kind and kind not in QUESTION_KINDS:
+                            raise ValueError(f"待处理事项 kind 必须是 {'/'.join(QUESTION_KINDS)} 之一。")
 
 
 def blocked_material(structured: dict[str, Any]) -> list[dict[str, str]]:
@@ -508,9 +543,14 @@ LABEL: dict[str, str] = {
     "owner": "责任人",
     "timing": "处理时机",
     "reason": "需要确认的原因",
+    "kind": "类型",
     "evidence_strength": "证据强度",
     "difficulty": "执行难度",
     "asset_needs": "素材依赖",
+    "satisfies": "满足简报",
+    "violates": "违反简报",
+    "amend_clause": "须先修订",
+    "amend_proposal": "修订提案",
     "shot": "画面",
     "purpose": "证明什么",
     "status": "状态",
@@ -651,8 +691,12 @@ def _direction(data: dict[str, Any]) -> list[dict[str, Any]]:
                             (
                                 "title", "claim", "audience_moment", "hook", "story", "gives_up",
                                 "evidence_strength", "difficulty", "asset_needs",
+                                "satisfies", "violates", "amend_clause", "amend_proposal",
                             ),
-                            secondary=("gives_up", "evidence_strength", "difficulty", "asset_needs"),
+                            secondary=(
+                                "gives_up", "evidence_strength", "difficulty", "asset_needs",
+                                "satisfies", "violates", "amend_clause", "amend_proposal",
+                            ),
                         ),
                     }
                     for o in options

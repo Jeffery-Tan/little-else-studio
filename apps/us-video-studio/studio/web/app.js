@@ -1233,6 +1233,42 @@ function wireGate(host) {
   if (draft.note || draft.option) status.textContent = "已恢复此版本的草稿 · 尚未提交";
   for (const btn of gate.querySelectorAll('[data-act]')) btn.onclick = async () => {
     if (state.busy || state.decisionBusy || gate.dataset.saving === "1") return;
+    if (btn.dataset.act === "amend_brief") {
+      const clause = (gate.dataset.amendClause || "").trim();
+      const text = (gate.dataset.amendText || "").trim();
+      if (!clause) {
+        const statusEl = gate.querySelector(".gate-feedback") || status;
+        status.textContent = "没有可写入的修订条款；请退回重做或刷新状态。";
+        return;
+      }
+      state.decisionBusy = true;
+      gate.dataset.saving = "1";
+      for (const control of gate.querySelectorAll("button,input,textarea")) control.disabled = true;
+      status.textContent = "正在批准简报修订…";
+      try {
+        const result = await api(`/api/runs/${state.runId}/brief-amendment`, {
+          method: "POST",
+          body: JSON.stringify({
+            changes: [{ clause_id: clause, op: "replace", text: text || clause }],
+            note: "用户在方向门禁上批准简报修订",
+            approve: true,
+            expected_artifact_sha256: gate.dataset.sha || null,
+            expected_version: gate.dataset.version ? Number(gate.dataset.version) : null,
+          }),
+        });
+        toast("简报已修订；当前方向版本将作废，团队需按新简报重做。");
+        try { localStorage.removeItem(key); localStorage.removeItem(legacyJourneyKey); } catch {}
+        await refreshTimeline();
+        void result;
+      } catch (err) {
+        status.textContent = `修订失败：${String(err.message || err)}。草稿仍保留。`;
+      } finally {
+        state.decisionBusy = false;
+        gate.dataset.saving = "0";
+        for (const control of gate.querySelectorAll("button,input,textarea")) control.disabled = false;
+      }
+      return;
+    }
     if (btn.dataset.optionKey && draft.option !== btn.dataset.optionKey) {
       draft.option = btn.dataset.optionKey;
       draft.nonce = null;

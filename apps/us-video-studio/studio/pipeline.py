@@ -58,6 +58,9 @@ class StageState:
     can_review: bool = False
     can_approve: bool = False
     blocked_reason: str = ""
+    #: P1 projection only: option ↔ ActiveBrief alignment for this latest
+    #: artifact. Never gates a click on its own — see active_brief.brief_gate.
+    brief_gate: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +79,7 @@ class StageState:
             "can_review": self.can_review,
             "can_approve": self.can_approve,
             "blocked_reason": self.blocked_reason,
+            "brief_gate": self.brief_gate,
         }
 
 
@@ -258,6 +262,24 @@ class Pipeline:
                 stale = True
                 stale_reason = '项目选择的灵感参考已调整，请根据当前参考更新这一版。'
 
+        # ActiveBrief binding (P1). Only artifacts that *carry* the key are
+        # checked — pre-P1 versions without brief:snapshot stay readable and
+        # are not mass-invalidated on deploy. New attempts always stamp it.
+        brief_gate: dict[str, Any] | None = None
+        if latest is not None and stage != "intake" and "brief:snapshot" in latest.inputs:
+            from .active_brief import compile_active_brief, fingerprint as brief_fp
+            if "__brief_fingerprint__" not in memo:
+                memo["__brief_fingerprint__"] = brief_fp(compile_active_brief(self.store, run_id))
+            if latest.inputs["brief:snapshot"] != memo["__brief_fingerprint__"]:
+                stale = True
+                stale_reason = (
+                    "有效简报已变化（brief 指纹不一致）；"
+                    f"本版写于 {latest.inputs['brief:snapshot']}，当前为 {memo['__brief_fingerprint__']}"
+                )
+        if latest is not None and stage == "direction":
+            from .active_brief import brief_gate as compute_gate
+            brief_gate = compute_gate(self.store, run_id, latest.structured)
+
         integrity_ok = True
         if latest is not None:
             integrity_ok = self.store.verify_artifact(run_id, stage, latest.version)
@@ -387,6 +409,7 @@ class Pipeline:
             can_review=can_review,
             can_approve=can_approve,
             blocked_reason=blocked,
+            brief_gate=brief_gate,
         )
         memo[stage] = state
         # ``complete`` is used by dependents; stash it alongside.
@@ -417,6 +440,10 @@ class Pipeline:
         from .evidence import evidence_fingerprint, evidence_generation
         inputs["evidence:snapshot"] = evidence_fingerprint(self.store, run_id)
         inputs["evidence:generation"] = str(evidence_generation(self.store, run_id))
+        # Brief is compiled *from* intake, so only later stages bind to it.
+        if stage != "intake":
+            from .active_brief import compile_active_brief, fingerprint as brief_fp
+            inputs["brief:snapshot"] = brief_fp(compile_active_brief(self.store, run_id))
         if stage != 'intake':
             from .references import reference_fingerprint, reference_generation
             selected_references = reference_fingerprint(self.store, run_id)
@@ -630,6 +657,36 @@ class Pipeline:
         if verdict == "return" and not findings:
             raise PipelineError("review", "a return needs at least one specific finding")
 
+        # Clause binding (P3): any clause_ids the reviewer cites must exist on
+        # the ActiveBrief. Direction returns against a blocked gate also get
+        # stamped with the gate's clause ids when the model omitted them, so
+        # the return stays machine-actionable.
+        from .active_brief import clause_index as brief_clause_index, compile_active_brief as compile_brief
+        brief = compile_brief(self.store, run_id)
+        known = set(brief_clause_index(brief))
+        findings = [dict(f) if isinstance(f, dict) else {"issue": str(f)} for f in findings]
+        for f in findings:
+            cids = f.get("clause_ids")
+            if cids is None:
+                continue
+            if not isinstance(cids, list):
+                raise PipelineError("review", "clause_ids must be a list of ActiveBrief clause ids")
+            for cid in cids:
+                if str(cid) not in known:
+                    raise PipelineError(
+                        "review",
+                        f"unknown ActiveBrief clause_id {cid!r}; use an id from the brief checklist",
+                    )
+            f["clause_ids"] = [str(c) for c in cids]
+        if stage == "direction" and verdict == "return" and state.brief_gate:
+            gate_ids = {
+                str(b.get("clause_id"))
+                for b in (state.brief_gate.get("blockers") or [])
+                if b.get("clause_id")
+            }
+            if gate_ids and not any(f.get("clause_ids") for f in findings) and findings:
+                findings[0]["clause_ids"] = sorted(gate_ids)
+
         review = Review(
             stage=stage,
             artifact_sha256=state.latest.sha256,
@@ -807,6 +864,24 @@ class Pipeline:
                     )
                 recorded = "approved_override"
                 note = (note + f"\n[override] {override_reason.strip()}").strip()
+            # Brief gate (P2): a selected option that still violates / needs an
+            # amendment cannot be adopted — not even with override_reason.
+            # The product goal only moves through amend_brief, never through a
+            # gate click. Return-with-note remains available.
+            if selected_option_id and state.brief_gate:
+                sel = str(selected_option_id).upper()
+                sel_blockers = [
+                    b for b in (state.brief_gate.get("blockers") or [])
+                    if str(b.get("key") or "").upper() == sel
+                ]
+                if sel_blockers:
+                    kinds = "、".join(sorted({str(b.get("kind") or "") for b in sel_blockers}))
+                    raise PipelineError(
+                        "brief",
+                        f"方向 {sel} 未满足当前有效简报（{kinds}）。"
+                        "请先批准简报修订并让团队按新简报重做，或退回按原简报重做；"
+                        "不能用 override 直接采用。",
+                    )
         elif decision == "returned" and not note.strip():
             # The mirror of the rule above, and it is here for the same reason:
             # a decision that *sends something onward* has to carry the content

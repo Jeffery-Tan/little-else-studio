@@ -2,11 +2,69 @@
 from __future__ import annotations
 from typing import Any
 from fastapi import HTTPException
-from .http_contracts import DecisionIn, DecisionContinuationIn
+from .http_contracts import BriefAmendmentDecisionIn, BriefAmendmentIn, DecisionIn, DecisionContinuationIn
 from .models import PipelineError, STAGE_SPEC
 
 
 def install_approval_routes(app, jobs, pipeline, store, require_run, continuation_job):
+    # -------------------------------------------------------------- brief amendments --
+
+    @app.post("/api/runs/{run_id}/brief-amendment")
+    def propose_brief_amendment(run_id: str, payload: BriefAmendmentIn) -> dict[str, Any]:
+        """Propose (and optionally approve) an ActiveBrief amendment.
+
+        Bound to the direction artifact the user is looking at when
+        expected_* is provided, so a stale page cannot rewrite the brief
+        against a version he is no longer reading.
+        """
+        from .active_brief import fingerprint as brief_fp, propose_amendment
+
+        require_run(run_id)
+        try:
+            with jobs.lock:
+                if jobs.busy(run_id):
+                    raise HTTPException(409, "当前制作仍在运行，请等这一轮结束后修订简报。")
+                if payload.expected_artifact_sha256 is not None:
+                    state = pipeline.stage_state(run_id, "direction")
+                    if state.latest is None:
+                        raise HTTPException(409, "创意方向尚无当前版本。")
+                    if (state.latest.sha256 != payload.expected_artifact_sha256
+                            or (payload.expected_version is not None
+                                and state.latest.version != payload.expected_version)):
+                        raise HTTPException(409, "方向版本已变化，请刷新后再修订简报。")
+                amendment = propose_amendment(
+                    store, run_id,
+                    changes=[c.model_dump(exclude_none=True) for c in payload.changes],
+                    note=payload.note,
+                    source="user",
+                    approve=payload.approve,
+                )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except PipelineError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        result = dict(amendment)
+        if payload.approve:
+            from .active_brief import compile_active_brief
+            result["brief_fingerprint"] = brief_fp(compile_active_brief(store, run_id))
+        return result
+
+    @app.post("/api/runs/{run_id}/brief-amendment/decide")
+    def decide_brief_amendment(run_id: str, payload: BriefAmendmentDecisionIn) -> dict[str, Any]:
+        from .active_brief import decide_amendment
+
+        require_run(run_id)
+        try:
+            with jobs.lock:
+                if jobs.busy(run_id):
+                    raise HTTPException(409, "当前制作仍在运行，请等这一轮结束后再决定。")
+                return decide_amendment(
+                    store, run_id, payload.amendment_id,
+                    decision=payload.decision, note=payload.note,
+                )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     # -------------------------------------------------------------- approvals --
 
     @app.post("/api/runs/{run_id}/nonce")

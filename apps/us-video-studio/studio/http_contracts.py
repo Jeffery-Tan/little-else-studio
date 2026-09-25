@@ -101,6 +101,27 @@ class DecisionContinuationIn(BaseModel):
     expected_artifact_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
 
 
+class BriefAmendmentChange(BaseModel):
+    clause_id: str = Field(min_length=1, max_length=80)
+    op: Literal["replace", "retire", "add"] = "replace"
+    text: str = Field(default="", max_length=4000)
+    kind: str | None = Field(default=None, max_length=32)
+
+
+class BriefAmendmentIn(BaseModel):
+    changes: list[BriefAmendmentChange] = Field(min_length=1, max_length=12)
+    note: str = Field(default="", max_length=2000)
+    approve: bool = Field(default=True, strict=True)
+    expected_artifact_sha256: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class BriefAmendmentDecisionIn(BaseModel):
+    amendment_id: str = Field(min_length=1, max_length=64)
+    decision: Literal["approved", "rejected"]
+    note: str = Field(default="", max_length=2000)
+
+
 class LearningProposalIn(BaseModel):
     type: str
     payload: dict[str, Any]

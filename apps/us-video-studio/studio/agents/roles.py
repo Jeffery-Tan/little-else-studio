@@ -182,7 +182,8 @@ REVIEWER = Role(
 通过不代表图片、视频、投放、费用或 Jeffery 的批准通过——那些不在你的范围内，
 你也不该暗示它们通过。
 
-判定为 return 时，每条 finding 必须**指名责任阶段**并说清具体是什么问题。
+判定为 return 时，每条 finding 必须**指名责任阶段**并说清具体问题。
+涉及产品目标或有效简报（ActiveBrief）条款的退回，必须填 `clause_ids`（清单里的条款 id，如 goal.primary）。
 「整体不够好」「可以更具体」这类话不是 finding，不要写。
 
 你没有任何写入能力，也无法批准任何东西。你的判断通过 `finish_review` 记录。
