@@ -1070,7 +1070,8 @@ function renderConversation(tl) {
     : '<div class="chat-welcome"><span class="chat-welcome-mark">le.</span><h3>从你的想法聊起</h3><p>说说商品、想打动的人，或者这次想尝试的表达。我们一起把方案做出来。</p><button class="chat-suggestion" type="button">帮我梳理这个项目的创意方向 ↗</button></div>';
   const suggestion=host.querySelector('.chat-suggestion');
   if (suggestion) suggestion.onclick=()=>{$('chat-input').value=state.runs.find(r=>r.run_id===state.runId)?.kind==='learning'?'先说说这条参考目前实际观察到了什么、还没有观察到什么。':'先帮我梳理这个项目的创意方向。';$('chat-input').focus();};
-  for (const turn of tl.turns) host.appendChild(renderTurn(turn));
+  for (let i = 0; i < tl.turns.length; i += 1)
+    host.appendChild(renderTurn(tl.turns[i], i === tl.turns.length - 1));
   const decision = box('div','journey-decision');decision.id='journey-decision';host.append(decision);
   if (typeof renderJourneyDecision === 'function') renderJourneyDecision();
   if (state.atBottom) host.scrollTop = host.scrollHeight;
@@ -1085,7 +1086,7 @@ function setConversationOpen(open) {
   $("conversation-caret").textContent = open ? "收起" : "展开";
 }
 
-function renderTurn(turn) {
+function renderTurn(turn, live = false) {
   const wrap = box("div", "turn");
 
   // A legacy run holds a user record with empty text; rendering it would put a
@@ -1142,10 +1143,12 @@ function renderTurn(turn) {
       bubble.append(who,box('p','muted','这条回复较长。当前进度见顶部，方案可从本轮成果打开。'),full);
     } else bubble.append(who, body);
     wrap.appendChild(bubble);
-  } else if (!state.busy && (turn.user?.text || work.length)) {
+  } else if ((!state.busy || !live) && (turn.user?.text || work.length)) {
     // A finished round that produced no reply still answers — honest silence
-    // was read as the assistant never coming back. The live status row owns
-    // the in-progress state, so this only appears once the round is over.
+    // was read as the assistant never coming back. Only the LIVE (last) turn
+    // while a round is running stays quiet: that state belongs to the status
+    // row, and claiming “no conclusion” mid-work would be false. Older failed
+    // rounds keep their fallback even while a new round runs.
     const bubble = box("div", "msg assistant");
     const body = box("div", "body");
     body.append(box("p", "muted", work.length

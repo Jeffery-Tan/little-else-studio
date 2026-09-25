@@ -119,6 +119,26 @@ test('while a round is still running the fallback stays out of the way', () => {
     'the live status row owns the in-progress state; no premature “no conclusion”');
 });
 
+test('only the live turn stays quiet — an older failed round still gets its fallback', () => {
+  const p = page();
+  p.ctx.__tl = {
+    turns: [
+      turn({user: {text: '再重新递交审核一次'}, reply: null,
+            items: [{kind: 'note', text: '导演这一次没能交出「创意方向」：派工失败'}]}),
+      turn({user: {text: '再试一次'}, reply: null, items: []}),   // the running one
+    ],
+    rail: [], questions: [], progress: {}, pending: null,
+  };
+  p.read('state.busy = true; state.timeline = globalThis.__tl; renderConversation(globalThis.__tl)');
+
+  const turns = p.el('conversation-body').querySelectorAll('.turn');
+  assert.equal(turns.length, 2);
+  assert.match(turns[0].querySelectorAll('.msg.assistant')[0]?.textContent || '',
+    /本轮没有留下结论回复/, 'the historical failed round is not silenced by a new run');
+  assert.equal(turns[1].querySelectorAll('.msg.assistant').length, 0,
+    'the live turn defers to the status row');
+});
+
 test('the workspace chrome carries the next action, and the green status band is gone', () => {
   const p = page();
   vm.runInContext(`

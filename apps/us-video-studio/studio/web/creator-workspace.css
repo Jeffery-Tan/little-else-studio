@@ -13,7 +13,7 @@
 .creator-goal-heading h1{font-size:clamp(15px,1.5vw,18px);line-height:1.3;margin:0;color:#f4f5ef;overflow-wrap:anywhere;display:inline;max-width:min(42vw,28ch);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .creator-goal-current{display:flex;gap:7px;align-items:center;flex-wrap:wrap;color:#cdd6bf;font-size:11px;line-height:1.4;margin:3px 0 0;min-width:0}
 .creator-goal-current>strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.creator-goal-current>span:last-child{color:#a6afa2}.creator-next{flex:none;max-width:200px;white-space:normal;line-height:1.3;text-align:center;min-height:30px;padding:6px 12px;font-size:12px}
+.creator-goal-current>span:last-child{color:#a6afa2}
 .creator-goal-detail{margin:3px 0 0;color:#bfc8b7;font-size:11px;line-height:1.4;overflow:hidden;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow-wrap:anywhere}
 .creator-goal-source{margin-top:3px;color:#aeb7a7;font-size:10px;line-height:1.4}.creator-goal-source>summary{cursor:pointer;width:max-content;max-width:100%;padding:1px 0}.creator-goal-source p{margin:6px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;max-width:72ch}
 .creator-stage-history{padding:0 24px;color:var(--ink-soft);font-size:11px;border-bottom:1px solid #34363a}
@@ -62,5 +62,5 @@
 .creator-production-state{font-size:13px;line-height:1.7;color:#d8e4cf;margin:13px 0}
 .creator-production-empty{padding:34px 20px;margin:15px 0;border:1px dashed #555d4f;border-radius:12px;color:#bfc7b6;text-align:center;font-size:13px;line-height:1.7}
 .production-embedded .production-card header .eyebrow{display:block}.production-embedded [data-revise],.production-embedded [data-review]{display:inline-flex}
-@media(max-width:950px){.creator-goal{padding:14px 16px}.creator-next{font-size:12px}.project-tools>[role="group"]{display:flex}.project-more{margin-left:auto}}
-@media(max-width:640px){.creator-goal{display:block}.creator-next{width:100%;max-width:none;margin-top:12px}.creator-stage-history{padding:0 16px}.creator-direction-body{padding:17px}.creator-direction-grid{grid-template-columns:1fr}.project-more .project-delivery-actions{width:min(220px,calc(100vw - 30px))}}
+@media(max-width:950px){.creator-goal{padding:14px 16px}.project-tools>[role="group"]{display:flex}.project-more{margin-left:auto}}
+@media(max-width:640px){.creator-goal{display:block}.creator-stage-history{padding:0 16px}.creator-direction-body{padding:17px}.creator-direction-grid{grid-template-columns:1fr}.project-more .project-delivery-actions{width:min(220px,calc(100vw - 30px))}}
