@@ -33,9 +33,17 @@ def install_approval_routes(app, jobs, pipeline, store, require_run, continuatio
 
         Bound to the direction artifact the user is looking at when
         expected_* is provided, so a stale page cannot rewrite the brief
-        against a version he is no longer reading.
+        against a version he is no longer reading — and bound to the *brief*
+        itself via ``expected_brief_fingerprint``, because the direction can
+        stand still while a second amendment moves the brief underneath it
+        (A1). ``apply_brief_amendment`` does the change-level validation.
         """
-        from .active_brief import fingerprint as brief_fp, propose_amendment
+        from .active_brief import (
+            BriefBaselineChanged,
+            apply_brief_amendment,
+            compile_active_brief,
+            fingerprint as brief_fp,
+        )
 
         require_run(run_id)
         try:
@@ -50,13 +58,23 @@ def install_approval_routes(app, jobs, pipeline, store, require_run, continuatio
                             or (payload.expected_version is not None
                                 and state.latest.version != payload.expected_version)):
                         raise HTTPException(409, "方向版本已变化，请刷新后再修订简报。")
-                amendment = propose_amendment(
+                amendment = apply_brief_amendment(
                     store, run_id,
                     changes=[c.model_dump(exclude_none=True) for c in payload.changes],
                     note=payload.note,
                     source="user",
                     approve=payload.approve,
+                    expected_brief_fingerprint=payload.expected_brief_fingerprint,
                 )
+        except BriefBaselineChanged as exc:
+            # Not a bad request: the decision was real, it simply belongs to a
+            # brief that has since moved. Say which brief is current so the page
+            # can reload and re-decide instead of blaming the user's input.
+            raise HTTPException(409, {
+                "detail": str(exc),
+                "reason": "brief_changed",
+                "current_brief_fingerprint": exc.current_fingerprint,
+            }) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         except PipelineError as exc:

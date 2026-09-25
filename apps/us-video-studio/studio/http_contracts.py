@@ -106,6 +106,10 @@ class BriefAmendmentChange(BaseModel):
     op: Literal["replace", "retire", "add"] = "replace"
     text: str = Field(default="", max_length=4000)
     kind: str | None = Field(default=None, max_length=32)
+    #: The clause body this change was decided against. The server fills it in
+    #: when a client omits it; sending it is how a replayed amendment finds its
+    #: clause again after the model reworded the intake (R2).
+    base_text: str | None = Field(default=None, max_length=4000)
 
 
 class BriefAmendmentIn(BaseModel):
@@ -114,6 +118,10 @@ class BriefAmendmentIn(BaseModel):
     approve: bool = Field(default=True, strict=True)
     expected_artifact_sha256: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
     expected_version: int | None = Field(default=None, ge=1)
+    #: The effective brief the user was reading. Optional so an older page keeps
+    #: working, but a page that sends it cannot rebase a decision onto a brief
+    #: that moved while the direction version stood still (A1).
+    expected_brief_fingerprint: str | None = Field(default=None, max_length=120)
 
 
 class BriefAmendmentDecisionIn(BaseModel):

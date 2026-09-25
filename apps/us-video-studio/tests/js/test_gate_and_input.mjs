@@ -294,6 +294,145 @@ test('the ordinary decision card still carries the note box, choices and both bu
   assert.equal(gate.querySelector('.gate-actions').getAttribute('data-gate-act'), 'approve reject');
 });
 
+/* ----------------------------------------------------------------- R3 ---- */
+
+test('a blocked option is drawn but not selectable, with its reason', () => {
+  const gate = mountGate({}, decisionPending({
+    options: [
+      {key: 'A', recommended: true, label: '方向 A', admissible: false,
+       blocked_reason: '方案 A 未声明满足 goal.primary。'},
+      {key: 'B', recommended: false, label: '方向 B', admissible: true},
+    ],
+  }));
+  const radios = gate.querySelectorAll('input[type="radio"]');
+  assert.equal(radios.length, 2, 'both options are visible');
+  const byKey = Object.fromEntries(radios.map(r => [r.value, r]));
+  assert.equal(byKey.A.disabled, true, 'the refused option cannot be selected');
+  assert.equal(byKey.B.disabled, false, 'the compliant option stays selectable');
+  assert.ok(gate.textContent.includes('未声明满足 goal.primary'), 'the reason is on the card');
+  assert.ok(gate.querySelector('[data-act="approve"]'), 'adoption is still offered for B');
+});
+
+test('a proposal on an option is offered from the same decision card', async () => {
+  const app = wire({routes: {'brief-amendment': {id: 'amd-r3', status: 'approved',
+    redo: {status: 'started', job_id: 'job-r3'}}}});
+  const gate = bind(app, mountGate({}, decisionPending({
+    brief_fingerprint: 'brief-v1-abc123',
+    options: [
+      {key: 'A', recommended: true, label: '方向 A', admissible: false,
+       blocked_reason: '方案 A 未声明满足 goal.primary。'},
+      {key: 'B', recommended: false, label: '方向 B', admissible: true},
+    ],
+    amend: {clause_id: 'goal.primary', op: 'replace', text: '目标收窄为设计细节种草',
+            current_text: '做一个种草视频', valid: true, reason: '',
+            recommended: 'A', key: 'A'},
+  })));
+
+  // Both routes out of the card, without a second decision form.
+  assert.ok(gate.querySelector('[data-act="approve"]'), 'adopt B');
+  const amender = gate.querySelector('[data-act="amend_brief"]');
+  assert.ok(amender, 'or change the brief first');
+  assert.ok(gate.textContent.includes('做一个种草视频'), 'the diff shows the current clause');
+
+  amender.click();
+  await settle();
+  const post = app.observed.find(call => call.path.endsWith('/brief-amendment'));
+  assert.equal(post.body.changes[0].text, '目标收窄为设计细节种草');
+  // A1: the decision carries the brief the user was reading.
+  assert.equal(post.body.expected_brief_fingerprint, 'brief-v1-abc123');
+});
+
+test('a card with no proposal still offers only the return, never a fabricated body', () => {
+  const gate = mountGate({}, decisionPending({
+    amend: {clause_id: 'goal.primary', op: 'replace', text: '', current_text: '做一个种草视频',
+            valid: false, reason: '这一版没有提出可批准的简报修订正文。',
+            recommended: 'A', key: 'A'},
+  }));
+  assert.equal(gate.querySelector('[data-act="amend_brief"]'), null);
+  assert.equal(gate.dataset.amendValid, '0');
+  assert.equal(gate.dataset.amendText, '');
+  assert.ok(gate.textContent.includes('没有提出可批准的简报修订正文'));
+  assert.ok(gate.querySelector('[data-act="approve"]'), 'the ordinary decision is unaffected');
+});
+
+test('an unresolved brief amendment blocks the card and says which one', () => {
+  const gate = mountGate({}, decisionPending({
+    conflicts: [{amendment_clause_id: 'must.c7e124e4', kind: 'amendment_unresolved',
+                 detail: '已批准的修订（针对条款 must.c7e124e4）把这条要求改成了「…」…'}],
+  }));
+  assert.ok(gate.querySelector('.gate-conflicts'), 'the conflict is visible on the card');
+  assert.ok(gate.textContent.includes('must.c7e124e4'));
+  assert.ok(gate.textContent.includes('任何方向都不能被采用'));
+});
+
+test('a stale brief is reported as a decision to redo, not a failed request', async () => {
+  const conflict = Object.assign(new Error('有效简报已经变化，这次修订是相对旧简报做出的；请重新阅读当前简报后再决定。'),
+    {status: 409});
+  const app = wire({routes: {'brief-amendment': conflict}});
+  const gate = bind(app, mountGate({}, decisionPending({
+    brief_fingerprint: 'brief-v1-stale',
+    amend: {clause_id: 'goal.primary', op: 'replace', text: '新目标',
+            current_text: '旧目标', valid: true, reason: '', recommended: 'A', key: 'A'},
+  })));
+  gate.querySelector('[data-act="amend_brief"]').click();
+  await settle();
+  const feedback = gate.querySelector('.gate-feedback').textContent;
+  assert.match(feedback, /有效简报已经变化/);
+  assert.match(feedback, /草稿仍保留/);
+  assert.ok(gate.querySelector('.gate-reload'), 'and it offers a way to reload');
+});
+
+/* ----------------------------------------------------------------- R5 ---- */
+
+test('a refusal from another project never overwrites the visible draft', async () => {
+  const app = composer();
+  // The adjustment goes out for run-1, the user switches, and only then does the
+  // server refuse. The words belong to run-1's composer, not this one.
+  app.ctx.__switchTo = true;
+  const input = app.ctx.document.getElementById('chat-input');
+  input.value = '这条属于旧项目';
+  const result = await app.ctx.submit();
+  assert.equal(result.accepted, false);
+  assert.equal(result.draft_restored, false);
+  assert.equal(input.value, '', 'nothing was written into the other project');
+});
+
+test('a refusal never overwrites words the user typed after sending', async () => {
+  const app = composer();
+  // Hold the answer so the user can keep typing while it is in flight — which is
+  // the only way this race exists, and the reason a broken restore is invisible
+  // in a test whose refusal comes back synchronously.
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  app.ctx.__holdSend = held;
+  const input = app.ctx.document.getElementById('chat-input');
+  input.value = '第一次尝试';
+  const pending = app.ctx.submit();
+  input.value = '第二次想法';
+  release({accepted: false, reason: '这轮没接受'});
+  await pending;
+  assert.equal(input.value, '第二次想法', 'the newer draft wins over the failed one');
+});
+
+test('a refusal from the same project with no newer input puts the words back', async () => {
+  const app = composer({accept: false});
+  const input = app.ctx.document.getElementById('chat-input');
+  input.value = '换了模型再试';
+  const result = await app.ctx.submit();
+  assert.equal(result.accepted, false);
+  assert.equal(result.draft_restored, true);
+  assert.equal(input.value, '换了模型再试');
+});
+
+test('submit reports the runtime result instead of assuming it was accepted', async () => {
+  const app = composer({busy: true, steer: {ok: true},
+    currentJob: {job_id: 'j9', job_kind: 'conversation', status: 'running', goal_revision: 0}});
+  const input = app.ctx.document.getElementById('chat-input');
+  input.value = '改成 12 秒';
+  const result = await app.ctx.submit();
+  assert.equal(result.accepted, true, 'an accepted adjustment is reported as accepted');
+});
+
 /* ----------------------------------------------------------------- F6 ---- */
 
 /* Drive the real composer: set the textarea, then call the same `submit()` the
@@ -309,6 +448,7 @@ function composer({busy = false, currentJob = null, recoveryBlocked = false, acc
     globals: {
       __submitJob: async (runId, payload) => {
         jobs.push({runId, payload});
+        if (app.ctx.__holdSend) await app.ctx.__holdSend;
         if (app.ctx.__switchTo) {
           app.ctx.__switchTo = false;
           vm.runInContext(`state.runId = 'run-2';`, app.ctx);
@@ -436,7 +576,7 @@ test('project switch during a refused send never writes into the other project c
   input.value = '这条属于旧项目';
   const result = await app.ctx.submit();
   assert.equal(result.accepted, false);
-  assert.equal(result.kept, false, 'the refusal must not claim to have restored the text');
+  assert.equal(result.draft_restored, false, 'the refusal must not claim to have restored the text');
   assert.equal(input.value, '', 'the text belongs to run-1; the visible box is run-2');
 });
 test('a blocked recovery state refuses before clearing anything', async () => {

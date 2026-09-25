@@ -386,16 +386,44 @@ def _pending_action(state: dict[str, Any], ledger: Any,
         findings = review.get("findings") or []
         gate = st.get("brief_gate") or {}
 
-        # P2: blocked brief alignment is its own pending action — no A/B/C
-        # adopt radios, no override path. Amend the brief or rework.
-        if stage == "direction" and gate.get("status") == "blocked":
+        # ---------------------------------------------------------- direction --
+        #
+        # Admission is decided per option, by the same `brief_gate` the approval
+        # path enforces. The recommendation only decides which option the card
+        # leads with: it must not delete a compliant alternative's button (R3)
+        # and it must not shield an unchecked alternative from the check (R1).
+        amend_block: dict[str, Any] = {}
+        option_rows: list[dict[str, Any]] = []
+        if stage == "direction":
             from .active_brief import clause_index, compile_active_brief, option_amend_proposal
 
-            blockers = gate.get("blockers") or []
+            run_id = str((state.get("run") or {}).get("run_id") or "")
+            brief = compile_active_brief(store, run_id) if run_id else {"clauses": [], "conflicts": []}
+            index = clause_index(brief)
+            if (brief.get("goal") or {}).get("id"):
+                index.setdefault("goal.primary", dict(brief["goal"]))
+            structured = latest.get("structured") or {}
             rec = str(gate.get("recommended") or "")
-            # Which option's amendment is on the table. A recommendation is only
-            # advice, so its proposal is the one to show; a blocker that asks for
-            # an amendment outranks a plain violation.
+            admission = {str(row.get("key") or ""): row
+                         for row in (gate.get("options") or [])}
+            for o in direction_options(structured):
+                key = str(o["key"])
+                own = admission.get(key) or {}
+                reasons = [str(b.get("detail") or "") for b in (own.get("blockers") or [])]
+                option_rows.append({
+                    "key": key,
+                    "recommended": o["recommended"],
+                    "label": v.option_button_label(key, o["recommended"]),
+                    # `admissible` is the gate's own answer, not a re-derivation:
+                    # a card that offered a button the server refuses would be
+                    # advertising a click that cannot happen.
+                    "admissible": bool(own.get("admissible", True)),
+                    "blocked_reason": "；".join(r for r in reasons if r),
+                })
+
+            # A real proposal is the only thing that can be approved. A diagnosis
+            # is not a body and a clause id is not a body (F4).
+            blockers = gate.get("blockers") or []
             rec_amend = next(
                 (b for b in blockers
                  if b.get("kind") == "needs_amendment"
@@ -403,24 +431,31 @@ def _pending_action(state: dict[str, Any], ledger: Any,
                 blockers[0] if blockers else None,
             )
             amend_key = str((rec_amend or {}).get("key") or rec or "")
-            proposal = option_amend_proposal(latest.get("structured") or {}, amend_key)
-
-            # A proposal is only approvable when it is a real change to a clause
-            # this brief actually has. The blocker's ``detail`` is a diagnosis
-            # and the clause id is an identifier; using either as the new brief
-            # text is the F4 defect, so there is no fallback here at all.
-            run_id = str((state.get("run") or {}).get("run_id") or "")
-            brief = compile_active_brief(store, run_id) if run_id else {"clauses": []}
-            index = clause_index(brief)
-            if (brief.get("goal") or {}).get("id"):
-                index.setdefault("goal.primary", dict(brief["goal"]))
+            proposal = option_amend_proposal(structured, amend_key)
             clause_id = proposal["clause_id"]
             current_text = str(index.get(clause_id, {}).get("text") or "").strip()
             new_text = proposal["text"].strip()
             amend_valid = bool(
                 clause_id and new_text and new_text != current_text and clause_id in index
             )
+            if clause_id or amend_key:
+                amend_block = {
+                    "clause_id": clause_id,
+                    "op": "replace",
+                    "text": new_text,
+                    "current_text": current_text,
+                    "valid": amend_valid,
+                    "reason": "" if amend_valid else "这一版没有提出可批准的简报修订正文。",
+                    "recommended": rec,
+                    "key": amend_key,
+                }
 
+        if stage == "direction" and option_rows and not any(row["admissible"] for row in option_rows):
+            # There *are* options and none of them can be adopted. The card asks
+            # for the one decision that can move this forward — change the brief,
+            # or send it back. A document with no options at all is a different
+            # situation and keeps the ordinary card: nothing was proposed, so
+            # there is nothing to align and nothing to amend.
             return {
                 "kind": "brief_amendment",
                 "at": latest.get("created_at", utcnow()),
@@ -429,26 +464,25 @@ def _pending_action(state: dict[str, Any], ledger: Any,
                 "version": latest.get("version"),
                 "artifact_sha256": latest.get("sha256"),
                 "passed": passed,
-                "headline": "推荐方向与当前有效简报不一致，不能直接采用。",
+                "headline": "这份方向稿没有可以采用的选择。",
                 "body": (
+                    "每个方向都没有通过当前有效简报的检查（逐条原因见下）。"
                     "可以批准下方的简报修订（之后本版会作废、团队按新简报重做），"
                     "或退回要求在原简报下重做。不能勾选方向硬过。"
                 ),
                 "findings": [
                     {"kind": f.get("kind", ""), "issue": f.get("issue", "")} for f in findings
                 ],
-                "blockers": blockers,
-                "amend": {
-                    "clause_id": clause_id,
-                    "op": "replace",
-                    "text": new_text,
-                    "current_text": current_text,
-                    # False = show the diagnosis and let him return for rework or
-                    # ask the team for a proposal. Never a fabricated change.
-                    "valid": amend_valid,
-                    "reason": "" if amend_valid else "这一版没有提出可批准的简报修订正文。",
-                    "recommended": rec,
-                    "key": amend_key,
+                "blockers": gate.get("blockers") or [],
+                "conflicts": gate.get("conflicts") or [],
+                # The brief this card was drawn against, so the decision can be
+                # bound to it (A1).
+                "brief_fingerprint": gate.get("fingerprint") or "",
+                "amend": amend_block or {
+                    "clause_id": "", "op": "replace", "text": "", "current_text": "",
+                    "valid": False, "reason": "这一版没有提出可批准的简报修订正文。",
+                    "recommended": str(gate.get("recommended") or ""),
+                    "key": str(gate.get("recommended") or ""),
                 },
                 "next_stage_label": "",
                 "next_owner": "",
@@ -465,6 +499,8 @@ def _pending_action(state: dict[str, Any], ledger: Any,
         else:
             head = f"「{v.stage_label(stage)}」写好了，但审核没有通过它。"
             body = "你可以退回重做，或者看完之后明知有问题仍然通过——那样要写明理由。"
+        if stage == "direction" and any(not row["admissible"] for row in option_rows):
+            body += " 有方向没有通过当前有效简报的检查，那些选项不能采用；原因写在各自选项旁。"
 
         # What approving this one opens, and what that has cost before. The
         # price sits on the button rather than in a budget page, because the
@@ -479,14 +515,8 @@ def _pending_action(state: dict[str, Any], ledger: Any,
             next_owner = v.role_label(v.owner_role(nxt))
             cost = v.cost_sentence(ledger.last_stage_cost(v.owner_role(nxt), nxt))
 
-        # Recommendation is advisory. Every actual option is selectable, while
-        # an override still requires its explicit reason in the approval API.
-        options = []
-        if stage == "direction":
-            options = [{"key": o["key"], "recommended": o["recommended"],
-                        "label": v.option_button_label(o["key"], o["recommended"])}
-                       for o in direction_options(latest.get("structured") or {})]
-
+        # Recommendation is advisory. Every option the gate admits is selectable,
+        # while an override still requires its explicit reason in the approval API.
         return {
             "kind": "decision_request",
             "at": latest.get("created_at", utcnow()),
@@ -503,7 +533,13 @@ def _pending_action(state: dict[str, Any], ledger: Any,
             "next_stage_label": next_stage_label,
             "next_owner": next_owner,
             "next_cost_sentence": cost,
-            "options": options,
-            "options_hint": v.GATE_OPTION_HINT if options else "",
+            "options": option_rows,
+            "options_hint": v.GATE_OPTION_HINT if option_rows else "",
+            # Present only when this version actually proposed a brief change:
+            # the same-card route to the amendment, without a second decision
+            # form or a second nonce.
+            "amend": amend_block,
+            "conflicts": gate.get("conflicts") or [],
+            "brief_fingerprint": gate.get("fingerprint") or "",
         }
     return None

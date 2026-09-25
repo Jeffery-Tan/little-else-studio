@@ -59,6 +59,12 @@ BLOCKER_VIOLATES = "violates"
 BLOCKER_NEEDS_AMENDMENT = "needs_amendment"
 BLOCKER_UNKNOWN_CLAUSE = "unknown_clause"
 BLOCKER_UNMAPPED = "unmapped"
+#: The option declared something, but not the product goal and no amendment to
+#: it — so the one clause every plan has to be measured against went unchecked.
+BLOCKER_GOAL_UNCOVERED = "goal_uncovered"
+#: An approved amendment could not be reapplied to the current brief. This one
+#: is not about an option: it blocks the whole brief.
+BLOCKER_AMENDMENT_UNRESOLVED = "amendment_unresolved"
 
 #: ask_user replies written by the conversation path: 关于「问题」：答案
 _ANSWER = re.compile(r"^关于「(.+?)」[：:]\s*(.+)$", re.S)
@@ -340,11 +346,17 @@ def validate_changes_against(brief: dict[str, Any], changes: list[dict[str, Any]
 
     Two ways a "change" is not a change, and both used to reach the write path:
 
-    * the clause id names nothing in the current brief, so applying it is a
-      silent no-op that still bumps the brief version; and
+    * a ``replace``/``retire`` whose clause id names nothing in the current
+      brief, so applying it is a silent no-op that still bumps the version; and
     * the replacement text is the clause's existing text — the frontend fell
       back to the clause id when no proposal existed, and a block of diagnostic
       prose used to be offered as the *new goal*.
+
+    ``add`` is validated the other way round (A2): its whole point is a clause
+    the brief does not have yet, so requiring the id to exist rejected every
+    legitimate addition. It needs a non-empty body and an id or a kind to
+    derive one from — and an ``add`` that would duplicate an existing clause
+    body is refused rather than silently dropped.
 
     Raising here keeps the ambiguity out of the audit trail: an amendment row
     exists only when someone decided something that differs from what is there.
@@ -354,17 +366,25 @@ def validate_changes_against(brief: dict[str, Any], changes: list[dict[str, Any]
     known = set(index)
     if brief.get("goal"):
         known.add("goal.primary")
+    bodies = {(str(c.get("text") or "")).strip() for c in index.values()}
+    bodies.add(goal_text.strip())
     for ch in changes or []:
         if not isinstance(ch, dict):
             continue
         clause_id = str(ch.get("clause_id") or "").strip()
         op = str(ch.get("op") or "replace").strip()
+        text = str(ch.get("text") or "").strip()
+        if op == "add":
+            if not clause_id and not text:
+                raise ValueError("新增条款需要 clause_id 或至少一段正文。")
+            if text and text in bodies:
+                raise ValueError("这条正文已在当前有效简报里，不需要新增。")
+            continue
         if clause_id not in known:
             raise ValueError(
                 f"修订条款 {clause_id or '(空)'} 不在当前有效简报中，不能作为修订目标。"
             )
-        if op in ("replace", "add"):
-            text = str(ch.get("text") or "").strip()
+        if op == "replace":
             current = goal_text if clause_id == "goal.primary" else str(
                 index.get(clause_id, {}).get("text") or ""
             )
@@ -372,11 +392,65 @@ def validate_changes_against(brief: dict[str, Any], changes: list[dict[str, Any]
                 raise ValueError("修订正文与原条款内容相同，没有实际变更；请写明要改成什么。")
 
 
-def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]]) -> dict[str, Any]:
-    """Apply approved change ops in order. Unknown clause_id is a no-op miss."""
+def _text_key(value: Any) -> str:
+    """Whitespace-insensitive identity for a clause body.
+
+    Used only to recognise the *same* requirement after a model reworded it.
+    It is deliberately not a fuzzy match: without an exact body there is nothing
+    to claim the user's decision still applies to, and guessing would be worse
+    than reporting the conflict.
+    """
+    return re.sub(r"\s+", "", str(value or ""))
+
+
+def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]],
+                   conflicts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Apply approved change ops in order, realigning them onto the live clauses.
+
+    An amendment is a decision about a *requirement*, and clause ids here are
+    derived from clause text. So a later intake revision that rewords the clause
+    changes its id, and the approved change used to be dropped without a word —
+    the record still said "approved" while the brief no longer carried it (R2).
+
+    Each change therefore carries the body it was decided against (``base_text``,
+    recorded at proposal time). Resolution order:
+
+    1. the id, if the brief still has it;
+    2. otherwise a live clause with the same body, and the change moves onto that
+       clause's id — the model reworded it, the decision still applies;
+    3. otherwise a conflict, reported and never silently skipped.
+
+    Retiring a clause the brief no longer has is *not* a conflict: the
+    requirement is already gone, which is what the user asked for.
+    """
     goal = dict(brief["goal"]) if brief.get("goal") else None
     clauses = [dict(c) for c in brief.get("clauses") or []]
     by_id = {c.get("id"): c for c in clauses}
+    conflicts = conflicts if conflicts is not None else []
+
+    def align(clause_id: str, base_text: str, decided_text: str) -> str:
+        """Which live clause this decision is about, or "" if none is.
+
+        Three ways to recognise it, in order of confidence:
+
+        1. the id — nothing has moved;
+        2. a clause carrying the body the user *approved* — the model kept the
+           decision but recompiled it under a different id, which is the normal
+           case once a reworded intake carries the user's own wording forward;
+        3. a clause carrying the body the user decided *against* — the model
+           reworded the original and dropped the decision, so the change has to
+           move onto the clause that still means the same thing.
+        """
+        if clause_id == "goal.primary" or clause_id in by_id:
+            return clause_id
+        for wanted in (decided_text, base_text):
+            key = _text_key(wanted)
+            if not key:
+                continue
+            for row in clauses:
+                if _text_key(row.get("text")) == key:
+                    return str(row.get("id") or "")
+        return ""
 
     for ch in changes or []:
         if not isinstance(ch, dict):
@@ -384,6 +458,7 @@ def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]]) -> dict
         clause_id = str(ch.get("clause_id") or "").strip()
         op = str(ch.get("op") or "replace").strip()
         text = str(ch.get("text") or "").strip()
+        base_text = str(ch.get("base_text") or "").strip()
         if not clause_id:
             continue
         if op == "add":
@@ -398,43 +473,85 @@ def _apply_changes(brief: dict[str, Any], changes: list[dict[str, Any]]) -> dict
                 "text": text,
                 "check": _check_for(kind, text),
                 "source": "brief_amendment",
+                "authority": "amendment",
                 "scope": "global",
                 "status": "confirmed",
             }
-            if row["id"] not in by_id:
-                clauses.append(row)
-                by_id[row["id"]] = row
             if new_id == "goal.primary" and text:
                 goal = _amended_goal(text)
+            existing = by_id.get(new_id)
+            if existing is None:
+                clauses.append(row)
+                by_id[new_id] = row
+            elif str(existing.get("text") or "").strip() != text:
+                # Same identity, different body: an edit, not a duplicate. The
+                # old code dropped this and reported nothing (A2).
+                clauses = [c for c in clauses if c.get("id") != new_id]
+                clauses.append(row)
+                by_id[new_id] = row
             continue
-        target = by_id.get(clause_id)
+        resolved = align(clause_id, base_text, text)
         if op == "retire":
-            if target is not None:
-                clauses = [c for c in clauses if c.get("id") != clause_id]
-                by_id.pop(clause_id, None)
-            if clause_id == "goal.primary":
-                # Retiring the product goal is not allowed — keep the old text.
-                pass
+            if resolved and resolved != "goal.primary":
+                clauses = [c for c in clauses if c.get("id") != resolved]
+                by_id.pop(resolved, None)
             continue
         # replace
         if not text:
             continue
+        if not resolved and clause_id != "goal.primary":
+            # The clause the user decided about is no longer in the brief under
+            # either its id or its body: the model replaced or dropped it
+            # outright. Dropping the decision here is the defect this fixes, and
+            # so is resurrecting the model's text as if the user had approved it.
+            # What the user approved becomes the clause, under the id they
+            # approved it as, and the divergence is reported.
+            kind = str(next((c.get("kind") for c in clauses if c.get("id") == clause_id),
+                            "must") or "must")
+            clauses = [c for c in clauses if c.get("id") != clause_id]
+            kept = {
+                "id": clause_id,
+                "kind": kind,
+                "text": text,
+                "check": _check_for(kind, text),
+                "source": "brief_amendment",
+                "authority": "amendment",
+                "scope": "global",
+                "status": "confirmed",
+            }
+            clauses.append(kept)
+            by_id[clause_id] = kept
+            conflicts.append({
+                "amendment_clause_id": clause_id,
+                "kind": BLOCKER_AMENDMENT_UNRESOLVED,
+                "base_text": base_text,
+                "detail": (
+                    f"已批准的修订（针对条款 {clause_id}）把这条要求改成了「{text}」，"
+                    "但模型重写 intake 时"
+                    + (f"已经没有这一条（原文「{base_text}」）" if base_text else "已经把这一条换掉了")
+                    + "。这份简报保留了你的版本，但两者不一致，采用前需要你确认："
+                      "可以重新提出这条修订，或退回让团队按当前简报重做。"
+                ),
+            })
+            continue
+        target = by_id.get(resolved)
         if target is not None:
-            new_text_id = target["id"] if clause_id == "goal.primary" else _stable_clause_id(
+            new_text_id = resolved if resolved == "goal.primary" else _stable_clause_id(
                 str(target.get("kind") or "must"), text)
-            new_row = {**target, "text": text, "source": "brief_amendment"}
+            new_row = {**target, "text": text, "source": "brief_amendment",
+                       "authority": "amendment"}
             if new_text_id != target["id"]:
                 new_row["id"] = new_text_id
                 by_id.pop(target["id"], None)
             # keep id stable for goal.primary
-            if clause_id == "goal.primary":
+            if resolved == "goal.primary":
                 new_row["id"] = "goal.primary"
             clauses = [c for c in clauses if c.get("id") != target["id"]]
             clauses.append(new_row)
             by_id[new_row["id"]] = new_row
-            if clause_id == "goal.primary" or new_row["id"] == "goal.primary":
+            if resolved == "goal.primary" or new_row["id"] == "goal.primary":
                 goal = _amended_goal(text)
-        elif clause_id == "goal.primary" and text:
+        elif resolved == "goal.primary" and text:
             goal = _amended_goal(text)
             clauses = [c for c in clauses if c.get("id") != "goal.primary"]
             row = {**goal, "check": "presence", "scope": "global", "status": "confirmed"}
@@ -513,9 +630,15 @@ def compile_active_brief(store: Store, run_id: str, *, version: int | None = Non
             "compiled_at": utcnow(),
         },
     }
+    # Approved amendments are replayed in order. Anything that cannot be
+    # realigned onto the current clauses becomes a reported conflict instead of
+    # a silent skip (R2) — a brief that quietly dropped a user decision must not
+    # look like a brief that carries it.
+    conflicts: list[dict[str, Any]] = []
     for row in approved:
-        brief = _apply_changes(brief, row.get("changes") or [])
+        brief = _apply_changes(brief, row.get("changes") or [], conflicts)
     brief["version"] = int(version) if version is not None else 1 + len(approved)
+    brief["conflicts"] = conflicts
     brief["brief_id"] = f"brf-{content_sha({'goal': brief.get('goal'), 'clauses': brief.get('clauses')})[:12]}"
     # ``compiled_at`` must not enter content hashes / fingerprints.
     return brief
@@ -533,6 +656,13 @@ def propose_amendment(
     """Record a brief amendment. ``approve=True`` applies it immediately
     (one explicit user click from the blocked gate); otherwise status=pending
     until ``decide_amendment``.
+
+    Each change is stamped with ``base_text`` — the body of the clause as the
+    *user saw it* when deciding — plus the brief fingerprint that body came
+    from. That is what lets a later intake revision reword the clause without
+    silently discarding the decision (R2); ``apply_brief_amendment`` does the
+    validating, because only a new proposal has to still line up with the
+    current brief.
     """
     store.read_run(run_id)  # existence
     cleaned: list[dict[str, Any]] = []
@@ -553,12 +683,11 @@ def propose_amendment(
             row["text"] = text
         if ch.get("kind"):
             row["kind"] = str(ch.get("kind"))
+        if ch.get("base_text") is not None:
+            row["base_text"] = str(ch.get("base_text") or "").strip()
         cleaned.append(row)
     if not cleaned:
         raise ValueError("amendment needs at least one change")
-    # Checked before the row is written, so a no-op or unknown-clause amendment
-    # never becomes a "decision" the history has to carry (F4).
-    validate_changes_against(compile_active_brief(store, run_id), cleaned)
 
     rows = load_amendments(store, run_id)
     amendment = {
@@ -597,6 +726,71 @@ def decide_amendment(
         row["note"] = ((row.get("note") or "") + "\n" + note.strip()).strip()
     _save_amendments(store, run_id, rows)
     return row
+
+
+def apply_brief_amendment(
+    store: Store,
+    run_id: str,
+    *,
+    changes: list[dict[str, Any]],
+    note: str = "",
+    source: str = "user",
+    approve: bool = False,
+    expected_brief_fingerprint: str | None = None,
+) -> dict[str, Any]:
+    """Record one user decision about the brief, validated against *that* brief.
+
+    Two refusals live here rather than deeper down, because both are about the
+    request being a *new* decision:
+
+    * ``expected_brief_fingerprint`` must still be the current brief (A1). The
+      direction guard already refuses a stale page, but the brief can move
+      while the direction does not — a second amendment is enough — and then a
+      request framed against the old brief would silently rebase onto the new
+      one. Same-body validation answers "is this already the value"; this
+      answers "is this still the decision the user made".
+    * the change must actually change something, and must target a clause the
+      current brief has (F4 + A2, via ``validate_changes_against``).
+
+    The approved row also records ``base_text`` for each change, so replaying it
+    onto a later intake revision can recognise the clause it was decided against
+    instead of dropping it (R2).
+    """
+    brief = compile_active_brief(store, run_id)
+    validate_changes_against(brief, changes)
+    if expected_brief_fingerprint is not None:
+        current = fingerprint(brief)
+        if str(expected_brief_fingerprint) != current:
+            raise BriefBaselineChanged(current)
+    index = clause_index(brief)
+    goal_text = str((brief.get("goal") or {}).get("text") or "")
+    stamped: list[dict[str, Any]] = []
+    for ch in changes or []:
+        if not isinstance(ch, dict):
+            continue
+        row = dict(ch)
+        if not row.get("base_text"):
+            clause_id = str(row.get("clause_id") or "").strip()
+            row["base_text"] = (goal_text if clause_id == "goal.primary"
+                                else str(index.get(clause_id, {}).get("text") or ""))
+        stamped.append(row)
+    return propose_amendment(store, run_id, changes=stamped, note=note,
+                             source=source, approve=approve)
+
+
+class BriefBaselineChanged(ValueError):
+    """The brief moved between the user's decision and the request.
+
+    A ``ValueError`` so existing callers keep handling it; a distinct type so
+    the route can answer "reload and decide again" rather than "invalid input".
+    """
+
+    def __init__(self, current_fingerprint: str) -> None:
+        super().__init__(
+            "有效简报已经变化，这次修订是相对旧简报做出的；"
+            "请重新阅读当前简报后再决定。"
+        )
+        self.current_fingerprint = current_fingerprint
 
 
 def fingerprint_for(store: Store, run_id: str) -> str:
@@ -640,16 +834,18 @@ def option_amend_proposal(structured: dict[str, Any] | None,
 
 def brief_gate(store: Store, run_id: str,
                structured: dict[str, Any] | None,
-               *, bound: bool = False) -> dict[str, Any]:
-    """Read-only projection of option ↔ ActiveBrief alignment (P1).
+               *, bound: bool = False,
+               rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Read-only projection of option ↔ ActiveBrief alignment.
 
     Never raises, never mutates, never blocks a click by itself — the screen
     and the approval path read this. ``status``:
 
     * ``absent`` — no direction structure (other stages / empty).
     * ``unmapped`` — options exist but carry no satisfies/violates (legacy v4).
-    * ``ok`` — the options that matter map to the brief with no blockers.
-    * ``blocked`` — they have violates / amend / unknown clause / no mapping.
+    * ``ok`` — the recommended option maps to the brief with no blockers.
+    * ``blocked`` — it has violates / amend / unknown clause / no mapping /
+      no goal coverage, or the brief itself carries an unresolved amendment.
 
     ``bound`` says this artifact was written **for the current brief** (it
     carries ``brief:snapshot``). Only then is "the author declared nothing" a
@@ -658,6 +854,19 @@ def brief_gate(store: Store, run_id: str,
     Checking the declared ids is not semantic verification — it only refuses to
     read "not checked" as "satisfied"; whether a claim is *true* stays with the
     independent review and the user.
+
+    **Admission is per option, and the recommendation is not part of it.** Every
+    option's own coverage is computed the same way whether or not the director
+    recommended it; ``recommended`` only decides which one the card leads with.
+    Otherwise "the recommendation happens to be fine" would let an unchecked
+    alternative through, and "the recommendation happens to be blocked" would
+    take the compliant alternative's button away with it. ``options`` reports
+    one entry per key so the screen and ``gate_blockers_for`` read the same
+    answer the approval path enforces.
+
+    ``rows`` lets a caller that already holds the option rows pass them in, so
+    the gate and the rest of that projection are computed from one read of the
+    artifact rather than two.
     """
     structured = structured or {}
     brief = compile_active_brief(store, run_id)
@@ -670,6 +879,8 @@ def brief_gate(store: Store, run_id: str,
         "bound": bool(bound),
         "blockers": [],
         "recommended": None,
+        "options": [],
+        "conflicts": list(brief.get("conflicts") or []),
     }
     if not options:
         return base
@@ -684,8 +895,9 @@ def brief_gate(store: Store, run_id: str,
         known.add(goal_id)
 
     blockers: list[dict[str, Any]] = []
+    admitted: list[dict[str, Any]] = []
     mapped_any = False
-    for row in options:
+    for row in rows if rows is not None else options:
         if not isinstance(row, dict):
             continue
         key = str(row.get("key") or "").upper()
@@ -693,6 +905,7 @@ def brief_gate(store: Store, run_id: str,
         violates = _split_ids(str(row.get("violates") or ""))
         amend = str(row.get("amend_clause") or "").strip()
         proposal = str(row.get("amend_proposal") or "").strip()
+        own: list[dict[str, Any]] = []
         if not (satisfies or violates or amend):
             # No declaration at all. For a draft written against this brief that
             # is a blocker on *that option* — it is nobody's business until
@@ -701,50 +914,74 @@ def brief_gate(store: Store, run_id: str,
             # one. A half-mapped A/B/C must not read as a hard stop on the whole
             # stage, and an unmapped option must not read as satisfied either.
             if bound and key:
-                blockers.append({
+                own.append({
                     "key": key, "kind": BLOCKER_UNMAPPED, "clause_id": goal_id or "",
                     "detail": "这一版没有声明它满足哪条有效简报条款；"
                               "未声明不等于符合约束，不能直接采用。",
                 })
-            continue
-        mapped_any = True
-        for cid in violates:
-            blockers.append({
-                "key": key, "kind": BLOCKER_VIOLATES, "clause_id": cid,
-                "detail": index.get(cid, {}).get("text", cid),
-            })
-        if amend:
-            blockers.append({
-                "key": key, "kind": BLOCKER_NEEDS_AMENDMENT, "clause_id": amend,
-                # Diagnosis only — never a replacement body. ``amend_proposal``
-                # is the proposal; see ``option_amend_proposal``.
-                "detail": proposal or f"方案要求先修订 {amend}，但没有写出修订正文。",
-                "proposed_text": proposal,
-            })
-        if bound:
-            # Ids the brief does not contain prove nothing about this brief.
-            for cid in satisfies + violates + ([amend] if amend else []):
-                if cid not in known:
-                    blockers.append({
-                        "key": key, "kind": BLOCKER_UNKNOWN_CLAUSE, "clause_id": cid,
-                        "detail": f"引用的简报条款 {cid} 不在当前有效简报中。",
-                    })
-        # The recommended option must claim the product goal unless it amended it.
-        if key and key == chosen and goal_id and goal_id not in satisfies and not amend:
-            if not any(b["clause_id"] == goal_id and b["kind"] == BLOCKER_VIOLATES
-                       for b in blockers if b["key"] == key):
-                blockers.append({
-                    "key": key, "kind": BLOCKER_VIOLATES, "clause_id": goal_id,
-                    "detail": "推荐方案未声明满足 goal.primary，也未提出简报修订",
+        else:
+            mapped_any = True
+            for cid in violates:
+                own.append({
+                    "key": key, "kind": BLOCKER_VIOLATES, "clause_id": cid,
+                    "detail": index.get(cid, {}).get("text", cid),
                 })
+            if amend:
+                own.append({
+                    "key": key, "kind": BLOCKER_NEEDS_AMENDMENT, "clause_id": amend,
+                    # Diagnosis only — never a replacement body. ``amend_proposal``
+                    # is the proposal; see ``option_amend_proposal``.
+                    "detail": proposal or f"方案要求先修订 {amend}，但没有写出修订正文。",
+                    "proposed_text": proposal,
+                })
+            if bound:
+                # Ids the brief does not contain prove nothing about this brief.
+                for cid in satisfies + violates + ([amend] if amend else []):
+                    if cid not in known:
+                        own.append({
+                            "key": key, "kind": BLOCKER_UNKNOWN_CLAUSE, "clause_id": cid,
+                            "detail": f"引用的简报条款 {cid} 不在当前有效简报中。",
+                        })
+            # Every adoptable option has to claim the product goal — not only the
+            # one the director recommended. An option that proposes the goal's
+            # amendment is covered by that amendment instead.
+            amends_goal = bool(goal_id) and amend == goal_id
+            if key and goal_id and goal_id not in satisfies and not amends_goal:
+                own.append({
+                    "key": key, "kind": BLOCKER_GOAL_UNCOVERED, "clause_id": goal_id,
+                    "detail": f"方案 {key} 未声明满足 {goal_id}，也未提出该条款的简报修订；"
+                              "未声明不等于符合约束，不能直接采用。",
+                })
+        # The brief's own unresolved amendments block every option: adopting
+        # against a brief that failed to reapply a user decision would be
+        # adopting against a brief nobody agreed to. They carry no `key` because
+        # they are not about an option, so they are read as-is.
+        own.extend(base["conflicts"])
+        blockers.extend(own)
+        admitted.append({
+            "key": key,
+            "admissible": bool(key) and not own,
+            "blockers": own,
+        })
 
+    base["options"] = admitted
     if not mapped_any and not blockers:
         return base
 
-    rec_blockers = [b for b in blockers if not chosen or b["key"] == chosen]
+    # ``status`` describes the recommended option, which is the one the card
+    # leads with. It never decides whether another option is admissible.
+    # Run-level blockers (an unresolved amendment) carry no ``key`` and apply to
+    # every option, recommendation included.
+    rec_blockers = [b for b in blockers
+                    if not b.get("key") or not chosen or b["key"] == chosen]
     base["blockers"] = blockers
     base["status"] = "blocked" if rec_blockers else "ok"
     return base
+
+
+def gate_admissible(gate: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The options the gate would let the user adopt, in the artifact's order."""
+    return [row for row in ((gate or {}).get("options") or []) if row.get("admissible")]
 
 
 def gate_blockers_for(gate: dict[str, Any] | None, option_id: str) -> list[dict[str, Any]]:

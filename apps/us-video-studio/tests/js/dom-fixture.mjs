@@ -38,12 +38,24 @@ class El {
     this.className = '';
     this.hidden = false;
     this.disabled = false;
-    this.value = '';
+    this._value = '';
     this.scrollTop = 0;
     this.scrollHeight = 0;
     this.clientHeight = 0;
     this.checked = false;
     this.files = [];
+  }
+
+  /* `value` is an attribute-backed property for inputs and selects, and the
+   * thing you type into for a textarea — the page uses both kinds. Reading has
+   * to fall back to the attribute or a parsed `<input value="A">` reports "". */
+  get value() { return this._value || this.getAttribute('value') || ''; }
+
+  set value(next) {
+    this._value = next == null ? '' : String(next);
+    if (this.tagName === 'INPUT' || this.tagName === 'SELECT') {
+      this.setAttribute('value', this._value);
+    }
   }
 
   get classList() {
@@ -86,6 +98,11 @@ class El {
     // `className` is a property on the element and `class` an attribute, and the
     // app writes both ways. Keep the one source they share in step.
     if (name === 'class') this.className = String(value);
+    // Boolean attributes are properties in a browser: `el.disabled` is what the
+    // page and the tests read, not `getAttribute('disabled')`.
+    if (name === 'disabled') this.disabled = true;
+    if (name === 'checked') this.checked = true;
+    if (name === 'hidden') this.hidden = true;
     if (name.startsWith('data-')) {
       this.dataset[name.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = String(value);
     }
@@ -336,14 +353,15 @@ export function makeStorage() {
  * `runtime.js` owns `steerPosting`, `canSteerJob`, `submitJob`, `submitSteer`
  * and `restoreJob`, and `app.js` calls them as bare identifiers. In a browser
  * they are shared top-level bindings; here they have to be declared in the same
- * realm, so `loadApp` prepends this. Declaring them with `let` matters: `app.js`
- * is not allowed to *assign* `submitJob`, and a test that wants to watch a call
- * wraps it instead (see `rerouteSend` in the gate/input test).
+ * realm, so `loadApp` prepends this — declared, not assigned to `globalThis`,
+ * because `app.js` reads the binding and an object property would not shadow it.
+ *
+ * Each call is routed through a per-context indirection (`__submitJob` and
+ * friends), so two fixtures loaded in one file can never see each other's stubs.
  */
 const RUNTIME_SHIM = `
 let steerPosting = false;
 let restoreJob = async () => {};
-let restoreJobPromise = null;
 async function submitJob(runId, payload, options = {}) {
   return globalThis.__submitJob ? globalThis.__submitJob(runId, payload, options)
                                 : {job_id: 'stub-job'};

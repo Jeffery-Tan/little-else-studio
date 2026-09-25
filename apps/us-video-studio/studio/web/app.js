@@ -69,9 +69,10 @@ const state = {
   materials: [],
   busy: false,
   decisionBusy: false,
-  // True while a send is awaiting its HTTP result. A refusal is not a failure:
-  // see `submit`, which restores the composer only when the request never left.
-  sendInFlight: false,
+  // Bumped whenever the composer's contents change. A refused send puts its
+  // words back only if this is still the version it took, so a failure from
+  // earlier can never overwrite what the user typed since (R5).
+  composerVersion: 0,
   refreshSerial: 0,
   machineDetail: false,
   materialsOpen: false,
@@ -729,12 +730,12 @@ function renderDraft() {
   sendBtn.onclick = async () => {
     const text = composeDraft();
     if (!text || state.busy || state.decisionBusy || state.recoveryBlocked || !state.runId) return;
-    // Same rule as the composer: the drafted answers are cleared once the
-    // request is accepted, not before. They stay in the tray on a refusal — the
-    // renderer would have to rebuild the pane under his hands to put them back.
-    state.sendInFlight = false;
+    // Same rule as the composer: the drafted answers survive a refusal. The tray
+    // is claimed for this attempt, so a later refusal cannot clear drafts that
+    // belong to a newer state of the run.
+    const stamp = (state.composerVersion = (state.composerVersion || 0) + 1);
     const result = await send(text);
-    if ((!result || result.accepted !== false) && !state.sendInFlight) {
+    if (state.runId && state.composerVersion === stamp && (!result || result.accepted !== false)) {
       state.draft = {};
       saveDraft();
       renderDraft();
@@ -1234,6 +1235,12 @@ function wireGate(host) {
     gate.appendChild(broken);
     return;
   }
+  // The effective brief this card was drawn against. Read off the rendered card
+  // rather than from refresh state, so the fingerprint sent back with the
+  // decision is the one the user actually read (A1).
+  const pendingBriefFingerprint = () => gate.dataset.briefFp
+    || (state.timeline || {}).pending?.brief_fingerprint
+    || null;
   const key = `studio-decision:${state.runId}:${gate.dataset.stage}:${gate.dataset.sha}:stage`;
   const legacyJourneyKey = `studio-decision:${state.runId}:${gate.dataset.stage}:${gate.dataset.sha}:journey`;
   let draft = { note: "", option: null, nonce: null };
@@ -1278,6 +1285,11 @@ function wireGate(host) {
             changes: [{ clause_id: clause, op: "replace", text }],
             note: reason.value.trim() || "用户在方向门禁上批准简报修订",
             approve: true,
+            // The brief this decision was framed against. The direction guard
+            // below cannot cover this: a second amendment moves the brief while
+            // the direction version stays put, and then this request would
+            // silently rebase onto a brief the user never read (A1).
+            expected_brief_fingerprint: pendingBriefFingerprint(),
             expected_artifact_sha256: gate.dataset.sha || null,
             expected_version: gate.dataset.version ? Number(gate.dataset.version) : null,
           }),
@@ -1295,7 +1307,19 @@ function wireGate(host) {
         catch { toast("简报已修订，但页面暂时无法刷新。请重新打开项目查看接续状态。", true); }
         if (started && state.runId) void restoreJob(state.runId);
       } catch (err) {
-        status.textContent = `修订失败：${String(err.message || err)}。草稿仍保留。`;
+        const message = String(err.message || err);
+        // A moved brief is not a failed request: the decision was real, it just
+        // belongs to a brief that is no longer current. Say which, and say what
+        // to do, rather than reporting it as an error the user caused.
+        status.textContent = err.status === 409
+          ? `${message} 草稿仍保留；请载入最新简报后重新决定。`
+          : `修订失败：${message}。草稿仍保留。`;
+        if (err.status === 409 && !gate.querySelector('.gate-reload')) {
+          const reload = box('button', 'ghost small gate-reload', '载入最新状态');
+          reload.type = 'button';
+          reload.onclick = () => refreshTimeline();
+          gate.appendChild(reload);
+        }
       } finally {
         state.decisionBusy = false;
         gate.dataset.saving = "0";
@@ -1599,50 +1623,64 @@ async function send(text) {
     const payload = target
       ? {text, request_id:crypto.randomUUID(), feedback_target:target}
       : {text, request_id:crypto.randomUUID()};
-    // Set for the request itself, not just for the response: `submitJob`
-    // persists a pending marker first, so a send that dies mid-flight must not
-    // be reported as "refused, your words are safe" — they are not.
-    state.sendInFlight = true;
-    await submitJob(runId, payload);
-    state.sendInFlight = false;
-    return {accepted: true};
+    // The result is passed through, not overwritten. `runtime.submitJob` is the
+    // code that knows whether the server accepted this request, refused it, or
+    // lost the answer; reporting `{accepted:true}` from here made the caller's
+    // picture of what happened wrong for every outcome but one (A3).
+    const result = await submitJob(runId, payload);
+    if (result && result.accepted === false) {
+      toast(result.reason || result.message || '这次发送没有被接受。', true);
+      if (typeof StudioComposer !== 'undefined') StudioComposer.render();
+      return {...result, run_id: runId};
+    }
+    return result === undefined ? {accepted: true} : {...result, run_id: runId};
   } catch(error){
     state.busy=false;$('send').disabled=false;
-    // Only put the text back into the composer he is looking at. A rejected
-    // request must not write into whatever project he moved to meanwhile.
-    if (state.runId === runId) $('chat-input').value = text;
+    // The composer is *not* written here. Whether these words can go back into
+    // the box depends on which project is on screen and whether that box still
+    // holds what the user meant to send — questions only `submit`, which took
+    // the snapshot, can answer (R5). Restoring here overwrote another project's
+    // draft.
     toast(error.message,true);if(typeof StudioComposer!=='undefined')StudioComposer.render();
-    return {accepted: false, reason: error.message, kept: state.runId === runId};
+    return {accepted: false, reason: error.message, uncertain: true, run_id: runId};
   }
 }
 
 /* ---------------------------------------------------------------- input -- */
 
-/* Returns the send result so callers can tell "sent" from "refused".
+/* Send what is in the composer, and put it back if it did not go.
  *
- * The composer is emptied only once the request was accepted, and every refusal
- * puts the text back. A refusal that clears the box is a lost message, and Enter
- * during a running task is the easiest way to hit one: the send button is
- * disabled there, but the keydown listener is not. `sendInFlight` is what
- * distinguishes "refused, your words are safe" from "the request actually
- * failed" — `state.busy` is cleared by both, so it cannot tell them apart.
+ * The draft belongs to one project and one moment. So this captures both: the
+ * run that owns the words, and a version stamp for what the box held. If the
+ * request comes back not-accepted, the words are returned only when the same
+ * project is still on screen *and* the box has not moved on since — otherwise
+ * restoring them would replace a newer draft, or another project's (R5).
+ *
+ * `send` owns the pass-through of the server's answer; this function owns what
+ * the composer does about it. Neither decides the other's question.
  */
 async function submit() {
   const input = $("chat-input");
   const value = input.value.trim() || (typeof StudioComposer!=='undefined' && StudioComposer.files(state.runId).length ? '我附上了素材，请先确认我想如何使用。' : '');
   if (!value || !state.runId || steerPosting ||
       state.decisionBusy || state.recoveryBlocked) return {accepted: false, reason: '现在不能发送。'};
+  const owner = state.runId;
+  const stamp = (state.composerVersion = (state.composerVersion || 0) + 1);
   input.value = "";
   input.style.height = "auto";
-  state.sendInFlight = false;
   const result = await send(value);
-  if (result && result.accepted === false && state.runId && !state.sendInFlight) {
+  const restorable = result && result.accepted === false
+    && state.runId === owner
+    && state.composerVersion === stamp;
+  if (restorable) {
     input.value = value;
     input.style.height = "auto";
     input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
   }
-  return result;
+  return {...result, draft_restored: Boolean(restorable)};
 }
+
+function updatesComposerVersion() { state.composerVersion = (state.composerVersion || 0) + 1; }
 
 $("send").onclick = () => { void submit(); };
 $("chat-input").addEventListener("keydown", (e) => {
@@ -1652,6 +1690,8 @@ $("chat-input").addEventListener("keydown", (e) => {
   }
 });
 $("chat-input").addEventListener("input", (e) => {
+  // Typing is the user moving the draft on. Any in-flight refusal is now stale.
+  updatesComposerVersion();
   e.target.style.height = "auto";
   e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`;
 });

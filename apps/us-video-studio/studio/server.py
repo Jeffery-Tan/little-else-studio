@@ -201,17 +201,43 @@ def build_app(
         It cannot reuse the approval-shaped entry: that one resolves a decision
         strictly by version + sha, and an approved amendment deliberately
         invalidates the very direction version it was decided against.
+
+        Three ways an amendment stops being pending work, and all three have to
+        be checked or the entry outlives its reason (R4):
+
+        * the policy reads the newest approved amendment only — a later
+          amendment replaces this one as the brief's current intent, and its own
+          redo (started or not) is what remains;
+        * the redo job exists, so the work is under way; or
+        * a direction draft already reflects the *current* brief (no mapping
+          blockers and no unresolved amendment), whoever produced it — an
+          ordinary conversation turn can have done this work already, and
+          offering it again would spend a model call on a finished job.
         """
+        from .active_brief import compile_active_brief, fingerprint as brief_fp
+
+        approved = [a for a in load_amendments(store, run_id)
+                    if a.get('status') == 'approved']
+        if not approved:
+            return None
+        newest = approved[-1]
         created = {row.get('request_id') for row in store.read_events(run_id)
                    if row.get('kind') == 'job_created'}
-        for amendment in reversed(load_amendments(store, run_id)):
-            if amendment.get('status') != 'approved':
-                continue
-            if amendment_redo_request_id(amendment.get('id')) in created:
-                continue
-            return {'amendment_id': amendment.get('id'),
-                    'message': '简报修订已保存，团队重做还没有启动。请检查连接后点击继续。'}
-        return None
+        if amendment_redo_request_id(newest.get('id')) in created:
+            return None
+
+        from .active_brief import gate_admissible
+
+        fingerprint = brief_fp(compile_active_brief(store, run_id))
+        direction = pipeline.stage_state(run_id, 'direction')
+        latest = direction.latest
+        if latest is not None and latest.inputs.get('brief:snapshot') == fingerprint:
+            fresh = gate_admissible(direction.brief_gate)
+            if fresh and not (direction.brief_gate or {}).get('conflicts'):
+                return None
+
+        return {'amendment_id': newest.get('id'),
+                'message': '简报修订已保存，团队重做还没有启动。请检查连接后点击继续。'}
 
     def pending_continuation(run_id):
         rows = store.read_events(run_id)

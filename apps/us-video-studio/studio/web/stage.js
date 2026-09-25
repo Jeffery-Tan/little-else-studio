@@ -301,11 +301,10 @@ function briefAmendmentGateHtml(pending) {
   return `<section id="stage-decision" class="gate gate-brief-amendment" role="group" aria-label="简报修订" ` +
     `data-stage="${escapeHtml(pending.stage)}" data-version="${escapeHtml(pending.version)}" ` +
     `data-sha="${escapeHtml(pending.artifact_sha256 || '')}" data-passed="${pending.passed ? '1' : '0'}" ` +
-    `data-pending-kind="brief_amendment" data-amend-valid="${amend.valid === false ? "0" : "1"}" ` +
-    `data-amend-clause="${escapeHtml(amend.clause_id || '')}" data-amend-text="${escapeHtml(amend.text || '')}">` +
+    `data-pending-kind="brief_amendment"` + gateAmendAttrs(pending) + `>` +
     `<div class="gate-head">下一步 · ${escapeHtml(pending.stage_label)}</div>` +
     `<p class="gate-headline">${escapeHtml(pending.headline)}</p>` +
-    `<p>${escapeHtml(pending.body || "")}</p>` + findingsHtml(pending) + blockersHtml(pending) +
+    `<p>${escapeHtml(pending.body || "")}</p>` + conflictsHtml(pending) + findingsHtml(pending) + blockersHtml(pending) +
     diff + missing +
     gateReasonHtml(amend.valid === false ? "退回时请写明要在原简报下改什么" : "批准或退回的补充说明（可留空）") +
     gateActionsHtml(amend.valid === false ? ["reject"] : ["amend_brief", "reject"],
@@ -322,14 +321,29 @@ function briefAmendmentGateHtml(pending) {
 
 function stageDecisionGateHtml(pending) {
   const options = pending.options || [];
+  // An option the gate refuses is drawn but not selectable, with the reason next
+  // to it. Leaving it selectable would advertise a click the server answers with
+  // a refusal; hiding it would hide that the team proposed it at all (R3).
   const choices = options.length ? `<fieldset class="gate-options"><legend>采用哪个方向</legend>` +
-    options.map(o => `<label class="gate-choice"><input type="radio" name="direction-choice" value="${escapeHtml(o.key)}">` +
-      `<span>方向 ${escapeHtml(o.key)}${o.recommended ? '<small>推荐</small>' : ''}</span></label>`).join("") + `</fieldset>` : "";
+    options.map(o => {
+      const blocked = o.admissible === false;
+      return `<label class="gate-choice${blocked ? " is-blocked" : ""}">` +
+        `<input type="radio" name="direction-choice" value="${escapeHtml(o.key)}"` +
+        (blocked ? ` disabled data-blocked="1"` : "") + `>` +
+        `<span>方向 ${escapeHtml(o.key)}${o.recommended ? '<small>推荐</small>' : ''}` +
+        (blocked ? '<small class="gate-choice-blocked">不能采用</small>' : '') + `</span>` +
+        (blocked && o.blocked_reason
+          ? `<small class="gate-choice-why">${escapeHtml(o.blocked_reason)}</small>` : '') +
+        `</label>`;
+    }).join("") + `</fieldset>` : "";
   return `<section id="stage-decision" class="gate" role="group" aria-label="等你决定的这一版" ` +
     `data-stage="${escapeHtml(pending.stage)}" data-version="${escapeHtml(pending.version)}" ` +
-    `data-sha="${escapeHtml(pending.artifact_sha256 || '')}" data-passed="${pending.passed ? '1' : '0'}">` +
+    `data-sha="${escapeHtml(pending.artifact_sha256 || '')}" data-passed="${pending.passed ? '1' : '0'}"` +
+    gateAmendAttrs(pending) + `>` +
     `<div class="gate-head">下一步 · ${escapeHtml(pending.stage_label)}</div>` +
-    `<p class="gate-headline">${escapeHtml(pending.headline)}</p>` + findingsHtml(pending) + choices +
+    `<p class="gate-headline">${escapeHtml(pending.headline)}</p>` +
+    conflictsHtml(pending) + findingsHtml(pending) + choices +
+    amendBlockHtml(pending) +
     gateReasonHtml("想保留什么，哪里需要调整？") +
     gateActionsHtml(["approve", "reject"], "选择不会立即提交",
       `<button type="button" class="good small" data-act="approve" data-stage="${escapeHtml(pending.stage)}">` +
@@ -339,6 +353,59 @@ function stageDecisionGateHtml(pending) {
     (pending.next_stage_label ? `<div>下一步：${escapeHtml(pending.next_stage_label)} · ${escapeHtml(pending.next_owner)}</div>` : '') +
     `<div class="gate-next-cost">${escapeHtml(pending.next_cost_sentence || '')}</div></details>` +
     `<p class="gate-limit">仅确认这一版策划，不开始图片或视频生成。</p></section>`;
+}
+
+/* The amendment an option proposed, offered from the same card.
+ *
+ * Same contract as the blocked-alignment card: only a real proposal produces a
+ * button, and a clause id is never sent as the new body. What differs is the
+ * company it keeps — here the compliant options are still selectable, so the
+ * user chooses between "adopt this one" and "change the brief first" instead of
+ * being told the whole version is unusable (R3).
+ */
+function amendBlockHtml(pending) {
+  const amend = pending.amend || {};
+  if (!amend.key && !amend.clause_id) return "";
+  const valid = amend.valid !== false && Boolean(amend.text);
+  const diff = valid
+    ? `<div class="gate-amend-diff">` +
+        `<div class="gate-amend-row"><span class="gate-amend-what">现在是</span>` +
+        `<span class="gate-amend-was">${escapeHtml(amend.current_text || "（这一版简报没有这条内容）")}</span></div>` +
+        `<div class="gate-amend-row"><span class="gate-amend-what">改为</span>` +
+        `<span class="gate-amend-now">${escapeHtml(amend.text)}</span></div>` +
+      `</div>`
+    : `<p class="gate-amend-missing">${escapeHtml(amend.reason || `方案 ${amend.key || ""} 要求先修订简报，但没有写出修订正文。`)}` +
+      `要改目标的话，请退回让团队写出要改成什么。</p>`;
+  return `<div class="gate-amend-inline"><div class="gate-amend-head">` +
+    `方向 ${escapeHtml(amend.key || "?")} 提出：先修订有效简报</div>` + diff +
+    (valid ? `<button type="button" class="good small" data-act="amend_brief">` +
+      `批准修订简报（本版作废，团队重做）</button>` : "") +
+    `</div>`;
+}
+
+/* The brief's own unresolved amendments. Not about this document, which is why
+ * it is worded as a block on the brief rather than on a direction. */
+function conflictsHtml(pending) {
+  const rows = pending.conflicts || [];
+  if (!rows.length) return "";
+  return `<div class="gate-conflicts" role="alert">` +
+    `<strong>这份有效简报里有一条已批准的修订无法自动对齐</strong>` +
+    `<ul>${rows.map(row => `<li>${escapeHtml(String(row.detail || ""))}</li>`).join("")}</ul>` +
+    `<p>在它解决之前，任何方向都不能被采用。</p></div>`;
+}
+
+/* The amendment attributes the binder reads. Declaration only: when there is no
+ * clause or no body the card says so with `data-amend-valid="0"`, and `wireGate`
+ * refuses to send a body it does not have. */
+function gateAmendAttrs(pending) {
+  const amend = pending.amend || {};
+  const briefFp = pending.brief_fingerprint
+    ? ` data-brief-fp="${escapeHtml(pending.brief_fingerprint)}"` : "";
+  if (!amend.key && !amend.clause_id) return briefFp;
+  return briefFp +
+    ` data-amend-valid="${amend.valid === false || !amend.text ? "0" : "1"}"` +
+    ` data-amend-clause="${escapeHtml(amend.clause_id || '')}"` +
+    ` data-amend-text="${escapeHtml(amend.text || '')}"`;
 }
 
 function findingsHtml(pending) {

@@ -114,6 +114,91 @@ def test_a_mapped_recommendation_does_not_let_an_unmapped_option_be_selected(sto
     assert approval.selected_option_id == "A"
 
 
+def test_an_alternative_that_only_maps_a_side_clause_is_blocked(store):
+    """R1: the reviewer's counterexample, and it needed its own rule.
+
+    B declares satisfaction of a real, non-goal clause — so the "declared
+    nothing" and "unknown id" rules are both silent — while never being measured
+    against the product goal. The goal check therefore applies to every option,
+    not only to the recommended one.
+    """
+    pipe = Pipeline(store)
+    submit_intake(pipe)
+    language = next(c for c in ab.compile_active_brief(store, RUN)["clauses"]
+                    if c["text"] == "台词用美式英语")
+    attempt = pipe.start_attempt(RUN, "direction")
+    pipe.submit(RUN, "direction", attempt.token, content="方向正文", summary="方向",
+                structured={"options": [{"key": "A", "satisfies": "goal.primary"},
+                                        {"key": "B", "satisfies": language["id"]}],
+                            "recommended": "A"})
+    pipe.record_review(RUN, "direction", verdict="pass", findings=[])
+
+    gate = pipe.stage_state(RUN, "direction").brief_gate
+    assert gate["status"] == "ok", "the recommendation is compliant"
+    b_blockers = [b for b in gate["blockers"] if b["key"] == "B"]
+    assert [b["kind"] for b in b_blockers] == ["goal_uncovered"]
+    assert "goal.primary" in b_blockers[0]["detail"]
+
+    nonce = pipe.issue_nonce(RUN, "direction")
+    with pytest.raises(PipelineError) as err:
+        pipe.record_approval(RUN, "direction", nonce=nonce, decision="approved",
+                             override_reason="硬过", selected_option_id="B")
+    assert err.value.rule == "brief"
+    assert "goal_uncovered" in str(err.value)
+
+
+def test_changing_only_the_recommendation_does_not_change_admission(store):
+    """Same options, different `recommended`: the per-option answer must not move."""
+    pipe = Pipeline(store)
+    submit_intake(pipe)
+    admission = {}
+    for recommended in ("A", "B"):
+        attempt = pipe.start_attempt(RUN, "direction")
+        pipe.submit(RUN, "direction", attempt.token, content="方向正文", summary="方向",
+                    structured={"options": [{"key": "A", "satisfies": "goal.primary"},
+                                            {"key": "B", "satisfies": "goal.primary"}],
+                                "recommended": recommended})
+        gate = pipe.stage_state(RUN, "direction").brief_gate
+        admission[recommended] = {r["key"]: r["admissible"] for r in gate["options"]}
+    assert admission["A"] == admission["B"] == {"A": True, "B": True}
+
+
+def test_a_compliant_alternative_stays_adoptable_when_the_recommendation_is_blocked(store):
+    """R3: one bad recommendation must not take the good option's button away.
+
+    The whole-stage card switches to `brief_amendment` only when *nothing* can be
+    adopted; the approval route follows the same per-option answer.
+    """
+    from studio.config import Pricing, Settings
+    from studio.ledger import Ledger
+    from studio.timeline import _pending_action
+
+    pipe, _ = _gated_direction(
+        store,
+        options=[{"key": "A", "violates": "goal.primary", "claim": "降级目标"},
+                 {"key": "B", "satisfies": "goal.primary"}],
+    )
+    gate = pipe.stage_state(RUN, "direction").brief_gate
+    assert gate["status"] == "blocked", "the recommendation is the blocked one"
+    assert {r["key"]: r["admissible"] for r in gate["options"]} == {"A": False, "B": True}
+
+    ledger = Ledger(store, Settings(data_root=store.root,
+                                    base_url="https://example.invalid/anthropic",
+                                    pricing=Pricing(source="test", input_usd_per_mtok=1.0,
+                                                    output_usd_per_mtok=2.0, as_of="2026-09-17")))
+    pending = _pending_action(pipe.state(RUN).to_dict(), ledger, store)
+    assert pending["kind"] == "decision_request", "B still has an adoption entry"
+    rows = {row["key"]: row for row in pending["options"]}
+    assert rows["B"]["admissible"] is True
+    assert rows["A"]["admissible"] is False
+    assert rows["A"]["blocked_reason"], "the blocked option says why"
+
+    # And the server agrees with the card it drew.
+    approval = pipe.record_approval(RUN, "direction", nonce=pipe.issue_nonce(RUN, "direction"),
+                                    decision="approved", selected_option_id="B")
+    assert approval.selected_option_id == "B"
+
+
 def test_an_unknown_clause_id_blocks_the_option_that_cites_it(store):
     pipe, _ = _gated_direction(
         store,
@@ -274,7 +359,7 @@ def test_an_amendment_that_changes_nothing_is_refused(store):
     submit_intake(pipe)
     goal_text = ab.compile_active_brief(store, RUN)["goal"]["text"]
     with pytest.raises(ValueError) as err:
-        ab.propose_amendment(store, RUN, changes=[{
+        ab.apply_brief_amendment(store, RUN, changes=[{
             "clause_id": "goal.primary", "op": "replace", "text": goal_text}])
     assert "没有实际变更" in str(err.value)
     assert ab.load_amendments(store, RUN) == [], "a no-op must not become a decision"
@@ -284,10 +369,120 @@ def test_an_amendment_against_a_clause_that_does_not_exist_is_refused(store):
     pipe = Pipeline(store)
     submit_intake(pipe)
     with pytest.raises(ValueError) as err:
-        ab.propose_amendment(store, RUN, changes=[{
+        ab.apply_brief_amendment(store, RUN, changes=[{
             "clause_id": "must.deadbeef", "op": "replace", "text": "改点什么"}])
     assert "不在当前有效简报中" in str(err.value)
     assert ab.load_amendments(store, RUN) == []
+
+
+def test_adding_a_clause_is_validated_the_other_way_round(store):
+    """A2: `add` exists to introduce a clause the brief does not have yet.
+
+    Requiring the target to exist rejected every legitimate addition, and an
+    `add` that reused an existing id with a new body was silently dropped.
+    """
+    pipe = Pipeline(store)
+    submit_intake(pipe)
+    amendment = ab.apply_brief_amendment(store, RUN, changes=[{
+        "clause_id": "must.a11ce001", "op": "add", "kind": "must",
+        "text": "片中必须出现容量对比画面"}], approve=True)
+    assert amendment["status"] == "approved"
+    brief = ab.compile_active_brief(store, RUN)
+    added = [c for c in brief["clauses"] if c["id"] == "must.a11ce001"]
+    assert added and added[0]["text"] == "片中必须出现容量对比画面"
+    assert added[0]["authority"] == "amendment"
+
+    # A body the brief already carries is refused, not silently dropped.
+    with pytest.raises(ValueError) as err:
+        ab.apply_brief_amendment(store, RUN, changes=[{
+            "clause_id": "must.b0b0b0b0", "op": "add", "text": "片中必须出现容量对比画面"}])
+    assert "已在当前有效简报里" in str(err.value)
+
+
+# ------------------------------------------------------------------ R2 ----- #
+
+
+def test_an_approved_amendment_survives_a_rewritten_intake_clause(store):
+    """The decision is about a requirement, not about a frozen string.
+
+    Clause ids are derived from clause text, so a model rewrite used to change
+    the id and make the replay silently skip: the record still said "approved"
+    while the brief no longer carried what the user had approved.
+    """
+    pipe = Pipeline(store)
+    submit_intake(pipe, constraints=("台词用美式英语",))
+    original = next(c for c in ab.compile_active_brief(store, RUN)["clauses"]
+                    if c["text"] == "台词用美式英语")
+
+    ab.apply_brief_amendment(store, RUN, changes=[{
+        "clause_id": original["id"], "op": "replace",
+        "text": "台词用美式英语，且不得虚构购买经历",
+    }], approve=True)
+    after_approval = ab.compile_active_brief(store, RUN)
+    assert any("不得虚构购买经历" in c["text"] for c in after_approval["clauses"])
+    assert after_approval["conflicts"] == []
+
+    # The model rewords the *same* requirement. The clause keeps its meaning, so
+    # there is nothing to report — but the id moves, and the replay has to follow
+    # it rather than drop the ban.
+    attempt = pipe.start_attempt(RUN, "intake")
+    pipe.submit(RUN, "intake", attempt.token, content="intake v2", summary="s2",
+                structured={
+                    "facts": [{"label": "交付形态", "value": "US 线时尚达人种草向带货视频",
+                              "source": "u"}],
+                    "constraints": ["台词用美式英语，且不得虚构购买经历"],
+                    "open_questions": [],
+                })
+    recompiled = ab.compile_active_brief(store, RUN)
+    banned = [c for c in recompiled["clauses"] if "不得虚构购买经历" in c["text"]]
+    assert banned, "the approved ban must not disappear with the reworded clause"
+    assert banned[0]["authority"] == "amendment"
+    assert recompiled["conflicts"] == [], "the same requirement is not a conflict"
+
+
+def test_an_amendment_that_cannot_be_realigned_keeps_the_decision_and_reports_it(store):
+    """R2: when the clause is gone, keep what the user approved and say so.
+
+    Silently dropping the decision left a brief that looked fine; silently
+    resurrecting the model's text would claim the user approved something they
+    never saw. Neither is acceptable, so the approved body stands under the id it
+    was approved as, and the divergence is reported for the user to settle.
+    """
+    pipe = Pipeline(store)
+    submit_intake(pipe, constraints=("台词用美式英语",))
+    original = next(c for c in ab.compile_active_brief(store, RUN)["clauses"]
+                    if c["text"] == "台词用美式英语")
+    approved_text = "台词用美式英语，且不得虚构购买经历"
+    ab.apply_brief_amendment(store, RUN, changes=[{
+        "clause_id": original["id"], "op": "replace", "text": approved_text,
+    }], approve=True)
+
+    # The rewrite replaces the clause with a different requirement entirely.
+    attempt = pipe.start_attempt(RUN, "intake")
+    pipe.submit(RUN, "intake", attempt.token, content="intake v2", summary="s2",
+                structured={
+                    "facts": [{"label": "交付形态", "value": "US 线时尚达人种草向带货视频",
+                              "source": "u"}],
+                    "constraints": ["全片必须出现容量对比画面"],
+                    "open_questions": [],
+                })
+    recompiled = ab.compile_active_brief(store, RUN)
+    kept = [c for c in recompiled["clauses"] if c["text"] == approved_text]
+    assert kept, "what the user approved is still in the brief"
+    assert kept[0]["id"] == original["id"]
+    assert kept[0]["authority"] == "amendment"
+
+    assert recompiled["conflicts"], "the divergence must be reported"
+    assert recompiled["conflicts"][0]["kind"] == "amendment_unresolved"
+    assert original["id"] in recompiled["conflicts"][0]["detail"]
+
+    # And the gate refuses to admit anything against such a brief.
+    gate = ab.brief_gate(store, RUN, {
+        "options": [{"key": "A", "satisfies": "goal.primary"}], "recommended": "A"},
+        bound=True)
+    assert gate["conflicts"], "the option projection carries the conflict"
+    assert gate["options"][0]["admissible"] is False
+    assert gate["status"] == "blocked"
 
 
 def test_option_amend_proposal_never_falls_back_to_a_diagnosis():
@@ -469,3 +664,70 @@ def test_the_amendment_route_refuses_a_no_op_before_writing_anything(http_client
     assert "没有实际变更" in res.text
     assert ab.load_amendments(store, RUN) == []
     assert _job_creations(store) == []
+
+
+# ------------------------------------------------------------------ R4 ----- #
+
+
+def test_a_stale_redo_stops_being_offered_once_newer_work_covers_it(http_client, monkeypatch):
+    """R4: the recovery entry is work, and it has to stop being work when done.
+
+    Three ways it stops being pending, each checked here: a later amendment
+    replaces it as the brief's current intent, a direction draft already
+    reflects the current brief, or its redo job exists.
+    """
+    from studio.active_brief import compile_active_brief, fingerprint as brief_fp
+    from studio.jobs import JobManager
+
+    http, store, pipe = http_client["http"], http_client["store"], http_client["pipe"]
+    http.post("/api/runs", json={"run_id": RUN, "title": "t", "brief": "做一个种草视频。"})
+    latest = _blocked_direction(store, pipe)
+
+    real_submit = JobManager.submit
+
+    def refuse(self, run_id, text, request_id, **kwargs):
+        if str(request_id).startswith("brief-amendment:"):
+            raise PipelineError("job_busy", "制片室正在运行另一个任务。")
+        return real_submit(self, run_id, text, request_id, **kwargs)
+
+    def approve(changes):
+        # The direction guard is read fresh: a brief decision is about the brief,
+        # and reading it while a newer direction is on screen is legitimate.
+        res = http.post(f"/api/runs/{RUN}/brief-amendment", json={
+            "changes": changes, "approve": True,
+        })
+        assert res.status_code == 200, res.text
+        return res.json()
+
+    def redo_entry():
+        return http.get(f"/api/runs/{RUN}/timeline").json()["pending_brief_redo"]
+
+    monkeypatch.setattr(JobManager, "submit", refuse)
+
+    # (1) Neither redo started, so the newest amendment is genuinely pending.
+    first = approve([{"clause_id": "goal.primary", "op": "replace",
+                      "text": "目标收窄为设计细节种草"}])
+    assert redo_entry()["amendment_id"] == first["id"]
+
+    # (2) A later amendment replaces it as the brief's current intent.
+    second = approve([{"clause_id": "goal.primary", "op": "replace",
+                       "text": "目标收窄为设计细节种草，时长压到 8 秒"}])
+    assert second["id"] != first["id"]
+    assert redo_entry()["amendment_id"] == second["id"], "only the newest decision is pending work"
+
+    # (3) An ordinary turn produces a direction that already matches the brief,
+    #     so redoing it would spend a model call on a finished job.
+    brief = compile_active_brief(store, RUN)
+    attempt = pipe.start_attempt(RUN, "direction")
+    pipe.submit(RUN, "direction", attempt.token, content="方向正文", summary="方向",
+                structured={"options": [{"key": "A", "satisfies": "goal.primary"}],
+                            "recommended": "A"})
+    assert pipe.stage_state(RUN, "direction").latest.inputs["brief:snapshot"] == brief_fp(brief)
+    assert redo_entry() is None, "the work this entry described has been done"
+
+    # (4) Its own job existing is the third, independent reason.
+    monkeypatch.setattr(JobManager, "submit", real_submit)
+    third = approve([{"clause_id": "goal.primary", "op": "replace",
+                      "text": "目标收窄为设计细节种草，时长压到 8 秒，保留容量对比"}])
+    assert third["redo"]["status"] == "started"
+    assert redo_entry() is None

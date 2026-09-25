@@ -155,14 +155,23 @@ BOM**，**代码与配置（`.py`/`.json`/`.yaml`）用 UTF-8 不带 BOM**。加
     `inputs["brief:snapshot"]`，指纹变化使**已带该 key** 的产物 stale（无 key 的旧版不批量作废）。
     direction 各 option 用 `satisfies`/`violates`/`amend_*` 声明条款；**带 `brief:snapshot`
     的产物必须声明**（`bound=True`）：未声明的 option 记 `unmapped` blocker，引用当前简报中不存在的
-    clause id 记 `unknown_clause`，检查的是**实际选中项**而非推荐项；不带该 key 的旧稿只报
-    `unmapped`、不加 blocker、不批量作废。推荐项有 blocker 时 `brief_gate=blocked`，pending 只暴露
-    「批准修订简报 / 退回重做」，**无 override 硬过路径**。
-    改 `goal.primary` 只能 `POST /brief-amendment`（`runs/<id>/briefs/amendments.json`），且写入前
-    校验条款存在、正文与原条款不同——诊断文字与 clause id 都不是修订正文，不得兜底成
-    `replace.text`。批准后按 amendment id 派生固定 request identity 启动一次重做
+    clause id 记 `unknown_clause`，**没有声明满足 `goal.primary` 且未对它提修订的 option 记
+    `goal_uncovered`**。**准入按每个 option 独立计算**（`brief_gate.options[].admissible`，
+    审批用同一个 `gate_blockers_for`）：推荐只决定卡片排前哪个，既不豁免备选、也不因自己被挡而
+    取消合规备选的采用入口；只有**所有** option 都不可采用时整阶段才改出简报修订卡。
+    不带该 key 的旧稿只报 `unmapped`、不加 blocker、不批量作废。**无 override 硬过路径**。
+    改 `goal.primary` 只能 `POST /brief-amendment`：`add` 按新身份校验正文不重复，`replace`/`retire`
+    要求目标存在且正文确有不同——诊断文字与 clause id 都不是修订正文，不得兜底成 `replace.text`。
+    每条改动记录决定时的原条款正文（`base_text`）与 `expected_brief_fingerprint`：前者让模型改写
+    intake 后仍能重新对齐，找不到对齐目标时**保留用户批准的正文并记 `conflicts`**（不得静默丢弃、
+    也不得拿模型新写的正文冒充已批准）；后者不一致返回 409，不静默换基线。
+    批准后按 amendment id 派生固定 request identity 启动一次重做
     （`POST /brief-amendment/{id}/redo` 是显式恢复入口）；「已保存但未启动」在 timeline 的
-    `pending_brief_redo` 显示，重试只解析原任务、不重复开任务，也不提交任何媒体生成。
+    `pending_brief_redo` 显示，只对**最新一条**已批准修订、且当前简报尚无合规方向稿时成立；
+    重试只解析原任务、不重复开任务，也不提交任何媒体生成。
+    对话输入**按每次提交与项目归还草稿**：一次提交捕获原 runId 与输入版本，只有同一项目且期间
+    没有更新的输入时才放回，失败不得覆盖别的项目或后来输入的文字；`submit` 原样返回
+    `submitJob` 的 accepted/uncertain，不自行改写结果。
     `open_questions.kind=brief_amendment` 不进 ask_user。审核 findings 可带 `clause_ids`，
     引用不存在的 id 拒记；direction 退回且 gate blocked 时缺省会补上 blockers 的 id。
     详见 `studio/active_brief.py`、`tests/test_active_brief.py` 与 `tests/test_brief_authority.py`。
