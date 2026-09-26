@@ -301,12 +301,19 @@ class JobManager:
         try:
             result = runner(text, emit, self.check_cancel)
             self.check_cancel()
-            if result.stopped_because != 'done':
+            if result.stopped_because == 'repeated_failure':
+                # Why it stopped is the actionable fact — more so than the
+                # unfinished deliverable, which is a consequence of it. Words
+                # the user can act on, not an English enum.
+                status, reason = 'blocked', (
+                    '同一问题连续失败，本轮已停止重试：请查看团队工作记录里的具体错误，'
+                    '改掉原因后再发送新的指令。')
+            elif result.stopped_because != 'done':
                 status, reason = 'blocked', f'本轮结束于 {result.stopped_because}；已保存进度，请查看结果后发送新的指令。'
             deliverable = getattr(result, 'deliverable', None)
             if deliverable:
                 self._event(run_id, job_id, 'job_deliverable', deliverable=deliverable)
-                if deliverable['status'] == 'incomplete':
+                if deliverable['status'] == 'incomplete' and result.stopped_because != 'repeated_failure':
                     status, reason = 'blocked', '交付未完成：' + '、'.join(deliverable['missing'])
             emit({'type': 'done', 'text': result.text, 'rounds': result.rounds,
                   'stopped_because': result.stopped_because, 'tools': result.used_tools})

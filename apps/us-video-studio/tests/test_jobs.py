@@ -591,3 +591,26 @@ def test_connection_preflight_problem_is_visible_without_unknown_charge(tmp_path
         assert ('PATH' if provider == 'codex_cli' else 'API key') in job['reason']
         assert job['unresolved_calls'] == []
         assert http.get(f'/api/runs/{RUN}/ledger').json()['rows'] == []
+
+
+def test_repeated_identical_failures_block_the_job_with_a_human_reason(tmp_path):
+    """Non-convergence, end to end: the same deterministic tool error again and
+    again cannot succeed by repeating (the 2026-09-26 live loop). The loop must
+    stop early with `repeated_failure`, and the job must say so in words the
+    user can act on — not leak an English enum or only report the deliverable.
+    """
+    model = ScriptedModel([
+        tool_turn(f"t{i}", "read_artifact", {"stage": "direction", "version": 1})
+        for i in range(12)
+    ])
+    with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: model)) as http:
+        make_run(http)
+        job = wait_job(http, post_job(http, text="看看方向稿")["job_id"])
+        assert job["status"] == "blocked"
+        assert "连续失败" in job["reason"], job["reason"]
+        assert "max_rounds" not in job["reason"]
+        assert any(e["type"] == "done" and e["stopped_because"] == "repeated_failure"
+                   for e in job["events"])
+        # The failure reason survives even though the deliverable is unfinished:
+        # "why it stopped" is the actionable fact, not the missing deliverable.
+        assert "交付未完成" not in job["reason"]

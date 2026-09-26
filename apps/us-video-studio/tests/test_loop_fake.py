@@ -275,3 +275,84 @@ def test_parallel_tool_calls_in_one_turn_all_execute():
     )
     assert [t["tool"] for t in result.tool_log] == ["read_project_state", "list_artifacts"]
     assert len(model.calls[1]["messages"][-1]["content"]) == 2
+
+
+# ------------------------------------------- non-convergence guard (H-fix) -- #
+
+
+def _repeating_failure_model(rounds: int) -> ScriptedModel:
+    return ScriptedModel([
+        tool_turn(f"t{i}", "submit_patch", {"changes": [{"path": ["x"], "value": "y"}]})
+        for i in range(rounds)
+    ])
+
+
+def test_identical_tool_failures_stop_the_loop_instead_of_burning_the_round_cap():
+    """Observed live 2026-09-26: one submit_patch rejection repeated while
+    completion_check kept saying "keep going" — rounds burned to the cap with
+    zero progress. Same tool + same failure result cannot succeed unchanged:
+    advise once at the limit, then stop with an honest reason."""
+    def execute(name, args):
+        raise ValueError("[revision_scope] 补丁超出本次字段范围、重复或内容过长，原稿未修改。")
+
+    result = run_agent_loop(
+        _repeating_failure_model(12), model="deepseek-flash", system="s",
+        messages=[{"role": "user", "content": "做局部修订"}],
+        tools=[{"name": "submit_patch"}], execute_tool=execute, max_rounds=12,
+    )
+    assert result.stopped_because == "repeated_failure"
+    assert result.rounds == 4, "3 identical failures, one chance to react, then stop"
+    assert len(result.tool_log) == 4
+    assert all(t["ok"] is False for t in result.tool_log)
+    # The model was told to change method (or report) *before* being stopped.
+    joined = "".join(
+        block if isinstance(m.get("content"), str) else
+        "".join(b.get("text", "") for b in m["content"] if isinstance(b, dict))
+        for m in result.messages
+        for block in [m.get("content", "")]
+    )
+    assert "停止原样重试" in joined, "the advisory reached the model"
+
+
+def test_distinct_errors_still_run_to_the_round_cap():
+    """Different errors each time are not non-convergence — the old bounded
+    behaviour stays: run to max_rounds, stop as max_rounds."""
+    counter = {"n": 0}
+
+    def execute(name, args):
+        counter["n"] += 1
+        raise ValueError(f"transient failure #{counter['n']}")
+
+    result = run_agent_loop(
+        ScriptedModel([tool_turn(f"t{i}", "flaky", {}) for i in range(5)]),
+        model="deepseek-flash", system="s", messages=[{"role": "user", "content": "go"}],
+        tools=[{"name": "flaky"}], execute_tool=execute, max_rounds=5,
+    )
+    assert result.stopped_because == "max_rounds"
+    assert result.rounds == 5
+
+
+def test_successes_between_identical_failures_do_not_reset_the_count():
+    """The live log: a failed patch, then a successful read, then the same
+    failed patch again. Counting only *consecutive* failures would miss it —
+    the count is per identical (tool, result) across the whole log."""
+    def execute(name, args):
+        if name == "read_artifact":
+            return "direction-v4 read ok"
+        raise ValueError("[revision_scope] 补丁超出本次字段范围、重复或内容过长，原稿未修改。")
+
+    turns = [
+        tool_turn("t0", "submit_patch", {"changes": []}),
+        tool_turn("t1", "read_artifact", {"stage": "direction", "version": 4}),
+        tool_turn("t2", "submit_patch", {"changes": []}),
+        tool_turn("t3", "submit_patch", {"changes": []}),
+        tool_turn("t4", "submit_patch", {"changes": []}),
+    ]
+    result = run_agent_loop(
+        ScriptedModel(turns), model="deepseek-flash", system="s",
+        messages=[{"role": "user", "content": "做局部修订"}],
+        tools=[{"name": "submit_patch"}, {"name": "read_artifact"}],
+        execute_tool=execute, max_rounds=8,
+    )
+    assert result.stopped_because == "repeated_failure"
+    assert result.rounds == 5, "read success in between does not reset the count"

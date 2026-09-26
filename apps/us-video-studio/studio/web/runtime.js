@@ -17,6 +17,9 @@ const JOB_LABELS = {
 const JOB_ROLE_NAMES = { orchestrator: "主制片", director: "创意导演", material: "视觉策划", writer: "编剧", reviewer: "独立审片" };
 function jobGuidance(job) {
   const reason = String(job.reason || "");
+  // Why the round stopped outranks what it was missing — the failure explains
+  // the missing part (and is the thing to fix).
+  if (/连续失败/.test(reason)) return "本轮因同一问题反复失败已停止。具体错误见「团队工作记录」，改掉原因后再发新的指令。";
   if (job.deliverable?.status === 'incomplete') return `本轮交付还缺：${job.deliverable.missing.join('、')}。已完成的内容已保留，请查看准确版本后继续。`;
   // Missing accounting data is diagnostic, never a creative workflow warning.
   if (/soft cap|预算.*上限|预算不足/i.test(reason)) return state.timeline?.budget?.limit_mode === 'none'

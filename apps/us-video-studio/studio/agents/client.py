@@ -331,6 +331,24 @@ class LoopResult:
     tool_log: list[dict[str, Any]] = field(default_factory=list)
 
 
+#: The same tool failing the same way this many times cannot succeed by
+#: repeating the identical call. At the limit the model is told to change
+#: method (or report honestly); beyond it the loop stops with
+#: ``stopped_because='repeated_failure'``. BudgetExceeded below is the
+#: precedent — it ends the loop instead of becoming retryable fodder; this
+#: generalizes that to every deterministic failure. Observed live 2026-09-26:
+#: one rejected submit_patch burned every round while completion_check kept
+#: saying "keep going" — zero progress for twenty minutes.
+REPEATED_FAILURE_LIMIT = 3
+FAILURE_ADVISORY = (
+    "这是同一工具、同一错误的第 {n} 次失败——停止原样重试。"
+    "换一种方法才继续（不同的输入、或拆成更小的步骤）；"
+    "如果换不了方法，现在就收工：按三段给 Jeffery 汇报——"
+    "结论、没成的事、需要他决定的——把卡住的原因写清楚，"
+    "不要继续重复同一调用。"
+)
+
+
 def run_agent_loop(
     client: ModelClient,
     *,
@@ -489,6 +507,30 @@ def run_agent_loop(
                     "is_error": is_error,
                 }
             )
+        # Non-convergence guard (see REPEATED_FAILURE_LIMIT): count identical
+        # (tool, failure result) pairs across the whole log — interleaved
+        # successes do not reset a deterministic failure. At the limit, attach
+        # ONE advisory telling the model to change method or report; if it does
+        # the same thing anyway, stop the loop instead of feeding retries until
+        # max_rounds. The transcript above is complete either way: the assistant
+        # tool_use batch is paired with its results before we return.
+        failures: dict[tuple[str, str], int] = {}
+        for rec in tool_log:
+            if not rec["ok"] and not rec.get("skipped"):
+                key = (rec["tool"], rec.get("result", ""))
+                failures[key] = failures.get(key, 0) + 1
+        if any(count > REPEATED_FAILURE_LIMIT for count in failures.values()):
+            convo.append({"role": "user", "content": results})
+            return LoopResult(
+                text="\n".join(text_seen).strip(),
+                messages=convo,
+                rounds=round_index,
+                stopped_because="repeated_failure",
+                tool_log=tool_log,
+            )
+        if any(count == REPEATED_FAILURE_LIMIT for count in failures.values()):
+            results.append({"type": "text",
+                            "text": FAILURE_ADVISORY.format(n=REPEATED_FAILURE_LIMIT)})
         convo.append({"role": "user", "content": results})
         if concluded:
             # Commit the terminal result and explicit skips for the remaining
