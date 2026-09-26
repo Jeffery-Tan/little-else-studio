@@ -1,10 +1,8 @@
-/* Conversation as the single stream — the interaction pattern mature OSS
- * chat UIs (Open WebUI, LibreChat) converge on:
+/* Conversation as the single stream:
  *
- *   progress lives in one stable status row → the conclusion is always a
- *   bubble of its own → clarification options arrive as an ADDITIONAL card
- *   after the answer → a finished round with no reply still says so instead
- *   of leaving the assistant side blank.
+ *   real agent progress appears in the originating turn → the conclusion is
+ *   a bubble of its own → clarification options arrive as an additional card
+ *   after the answer → a finished round with no reply still says so.
  *
  * And the project chrome carries no persistent status band: the one
  * next-action is a small button in the workspace tab bar (Open WebUI's top
@@ -116,7 +114,54 @@ test('while a round is still running the fallback stays out of the way', () => {
 
   const host = p.el('conversation-body');
   assert.equal(host.querySelectorAll('.msg.assistant').length, 0,
-    'the live status row owns the in-progress state; no premature “no conclusion”');
+    'the live progress area owns the in-progress state; no premature “no conclusion”');
+});
+
+test('saved and live agent progress stays in the chat turn without duplicate lines', () => {
+  const p = page();
+  p.ctx.__tl = {
+    turns: [turn({reply: null, items: [
+      {kind:'progress',type:'agent_narration',seq:10,at:'2026-09-25T15:55:00Z',
+       role:'orchestrator',text:'我先核对旧方案。'},
+    ]})],
+    rail: [], questions: [], progress: {}, pending: null,
+  };
+  vm.runInContext(`
+    state.busy = true;
+    currentJob = {job_id:'job-1',job_kind:'conversation',status:'running',events:[
+      {type:'agent_narration',seq:10,at:'2026-09-25T15:55:00Z',role:'orchestrator',text:'我先核对旧方案。'},
+      {type:'agent_tool',seq:11,at:'2026-09-25T15:55:20Z',role:'orchestrator',
+       tool:'dispatch',ok:true,args:{stage:'direction',role:'director'}},
+      {type:'agent_activity',seq:12,at:'2026-09-25T15:55:21Z',role:'director',phase:'thinking'},
+    ]};
+    state.timeline = globalThis.__tl;
+    renderConversation(globalThis.__tl);
+    renderJobProgress(currentJob);
+    null;
+  `, p.ctx);
+  const host = p.el('conversation-body');
+  const progress = host.querySelector('.turn-progress');
+  assert.equal(progress.querySelectorAll('.progress-line').length, 2,
+    'the persisted narration and new dispatch appear once each');
+  assert.match(progress.textContent, /我先核对旧方案/);
+  assert.match(progress.textContent, /创意导演已交回 · 创意方向/);
+  assert.match(progress.querySelector('.turn-working').textContent, /创意导演/);
+  assert.equal(host.querySelectorAll('.msg.assistant').length, 0,
+    'an unfinished turn does not claim a conclusion');
+
+  host.scrollHeight = 888;
+  p.read('state.atBottom = true');
+  p.read(`currentJob.events.push({type:'agent_narration',seq:13,
+    at:'2026-09-25T15:55:40Z',role:'director',text:'方向的开头已经明确。'});
+    renderJobProgress(currentJob)`);
+  assert.match(progress.children.at(-2).textContent, /方向的开头已经明确/,
+    'a new update goes before the current working indicator');
+  assert.match(progress.children.at(-1).className, /turn-working/);
+  assert.equal(host.scrollTop,888, 'new progress stays visible when the user is following the latest turn');
+
+  p.read('currentJob.status = "succeeded"; renderJobProgress(currentJob)');
+  assert.equal(progress.querySelector('.turn-working'), null,
+    'the working indicator clears as soon as execution ends');
 });
 
 test('only the live turn stays quiet — an older failed round still gets its fallback', () => {

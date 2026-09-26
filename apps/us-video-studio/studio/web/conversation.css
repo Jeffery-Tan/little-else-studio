@@ -13,6 +13,15 @@
 .brief-actions {display:flex;gap:8px;flex-shrink:0}
 .brief-actions button {font-size:12px}
 .turn-work,.reply-full,.team-issues {font-size:13px;color:#b8bdc8;margin:12px 0}
+.turn-progress {display:flex;flex-direction:column;gap:12px;margin:6px 0 16px}
+.turn-progress:empty {display:none}
+.progress-line {border-left:2px solid #56643d;padding:2px 0 2px 14px;max-width:78ch}
+.progress-line.failed {border-left-color:var(--wait)}
+.progress-meta {display:block;color:#aeb3a4;font-size:11px;margin-bottom:4px}
+.progress-text {font-size:13px;line-height:1.7;color:#dfe3d9;white-space:pre-wrap;overflow-wrap:anywhere}
+.turn-working {display:flex;align-items:center;gap:9px;color:#cbd8ad;font-size:12px;line-height:1.6;padding-left:16px}
+.turn-working::before {content:"";width:7px;height:7px;flex:none;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px #ceff6916}
+.turn-working.preview {white-space:pre-wrap;overflow-wrap:anywhere;align-items:flex-start}
 .turn-work summary,.reply-full summary,.team-issues summary {cursor:pointer;padding:8px 0;color:#cbd0db}
 .turn-work .line {padding:10px 0;display:block}
 .turn-work .line-by {display:block;white-space:normal;margin:8px 0}
@@ -35,6 +44,9 @@
 .producer-heading div>span {display:none}
 #conversation-latest {margin-left:auto;font-size:12px;color:var(--ink-soft)}
 .job-status {position:relative;margin-top:8px;padding:10px 14px;font-size:13px;line-height:1.55;max-height:30%;border-color:#363d2e;background:#ceff6905}
+.job-status[data-chat-job="true"] {max-height:none;overflow:visible;padding:4px 0;border:0;background:transparent}
+.job-status[data-chat-job="true"] .job-copy {display:flex;flex-direction:row;align-items:center;gap:10px;flex-wrap:wrap;padding:0}
+.job-status[data-chat-job="true"] .job-activity-open {position:static;margin-left:auto}
 .job-copy {gap:4px;position:relative}
 .job-copy>strong:first-child {font-size:13px;color:var(--accent)}
 .job-copy>.muted {color:#cdced4;font-size:13px;line-height:1.6}

@@ -31,7 +31,7 @@ from .project_brief import project_brief
 
 #: Sort tiebreak when a note and a card share a timestamp: the note announced the
 #: work, so it goes above the work.
-_PRIORITY = {"note": 0, "artifact": 1, "approval": 2, "decision_request": 3}
+_PRIORITY = {"progress": 0, "note": 1, "artifact": 2, "approval": 3, "decision_request": 4}
 
 
 def build_timeline(
@@ -142,10 +142,18 @@ def _collect_items(
     #: sha256 -> review, so each artifact card can carry its own verdict.
     review_by_sha = {r.artifact_sha256: r for r in reviews}
     card_shas = {a.sha256 for a in artifacts}
+    conversation_jobs = {ev.get("job_id") for ev in events
+                         if ev.get("kind") == "job_created"
+                         and ev.get("job_kind") in {"conversation", "stage_review"}}
 
     items: list[dict[str, Any]] = []
 
     for ev in events:
+        if ev.get("kind") == "job_progress":
+            progress = _conversation_progress(ev) if ev.get("job_id") in conversation_jobs else None
+            if progress is not None:
+                items.append(progress)
+            continue
         # These two are the card's own story; skip them when the card is present.
         if ev.get("kind") in ("attempt_submitted", "review_recorded"):
             if ev.get("sha256") in card_shas or _sha_of(ev, events) in card_shas:
@@ -210,6 +218,26 @@ def _collect_items(
 
     items.sort(key=lambda i: (i["at"], _PRIORITY.get(i["kind"], 9)))
     return items
+
+
+def _conversation_progress(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Expose durable public progress without carrying tool inputs into chat."""
+    event = row.get("event") or {}
+    kind = event.get("type")
+    if kind == "agent_narration":
+        text = str(event.get("text") or "").strip()
+        if not text:
+            return None
+        return {"kind": "progress", "type": kind, "at": row.get("at", ""),
+                "seq": row.get("seq"), "role": event.get("role", ""), "text": text[:1000]}
+    if kind == "agent_tool":
+        args = event.get("args") if isinstance(event.get("args"), dict) else {}
+        return {"kind": "progress", "type": kind, "at": row.get("at", ""),
+                "seq": row.get("seq"), "role": event.get("role", ""),
+                "tool": event.get("tool", ""), "ok": event.get("ok") is not False,
+                "args": {key: str(args[key])[:180] for key in ("stage", "role", "summary", "verdict")
+                         if key in args and isinstance(args[key], str)}}
+    return None
 
 
 def _sha_of(ev: dict[str, Any], events: list[dict[str, Any]]) -> str:

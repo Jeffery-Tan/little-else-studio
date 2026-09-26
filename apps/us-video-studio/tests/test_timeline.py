@@ -114,6 +114,33 @@ def test_a_message_comes_before_the_work_it_triggered(env):
     assert cards(turn)[0]["stage"] == "intake"
 
 
+def test_agent_progress_survives_reload_without_exposing_tool_inputs(env):
+    store, pipeline, ledger = env
+    store.append_chat(RUN, "user", "请先核对方案，再找导演修改。")
+    store.append_event(RUN, "job_created", job_id="job-1", job_kind="conversation")
+    store.append_event(RUN, "job_progress", job_id="job-1", event={
+        "type": "agent_narration", "role": "orchestrator", "text": "先核对已保存方案。"})
+    store.append_event(RUN, "job_progress", job_id="job-1", event={
+        "type": "agent_tool", "role": "orchestrator", "tool": "dispatch", "ok": True,
+        "args": {"stage": "direction", "role": "director", "secret": "never-in-timeline"}})
+    store.append_event(RUN, "job_progress", job_id="job-1", event={
+        "type": "agent_narration_preview", "role": "orchestrator", "text": "未完成的预览"})
+    store.append_event(RUN, "job_created", job_id="media-1", job_kind="reference_video")
+    store.append_event(RUN, "job_progress", job_id="media-1", event={
+        "type": "agent_narration", "role": "material", "text": "媒体分析不属于这一轮制片对话"})
+    store.append_chat(RUN, "assistant", "方向已经交回，等你选择。")
+
+    turn = timeline(store, pipeline, ledger)["turns"][0]
+    progress = [item for item in turn["items"] if item["kind"] == "progress"]
+    assert [item["type"] for item in progress] == ["agent_narration", "agent_tool"]
+    assert progress[0]["text"] == "先核对已保存方案。"
+    assert progress[1]["tool"] == "dispatch"
+    assert progress[1]["args"] == {"stage": "direction", "role": "director"}
+    assert all(isinstance(item["seq"], int) for item in progress)
+    assert "never-in-timeline" not in str(turn)
+    assert turn["reply"]["text"] == "方向已经交回，等你选择。"
+
+
 def test_each_message_starts_its_own_turn(env):
     store, pipeline, ledger = env
     store.append_chat(RUN, "user", "先整理需求。")

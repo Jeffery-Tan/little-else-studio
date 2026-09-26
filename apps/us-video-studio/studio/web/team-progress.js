@@ -18,10 +18,21 @@ const TEAM_TOOLS = {
   compile_creative_package:['整理创意交付包','已整理创意交付包'],
   read_production:['查阅制作方案','已查阅制作方案'],
   prepare_production:['准备制作方案','已保存制作方案，待你检查'],
+  review_production:['检查制作输入','已检查制作输入'],
 };
+const TEAM_CHAT_TOOLS = new Set([
+  'dispatch','request_review','write_stage','submit_stage','finish_review',
+  'prepare_production','review_production','propose_learning_feedback','compile_creative_package',
+]);
 
 function teamAction(event, completed = false) {
   const stage = TEAM_STAGES[event.args?.stage || event.stage];
+  if (event.tool === 'dispatch') {
+    const role = TEAM_ROLES[event.args?.role] || '受托角色';
+    return `${role}${completed ? event.ok === false ? '未能交回' : '已交回' : '正在处理'}${stage ? ` · ${stage}` : ''}`;
+  }
+  if (event.tool === 'request_review')
+    return `独立审片${completed ? event.ok === false ? '未能完成检查' : '已完成检查' : '正在检查'}${stage ? ` · ${stage}` : ''}`;
   let text = (TEAM_TOOLS[event.tool] || ['处理项目操作','项目操作已返回'])[completed ? 1 : 0];
   if (stage) text += ` · ${stage}`;
   if (completed && event.ok === false) return `${text.replace(/^已/, '')} · 未完成`;

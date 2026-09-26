@@ -161,6 +161,7 @@ function showJob(job, notice = "") {
   if (typeof renderProjectProgress === 'function') renderProjectProgress();
   if (typeof renderJourneyDecision === 'function') renderJourneyDecision();
   const host = $("job-status");
+  if (typeof renderJobProgress === 'function') renderJobProgress(job);
   const lastMessage = [...(job?.events || [])].reverse().find((event) => event.say || event.message);
   const renderKey = JSON.stringify([state.runId, job?.job_id, job?.status, job?.events?.length, job?.goal_revision,
     job?.steer_status, job?.successor_job_id, view.detail, view.guidance, job?.reason,
@@ -172,11 +173,12 @@ function showJob(job, notice = "") {
   host.hidden = !job && !notice && !state.recoveryBlocked;
   if (host.hidden) return;
   host.setAttribute?.('data-active', String(view.active));
+  host.setAttribute?.('data-chat-job', String(Boolean(job && ['conversation','stage_review'].includes(job.job_kind))));
   const copy = box("div", "job-copy");
   // Project status is above both views. This strip is only the live execution
   // observer; historical usage cannot turn it back into a second status panel.
-  if (job?.brief && !notice && !state.recoveryBlocked && ['conversation','stage_review'].includes(job.job_kind || 'conversation')) {
-    if (view.active) copy.append(box('span','job-live',teamProgress(job).current || '团队正在处理当前步骤'));
+  if (job && !notice && !state.recoveryBlocked && ['conversation','stage_review'].includes(job.job_kind)) {
+    if (view.active) copy.append(box('span','job-live','制片团队正在工作 · 进展见下方对话'));
     if (!view.active && view.guidance) {
       const warning = box('strong','job-warning',view.guidance);
       warning.setAttribute?.('role','alert');

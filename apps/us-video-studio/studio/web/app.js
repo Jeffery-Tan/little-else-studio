@@ -1074,6 +1074,7 @@ function renderConversation(tl) {
     host.appendChild(renderTurn(tl.turns[i], i === tl.turns.length - 1));
   const decision = box('div','journey-decision');decision.id='journey-decision';host.append(decision);
   if (typeof renderJourneyDecision === 'function') renderJourneyDecision();
+  renderJobProgress(currentJob);
   if (state.atBottom) host.scrollTop = host.scrollHeight;
   else host.scrollTop = previousScroll;
 }
@@ -1096,6 +1097,14 @@ function renderTurn(turn, live = false) {
     bubble.append(box("div", "who", "你"), box("div", "body", turn.user.text));
     wrap.appendChild(bubble);
   }
+
+  const progress = box('div','turn-progress');
+  progress.setAttribute('aria-label','本轮进展');
+  for (const item of turn.items.filter(item => item.kind === 'progress')) {
+    const line = renderProgressLine(item);
+    if (line) progress.append(line);
+  }
+  wrap.append(progress);
 
   const history = box('details','turn-work');
   const work = turn.items.filter(item => item.kind === 'note' || item.kind === 'artifact');
@@ -1140,19 +1149,19 @@ function renderTurn(turn, live = false) {
     if(turn.reply.text.length > 1400) {
       const full=box('details','reply-full');
       full.append(box('summary','','展开完整回复'),body);
-      bubble.append(who,box('p','muted','这条回复较长。当前进度见顶部，方案可从本轮成果打开。'),full);
+      bubble.append(who,box('p','muted','这条回复较长。本轮进展见上方，方案可从本轮成果打开。'),full);
     } else bubble.append(who, body);
     wrap.appendChild(bubble);
-  } else if ((!state.busy || !live) && (turn.user?.text || work.length)) {
+  } else if ((!state.busy || !live) && (turn.user?.text || work.length || progress.children.length)) {
     // A finished round that produced no reply still answers — honest silence
     // was read as the assistant never coming back. Only the LIVE (last) turn
-    // while a round is running stays quiet: that state belongs to the status
-    // row, and claiming “no conclusion” mid-work would be false. Older failed
+    // while a round is running stays quiet: progress is already visible above,
+    // and claiming “no conclusion” mid-work would be false. Older failed
     // rounds keep their fallback even while a new round runs.
     const bubble = box("div", "msg assistant");
     const body = box("div", "body");
-    body.append(box("p", "muted", work.length
-      ? "本轮没有留下结论回复；过程与原因见上方的「本轮工作记录」。"
+    body.append(box("p", "muted", work.length || progress.children.length
+      ? "本轮没有留下结论回复；过程与原因见本轮进展和「本轮工作记录」。"
       : "本轮没有留下结论回复。"));
     bubble.append(box("div", "who", "制片团队"), body);
     wrap.appendChild(bubble);
@@ -1173,6 +1182,60 @@ function renderTurn(turn, live = false) {
   if (detail) wrap.appendChild(detail);
 
   return wrap;
+}
+
+function renderProgressLine(item) {
+  if (item.type !== 'agent_narration' &&
+      !(item.type === 'agent_tool' && TEAM_CHAT_TOOLS.has(item.tool))) return null;
+  const text = item.type === 'agent_narration'
+    ? String(item.text || '').trim() : teamAction(item, true);
+  if (!text) return null;
+  const line = box('div',`progress-line${item.ok === false ? ' failed' : ''}`);
+  if (item.seq != null) line.setAttribute('data-progress-seq',String(item.seq));
+  line.append(box('span','progress-meta',`${teamTime(item.at)} · ${TEAM_ROLES[item.role] || '制片团队'}`),
+    box('div','progress-text',text));
+  return line;
+}
+
+function renderJobProgress(job) {
+  const conversation = $('conversation-body');
+  if (!job || !JOB_ACTIVE.has(job.status) ||
+      !['conversation','stage_review'].includes(job.job_kind || 'conversation')) {
+    conversation.querySelector('.turn-working')?.remove();
+    return;
+  }
+  const turns = conversation.querySelectorAll('.turn');
+  let turn = turns[turns.length - 1];
+  if (!turn) {
+    turn = box('div','turn turn-pending');
+    const progress = box('div','turn-progress');
+    progress.setAttribute('aria-label','本轮进展');
+    turn.append(progress);
+    conversation.append(turn);
+  }
+  const host = turn.querySelector('.turn-progress');
+  if (!host) return;
+  const present = new Set([...host.querySelectorAll('.progress-line')]
+    .map(line => line.getAttribute('data-progress-seq')));
+  let appended = false;
+  for (const event of job.events || []) {
+    if (event.seq == null || present.has(String(event.seq))) continue;
+    const line = renderProgressLine(event);
+    if (line) { host.append(line); present.add(String(event.seq)); appended = true; }
+  }
+  let working = host.querySelector('.turn-working');
+  if (working) working.remove();
+  else working = box('div','turn-working');
+  host.append(working);
+  const latest = [...(job.events || [])].reverse().find(event => event.type === 'agent_narration_preview');
+  const last = job.events?.at(-1);
+  const preview = last?.type === 'agent_narration_preview' && latest?.text
+    ? String(latest.text).trim().slice(0,500) : '';
+  const nextText = preview || teamProgress(job).current || '制片团队正在处理这一轮';
+  const changed = working.textContent !== nextText;
+  working.textContent = nextText;
+  working.classList.toggle('preview',Boolean(preview));
+  if (state.atBottom && (appended || changed)) conversation.scrollTop = conversation.scrollHeight;
 }
 
 function renderNote(item) {

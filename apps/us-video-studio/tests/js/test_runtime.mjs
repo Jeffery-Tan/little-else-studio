@@ -29,6 +29,17 @@ test('project brief outranks successful job status and historical missing usage'
   assert.equal(h.context.state.busy,false);
 });
 
+test('running conversation keeps the top strip compact while progress belongs to chat',()=>{
+  const h=harness(async()=>{});
+  h.context.showJob({job_id:'active',job_kind:'conversation',status:'running',
+    brief:{title:'方向处理中',detail:'已保存旧方案'},
+    events:[{type:'agent_activity',role:'director',phase:'thinking',at:'2026-09-26T12:00:00Z'}]});
+  const strip=visibleText(h.nodes.get('job-status'));
+  assert.match(strip,/进展见下方对话/);
+  assert.match(strip,/停止本轮/);
+  assert.doesNotMatch(strip,/最近操作|最近进展|构思创意方向/);
+});
+
 test('uncertain review retries preserve the exact version and dedicated endpoint',async()=>{
   const calls=[];
   const h=harness(async(url,options)=>{
