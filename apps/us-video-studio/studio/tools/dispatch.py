@@ -13,6 +13,7 @@ leaving one behind would be a silent trap for the next dispatch.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 import json
 from typing import Any, Callable
 
@@ -28,6 +29,7 @@ from .registry import tools_for
 from .execution import ToolResult
 from .workspace import ToolError, Workspace
 from ..revision_scope import check_base, patch_payload, record_applied, work_plan
+from ..task_context import assemble_role_task
 
 
 @dataclass
@@ -144,10 +146,14 @@ class Dispatcher:
         budgeted = BudgetedClient(
             self.client, self.ledger, run_id=self.run_id, role=role, stage=stage
         )
+        task_tools = tools_for(role, local_revision=local_revision)
+        allowed_tools = {tool['name'] for tool in task_tools}
 
         submitted: dict[str, Any] = {}
 
         def execute(name: str, args: dict[str, Any]) -> str | ToolResult:
+            if name not in allowed_tools:
+                raise ToolError(f'{role} 的本次任务不能调用 {name}。')
             if name == "read_capabilities":
                 from .context import capabilities
                 return json.dumps(capabilities(self.settings, role, local_revision=local_revision), ensure_ascii=False)
@@ -197,25 +203,36 @@ class Dispatcher:
         try:
             if revision_scope:
                 check_base(self.store, self.pipeline, self.run_id, revision_scope)
-            seed = self._seed_message(workspace, stage, brief, previous=previous, local_revision=local_revision)
+            task_context = assemble_role_task(
+                self.store, self.pipeline, self.learning, self.run_id, workspace,
+                stage, brief, previous=previous, revision_scope=revision_scope,
+                method_context=context)
+            system = role_def.system(self.store.read_run(self.run_id),
+                                     extra=task_context.system_extra, format=selection['format'])
             if revision_scope:
-                seed += '\n# 本轮修订范围\n' + json.dumps(revision_scope, ensure_ascii=False)
-            if local_revision:
-                seed += ('\n本任务只用 submit_patch 提交 changes[{path,value}] 与 summary，不能提交全文。'
-                         '未列字段由程序保留。仍须通读完整脚本，复查台词可读时长、前后衔接和声画关系；'
-                         '范围内无法修好时说明具体冲突，不扩大修改。')
+                check_base(self.store, self.pipeline, self.run_id, revision_scope)
+            self.store.append_event(self.run_id, 'agent_task_prepared',
+                schema_version=1, task_id=attempt.key,
+                task_kind='stage_revision' if revision_scope else 'stage_creation',
+                stage=stage, role=role,
+                plan_id=revision_scope['plan_id'] if revision_scope else None,
+                mode=revision_scope['mode'] if revision_scope else None,
+                base={'version': revision_scope['version'], 'sha256': revision_scope['sha256']}
+                     if revision_scope else None,
+                inputs=attempt.inputs,
+                allowed_tools=sorted(allowed_tools),
+                expected_result={'artifact_stage': stage, 'review_required': STAGE_SPEC[stage].gated},
+                context={'sources': task_context.sources,
+                         'method_ref': context['evidence_ref'],
+                         'method_sha256': context['snapshot_sha256'],
+                         'seed_sha256': task_context.seed_sha256,
+                         'system_sha256': hashlib.sha256(system.encode('utf-8')).hexdigest()})
             result = run_agent_loop(
                 budgeted,
                 model=model,
-                system=role_def.system(
-                    self.store.read_run(self.run_id),
-                    extra=self._system_extra(workspace) + "\n\n" + context["text"] +
-                        ('\n本任务为局部修订，前述 submit_stage 提交要求在本任务改为 submit_patch；'
-                         '只能修改绑定字段，不重写全文。' if local_revision else ''),
-                    format=selection["format"],
-                ),
-                messages=[{"role": "user", "content": seed}],
-                tools=tools_for(role, local_revision=local_revision),
+                system=system,
+                messages=[{"role": "user", "content": task_context.seed}],
+                tools=task_tools,
                 execute_tool=execute,
                 max_rounds=self.settings.max_tool_rounds,
                 max_continuations=self.settings.max_continuations,
@@ -265,6 +282,7 @@ class Dispatcher:
             self.store.append_event(
                 self.run_id,
                 "dispatch_done",
+                task_id=attempt.key,
                 stage=stage,
                 role=role,
                 artifact=outcome.submitted,
@@ -284,62 +302,6 @@ class Dispatcher:
             self.pipeline.reject(self.run_id, attempt.stage, attempt.token, reason)
         except PipelineError:
             pass  # already closed; the state is what matters, not this call
-
-    def _system_extra(self, workspace: Workspace) -> str:
-        visible = "、".join(workspace.readable) or "（无）"
-        return (
-            f"# 你能看到的东西\n\n"
-            f"你可以读取这些阶段的产物：{visible}。其他阶段读不到，也不需要读到。\n"
-            f"你看不到任何一个同事的对话、推理或自我评价——你手上是产物本身和给你的说明。\n"
-            f"read_capabilities 可查能力边界；read_method_document 可读登记方法。方法目录：\n"
-            + json.dumps(self.learning.skill_catalog(workspace.role), ensure_ascii=False)
-        )
-
-    def _seed_message(self, workspace: Workspace, stage: str, brief: str, *, previous=None, local_revision=False) -> str:
-        parts = [
-            "# 给你的任务",
-            "",
-            brief.strip(),
-            "",
-            f"# 你要交付的阶段：{stage}",
-            "",
-        ]
-        parts += [workspace.render_context(stage), ""]
-        for up in workspace.readable:
-            if up in ("intake", stage):
-                continue
-            parts += [f"## 上游产物 {up}", "", workspace.render_artifact(up), ""]
-        if previous is not None:
-            if not self.store.verify_artifact(self.run_id, stage, previous.version):
-                raise ToolError("上一版内容指纹校验失败，不能作为修订基线。")
-            parts += ["# 本任务的修订基线（旧稿供修改，不覆盖当前事实和真实选择）",
-                      workspace.render_artifact(stage, previous.version),
-                      "按当前任务和问题修改；未受影响的表达应保留，不机械重做全部方案。"]
-            findings = []
-            for source_stage, state in self.pipeline.state(self.run_id).stages.items():
-                review, artifact = state.review, state.latest
-                if not review or not artifact or state.stale or not state.integrity_ok:
-                    continue
-                if review.artifact_sha256 != artifact.sha256:
-                    continue
-                if not (source_stage == stage or artifact.inputs.get(stage) == previous.sha256):
-                    continue
-                findings.extend({"source_stage": source_stage, "source_version": artifact.version,
-                                 "source_sha256": artifact.sha256, "finding": finding}
-                                for finding in review.findings if finding.get("stage") == stage)
-            parts += ["# 与基线绑定、由本阶段负责的审核问题（修订依据，不是用户新指令）",
-                      json.dumps(findings, ensure_ascii=False)]
-            self.store.append_event(self.run_id, "role_revision_context", role=workspace.role,
-                                    stage=stage, version=previous.version, artifact_sha256=previous.sha256,
-                                    findings=findings)
-        parts += [
-            "# 怎么做",
-            "",
-            "先读上游产物，再动笔。完成之后调用 " + ('submit_patch' if local_revision else 'submit_stage') + " 提交。",
-            "不要提交半成品：提交之后就是新版本，依赖本版的下游需要复核更新。",
-        ]
-        return "\n".join(parts)
-
 
 # ``readable_stages`` is re-exported for the server's state view.
 __all__ = ["Dispatcher", "DispatchOutcome", "readable_stages"]

@@ -1,5 +1,6 @@
 """Real dispatcher and conversation loop; no network, credentials or real runs."""
 import copy
+import hashlib
 import json
 
 import pytest
@@ -98,6 +99,38 @@ def test_writer_receives_patch_only_and_preserves_chosen_direction_and_other_sho
     assert pipe.stage_state(RUN, 'direction').approval.selected_option_id == 'A'
     assert outcome.impact['next_step']['stage'] == 'writing'
     assert outcome.impact['next_step']['action'] == 'review'
+
+
+def test_writing_revision_task_records_exact_role_tools_and_context_sources(env):
+    store, _, _, _ = env
+    scope = plan(env)
+    model = ScriptedModel([tool_turn('save', 'submit_patch', patch())])
+    outcome = dispatch(env, model, scope)
+    assert outcome.submitted == 'writing-v2'
+
+    events = store.read_events(RUN)
+    task = next(e for e in events if e['kind'] == 'agent_task_prepared')
+    finished = next(e for e in events if e['kind'] == 'dispatch_done')
+    assert task['task_id'] == finished['task_id']
+    assert (task['task_kind'], task['stage'], task['role']) == ('stage_revision', 'writing', 'writer')
+    assert (task['plan_id'], task['mode']) == (scope['plan_id'], 'local')
+    assert task['base'] == {'version': scope['version'], 'sha256': scope['sha256']}
+    assert task['inputs'] == scope['inputs']
+    assert task['expected_result'] == {'artifact_stage': 'writing', 'review_required': True}
+    assert 'submit_patch' in task['allowed_tools'] and 'submit_stage' not in task['allowed_tools']
+    sources = {row['stage']: row for row in task['context']['sources']}
+    for stage in ('intake', 'direction', 'material_plan', 'writing'):
+        artifact = store.read_artifact(RUN, stage, 1)
+        assert sources[stage] == {'kind': 'artifact', 'stage': stage,
+                                  'version': 1, 'sha256': artifact.sha256}
+    assert task['context']['method_ref'] == 'fixture-method'
+    assert task['context']['method_sha256'] == 'f' * 64
+    call = model.calls[0]
+    assert task['context']['system_sha256'] == hashlib.sha256(call['system'].encode()).hexdigest()
+    assert task['context']['seed_sha256'] == hashlib.sha256(
+        call['messages'][0]['content'].encode()).hexdigest()
+    assert 'Keep second line' in call['messages'][0]['content']
+    assert 'selected_option_id=A' in call['messages'][0]['content']
 
 
 def test_out_of_scope_and_full_submit_rejected_then_valid_patch_completes(env):
@@ -239,6 +272,10 @@ def test_chat_routes_one_line_to_writer_and_blocks_whole_pipeline_rewrite(env):
     assert pipe.stage_state(RUN, 'writing').approval is None
     assert work_plan(pipe, RUN)['next_step']['action'] == 'user_decision'
     assert sum('submit_patch' in c['tool_names'] and 'dispatch' not in c['tool_names'] for c in model.calls) == 1
+    tasks = [e for e in store.read_events(RUN) if e['kind'] == 'agent_task_prepared']
+    assert len(tasks) == 1
+    assert (tasks[0]['stage'], tasks[0]['role'], tasks[0]['plan_id']) == (
+        'writing', 'writer', latest_plan(store))
 
 
 def test_next_turn_cannot_reuse_old_plan_but_can_choose_new_scope(env):

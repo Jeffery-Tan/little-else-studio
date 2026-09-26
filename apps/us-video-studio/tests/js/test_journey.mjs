@@ -48,29 +48,39 @@ test('only the canvas exposes a version-bound choice and submit action',()=>{
   assert.ok(stage.includes('name="direction-choice"'));
   assert.ok(stage.includes('data-act="approve"'));
 });
-test('outcome tabs have linked panels and arrow keys move the single tab stop',()=>{
+test('canvas tabs keep one selected work surface as arrow keys move through available artifacts',()=>{
   const html=fs.readFileSync(new URL('../../studio/web/index.html',import.meta.url),'utf8');
-  for(const [tab,panel] of [['plan','stage'],['storyboard','journey-storyboard'],['video','journey-video']]){
+  for(const [tab,panel] of [['plan','stage'],['assets','journey-assets'],['storyboard','journey-storyboard'],['video','journey-video']]){
     assert.match(html,new RegExp(`id="journey-tab-${tab}"[^>]*aria-controls="${panel}"`));
     assert.match(html,new RegExp(`id="${panel}"[^>]*role="tabpanel"[^>]*aria-labelledby="journey-tab-${tab}"`));
   }
-  const panels=Object.fromEntries(['stage','journey-storyboard','journey-video'].map(id=>[id,{hidden:id!=='stage'}]));
+  assert.match(html,/id="journey-tab-script"[^>]*data-plan-stage="writing"[^>]*aria-controls="stage"/);
+  const panels=Object.fromEntries(['stage','journey-assets','journey-storyboard','journey-video','project-stages']
+    .map(id=>[id,{hidden:id!=='stage',attrs:{},setAttribute(name,value){this.attrs[name]=value;}}]));
   let focused='',mounted='';
-  const tabs=['plan','storyboard','video'].map(id=>({dataset:{journeyTab:id},attrs:{},tabIndex:id==='plan'?0:-1,
+  const tabs=['plan','assets','script','storyboard','video'].map(id=>({id:`journey-tab-${id}`,
+    dataset:{journeyTab:id==='script'?'plan':id,...(id==='script'?{planStage:'writing'}:id==='plan'?{planStage:'direction'}:{})},
+    attrs:{},tabIndex:id==='plan'?0:-1,
     setAttribute(name,value){this.attrs[name]=value;},focus(){focused=id;}}));
   globalThis.document={querySelectorAll:()=>tabs,querySelector:()=>null};
-  globalThis.state={canvasTab:'plan',timeline:null,rail:[]};
-  globalThis.$=id=>panels[id];
+  globalThis.state={canvasTab:'plan',timeline:null,rail:[{stage:'direction'},{stage:'writing'}],activeStage:'direction'};
+  const nodes={...panels,...Object.fromEntries(tabs.map(tab=>[tab.id,tab]))};
+  globalThis.$=id=>nodes[id];
   globalThis.openProduction=({mount})=>{mounted=Object.entries(panels).find(([,value])=>value===mount)?.[0];};
-  globalThis.selectStage=()=>{};
+  globalThis.renderCanvasMaterials=()=>{};
+  globalThis.selectStage=stage=>{state.activeStage=stage;};
   bindJourneyTabs();
   let prevented=false;
   tabs[0].onkeydown({key:'ArrowRight',preventDefault(){prevented=true;}});
-  assert.equal(prevented,true);assert.equal(focused,'storyboard');assert.equal(mounted,'journey-storyboard');
+  assert.equal(prevented,true);assert.equal(focused,'assets');
   assert.equal(tabs[1].tabIndex,0);assert.equal(tabs[0].tabIndex,-1);
-  assert.equal(panels['journey-storyboard'].hidden,false);assert.equal(panels.stage.hidden,true);
-  tabs[1].onkeydown({key:'End',preventDefault(){}});
+  assert.equal(panels['journey-assets'].hidden,false);assert.equal(panels.stage.hidden,true);
+  tabs[1].onkeydown({key:'ArrowRight',preventDefault(){}});
+  assert.equal(focused,'script');assert.equal(panels.stage.hidden,false);
+  assert.equal(state.activeStage,'writing');assert.equal(panels.stage.attrs['aria-labelledby'],'journey-tab-script');
+  tabs[2].onkeydown({key:'End',preventDefault(){}});
   assert.equal(focused,'video');assert.equal(panels['journey-video'].hidden,false);
+  assert.equal(mounted,'journey-video');
 });
 
 test("pending ask_user renders as an interactive producer bubble in the conversation", () => {

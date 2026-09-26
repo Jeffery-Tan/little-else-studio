@@ -55,6 +55,23 @@ test('uncertain review retries preserve the exact version and dedicated endpoint
   assert.ok(calls.every(c=>c.url==='/api/runs/run-a/actions/review'));
   assert.deepEqual(calls[0].body,calls[1].body);
 });
+test('uncertain selected-field edit retries its exact target on the dedicated endpoint',async()=>{
+  const calls=[];
+  const h=harness(async(url,options)=>{
+    if(!options)return {can_continue:true,revision:'r'};
+    calls.push({url,body:JSON.parse(options.body)});
+    if(calls.length===1)throw new TypeError('offline');
+    return {job_id:'edit-1',request_id:'same-edit',job_kind:'writing_revision',status:'succeeded',events:[]};
+  });
+  const payload={request_kind:'writing_revision',request_id:'same-edit',text:'只改这一句',
+    feedback_target:{kind:'writing',run_id:'run-a',stage:'writing',version:2,
+      artifact_sha256:'a'.repeat(64),quote:'Original line',path:['segments',0,'line']}};
+  await h.context.submitJob('run-a',payload);
+  await h.nodes.get('job-status').children.at(-1).onclick();
+  assert.equal(calls.length,2);
+  assert.ok(calls.every(c=>c.url==='/api/runs/run-a/actions/revise-writing'));
+  assert.deepEqual(calls[0].body,calls[1].body);
+});
 test('resolved accounting uses current recovery state without hiding actual budget caps', () => {
   const h = harness(async () => ({}));
   const job = {status: 'blocked', reason: '1 model call(s) have unknown, partial or pending usage', events: []};
@@ -108,6 +125,34 @@ test('an ended model turn surfaces the concrete missing deliverable', () => {
   const job = {status:'blocked',reason:'交付未完成',deliverable:{goal:'writing',status:'incomplete',missing:['writing 当前准确版本']}};
   assert.match(h.context.jobGuidance(job), /writing 当前准确版本/);
   assert.doesNotMatch(h.context.jobGuidance(job), /已完成本轮/);
+});
+
+test('returned direct writing edit separates saved revision from whole-script review', () => {
+  const h = harness(async () => { throw new Error('viewing a saved script must not post a job'); });
+  const job = {job_id:'edit-1',job_kind:'writing_revision',status:'blocked',events:[],
+    revision_result:{stage:'writing',version:2,artifact_sha256:'sha',change_status:'saved',review_status:'return'},
+    deliverable:{goal:'revision',status:'incomplete',missing:['修订新版的独立审核通过记录']}};
+  h.context.showJob(job);
+  const status = visibleText(h.nodes.get('job-status'));
+  assert.match(status, /脚本新版已保存 · 审核退回/);
+  assert.match(status, /选中的内容已修改并保存；独立审核认为整稿仍需修改/);
+  const nav=[];
+  h.context.showJourneyTab = tab => nav.push(`tab:${tab}`);
+  h.context.selectStage = stage => nav.push(`stage:${stage}`);
+  h.context.setProjectFocus = focus => nav.push(`focus:${focus}`);
+  descendants(h.nodes.get('job-status'), node => node.text === '查看脚本与审核')[0].onclick();
+  assert.deepEqual(nav, ['tab:plan','stage:writing','focus:canvas']);
+  h.context.showJob({...job,job_id:'edit-2',revision_result:{...job.revision_result,review_status:'pending'},
+    status:'failed',deliverable:null,reason:'独立审核调用失败'});
+  const pending = visibleText(h.nodes.get('job-status'));
+  assert.match(pending, /脚本新版已保存 · 审核未完成/);
+  assert.doesNotMatch(pending, /审核退回/);
+  assert.equal(descendants(h.nodes.get('job-status'), node => node.text === '查看脚本与审核').length, 1);
+  h.context.showJob({...job,job_id:'edit-3',revision_result:null});
+  assert.match(visibleText(h.nodes.get('job-status')), /脚本新版已保存 · 审核退回/);
+  h.context.showJob({...job,job_id:'edit-4',revision_result:null,deliverable:null,reason:'模型调用失败'});
+  assert.doesNotMatch(visibleText(h.nodes.get('job-status')), /脚本新版已保存 · 审核退回/);
+  assert.equal(descendants(h.nodes.get('job-status'), node => node.text === '查看脚本与审核').length, 0);
 });
 
 test('uncertain video observation retries acceptance identity without becoming a conversation job',async()=>{
@@ -200,12 +245,15 @@ test('refresh reattaches to accepted running job without posting a second reques
   const calls = [];
   const h = harness(async (url, options) => {
     calls.push({ url, options });
+    if (url.includes('/request-receipts/accepted?kind=job'))
+      return {received:true,kind:'job',request_id:'accepted',job_id:'j1'};
     return { job_id: 'j1', request_id: 'accepted', status: 'running', events: [{ say: '审核中' }] };
   });
   h.storage.set('studio-job-pending:run-a', JSON.stringify({ request_id: 'accepted', text: 'go' }));
   await h.context.restoreJob('run-a');
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].options, undefined);
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every(call => call.options === undefined));
+  assert.match(calls[1].url, /request-receipts\/accepted\?kind=job/);
   assert.equal(h.storage.size, 0);
   assert.equal(h.context.state.busy, true);
   assert.equal(h.timers.length, 1);

@@ -213,19 +213,21 @@ function writingWorkHtml(step, ctx) {
     const explicitNoLine = !isPhoto && /^(?:[（(]?无台词[）)]?|不使用口播|无口播)$/u.test(line.trim());
     const hasLine = Boolean(line.trim()) && !explicitNoLine && !['无', '—', '-'].includes(line.trim());
     const target = isPhoto ? `第 ${number} 页` : `第 ${number} 段`;
-    const words = hasLine ? `<div class="creator-script-words"><strong>${isPhoto ? '图内文案' : '台词或字幕'}</strong><p class="creator-script-line vf-value"${canSelect ? ` data-creator-target="${target}${isPhoto ? '图内文案' : '台词'}"` : ''}>${escapeHtml(line)}</p></div>` :
+    const fieldTarget = (name, field) => canSelect
+      ? ` data-creator-target="${name}" data-creator-path="${escapeHtml(JSON.stringify(['segments',index,field]))}"` : '';
+    const words = hasLine ? `<div class="creator-script-words"><strong>${isPhoto ? '图内文案' : '台词或字幕'}</strong><p class="creator-script-line vf-value"${fieldTarget(`${target}${isPhoto ? '图内文案' : '台词'}`,'line')}>${escapeHtml(line)}</p></div>` :
       explicitNoLine ? `<p class="creator-script-no-line">原稿注明：${escapeHtml(line)}</p>` : '';
     const visual = picture || card.media ? `<div class="creator-script-visual">` +
       (card.media ? `<div class="creator-script-media" data-media="${escapeHtml(card.media)}"></div>` : '') +
-      (picture ? `<div class="creator-script-picture-wrap"><strong>${isPhoto ? '画面' : '画面与动作'}</strong><p class="creator-script-picture vf-value"${canSelect ? ` data-creator-target="${target}画面"` : ''}>${escapeHtml(picture)}</p></div>` : '') + '</div>' : '';
-    const audio = sound ? `<div class="creator-script-sound"><strong>声音</strong><p${canSelect ? ` data-creator-target="${target}声音"` : ''}>${escapeHtml(sound)}</p></div>` : '';
+      (picture ? `<div class="creator-script-picture-wrap"><strong>${isPhoto ? '画面' : '画面与动作'}</strong><p class="creator-script-picture vf-value"${fieldTarget(`${target}画面`,'picture')}>${escapeHtml(picture)}</p></div>` : '') + '</div>' : '';
+    const audio = sound ? `<div class="creator-script-sound"><strong>声音</strong><p${fieldTarget(`${target}声音`,'sound')}>${escapeHtml(sound)}</p></div>` : '';
     const content = isPhoto || !hasLine ? visual + words : words + visual;
     const heading = isPhoto ? (time || `第 ${number} 页`) : `第 ${number} 段${time ? ` · ${time}` : ''}`;
     return `<article class="creator-script-segment${isPhoto ? ' is-photo' : hasLine ? ' has-words' : ' is-visual'}"><header><span>${escapeHtml(heading)}</span>${duration && !isPhoto ? `<small>${escapeHtml(duration)}</small>` : ''}</header>` +
       `<div class="creator-script-content">${content}${audio}${!content && !audio ? `<p class="creator-script-unwritten">这一${isPhoto ? '页' : '段'}尚未写出可读内容。</p>` : ''}</div></article>`;
   }).join('');
-  return `<div class="pane-doc creator-script-work"><div class="creator-script-intro"><span class="creator-kicker">${isPhoto ? '当前图文稿' : '当前脚本'}</span><h2>${isPhoto ? '逐页看画面与图内文案' : '逐段读画面与表达'}</h2><p>${canSelect ? '点选画面或文字，在对话中说明要改哪里。' : '先阅读这份作品；来源或版本需要核对后才能针对具体内容修改。'}</p></div><div class="creator-script-lines">${segments}</div>` +
-    (caption?.text ? `<section class="creator-script-caption"><h3>发布文案</h3><p class="blk-text"${canSelect ? ' data-creator-target="发布文案"' : ''}>${escapeHtml(caption.text)}</p></section>` : '') +
+  return `<div class="pane-doc creator-script-work"><div class="creator-script-intro"><span class="creator-kicker">${isPhoto ? '当前图文稿' : '当前脚本'}</span><h2>${isPhoto ? '逐页看画面与图内文案' : '逐段读画面与表达'}</h2><p>${canSelect ? '点选画面或文字，可在对话中讨论，也可按意见直接修改该字段。' : '先阅读这份作品；来源或版本需要核对后才能针对具体内容修改。'}</p></div><div class="creator-script-lines">${segments}</div>` +
+    (caption?.text ? `<section class="creator-script-caption"><h3>发布文案</h3><p class="blk-text"${canSelect ? ` data-creator-target="发布文案" data-creator-path="${escapeHtml(JSON.stringify(['caption']))}"` : ''}>${escapeHtml(caption.text)}</p></section>` : '') +
     (assumptions?.items?.length ? `<section class="creator-script-assumptions"><h3>这份脚本仍需核对</h3><ul>${assumptions.items.map(item => `<li>${escapeHtml(item.text)}</li>`).join('')}</ul></section>` : '') +
     (other.length ? `<details class="creator-script-support"><summary>查看分镜顺序与其他依据</summary>${blocksHtml(other)}</details>` : '') + sourceSummaryHtml(step) + '</div>';
 }
@@ -367,9 +369,13 @@ function stageDecisionGateHtml(pending) {
     amendBlockHtml(pending) +
     gateReasonHtml("想保留什么，哪里需要调整？") +
     gateActionsHtml(["approve", "reject"], "选择不会立即提交",
-      `<button type="button" class="good small" data-act="approve" data-stage="${escapeHtml(pending.stage)}">` +
-      `${escapeHtml(gateApproveLabel(pending, "stage"))}</button>` +
-      `<button type="button" class="bad small" data-act="reject" data-stage="${escapeHtml(pending.stage)}">${escapeHtml(gateRejectLabel("stage"))}</button>`) +
+      pending.passed
+        ? `<button type="button" class="good small" data-act="approve" data-stage="${escapeHtml(pending.stage)}">` +
+          `${escapeHtml(gateApproveLabel(pending, "stage"))}</button>` +
+          `<button type="button" class="bad small" data-act="reject" data-stage="${escapeHtml(pending.stage)}">${escapeHtml(gateRejectLabel("stage"))}</button>`
+        : `<button type="button" class="good small" data-act="reject" data-stage="${escapeHtml(pending.stage)}">${escapeHtml(gateRejectLabel("stage"))}</button>` +
+          `<button type="button" class="bad small" data-act="approve" data-stage="${escapeHtml(pending.stage)}">` +
+          `${escapeHtml(gateApproveLabel(pending, "stage"))}</button>`) +
     `<details class="gate-next"><summary>后续阶段与历史用量</summary>` +
     (pending.next_stage_label ? `<div>下一步：${escapeHtml(pending.next_stage_label)} · ${escapeHtml(pending.next_owner)}</div>` : '') +
     `<div class="gate-next-cost">${escapeHtml(pending.next_cost_sentence || '')}</div></details>` +
@@ -430,7 +436,7 @@ function gateAmendAttrs(pending) {
 }
 
 function findingsHtml(pending) {
-  return pending.findings?.length ? `<details class="gate-findings"><summary>审核提的 ${pending.findings.length} 点</summary>` +
+  return pending.findings?.length ? `<details class="gate-findings"${pending.passed ? '' : ' open'}><summary>审核提的 ${pending.findings.length} 点</summary>` +
     pending.findings.map(findingHtml).join("") + `</details>` : "";
 }
 
@@ -452,7 +458,9 @@ function blockersHtml(pending) {
 }
 
 function findingHtml(f) {
-  const kind = {content:"内容", feasibility:"可执行性", evidence:"证据", unverified:"尚未验证"}[f.kind] || f.kind;
+  const labels = {content:"内容", feasibility:"可执行性", evidence:"证据", unverified:"尚未验证",
+    unsupported:"依据不足", gap:"表达缺口"};
+  const kind = labels[f.kind] || (/\p{Script=Han}/u.test(String(f.kind || '')) ? f.kind : '审核意见');
   return (
     `<div class="finding">` +
     (kind ? `<span class="finding-kind">${escapeHtml(kind)}</span>` : "") +

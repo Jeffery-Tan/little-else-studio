@@ -211,6 +211,7 @@ def _collect_items(
                 "at": ap.decided_at,
                 "stage": ap.stage,
                 "stage_label": v.stage_label(ap.stage),
+                "version": ap.artifact_version,
                 "decision": ap.decision,
                 "sentence": v.approval_sentence(ap.decision, ap.note) + (f" 已选方向 {ap.selected_option_id}。" if ap.selected_option_id else ""),
             }

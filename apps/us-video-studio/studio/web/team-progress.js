@@ -118,7 +118,10 @@ function updateTeamDialog() {
   if (!job) { host.append(box('p','','这个项目还没有本轮工作记录。')); return; }
   const view = teamProgress({...job, brief});
   host.append(box('p','team-current',view.current || view.statusTitle || '本次执行已结束'));
-  if (!JOB_ACTIVE.has(job.status)) host.append(box('p','muted',view.summary));
+  if (!JOB_ACTIVE.has(job.status) && job.reason) {
+    host.append(box('p','team-reason',jobGuidance(job) || '本轮未完成，请按当前状态处理。'));
+    host.append(box('p','muted','已保存的需求和作品不会自动重试；处理原因后，在对话中说明下一步。'));
+  } else if (!JOB_ACTIVE.has(job.status)) host.append(box('p','muted',view.summary));
   const roles = box('div','team-members');
   for (const row of view.participants) {
     const card = box('div',`team-member${row.role === view.currentRole ? ' active' : ''}`);

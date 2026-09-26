@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import uuid
 
 from .models import PipelineError, STAGES
@@ -101,6 +102,31 @@ def check_base(store, pipeline, run_id, scope):
         if not is_canonical_document(stage, base.structured, original):
             raise PipelineError('revision_scope', '旧稿的正文与卡片分别保存，不能保证只改指定字段；需明确整理完整版本。')
     return base, inputs
+
+
+def validate_writing_target(store, pipeline, run_id, target):
+    """Resolve an explicit UI field to the current canonical writing version."""
+    path = target.get('path')
+    if not (path == ['caption'] or
+            (isinstance(path, list) and len(path) == 3 and path[0] == 'segments'
+             and type(path[1]) is int and path[1] >= 0
+             and path[2] in {'line', 'picture', 'sound'})):
+        raise PipelineError('revision_scope', '这段内容没有可核对的脚本字段，请在对话中说明修改范围。')
+    state = pipeline.stage_state(run_id, 'writing')
+    if (target.get('run_id') != run_id or target.get('stage') != 'writing'
+            or not state.latest or state.latest.version != target.get('version')
+            or state.latest.sha256 != target.get('artifact_sha256')):
+        raise PipelineError('version_conflict', '脚本版本已变化，请重新选择当前稿件中的内容。')
+    scope = {'stage': 'writing', 'version': state.latest.version,
+             'sha256': state.latest.sha256, 'mode': 'local',
+             'inputs': pipeline.require_prerequisites(run_id, 'writing')}
+    base, _ = check_base(store, pipeline, run_id, scope)
+    value = _cell(base.structured, path)
+    quote = re.sub(r'\s+', ' ', target.get('quote', '')).strip()
+    if not quote or quote not in re.sub(r'\s+', ' ', value):
+        raise PipelineError('revision_scope', '所选文字与这个脚本字段不一致，请重新选择。')
+    return {'path': path, 'version': base.version, 'sha256': base.sha256,
+            'quote': quote}
 
 
 def plan_revision(store, pipeline, run_id, args, *, turn_id, user_message, previous=None):

@@ -57,13 +57,15 @@ function renderJourneyStatus() {
   const visibleTarget=view.action?.kind==='navigate' && view.action.tab===state.canvasTab &&
     (view.action.tab!=='plan'||!view.action.stage||view.action.stage===state.activeStage);
   const next=state.busy||visibleTarget ? null : view.action;
-  // No status band. Title lives in the project selector, live status in the
-  // job strip, pending decisions and conclusions in the conversation — the
-  // chrome slot carries only the one next action, as a plain toolbar control
-  // (the pattern mature chat UIs use: chrome shows actions, the stream shows
-  // state). Rebuilt whole, so going busy clears the button with it.
+  // Keep the current result visible while the artifact and conversation scroll
+  // independently. The action is omitted when its target is already on screen.
   const host=$('project-progress');
   host.replaceChildren();
+  const status=box('div','creator-status');
+  status.setAttribute('aria-label','当前进展');
+  status.append(box('span','creator-status-label','当前进展'),
+    box('strong','creator-status-current',view.current||'打开当前作品查看进展'));
+  host.append(status);
   if(next){
     const button=box('button','ghost small creator-next',next.label);
     button.type='button';
@@ -80,6 +82,7 @@ function renderJourneyStatus() {
       }
       if(action.kind==='reference'){toggleMaterials(true);return;}
       if(action.kind==='settings'){$('connections-open')?.click();return;}
+      if(action.kind==='job'){setProjectFocus('chat');openTeamProgress();return;}
       if(action.kind==='chat'){setProjectFocus('chat');$('chat-input').focus();return;}
       if(action.kind==='prepare'){
         const runId=state.runId;
@@ -110,13 +113,34 @@ function configureJourneyTabs() {
   const run=(state.runs || []).find(item=>item.run_id===state.runId);
   const photo=(state.creatorView?.format||run?.content_format)==='photo';
   const analysis=Boolean(state.creatorView?.analysisOnly);
-  $('journey-tab-plan').textContent=analysis?'分析与参考':photo?'创意与文案':'创意与脚本';
+  $('journey-tab-plan').textContent=analysis?'分析与参考':'创意方向';
+  $('journey-tab-assets').hidden=analysis;
+  $('journey-tab-script').hidden=analysis;
+  $('journey-tab-script').textContent=photo?'图文方案':'脚本';
+  const hasWriting=(state.timeline?.rail||[]).some(step=>step.stage==='writing'&&step.has_doc);
+  const hasMedia=Boolean(state.productionData?.drafts?.length);
+  $('journey-tab-script').disabled=!hasWriting;
   $('journey-tab-storyboard').textContent=photo?'图片':'画面';
   $('journey-tab-storyboard').hidden=analysis;
+  $('journey-tab-storyboard').disabled=!hasWriting&&!hasMedia;
   $('journey-tab-video').hidden=photo||analysis;
+  $('journey-tab-video').disabled=!hasWriting&&!hasMedia;
   $('project-stages').hidden=analysis;
-  if (((photo || analysis) && state.canvasTab === 'video') || (analysis && state.canvasTab === 'storyboard'))
+  if (((photo || analysis) && state.canvasTab === 'video') || (analysis && ['storyboard','assets'].includes(state.canvasTab)))
     showJourneyTab('plan');
+  syncJourneyTabs();
+}
+
+function syncJourneyTabs() {
+  const active=state.canvasTab==='plan'
+    ? state.activeStage==='writing' && !$('journey-tab-script').disabled ? 'script' : 'plan'
+    : state.canvasTab;
+  for(const button of document.querySelectorAll('[data-journey-tab]')){
+    const selected=button.id===`journey-tab-${active}`;
+    button.setAttribute('aria-selected',String(selected));
+    button.tabIndex=selected?0:-1;
+  }
+  $('stage').setAttribute('aria-labelledby',`journey-tab-${active==='script'?'script':'plan'}`);
 }
 
 function renderJourneyDecision() {
@@ -177,22 +201,25 @@ function scrollToJourneyDecision(host) {
 }
 function closeEmbeddedProduction(){document.querySelector('.production-embedded')?.studioClose?.();}
 function showJourneyTab(tab, options={}) {
-  if($(`journey-tab-${tab}`)?.hidden)return;
+  const button=tab==='plan' && options.stage==='writing' ? $('journey-tab-script') : $(`journey-tab-${tab}`);
+  if(button?.hidden||button?.disabled)return;
   if(!options.automatic)state.canvasTouched=true;
   closeEmbeddedProduction();
   state.canvasTab=tab;
-  for(const button of document.querySelectorAll('[data-journey-tab]')){
-    const selected=button.dataset.journeyTab===tab;
-    button.setAttribute('aria-selected',String(selected));button.tabIndex=selected?0:-1;
-  }
   $('stage').hidden=tab!=='plan';
+  $('journey-assets').hidden=tab!=='assets';
   $('journey-storyboard').hidden=tab!=='storyboard';
   $('journey-video').hidden=tab!=='video';
+  $('project-stages').hidden=tab!=='plan'||Boolean(state.creatorView?.analysisOnly);
   let opened=null;
   if(tab==='plan'){
-    const candidate=state.timeline?.pending?.stage || (state.rail||[]).find(s=>s.stage==='writing'&&s.has_doc)?.stage || (state.rail||[]).find(s=>s.stage==='direction'&&s.has_doc)?.stage || 'intake';
+    const candidate=(options.stage && (state.rail||[]).some(s=>s.stage===options.stage) ? options.stage : null)
+      || state.timeline?.pending?.stage || (state.rail||[]).find(s=>s.stage==='writing'&&s.has_doc)?.stage
+      || (state.rail||[]).find(s=>s.stage==='direction'&&s.has_doc)?.stage || 'intake';
     selectStage(candidate);
-  } else opened=openProduction({mount:$(tab==='storyboard'?'journey-storyboard':'journey-video'),kind:tab==='storyboard'?'image':'video'});
+  } else if(tab==='assets') renderCanvasMaterials();
+  else opened=openProduction({mount:$(tab==='storyboard'?'journey-storyboard':'journey-video'),kind:tab==='storyboard'?'image':'video'});
+  syncJourneyTabs();
   if(state.creatorView)renderJourneyStatus();
   return opened;
 }
@@ -220,14 +247,14 @@ function renderReferenceAnalysis() {
 function bindJourneyTabs(){
   const tabs=[...document.querySelectorAll('[data-journey-tab]')];
   for(const button of tabs){
-    button.onclick=()=>showJourneyTab(button.dataset.journeyTab);
+    button.onclick=()=>showJourneyTab(button.dataset.journeyTab,{stage:button.dataset.planStage});
     button.onkeydown=event=>{
-      const visible=tabs.filter(tab=>!tab.hidden),index=visible.indexOf(button);
+      const visible=tabs.filter(tab=>!tab.hidden&&!tab.disabled),index=visible.indexOf(button);
       const next=event.key==='ArrowRight'?visible[(index+1)%visible.length]
         :event.key==='ArrowLeft'?visible[(index+visible.length-1)%visible.length]
         :event.key==='Home'?visible[0]:event.key==='End'?visible[visible.length-1]:null;
       if(!next)return;
-      event.preventDefault();next.focus();showJourneyTab(next.dataset.journeyTab);
+      event.preventDefault();next.focus();showJourneyTab(next.dataset.journeyTab,{stage:next.dataset.planStage});
     };
   }
 }

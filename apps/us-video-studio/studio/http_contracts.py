@@ -46,6 +46,17 @@ class FeedbackTarget(BaseModel):
     version: int = Field(ge=1, strict=True)
     artifact_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
     quote: str = Field(min_length=1, max_length=240)
+    path: list[str | int] | None = None
+
+
+class WritingRevisionTarget(FeedbackTarget):
+    path: list[str | int] = Field(min_length=1, max_length=3)
+
+
+class WritingRevisionIn(MessageIn):
+    text: str = Field(min_length=1, max_length=4000)
+    request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
+    feedback_target: WritingRevisionTarget
 
 
 class MediaFeedbackTarget(BaseModel):

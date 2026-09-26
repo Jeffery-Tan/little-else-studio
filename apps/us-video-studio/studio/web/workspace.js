@@ -63,7 +63,7 @@ function setStudioView(view) {
   $('project-workspace').setAttribute('aria-label',learning?'学习工作区':'项目工作区');
   $('stage').setAttribute('role',learning?'region':'tabpanel');
   if(learning){$('stage').removeAttribute('aria-labelledby');$('stage').setAttribute('aria-label','学习记录');}
-  else{$('stage').setAttribute('aria-labelledby','journey-tab-plan');$('stage').removeAttribute('aria-label');}
+  else{$('stage').setAttribute('aria-labelledby',state.activeStage==='writing'&&!$('journey-tab-script').disabled?'journey-tab-script':'journey-tab-plan');$('stage').removeAttribute('aria-label');}
   document.querySelector('.composer').setAttribute('aria-label',learning?'学习对话':'制片对话');
   document.querySelector('.project-more summary').textContent=learning?'学习记录与设置':'项目与设置';
   document.querySelector('.producer-heading strong').textContent=learning?'你的学习搭档':'你的制片团队';

@@ -25,11 +25,23 @@ test('direction choice and adopted direction keep a creative destination',()=>{
 test('script is the current work until media work exists',()=>{
   const pending=creatorProjectView({...base,timeline:{...base.timeline,pending:{stage:'writing'}}});
   assert.equal(pending.action.label,'阅读并决定脚本');
+  const returned=creatorProjectView({...base,timeline:{...base.timeline,
+    pending:{stage:'writing',passed:false}}});
+  assert.equal(returned.current,'脚本新版已保存，但审核提出修改意见');
+  assert.equal(returned.action.label,'查看脚本与审核');
+  assert.equal(returned.stage,'writing');
   const ready=creatorProjectView(base);
   assert.equal(ready.goal,'商品视频与发布文案');
   assert.equal(ready.current,'脚本已确认，下一步准备实际画面');
   assert.equal(ready.tab,'plan');
   assert.equal(ready.action.tab,'storyboard');
+});
+
+test('direction review return does not appear ready for adoption',()=>{
+  const returned=creatorProjectView({...base,timeline:{rail:[direction],
+    pending:{stage:'direction',passed:false},brief:{execution:{active:false}}}});
+  assert.equal(returned.current,'创意方向已保存，但审核提出修改意见');
+  assert.equal(returned.action.label,'查看方向与审核');
 });
 
 test('media states map to one current work and safe main action',()=>{
@@ -111,6 +123,18 @@ test('active execution and saved decision do not imply a new media authorization
   assert.equal(active.action,null);
   const continuing=creatorProjectView({...base,timeline:{...base.timeline,pending_continuation:{stage:'direction'}}});
   assert.equal(continuing.action.kind,'continue');
+});
+
+test('a failed first turn keeps the saved request visible and points to recovery',()=>{
+  const fresh={run_id:'fresh',title:'新项目',brief:'先构思一条商品视频'};
+  const failed=creatorProjectView({run:fresh,timeline:{rail:[],brief:{phase:'interrupted',
+    execution:{status:'failed',active:false}}}});
+  assert.equal(failed.current,'你的需求已保存，本轮制片未完成');
+  assert.deepEqual(failed.action,{kind:'job',label:'查看本轮记录'});
+  const waiting=creatorProjectView({run:fresh,timeline:{rail:[]}});
+  assert.equal(waiting.current,'你的需求已保存，等待继续创作');
+  const empty=creatorProjectView({run:{run_id:'fresh',brief:''},timeline:{rail:[]}});
+  assert.equal(empty.current,'说出你想完成的作品');
 });
 
 test('an old token-cap failure becomes an explicit new-turn option when the cap is disabled',()=>{

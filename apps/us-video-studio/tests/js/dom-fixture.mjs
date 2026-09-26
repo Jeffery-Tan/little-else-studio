@@ -185,7 +185,7 @@ class El {
     const out = [];
     const walk = (node) => {
       for (const child of node.children) {
-        if (matchers.every(m => m(child))) out.push(child);
+        if (matchers.some(m => m(child))) out.push(child);
         walk(child);
       }
     };
@@ -463,10 +463,13 @@ export function loadApp({routes = {}, globals = {}, dom = makeDom(), storage = m
     vm.runInContext(webSource('team-progress.js'), ctx, {filename: 'team-progress.js'});
     vm.runInContext(webSource('runtime.js'), ctx, {filename: 'runtime.js'});
     vm.runInContext(webSource('journey.js'), ctx, {filename: 'journey.js'});
-  } else {
+  } else if (runtime === 'shim') {
     vm.runInContext(RUNTIME_SHIM, ctx, {filename: 'runtime-shim.js'});
+  } else if (runtime !== 'page') {
+    throw new Error(`unknown runtime mode: ${runtime}`);
   }
-  vm.runInContext(webSource('app.js'), ctx, {filename: 'app.js'});
+  // Page mode lets a caller evaluate every classic script in index.html order.
+  if (runtime !== 'page') vm.runInContext(webSource('app.js'), ctx, {filename: 'app.js'});
   return {ctx, observed, elements: dom.elements, document, storage};
 }
 

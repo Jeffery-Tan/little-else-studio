@@ -4,12 +4,12 @@ import asyncio
 import json
 import re
 import uuid
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 from .connection_checks import ConnectionCheckError
 from .connections import ConnectionConflict
-from .http_contracts import DeepSeekCheckIn, ReviewActionIn, JobIn, MessageIn, SteerIn, MediaFeedbackTarget, ProductionDraftFeedbackTarget, redact_http_event
+from .http_contracts import DeepSeekCheckIn, ReviewActionIn, JobIn, MessageIn, SteerIn, WritingRevisionIn, MediaFeedbackTarget, ProductionDraftFeedbackTarget, redact_http_event
 from .models import PipelineError
 from .project_brief import project_brief, latest_execution
 from . import vocabulary
@@ -102,6 +102,20 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
         except (PipelineError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    @app.post('/api/runs/{run_id}/actions/revise-writing')
+    def revise_writing_action(run_id: str, payload: WritingRevisionIn):
+        require_run(run_id)
+        try:
+            def prepare_revision(rid):
+                from .revision_scope import validate_writing_target
+                validate_writing_target(store, pipeline, rid, payload.feedback_target.model_dump())
+                return prepare_job(rid, writing_revision=payload)
+            return present_job(jobs.submit(run_id, payload.text, payload.request_id,
+                kind='writing_revision', payload=payload.model_dump(exclude={'request_id'}),
+                prepare=prepare_revision))
+        except (PipelineError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @app.post("/api/runs/{run_id}/jobs")
     def create_job(run_id: str, payload: JobIn):
         require_run(run_id)
@@ -180,6 +194,15 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
     def latest_job(run_id: str, after_seq: int = 0):
         require_run(run_id)
         return present_job(jobs.latest(run_id, max(0, after_seq)))
+
+    @app.get("/api/runs/{run_id}/request-receipts/{request_id}")
+    def request_receipt(run_id: str, request_id: str,
+                        kind: Literal['job', 'steer'] = 'job', job_id: str | None = None):
+        require_run(run_id)
+        try:
+            return jobs.request_receipt(run_id, request_id, kind=kind, job_id=job_id)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @app.get("/api/runs/{run_id}/jobs/{job_id}")
     def get_job(run_id: str, job_id: str, after_seq: int = 0):

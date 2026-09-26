@@ -28,10 +28,23 @@ function jobGuidance(job) {
   if (/Codex CLI is not installed or not on PATH/i.test(reason)) return "服务没有找到 Codex CLI。请确认本机已安装 Codex，重启工作台服务后再发送消息；已保存的内容不受影响。";
   if (/连接准备未通过|ConnectionUnavailable|CodexUnavailable/i.test(reason)) return "模型连接尚未准备好。请检查制作团队中的对应服务设置，再发送继续指令。";
   if (job.open_attempts?.length) return "有尚未结束的制作阶段。请先按下方恢复步骤处理遗留任务，再继续创作。";
-  if (job.status === "failed") return "本轮未完成，已有内容已保留。请查看下方原因与恢复步骤，处理后再继续。";
+  if (job.status === "failed") return "本轮未完成，已有内容已保留。打开「团队工作记录」查看原因，处理后再说明下一步。";
   if (job.status === "blocked") return "本轮已暂停。先查看保存的内容和下方提示，再说明下一步要求。";
   if (job.status === "interrupted") return "服务曾中断，已有内容已保留。确认进度后，再发送新的继续指令。";
   return "";
+}
+function writingRevisionReviewReturned(job) {
+  if (job?.job_kind !== 'writing_revision' || job.status !== 'blocked') return false;
+  if (job.revision_result) return job.revision_result.change_status === 'saved'
+    && job.revision_result.review_status === 'return';
+  // Older jobs have no separate result; their revision deliverable was only
+  // evaluated after a submitted artifact and a recorded reviewer verdict.
+  return job.deliverable?.goal === 'revision' && job.deliverable.status === 'incomplete';
+}
+function writingRevisionReviewPending(job) {
+  return job?.job_kind === 'writing_revision' && !JOB_ACTIVE.has(job.status)
+    && job.revision_result?.change_status === 'saved'
+    && job.revision_result.review_status === 'pending';
 }
 function jobPresentation(job, recovery = null) {
   if (!job) return { active: false, label: "", detail: "" };
@@ -53,6 +66,18 @@ function jobPresentation(job, recovery = null) {
     detail:active?'正在处理制作任务；媒体生成进度与结果保存在制作页。':'本次制作状态已保存，请在制作页查看结果与用量。',guidance:jobGuidance(job)};
   if (job.job_kind === 'artifact_revision') return {active,label:JOB_LABELS[job.status] || '状态待确认',
     detail:active ? '正在将局部修改同步到新版本。' : job.status==='succeeded' ? '新版本已保存，请比较改动后重新审核。' : '',guidance:jobGuidance(job)};
+  if (job.job_kind === 'writing_revision') return {active,
+    label:writingRevisionReviewReturned(job) ? '脚本新版已保存 · 审核退回'
+      : writingRevisionReviewPending(job) ? '脚本新版已保存 · 审核未完成'
+      : JOB_LABELS[job.status] || '状态待确认',
+    detail:active ? '编剧正在修改选中字段，随后由独立审核检查新版。'
+      : job.status==='succeeded' ? '脚本新版已完成独立审核，请阅读结论并决定是否采用。'
+      : writingRevisionReviewReturned(job) ? '选中的内容已修改并保存；独立审核认为整稿仍需修改。'
+      : writingRevisionReviewPending(job) ? '选中的内容已修改并保存；独立审核没有完成判定。' : '',
+    guidance:writingRevisionReviewReturned(job)
+      ? '请查看新版脚本和审核意见，再选择需要修改的内容。'
+      : writingRevisionReviewPending(job)
+      ? '请查看新版脚本和本次任务原因，再决定如何完成审核。' : jobGuidance(job)};
   if (['image_analysis','video_analysis'].includes(job.job_kind)) return {active, label:JOB_LABELS[job.status] || '状态待确认',
     detail:active ? '视觉策划正在分析素材。可以离开页面，任务会继续；不会自动重试。'
       :job.status==='succeeded' ? '素材分析已保存，请核对并选择要采用的观察。' : '',guidance:jobGuidance(job)};
@@ -123,6 +148,19 @@ function readPendingJob(runId) {
   try { return JSON.parse(sessionStorage.getItem(pendingJobKey(runId)) || "null"); }
   catch (_) { return null; }
 }
+function stablePayload(value) {
+  if (Array.isArray(value)) return value.map(stablePayload);
+  if (value && typeof value === 'object') return Object.fromEntries(
+    Object.keys(value).sort().map(key => [key, stablePayload(value[key])]));
+  return value;
+}
+function samePendingPayload(saved, incoming) {
+  return JSON.stringify(stablePayload(saved)) === JSON.stringify(stablePayload(incoming));
+}
+function jobWirePayload(runId, payload) {
+  if (payload.request_kind || payload.reference_consent !== undefined) return payload;
+  return {...payload, reference_consent:(state.runs||[]).find(run=>run.run_id===runId)?.kind!=='learning'};
+}
 function readPendingJobOptions(runId, payload) {
   try {
     const saved = JSON.parse(sessionStorage.getItem(pendingJobUiKey(runId)) || "{}");
@@ -151,11 +189,13 @@ function showJob(job, notice = "") {
   if (typeof configureJourneyTabs === 'function') configureJourneyTabs();
   if (job?.brief) state.projectBrief = job.brief;
   const view = jobPresentation(job, currentRecovery);
-  state.busy = view.active || Boolean(readPendingJob(state.runId));
+  const unresolved = readPendingJob(state.runId) || readPendingSteer(state.runId);
+  state.busy = view.active || Boolean(unresolved);
   state.recoveryBlocked = Boolean((currentRecovery && !currentRecovery.can_continue)
     || (!currentRecovery && (job?.open_attempts?.length)));
   const adjusting = canSteerJob(job);
-  $("send").disabled = (state.busy && !adjusting) || steerPosting || state.decisionBusy || state.recoveryBlocked;
+  $("send").disabled = Boolean(unresolved) || (state.busy && !adjusting)
+    || steerPosting || state.decisionBusy || state.recoveryBlocked;
   $("send").textContent = adjusting ? '调整任务 ↑' : '发送 ↑';
   $("send").setAttribute?.('aria-label', adjusting ? '调整当前任务' : '发送消息');
   if (typeof renderProjectProgress === 'function') renderProjectProgress();
@@ -249,6 +289,13 @@ function showJob(job, notice = "") {
     const review = box('button','primary small','查看修改版本');
     review.onclick = () => {selectStage(job.job_payload.stage);openRevisionWorkspace(state.runId,job.job_payload.stage);};
     copy.append(review);
+  }
+  if (!view.active && job?.job_kind === 'writing_revision'
+      && (job.status === 'succeeded' || writingRevisionReviewReturned(job)
+          || writingRevisionReviewPending(job))) {
+    const writing = box('button', 'primary small', '查看脚本与审核');
+    writing.onclick = () => { showJourneyTab('plan'); selectStage('writing'); setProjectFocus('canvas'); };
+    copy.append(writing);
   }
   if (!view.active && ['image_analysis','video_analysis','reference_video'].includes(job?.job_kind)) {
     const review = box('button','primary small',job?.job_kind === 'reference_video' ? '查看参考任务' : '查看素材分析');
@@ -395,18 +442,24 @@ async function restoreJob(runId) {
     const job = await api(`/api/runs/${runId}/jobs/latest`);
     if (runId !== state.runId || generation !== jobWatch) return;
     const pending = readPendingJob(runId);
-    if (pending && job?.request_id === pending.request_id) clearPendingJob(runId, pending.request_id);
-    else if (pending) { showUncertainSubmission(runId, pending, readPendingJobOptions(runId, pending)); return; }
+    if (pending) {
+      const receipt = await api(`/api/runs/${runId}/request-receipts/${encodeURIComponent(pending.request_id)}?kind=job`);
+      if (runId !== state.runId || generation !== jobWatch) return;
+      if (receipt.received) clearPendingJob(runId, pending.request_id);
+      else { showUncertainSubmission(runId, pending, readPendingJobOptions(runId, pending)); return; }
+    }
     const steer = readPendingSteer(runId);
-    if (steer && (job?.parent_job_id === steer.job_id ||
-        (job?.job_id === steer.job_id && Number(job.goal_revision || 0) > steer.expected_goal_revision))) {
-      clearPendingSteer(runId, steer.request_id);
-    } else if (steer) {
-      showJob(job, '调整是否收到尚未确认。请确认提交状态。');
-      const retry = box('button','ghost small','确认调整状态');
-      retry.onclick = () => submitSteer(runId, steer.job_id, steer);
-      $('job-status').append(retry);
-      return;
+    if (steer) {
+      const receipt = await api(`/api/runs/${runId}/request-receipts/${encodeURIComponent(steer.request_id)}?kind=steer&job_id=${encodeURIComponent(steer.job_id)}`);
+      if (runId !== state.runId || generation !== jobWatch) return;
+      if (receipt.received) clearPendingSteer(runId, steer.request_id);
+      else {
+        showJob(job, '调整是否收到尚未确认。请确认提交状态。');
+        const retry = box('button','ghost small','确认调整状态');
+        retry.onclick = () => submitSteer(runId, steer.job_id, steer);
+        $('job-status').append(retry);
+        return;
+      }
     }
     await watchJob(runId, job, generation);
   } catch (_) {
@@ -424,9 +477,11 @@ async function submitSteer(runId, jobId, payload) {
   // second identity must neither go out nor overwrite that record — the
   // original request_id and payload are what the confirm entry retries (U2).
   const unresolved = readPendingSteer(runId);
-  if (unresolved && unresolved.request_id !== payload.request_id)
+  if (unresolved && !samePendingPayload(unresolved, {...payload, job_id:jobId})) {
+    try { await restoreJob(runId); } catch (_) { /* best-effort original receipt */ }
     return {ok:false, reason:'pending_unknown', pending_kind:'steer',
             error:new Error('上一次调整的结果还没有确认；请先在任务状态里确认提交。')};
+  }
   if (!unresolved) {
     // Cross entry (H2): a *job* submission is what this run is still
     // verifying — a direct adjuster (nothing here is behind `send()`) must
@@ -477,11 +532,13 @@ async function submitSteer(runId, jobId, payload) {
 
 async function submitJob(runId, payload, options = {}) {
   if (runId !== state.runId) return {accepted:false,error:new Error('项目已切换，请重新打开当前项目。')};
+  // Compare the exact wire payload, including the default reference scope.
+  payload = jobWirePayload(runId, payload);
   // One unresolved submission identity per project (U2). A new request_id must
   // not displace — or silently replace — the record whose outcome is still
   // unknown; the confirm entry for that original identity stays on screen.
   const unresolved = readPendingJob(runId);
-  if (unresolved && unresolved.request_id !== payload.request_id) {
+  if (unresolved && !samePendingPayload(jobWirePayload(runId, unresolved), payload)) {
     showUncertainSubmission(runId, unresolved, readPendingJobOptions(runId, unresolved));
     return {accepted:false, uncertain:true, pending_kind:'job',
             error:new Error('上一次发送的结果还没有确认；请先在任务状态里确认提交。'),
@@ -504,8 +561,6 @@ async function submitJob(runId, payload, options = {}) {
   // Both conversation entry points display the same on-demand analysis notice.
   // This does not enable media generation; the main agent still needs an
   // explicit reference request, a supplied source and the bounded tool.
-  if (!payload.request_kind && payload.reference_consent === undefined)
-    payload={...payload,reference_consent:(state.runs||[]).find(run=>run.run_id===runId)?.kind!=='learning'};
   const generation = ++jobWatch;
   clearTimeout(jobTimer);
   closeJobSource();
@@ -521,7 +576,7 @@ async function submitJob(runId, payload, options = {}) {
   showJob(null, "正在提交…");
   let job;
   try {
-    const route = payload.request_kind === 'reference_video' ? 'reference-videos' : payload.request_kind === 'stage_review' ? 'actions/review' : payload.request_kind === 'video_analysis' ? 'video-analysis' : payload.request_kind === 'image_analysis' ? 'image-analysis' : payload.request_kind === 'artifact_revision'
+    const route = payload.request_kind === 'reference_video' ? 'reference-videos' : payload.request_kind === 'stage_review' ? 'actions/review' : payload.request_kind === 'writing_revision' ? 'actions/revise-writing' : payload.request_kind === 'video_analysis' ? 'video-analysis' : payload.request_kind === 'image_analysis' ? 'image-analysis' : payload.request_kind === 'artifact_revision'
       ? `edits/${encodeURIComponent(payload.stage)}/${encodeURIComponent(payload.draft_id)}/generate` : 'jobs';
     job = await api(`/api/runs/${runId}/${route}`, { method: "POST", body: JSON.stringify(payload) });
   } catch (err) {

@@ -89,9 +89,14 @@ def build_app(
         if not current.can_review:
             raise PipelineError('review', '这一版当前不能发起审核，请刷新项目状态。')
 
-    def prepare_job(run_id, review=None, reference_consent=False, feedback_target=None):
+    def prepare_job(run_id, review=None, reference_consent=False, feedback_target=None,
+                    writing_revision=None):
         if review is not None:
             require_review_version(run_id, review)
+        if writing_revision is not None:
+            from .revision_scope import validate_writing_target
+            validate_writing_target(store, pipeline, run_id,
+                                    writing_revision.feedback_target.model_dump())
         if client_factory is not None:
             job_settings, client = settings, client_factory()
             summary = {'source': 'injected-test-client',
@@ -138,6 +143,56 @@ def build_app(
                          f'「{label}」第 {review.expected_version} 版审核提出了修改意见。请在创作板查看关键问题，再决定调整方向。')
                 store.append_chat(run_id, 'assistant', reply)
                 return OrchestratorTurn(reply, 'done', outcome.rounds)
+            if writing_revision is not None:
+                from .agents.roles import creative_selection
+                from .revision_scope import plan_revision, validate_writing_target
+                from .task_contract import evaluate as evaluate_deliverable
+                from .tools.dispatch import Dispatcher
+
+                check_cancel()
+                store.append_chat(run_id, 'user', text)
+                target = validate_writing_target(store, pipeline, run_id,
+                                                 writing_revision.feedback_target.model_dump())
+                previous = creative_selection(store, run_id)
+                selection = {**previous, 'intent': 'edit'}
+                scope = plan_revision(store, pipeline, run_id, {
+                    'stage': 'writing', 'version': target['version'], 'sha256': target['sha256'],
+                    'mode': 'local', 'quote': text, 'reason': '用户明确要求修改当前脚本的选中字段',
+                    'fields': [{'path': target['path'], 'instruction': text}]},
+                    turn_id=writing_revision.request_id, user_message=text)
+                store.append_event(run_id, 'creative_context_selected', selection=selection,
+                                   turn_id=writing_revision.request_id, deliverable='revision',
+                                   source='explicit_writing_field')
+                ledger_for_task = Ledger(store, job_settings)
+                outcome = Dispatcher(store, pipeline, job_settings, job_client, ledger_for_task,
+                                     run_id, on_event=emit, check_cancel=check_cancel,
+                                     learning_service=learning).dispatch('writing', text,
+                                                                          revision_scope=scope)
+                if not outcome.submitted:
+                    raise PipelineError('revision', outcome.error or '编剧未提交新版本，原稿已保留。')
+                revised = store.latest_artifact(run_id, 'writing')
+                if revised is None or revised.key != outcome.submitted:
+                    raise PipelineError('revision', '编剧提交的新版本与当前脚本不一致，请检查任务记录。')
+                revision_result = {'stage': 'writing', 'version': revised.version,
+                                   'artifact_sha256': revised.sha256,
+                                   'change_status': 'saved', 'review_status': 'pending'}
+                emit({'type': 'writing_revision_result', 'result': revision_result})
+                check_cancel()
+                review_result = run_review(store=store, pipeline=pipeline, settings=job_settings,
+                    client=job_client, ledger=ledger_for_task, run_id=run_id, stage='writing',
+                    on_event=emit, check_cancel=check_cancel, learning_service=learning,
+                    explicit_request=True)
+                if review_result.verdict is None:
+                    raise PipelineError('review', review_result.error or '新版已保存，但独立审核尚未完成。')
+                emit({'type': 'writing_revision_result', 'result': {
+                    **revision_result, 'review_status': review_result.verdict}})
+                delivery = evaluate_deliverable(store, pipeline, run_id, 'revision', revision_scope=scope)
+                reply = (f'脚本新版 {outcome.submitted} 已保存并通过独立审核。请阅读准确版本后决定是否采用。'
+                         if review_result.verdict == 'pass' else
+                         f'脚本新版 {outcome.submitted} 已保存；独立审核提出修改意见，请在创作板查看。')
+                store.append_chat(run_id, 'assistant', reply)
+                return OrchestratorTurn(reply, 'done', outcome.rounds + review_result.rounds,
+                                        deliverable=delivery)
             def observe_reference(source, instruction, reference_emit, reference_cancel):
                 if not reference_connection:
                     raise PipelineError('reference_connection', '参考观察连接未就绪，请检查当前百炼连接。')

@@ -62,19 +62,19 @@ BRIEF = (
 
 DIRECTION = {
     "options": [
-        {"key": "A", "title": "出门前十秒", "claim": "把装午餐的早晨动作拍成一段轻快开场。",
+        {"key": "A", "title": "出门前十秒", "claim": "把装午餐的早晨动作拍成一段轻快开场。", "satisfies": "goal.primary",
          "audience_moment": "早上准备带饭，正在收拾随身物品的人。",
          "hook": "手在桌前把午餐放进包里，立刻看到包的大小。",
          "story": "先放入午餐，再提起包走向门口；商品始终可见。",
          "gives_up": "不做价格比较。", "evidence_strength": "仅演示已拍到的放置动作",
          "difficulty": "中", "asset_needs": "需要实物和真实动作镜头。"},
-        {"key": "B", "title": "带上你的午餐", "claim": "让包在通勤途中自然出现，建立带饭情境。",
+        {"key": "B", "title": "带上你的午餐", "claim": "让包在通勤途中自然出现，建立带饭情境。", "satisfies": "goal.primary",
          "audience_moment": "准备出门上班，想把午餐与日常物品一起带走的人。",
          "hook": "先见午餐盒，再见它被放入包中。",
          "story": "装好、提起、走出门；用三个动作讲完整使用场景。",
          "gives_up": "不声明未经核实的保温时长。", "evidence_strength": "仅演示画面可见的动作",
          "difficulty": "低", "asset_needs": "需要准确商品图或实拍。"},
-        {"key": "C", "title": "桌上有什么", "claim": "把桌面整理与午餐包的出现作为画面推进。",
+        {"key": "C", "title": "桌上有什么", "claim": "把桌面整理与午餐包的出现作为画面推进。", "satisfies": "goal.primary",
          "audience_moment": "午休前整理东西的人。",
          "hook": "凌乱桌面先入画，商品最后落位。",
          "story": "逐件整理物品，最后展示带走的整体画面。",

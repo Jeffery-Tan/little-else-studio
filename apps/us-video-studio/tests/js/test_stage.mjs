@@ -175,10 +175,15 @@ test("both structured and prose-only gates require an explicit submit action", (
 
 test("a document the reviewer did not pass asks the override question differently", () => {
   const html = stageHtml(step(), {
-    pending: pending({ passed: false, options: [], headline: "「创意方向」写好了，但审核没有通过它。" }),
+    pending: pending({ passed: false, options: [], headline: "「创意方向」写好了，但审核没有通过它。",
+      findings: [{kind:"content",issue:"开场没有商品作用"}] }),
   });
   assert.ok(html.includes("明确覆盖审核并通过"));
   assert.ok(html.includes('data-passed="0"'));
+  assert.ok(html.includes('<details class="gate-findings" open>'));
+  assert.ok(html.indexOf('data-act="reject"') < html.indexOf('data-act="approve"'));
+  assert.ok(html.includes('class="good small" data-act="reject"'));
+  assert.ok(html.includes('class="bad small" data-act="approve"'));
 });
 
 test("the findings and the price of the click are reachable but folded", () => {
@@ -190,6 +195,7 @@ test("the findings and the price of the click are reachable but folded", () => {
   assert.ok(html.includes("<details"));
   assert.ok(html.includes("审核提的 1 点"));
   assert.ok(html.includes("容量只有一条实测支撑"));
+  assert.ok(html.includes('<details class="gate-findings">'));
   assert.ok(html.includes("上一次这一步花了 $0.02。"));
 });
 
@@ -415,12 +421,15 @@ test("review findings use human labels and retain every concrete risk", () => {
   const html = stageHtml(step({review:{verdict:'return',sentence:'尚未通过审核',findings:[
     {kind:'content',issue:'缺少明确主张'}, {kind:'feasibility',issue:'动作无法完成'},
     {kind:'evidence',issue:'商品事实没有依据'}, {kind:'unverified',issue:'音效仍未验证'},
+    {kind:'unsupported',issue:'容量数字无依据'}, {kind:'gap',issue:'缺少选择理由'},
   ]}}), {});
-  for (const text of ['内容','可执行性','证据','尚未验证','缺少明确主张','动作无法完成','商品事实没有依据','音效仍未验证']) {
+  for (const text of ['内容','可执行性','证据','尚未验证','依据不足','表达缺口','缺少明确主张','动作无法完成','商品事实没有依据','音效仍未验证','容量数字无依据','缺少选择理由']) {
     assert.ok(html.includes(text));
   }
   assert.ok(!html.includes('>feasibility<'));
   assert.ok(!html.includes('>unverified<'));
+  assert.ok(!html.includes('>unsupported<'));
+  assert.ok(!html.includes('>gap<'));
 });
 
 test("reading comes before approval without changing the exact gate binding", () => {
@@ -526,6 +535,9 @@ test('structured script reads exact lines before optional pictures and the timel
   assert.ok(html.indexOf('Here is how I choose.') < html.indexOf('class="timeline"'));
   assert.match(html,/data-creator-target="第 1 段台词"/);
   assert.match(html,/data-creator-target="第 1 段画面"/);
+  assert.match(html,/data-creator-path="\[&quot;segments&quot;,0,&quot;line&quot;\]"/);
+  assert.match(html,/data-creator-path="\[&quot;segments&quot;,0,&quot;picture&quot;\]"/);
+  assert.match(html,/data-creator-path="\[&quot;caption&quot;\]"/);
   assert.match(html,/class="creator-script-caption"/);
   assert.match(html,/查看分镜顺序与其他依据/);
 });
@@ -551,6 +563,7 @@ test('photo script reads page pictures and on-image copy without video labels', 
   assert.match(html,/逐页看画面与图内文案/);
   assert.match(html,/data-creator-target="第 1 页画面"/);
   assert.match(html,/data-creator-target="第 2 页图内文案"/);
+  assert.match(html,/data-creator-path="\[&quot;segments&quot;,1,&quot;line&quot;\]"/);
   assert.ok(html.indexOf('桌上并排两款包') < html.indexOf('Pick your lunch size'));
   assert.doesNotMatch(html,/第 1 段|台词或字幕|声音/);
 });

@@ -196,6 +196,37 @@ def test_job_replay_idempotency_and_context_refs(tmp_path):
         assert post_job(http)['job_id'] == job['job_id']
 
 
+def test_request_receipt_reads_exact_job_and_steer_identity_without_writing(tmp_path):
+    model = ScriptedModel([final_turn('第一轮完成。'), final_turn('第二轮完成。')])
+    with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: model)) as http:
+        make_run(http)
+        first = post_job(http, request_id='first')
+        wait_job(http, first['job_id'])
+        second = post_job(http, request_id='second')
+        wait_job(http, second['job_id'])
+        assert http.get(f'/api/runs/{RUN}/jobs/latest').json()['job_id'] == second['job_id']
+
+        store = Store(tmp_path)
+        store.append_event(RUN, 'job_steer_received', job_id=first['job_id'],
+                           request_id='steer-first', text='修改这轮目标',
+                           expected_goal_revision=0, goal_revision=1)
+        before = len(store.read_events(RUN))
+        base = f'/api/runs/{RUN}/request-receipts/'
+        accepted = http.get(base + 'first').json()
+        assert accepted == {'received': True, 'kind': 'job',
+                            'request_id': 'first', 'job_id': first['job_id']}
+        assert http.get(base + 'missing').json()['received'] is False
+        steer = http.get(base + 'steer-first', params={
+            'kind': 'steer', 'job_id': first['job_id']}).json()
+        assert steer == {'received': True, 'kind': 'steer',
+                         'request_id': 'steer-first', 'job_id': first['job_id']}
+        assert http.get(base + 'steer-first', params={
+            'kind': 'steer', 'job_id': second['job_id']}).json()['received'] is False
+        assert http.get(base + 'steer-first', params={'kind': 'steer'}).status_code == 400
+        assert len(store.read_events(RUN)) == before
+        assert '修改这轮目标' not in str(steer)
+
+
 def test_model_end_turn_does_not_claim_missing_writing_was_delivered(tmp_path):
     model = ScriptedModel([
         tool_turn('route', 'prepare_creative_context', {'intent': 'continue', 'format': 'video', 'deliverable': 'writing'}),

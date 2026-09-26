@@ -28,7 +28,7 @@ function page({routes = {}, storage = makeStorage(), uuidRef = {n: 0}} = {}) {
   const timers = [];
   const app = loadApp({
     runtime: 'real',
-    routes,
+    routes: {...routes, '/request-receipts/': () => ({received:false})},
     storage,
     globals: {
       crypto: {randomUUID: () => `req-${++uuidRef.n}`},
@@ -356,6 +356,59 @@ test('an unknown adjustment survives a refresh and the confirm entry retries the
   assert.equal(next.accepted, true);
   assert.equal(steer.calls.length, 3);
   assert.notEqual(steer.calls[2].request_id, original.request_id);
+});
+
+test('refresh settles only an exact server receipt even when another job is latest', async () => {
+  const latest = {job_id:'newer',request_id:'newer-request',status:'succeeded',events:[]};
+  const routes = {
+    'jobs/latest': () => latest,
+    '/request-receipts/old-request?kind=job': () => ({received:true,kind:'job',
+      request_id:'old-request',job_id:'older'}),
+  };
+  const p = page({routes});
+  p.storage.setItem('studio-job-pending:run-1', JSON.stringify(
+    {request_id:'old-request',text:'原请求',reference_consent:true}));
+  openRun(p, latest, {busy:false});
+  await p.ctx.restoreJob('run-1');
+  assert.equal(p.storage.getItem('studio-job-pending:run-1'), null);
+  assert.equal(read(p, 'currentJob.job_id'), 'newer');
+  assert.equal(p.observed.filter(x => x.method === 'POST').length, 0,
+    'a read-only receipt never resends the old request');
+});
+
+test('a newer job cannot falsely settle an unrecorded adjustment', async () => {
+  const latest = {job_id:'newer',parent_job_id:'j1',status:'succeeded',events:[]};
+  const p = page({routes:{'jobs/latest': () => latest,
+    '/request-receipts/adjust-1?kind=steer&job_id=j1': () => ({received:false})}});
+  p.storage.setItem('studio-steer-pending:run-1', JSON.stringify(
+    {request_id:'adjust-1',job_id:'j1',text:'原调整',expected_goal_revision:0}));
+  openRun(p, latest, {busy:false});
+  await p.ctx.restoreJob('run-1');
+  assert.equal(JSON.parse(p.storage.getItem('studio-steer-pending:run-1')).request_id, 'adjust-1');
+  assert.ok(descendants(el(p, 'job-status'), n => n.textContent === '确认调整状态')[0]);
+  assert.equal(p.observed.filter(x => x.method === 'POST').length, 0);
+});
+
+test('the same pending id cannot be reused with changed job or adjustment content', async () => {
+  const jobs = jobsTransport(() => ({job_id:'new',status:'running',events:[]}));
+  const steer = steerTransport(() => ACCEPTED_STEER);
+  const p = page({routes:{'jobs/latest': () => RUNNING, '/jobs': jobs, '/steer': steer}});
+  openRun(p);
+  const jobOriginal = {request_id:'fixed-job',text:'原任务',reference_consent:true};
+  p.storage.setItem('studio-job-pending:run-1', JSON.stringify(jobOriginal));
+  const jobResult = await p.ctx.submitJob('run-1', {...jobOriginal,text:'另一个任务'});
+  assert.equal(jobResult.accepted, false);
+  assert.equal(jobs.calls.length, 0);
+  assert.equal(JSON.parse(p.storage.getItem('studio-job-pending:run-1')).text, '原任务');
+  p.storage.removeItem('studio-job-pending:run-1');
+
+  const steerOriginal = {request_id:'fixed-steer',job_id:'j1',text:'原调整',expected_goal_revision:0};
+  p.storage.setItem('studio-steer-pending:run-1', JSON.stringify(steerOriginal));
+  const steerResult = await p.ctx.submitSteer('run-1', 'j1',
+    {request_id:'fixed-steer',text:'另一个调整',expected_goal_revision:0});
+  assert.equal(steerResult.ok, false);
+  assert.equal(steer.calls.length, 0);
+  assert.equal(JSON.parse(p.storage.getItem('studio-steer-pending:run-1')).text, '原调整');
 });
 
 /* ------------------------------------------------------------ draft tray -- */

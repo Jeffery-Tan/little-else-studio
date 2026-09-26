@@ -295,6 +295,9 @@ def test_his_own_return_does_not_leave_a_decision_card_behind(env):
 
     out = timeline(store, pipeline, ledger)
     assert out["pending"] is None, "a decided version must not ask again"
+    historical_decision = next(item for turn in out["turns"] for item in turn["items"]
+                               if item["kind"] == "approval")
+    assert historical_decision["version"] == 1
     assert out["progress"]["action"] == "draft"
     assert out["progress"]["title"] == "「创意方向」已退回，等团队出新版"
     assert "新版" in out["progress"]["prompt"]

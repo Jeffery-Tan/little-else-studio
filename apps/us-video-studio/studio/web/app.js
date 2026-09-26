@@ -168,9 +168,9 @@ async function selectRun(runId) {
   if (typeof closeEmbeddedProduction === 'function') closeEmbeddedProduction();
   state.canvasTab = 'plan';
   state.canvasTouched = false;
-  $('stage').hidden=false;$('journey-storyboard').hidden=true;$('journey-video').hidden=true;
+  $('stage').hidden=false;$('journey-assets').hidden=true;$('journey-storyboard').hidden=true;$('journey-video').hidden=true;
   for(const tab of document.querySelectorAll('[data-journey-tab]')){
-    const selected=tab.dataset.journeyTab==='plan';tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;
+    const selected=tab.id==='journey-tab-plan';tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;
   }
   $('spend-panel').hidden = true;
   $('spend-panel').costRequest = null;
@@ -261,6 +261,7 @@ async function refreshTimeline() {
   // The rail first: it decides which stage is on screen, and everything below
   // is drawn for that stage.
   renderRail(tl.rail);
+  syncJourneyTabs();
   // Pruning runs against every question the run has, never against the stage on
   // screen — see `pruneDrafts`. Before the pane, so a dropped answer is not
   // drawn one last time.
@@ -349,6 +350,7 @@ function selectStage(stage) {
   if (!stage || stage === state.activeStage) return;
   state.activeStage = stage;
   renderRail(state.rail);
+  syncJourneyTabs();
   renderPane();
 }
 
@@ -407,7 +409,7 @@ function renderPane() {
   if (step.stage === 'writing' && !step.stale && step.integrity_ok !== false &&
       host.querySelector('[data-creator-target], .artifact-prose p, .artifact-prose li')) {
     const hint = box('p', 'creator-feedback-hint',
-      host.querySelector('[data-creator-target]') ? '点一段画面、声音或台词，在对话中提出修改。'
+      host.querySelector('[data-creator-target]') ? '点一段画面、声音或台词，可讨论或直接修改。'
         : '点一段原文，在对话中提出这段的修改。');
     host.querySelector('.stage-heading')?.after(hint);
   }
@@ -535,13 +537,20 @@ function wireCreatorFeedback(host, step) {
           current?.artifact_sha256 !== bound.artifact_sha256) {
         toast('稿件版本已变化，请刷新后重新选择句子。', true); return;
       }
-      state.feedbackTarget = {...bound, quote};
+      let path = null;
+      try { path = JSON.parse(node.dataset.creatorPath || 'null'); } catch (_) { /* prose has no field path */ }
+      state.feedbackTarget = {...bound, kind:'writing', quote, ...(Array.isArray(path) ? {path} : {})};
       const chip = $('feedback-target');
       chip.replaceChildren();
-      const label = box('span', '', `正在修改${targetName} · 第 ${bound.version} 版：「${quote}」`);
+      const label = box('span', '', `已选${targetName} · 第 ${bound.version} 版：「${quote}」`);
+      if (Array.isArray(path)) {
+        const direct = box('button', 'ghost small', '按意见直接修改');
+        direct.type = 'button'; direct.onclick = () => { void submit('writing_revision'); };
+        chip.append(label, direct);
+      } else chip.append(label);
       const clear = box('button', 'ghost small', '取消');
       clear.type = 'button'; clear.onclick = clearFeedbackTarget;
-      chip.append(label, clear); chip.hidden = false;
+      chip.append(clear); chip.hidden = false;
       $('chat-input').placeholder = '说说这句或这段想怎么改…';
       setProjectFocus('chat'); $('chat-input').focus();
     };
@@ -927,6 +936,7 @@ function renderMaterials() {
   $("materials-count").textContent = list.length
     ? `${usable.length} 个能用 · 共 ${list.length} 个文件`
     : "还没有素材";
+  renderCanvasMaterials();
 
   const grid = $("materials-grid");
   grid.innerHTML = "";
@@ -941,8 +951,43 @@ function renderMaterials() {
   if (state.materialsOpen) loadMaterialWorkspace();
 }
 
+function renderCanvasMaterials() {
+  const host = $("journey-assets");
+  if (!host) return;
+  const list = state.materials || [];
+  const usable = list.filter(m => m.usable);
+  $("journey-tab-assets").textContent = usable.length ? `素材 ${usable.length}` : "素材";
+  host.replaceChildren();
+  const heading = box("div", "canvas-assets-heading");
+  const copy = box("div");
+  copy.append(box("span", "creator-kicker", "PROJECT MATERIALS"),
+    box("h2", "", "项目素材"),
+    box("p", "muted", list.length
+      ? `${usable.length} 个可用文件 · 共 ${list.length} 个。点开可查看原图或视频。`
+      : "这里会持续显示项目的图片和视频。添加素材本身不会启动创作或生成。"));
+  const add = box("button", "ghost small", "添加素材 ↗");
+  add.type = "button";
+  add.onclick = () => toggleMaterials(true);
+  heading.append(copy, add);
+  host.append(heading);
+  if (!list.length) return;
+  const grid = box("div", "canvas-material-grid");
+  for (const material of list) grid.appendChild(materialTile(material));
+  host.append(grid);
+  wireMedia(grid);
+}
+
 function materialTile(m) {
   const tile = box("div", "tile" + (m.usable ? "" : " unusable"));
+  if (m.usable) {
+    tile.setAttribute("role", "button");
+    tile.tabIndex = 0;
+    tile.setAttribute("aria-label", `查看素材：${m.name}`);
+    tile.onclick = event => { if (!event.target.closest("[data-media]")) openViewer(m); };
+    tile.onkeydown = event => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openViewer(m); }
+    };
+  }
   const thumb = box("span", "tile-thumb");
   if (m.usable) {
     // Wired by `wireMedia` like every other slot, so a tile and a card draw the
@@ -1121,7 +1166,15 @@ function renderTurn(turn, live = false) {
     const links = box('div','turn-deliverables');
     for(const item of delivered.values()) {
       const link=box('button','ghost small',`${item.stage==='writing'?'查看完整方案':item.stage==='direction'?'查看方向方案':item.stage==='intake'?'查看需求理解':'查看素材安排'} ↗`);
-      link.onclick=()=>openReader(item.stage,item.version).catch(err=>toast(err.message,true));
+      link.onclick=()=>{
+        const current=(state.rail||[]).find(step=>step.stage===item.stage);
+        if(['direction','writing'].includes(item.stage) && current?.has_doc &&
+            String(current.version)===String(item.version)) {
+          showJourneyTab('plan',{stage:item.stage});
+          setProjectFocus('canvas');
+          $('stage').scrollTop=0;
+        } else openReader(item.stage,item.version).catch(err=>toast(err.message,true));
+      };
       links.append(link);
     }
     wrap.append(links);
@@ -1284,7 +1337,8 @@ function goToStage(stage) {
 
 function renderApproval(item) {
   const card = box("div", "card approval");
-  card.append(box("div", "card-title", `你的决定 · ${item.stage_label}`));
+  const version = Number.isInteger(item.version) && item.version > 0 ? `第 ${item.version} 版` : '';
+  card.append(box("div", "card-title", `你的决定 · ${item.stage_label}${version}`));
   card.appendChild(box("p", "card-summary", item.sentence));
   return card;
 }
@@ -1776,7 +1830,7 @@ $("conversation-body").addEventListener("scroll", () => {
  * is now cleared only for a request that was accepted (or durably saved), and
  * the keyboard and the button share this one admission rule.
  */
-async function send(text) {
+async function send(text, requestKind = null) {
   if (steerPosting) return {accepted: false, reason: '正在提交上一次调整，请稍候。'};
   if (state.decisionBusy) return {accepted: false, reason: '正在保存你的决定，请稍候。'};
   if (state.recoveryBlocked) return {accepted: false, reason: '请先处理待恢复事项。'};
@@ -1798,6 +1852,12 @@ async function send(text) {
   const runId=state.runId;
   try {
     const target = state.feedbackTarget;
+    if (requestKind === 'writing_revision' &&
+        (!target || target.kind !== 'writing' || !Array.isArray(target.path)))
+      throw Error('这段内容无法精确定位到脚本字段，请用普通发送说明修改范围。');
+    if (requestKind === 'writing_revision' &&
+        typeof StudioComposer !== 'undefined' && StudioComposer.files(runId).length)
+      throw Error('直接修改脚本时请先移除待上传附件，避免改变本次依据。');
     if (target) {
       if (runId !== target.run_id)
         throw Error('项目已切换。意见已保留，请重新选择目标。');
@@ -1847,7 +1907,8 @@ async function send(text) {
       StudioComposer.clear(runId);state.busy=false;StudioComposer.render();
     }
     const payload = target
-      ? {text, request_id:crypto.randomUUID(), feedback_target:target}
+      ? {text, request_id:crypto.randomUUID(), feedback_target:target,
+          ...(requestKind ? {request_kind:requestKind} : {})}
       : {text, request_id:crypto.randomUUID()};
     // The result is passed through, not overwritten. `runtime.submitJob` is the
     // code that knows whether the server accepted this request, refused it, or
@@ -1861,7 +1922,9 @@ async function send(text) {
       // entry, so the wording has to keep that distinction.
       toast(result.uncertain
         ? '发送结果尚未确认，请在任务状态里确认这次提交，不要直接重发。'
-        : (result.reason || result.message || '这次发送没有被接受。'), true);
+        : (result.reason || result.error?.message || result.message || '这次发送没有被接受。'), true);
+      if (requestKind === 'writing_revision' && result.error?.status === 409)
+        clearFeedbackTarget();
       if (typeof StudioComposer !== 'undefined') StudioComposer.render();
       return {...result, run_id: runId};
     }
@@ -1905,7 +1968,7 @@ async function send(text) {
  * `send` owns the pass-through of the server's answer; this function owns what
  * the composer does about it. Neither decides the other's question.
  */
-async function submit() {
+async function submit(requestKind = null) {
   const input = $("chat-input");
   const value = input.value.trim() || (typeof StudioComposer!=='undefined' && StudioComposer.files(state.runId).length ? '我附上了素材，请先确认我想如何使用。' : '');
   if (!value || !state.runId || steerPosting ||
@@ -1923,7 +1986,7 @@ async function submit() {
   const stamp = (state.composerVersion = (state.composerVersion || 0) + 1);
   input.value = "";
   input.style.height = "auto";
-  const result = await send(value);
+  const result = await send(value, requestKind);
   const restorable = result && result.accepted === false && !result.uncertain
     && state.runId === owner
     && state.composerVersion === stamp;

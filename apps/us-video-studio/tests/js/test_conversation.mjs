@@ -184,7 +184,7 @@ test('only the live turn stays quiet — an older failed round still gets its fa
     'the live turn defers to the status row');
 });
 
-test('the workspace chrome carries the next action, and the green status band is gone', () => {
+test('the workspace chrome keeps current progress visible beside the next action', () => {
   const p = page();
   vm.runInContext(`
     state.busy = false;
@@ -200,11 +200,9 @@ test('the workspace chrome carries the next action, and the green status band is
     null;
   `, p.ctx);
 
-  const band = p.document.querySelector('.creator-goal');
-  assert.equal(band, null, 'no persistent 最终交付/现在 status band is rendered');
   const slot = p.el('project-progress');
-  assert.doesNotMatch(slot.textContent || '', /最终交付|现在：/,
-    'none of the band copy stands in for the chat');
+  assert.equal(slot.querySelector('.creator-status-current')?.textContent, '等待重试审核');
+  assert.equal(slot.querySelector('.creator-status')?.getAttribute('aria-label'), '当前进展');
   const button = slot.querySelector('[data-creator-next]');
   assert.ok(button, 'the next action stays in the chrome as a plain slot button');
   assert.equal(button.textContent, '重试本版审核');
@@ -230,4 +228,6 @@ test('the chrome action disappears while the team is working', () => {
   `, p.ctx);
   assert.equal(p.el('project-progress').querySelector('[data-creator-next]'), null,
     'in-progress state belongs to the status row, not to a second action');
+  assert.equal(p.el('project-progress').querySelector('.creator-status-current')?.textContent,
+    '团队正在处理');
 });

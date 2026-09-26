@@ -1,0 +1,78 @@
+/* The project keeps its work visible while the conversation remains available. */
+body[data-view="project"]:not([data-run-kind="learning"]) .sidebar {
+  width:66px;
+  padding:16px 8px;
+  align-items:center;
+}
+body[data-view="project"]:not([data-run-kind="learning"]) .app-shell {margin-left:66px}
+body[data-view="project"]:not([data-run-kind="learning"]) .studio-brand {
+  padding:0;
+  margin:2px 0 22px;
+}
+body[data-view="project"]:not([data-run-kind="learning"]) .studio-brand>span,
+body[data-view="project"]:not([data-run-kind="learning"]) .nav-item>span:last-child,
+body[data-view="project"]:not([data-run-kind="learning"]) .sidebar-note,
+body[data-view="project"]:not([data-run-kind="learning"]) .profile>div {display:none}
+body[data-view="project"]:not([data-run-kind="learning"]) .create-button {
+  width:42px;
+  height:42px;
+  padding:0;
+  font-size:0;
+  margin-bottom:20px;
+}
+body[data-view="project"]:not([data-run-kind="learning"]) .create-button>span {font-size:21px}
+body[data-view="project"]:not([data-run-kind="learning"]) .primary-nav,
+body[data-view="project"]:not([data-run-kind="learning"]) .sidebar-bottom {width:100%}
+body[data-view="project"]:not([data-run-kind="learning"]) .nav-item {
+  width:42px;
+  height:42px;
+  padding:0;
+  margin-inline:auto;
+  justify-content:center;
+  font-size:0;
+}
+body[data-view="project"]:not([data-run-kind="learning"]) .nav-icon svg {width:20px;height:20px}
+body[data-view="project"]:not([data-run-kind="learning"]) #spend::before {font-size:17px}
+body[data-view="project"]:not([data-run-kind="learning"]) .profile {
+  justify-content:center;
+  padding:14px 0 0;
+}
+body[data-view="project"]:not([data-run-kind="learning"]) .profile-avatar {flex:none}
+
+@media(min-width:951px) {
+  .project-workspace[data-focus="workbench"] {grid-template-columns:minmax(0,1fr) 392px}
+}
+@media(max-width:950px) {
+  .project-workspace[data-focus="workbench"] {
+    grid-template-columns:minmax(0,1fr);
+    grid-template-rows:auto minmax(0,1fr);
+  }
+  .project-workspace[data-focus="workbench"]>.project-chrome {grid-column:1;grid-row:1}
+  .project-workspace[data-focus="workbench"]>.project-canvas,
+  .project-workspace[data-focus="workbench"]>.composer {grid-column:1;grid-row:2}
+}
+.journey-tabs {gap:20px;overflow-x:auto;scrollbar-width:thin;white-space:nowrap}
+.journey-tabs button {flex:none}
+.journey-tabs button:disabled {opacity:.42;cursor:not-allowed}
+.canvas-assets {
+  flex:1;
+  min-height:0;
+  overflow:auto;
+  padding:28px 30px 42px;
+  scrollbar-gutter:stable;
+}
+.canvas-assets-heading {display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:24px}
+.canvas-assets-heading h2 {font-size:24px;line-height:1.35;margin:5px 0 8px}
+.canvas-assets-heading p {font-size:13px;line-height:1.6;margin:0;max-width:56ch}
+.canvas-assets-heading button {flex:none}
+.canvas-material-grid {display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:18px}
+.canvas-material-grid .tile {padding:10px;border:1px solid #3d4639;border-radius:12px;background:#1a201b}
+.canvas-material-grid .tile:focus-visible {outline:2px solid var(--accent);outline-offset:3px}
+.canvas-material-grid .tile-name {color:#e2e8dc}
+@media(max-width:720px) {
+  body[data-view="project"]:not([data-run-kind="learning"]) .sidebar {width:60px;padding:12px 6px}
+  body[data-view="project"]:not([data-run-kind="learning"]) .app-shell {margin-left:60px}
+  .canvas-assets {padding:20px 18px 30px}
+  .canvas-assets-heading {gap:10px}
+  .canvas-material-grid {grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:10px}
+}

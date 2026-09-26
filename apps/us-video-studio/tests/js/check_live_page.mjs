@@ -20,24 +20,24 @@ const BASE = process.env.STUDIO_CHECK_URL || '';
 const RUNS = (process.env.STUDIO_CHECK_RUNS || '').split(',').map(s => s.trim()).filter(Boolean);
 const live = BASE && RUNS.length ? test : test.skip;
 
-/* The scripts `index.html` loads, in its order. `app.js` is last of the ones we
- * need, and `learning-session.js` is first. Anything already loaded by the
- * fixture (`md.js`, `blocks.js`) is skipped rather than redefined. */
+/* Classic scripts from index.html, in browser order. Page mode leaves the
+ * fixture's runtime and app shims unloaded so these own the shared bindings. */
 const PAGE_SCRIPTS = [
   'learning-session.js', 'project-management.js', 'workspace.js', 'progress.js',
   'materials.js', 'image-analysis.js', 'image-workspace.js', 'conversation-input.js',
   'reference-video.js', 'material-workspace.js', 'team-progress.js', 'runtime.js',
   'revisions.js', 'revision-workspace.js', 'product-cards.js', 'outcomes.js',
   'project-costs.js', 'history.js', 'production.js', 'creator-view.js', 'journey.js',
-  'codex-login.js', 'connections.js', 'learning.js', 'inline-feedback.js',
+  'app.js', 'codex-login.js', 'connections.js', 'learning.js', 'inline-feedback.js',
 ];
 
 const IDS = ['chat-input', 'send', 'stage', 'toast', 'rail', 'project-progress',
   'conversation-body', 'conversation-count', 'draft', 'spend', 'materials',
   'materials-grid', 'materials-count', 'materials-toggle', 'materials-close',
   'materials-project-name', 'viewer', 'reader', 'run-select', 'journey-decision',
-  'journey-tab-plan', 'journey-tab-storyboard', 'journey-tab-video', 'journey-storyboard',
-  'journey-video', 'spend-panel', 'detail-toggle', 'conversation-toggle',
+  'journey-tab-plan', 'journey-tab-assets', 'journey-tab-script', 'journey-tab-storyboard',
+  'journey-tab-video', 'journey-assets', 'journey-storyboard', 'journey-video',
+  'spend-panel', 'detail-toggle', 'conversation-toggle',
   'conversation-caret', 'conversation-latest', 'feedback-target', 'viewer-body',
   'viewer-name', 'reader-body', 'reader-title', 'reader-sub', 'reader-versions',
   'reader-close', 'new-run', 'inspiration', 'trash-open', 'page-heading'];
@@ -52,7 +52,7 @@ function pageBody() {
 
 /** Load the whole page the way the browser loads it, then open one project. */
 async function openProject(runId) {
-  const app = loadApp({baseUrl: BASE, dom: makeDom({ids: IDS, body: pageBody()})});
+  const app = loadApp({baseUrl: BASE, dom: makeDom({ids: IDS, body: pageBody()}), runtime: 'page'});
   const {ctx, document} = app;
   // `index.html` defines these as top-level scripts, so they share one realm.
   for (const name of ['md.js', 'blocks.js', 'stage.js', ...PAGE_SCRIPTS]) {
@@ -64,12 +64,21 @@ async function openProject(runId) {
       (app.loadErrors ||= []).push(`${name}: ${err.message}`);
     }
   }
+  // app.js starts its own async init. Let that first project settle before
+  // exercising the same selector path a browser user takes, so the two loads
+  // cannot clear each other's timeline mid-assertion.
+  for (let attempt = 0; attempt < 100 && !vm.runInContext('state.timeline', ctx); attempt += 1)
+    await new Promise(resolve => setTimeout(resolve, 50));
+  if (!vm.runInContext('state.timeline', ctx))
+    throw new Error(`Initial page load did not settle; script load errors: ${(app.loadErrors || []).join('; ')}`);
   ctx.__run = runId;
-  vm.runInContext(`
-    state.runId = globalThis.__run;
-    null;
-  `, ctx);
-  await vm.runInContext('refreshTimeline()', ctx);
+  try {
+    await vm.runInContext('selectRun(globalThis.__run)', ctx);
+    vm.runInContext("setStudioView('project')", ctx);
+  } catch (error) {
+    throw new Error(`${error.message}; script load errors: ${(app.loadErrors || []).join('; ')}`,
+      {cause: error});
+  }
   app.read = (expression) => vm.runInContext(expression, ctx);
   app.document = document;
   return app;
@@ -79,6 +88,9 @@ for (const runId of RUNS) {
   live(`the live page opens ${runId} and renders it without a script error`, async () => {
     const app = await openProject(runId);
     const tl = app.read('state.timeline');
+    assert.ok(tl, JSON.stringify({runId, selected: app.read('state.runId'),
+      refreshSerial: app.read('state.refreshSerial'), requests: app.observed,
+      loadErrors: app.loadErrors || []}));
 
     // The projections the review is about, read straight off the live server's
     // answer as the page received it.

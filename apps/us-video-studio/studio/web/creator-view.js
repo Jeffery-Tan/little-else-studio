@@ -81,10 +81,12 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
     {kind: 'brief-redo', label: '继续重做方向'}, 'plan', 'direction');
   if (interaction) return result(interaction.question || '有一项需要你确认',
     {kind: 'question', label: '回答这个问题'}, 'plan');
-  if (pending?.stage === 'direction') return nav('选择创意方向', 'plan',
-    '正在选择创意方向；采用后会继续准备脚本', 'direction');
-  if (pending?.stage === 'writing') return nav('阅读并决定脚本', 'plan',
-    '脚本已准备好，等待你阅读和决定', 'writing');
+  if (pending?.stage === 'direction') return pending.passed === false
+    ? nav('查看方向与审核', 'plan', '创意方向已保存，但审核提出修改意见', 'direction')
+    : nav('选择创意方向', 'plan', '正在选择创意方向；采用后会继续准备脚本', 'direction');
+  if (pending?.stage === 'writing') return pending.passed === false
+    ? nav('查看脚本与审核', 'plan', '脚本新版已保存，但审核提出修改意见', 'writing')
+    : nav('阅读并决定脚本', 'plan', '脚本已准备好，等待你阅读和决定', 'writing');
   if (timeline.brief?.phase === 'review_failed' && timeline.brief.action?.kind === 'review_stage') {
     const review = timeline.brief.action;
     const name = review.stage === 'direction' ? '创意方向' : review.stage === 'writing' ? '脚本' : '当前作品';
@@ -152,6 +154,12 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
   if (timeline.brief?.action?.kind === 'review_stage') return result(
     '当前作品已保存，团队检查尚未完成',
     {...timeline.brief.action, kind:'review_stage'}, 'plan', timeline.brief.action.stage);
+  if (timeline.brief?.phase === 'interrupted' && String(run.brief || '').trim()) return result(
+    '你的需求已保存，本轮制片未完成',
+    {kind:'job',label:'查看本轮记录'}, 'plan', null,
+    '查看本轮失败原因后，再决定是否继续；不会自动重试。');
+  if (String(run.brief || '').trim()) return result(
+    '你的需求已保存，等待继续创作', {kind:'chat',label:'继续对话'}, 'plan');
   return result('说出你想完成的作品', {kind: 'chat', label: '继续对话'}, 'plan');
 }
 

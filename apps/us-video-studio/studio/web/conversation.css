@@ -3,6 +3,12 @@
 .project-chrome {grid-column:1/-1;grid-row:1;display:flex;min-width:0}
 .project-chrome>#project-progress {flex:1;min-width:0}
 .project-chrome>#project-progress:has(>[data-creator-next]) {display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:6px 0}
+.project-chrome>#project-progress:has(>.creator-status) {display:flex;align-items:center;justify-content:space-between;gap:12px;padding:7px 16px;background:#1b201c;border-bottom:1px solid #4c5640}
+.creator-status {display:flex;align-items:baseline;gap:9px;min-width:0;font-size:12px;line-height:1.5}
+.creator-status-label {flex:none;color:#b9c69f}
+.creator-status-current {min-width:0;color:#edf1e7;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.project-chrome>#project-progress:has(>.creator-status) [data-creator-next] {flex:none}
+@media(max-width:600px) {.project-chrome>#project-progress:has(>.creator-status) {padding:7px 10px}.creator-status {display:block}.creator-status-label {display:block;font-size:10px}}
 .project-chrome>.project-tools {flex:none}
 .project-canvas {grid-area:2/1/3/2}
 .project-workspace>.composer {grid-area:2/2/3/3}

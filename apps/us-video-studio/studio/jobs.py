@@ -140,7 +140,8 @@ class JobManager:
             raise PipelineError('job_missing', '没有找到这次执行。')
         out = {k: v for k, v in created.items() if k not in ('kind', 'seq')}
         out.update(run_id=run_id, status='queued', events=[], cursor=created['seq'], reason='',
-                   deliverable=None, goal_revision=0, steer_status=None, successor_job_id=None)
+                   deliverable=None, revision_result=None, goal_revision=0,
+                   steer_status=None, successor_job_id=None)
         corrections = []
         for row in rows:
             out['cursor'] = row['seq']
@@ -148,8 +149,12 @@ class JobManager:
                 out['status'], out['reason'] = row['status'], row.get('reason', '')
             if row['kind'] == 'job_deliverable':
                 out['deliverable'] = row['deliverable']
-            if row['kind'] == 'job_progress' and row['seq'] > after_seq:
-                out['events'].append({**row['event'], 'seq': row['seq'], 'at': row['at']})
+            if row['kind'] == 'job_progress':
+                event = row['event']
+                if event.get('type') == 'writing_revision_result' and isinstance(event.get('result'), dict):
+                    out['revision_result'] = event['result']
+                if row['seq'] > after_seq:
+                    out['events'].append({**event, 'seq': row['seq'], 'at': row['at']})
             if row['kind'] == 'job_steer_received':
                 corrections.append(row)
                 out['goal_revision'] = row['goal_revision']
@@ -188,6 +193,25 @@ class JobManager:
     def latest(self, run_id, after_seq=0):
         jobs = self.list(run_id)
         return self.get(run_id, jobs[-1]['job_id'], after_seq) if jobs else None
+
+    def request_receipt(self, run_id, request_id, *, kind='job', job_id=None):
+        """Read an exact durable acceptance record without retrying the request.
+
+        Absence is not proof of rejection: an in-flight POST may still arrive.
+        The caller must keep its original identity and payload until resolved.
+        """
+        if kind not in {'job', 'steer'} or (kind == 'steer' and not job_id):
+            raise ValueError('request receipt needs a kind and a target job for steer')
+        event_kind = 'job_created' if kind == 'job' else 'job_steer_received'
+        with self.store.run_lock(run_id):
+            rows = self.store.read_events(run_id)
+        record = next((row for row in rows
+                       if row.get('kind') == event_kind
+                       and row.get('request_id') == request_id
+                       and (kind == 'job' or row.get('job_id') == job_id)), None)
+        return {'received': record is not None, 'kind': kind,
+                'request_id': request_id,
+                'job_id': record['job_id'] if record else job_id if kind == 'steer' else None}
 
     def _event(self, run_id, job_id, kind, **fields):
         with self.store.run_lock(run_id):
