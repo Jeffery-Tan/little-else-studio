@@ -388,6 +388,17 @@ def test_material_blocks_count_what_cannot_be_filmed():
     assert gaps["items"] == [{"text": "没有实测素材", "note": "这条主张没法证明"}]
 
 
+def test_critical_material_gap_is_visible_even_when_shot_can_be_made():
+    data = s.normalize("material_plan", {
+        "items": [{"shot": "商品近景", "status": "需要拍"}],
+        "gaps": [{"gap": "核心效果无证据", "consequence": "不能展示效果", "blocking": "阻塞"}],
+    }).data
+
+    assert s.material_blockers(data) == ["核心效果无证据"]
+    gaps = next(b for b in s.view("material_plan", data) if b["type"] == "list")
+    assert gaps["items"] == [{"text": "核心效果无证据", "note": "阻塞脚本 · 不能展示效果"}]
+
+
 def test_a_status_the_model_invented_is_not_given_a_tone():
     """Mapping it to a colour would present a guess as a classification."""
     data = s.normalize("material_plan", {"items": [{"shot": "x", "status": "待定"}]}).data

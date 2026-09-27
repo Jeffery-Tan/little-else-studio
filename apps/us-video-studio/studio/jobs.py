@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from .agents.client import JobCancelled, ModelError
+from .agents.client import JobCancelled, ModelError, NonRetryableStageError
 from .agents.codex_client import CodexUnavailable
 from .connections import ConnectionUnavailable
 from .models import BudgetExceeded, PipelineError, STAGES
@@ -345,6 +345,9 @@ class JobManager:
             status, reason = 'cancelled', str(exc)
             emit({'type': 'cancelled', 'message': reason})
         except BudgetExceeded as exc:
+            status, reason = 'blocked', str(exc)
+            emit({'type': 'blocked', 'message': reason})
+        except NonRetryableStageError as exc:
             status, reason = 'blocked', str(exc)
             emit({'type': 'blocked', 'message': reason})
         except (CodexUnavailable, ConnectionUnavailable) as exc:

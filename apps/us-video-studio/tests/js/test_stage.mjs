@@ -168,8 +168,8 @@ test("both structured and prose-only gates require an explicit submit action", (
   for (const options of [threeOptions, []]) {
     const html = stageHtml(step(), { pending: pending({options}) });
     assert.ok(html.includes('data-act="approve"'));
-    assert.ok(html.includes('采用并继续完善方案'));
-    assert.ok(html.includes('退回并继续修改'));
+    assert.ok(html.includes(options.length ? '按所选方向继续' : '确认当前方向并继续'));
+    assert.ok(html.includes('按意见修改，先出新版'));
   }
 });
 
@@ -178,12 +178,13 @@ test("a document the reviewer did not pass asks the override question differentl
     pending: pending({ passed: false, options: [], headline: "「创意方向」写好了，但审核没有通过它。",
       findings: [{kind:"content",issue:"开场没有商品作用"}] }),
   });
-  assert.ok(html.includes("明确覆盖审核并通过"));
+  assert.ok(html.includes("明确覆盖审核并采用当前版"));
   assert.ok(html.includes('data-passed="0"'));
   assert.ok(html.includes('<details class="gate-findings" open>'));
   assert.ok(html.indexOf('data-act="reject"') < html.indexOf('data-act="approve"'));
   assert.ok(html.includes('class="good small" data-act="reject"'));
   assert.ok(html.includes('class="bad small" data-act="approve"'));
+  assert.ok(html.includes('class="override-reason"'));
 });
 
 test("the findings and the price of the click are reachable but folded", () => {
@@ -440,7 +441,7 @@ test("reading comes before approval without changing the exact gate binding", ()
   });
   assert.ok(html.indexOf('class="artifact-prose"') < html.indexOf('id="stage-decision"'));
   assert.match(html, new RegExp(`data-stage="direction" data-version="2" data-sha="${hash}" data-passed="0"`));
-  assert.ok(html.includes('明确覆盖审核并通过'));
+  assert.ok(html.includes('明确覆盖审核并采用当前版'));
   assert.equal((html.match(/type="radio"/g)||[]).length,3);
   assert.ok(!/\bchecked\b/.test(html));
 });
@@ -494,7 +495,35 @@ test('normal direction fields lead with the real claim and show recommendation a
   assert.doesNotMatch(html,/data-act="approve"|<h3>方向 A<\/h3>/);
 });
 
-test('choice-changing direction risks remain visible while generic evidence stays in details', () => {
+test('a legacy direction script is folded while the direction remains comparable', () => {
+  const script = '开场（0–3s）：手举起包。台词：This is my bag.\n'.repeat(12);
+  const html = stageHtml(step({blocks:[{type:'cards',cards:[{head:'A',fields:[
+    {label:'主张',value:'展示一片式结构'},
+    {label:'观众与处境',value:'通勤时需要轻便收纳'},
+    {label:'开场',value:'第一镜头说出一句英文台词'},
+    {label:'画面与表达',value:script},
+  ]}]}]}), {});
+  assert.match(html, /展示一片式结构/);
+  assert.match(html, /通勤时需要轻便收纳/);
+  assert.match(html, /<details class="creator-direction-draft"><summary>查看原稿中的制作细节<\/summary>/);
+  assert.ok(html.indexOf('查看原稿中的制作细节') < html.indexOf('This is my bag'),
+    'the saved script remains available only inside the closed detail');
+  assert.doesNotMatch(html, /class="creator-direction-story"/);
+  assert.doesNotMatch(html, /class="creator-opening"/);
+});
+
+test('a concise new direction shows its progression without a draft disclosure', () => {
+  const html = stageHtml(step({blocks:[{type:'cards',cards:[{head:'A',fields:[
+    {label:'主张',value:'展示一片式结构'},
+    {label:'推进概念',value:'先看到平铺形态，再看到它收成日常背包。'},
+    {label:'开场识别点',value:'平铺的背包占满画面'},
+  ]}]}]}), {});
+  assert.match(html, /class="creator-direction-story">先看到平铺形态/);
+  assert.match(html, /开场识别点/);
+  assert.doesNotMatch(html, /creator-direction-draft/);
+});
+
+test('direction conditions remain available without an invented hard veto', () => {
   const html=stageHtml(step({blocks:[
     {type:'cards',cards:[{head:'A',fields:[
       {label:'主张',value:'先比较容量'},
@@ -504,7 +533,9 @@ test('choice-changing direction risks remain visible while generic evidence stay
     {type:'matrix',columns:['A'],rows:[{label:'两款实际容量',cells:[true]}]},
   ]}),{});
   assert.ok(html.indexOf('舍弃细节镜头') < html.indexOf('研究依据与制作条件'));
-  assert.match(html,/「两款实际容量」未解决时，这个方向不能成立/);
+  assert.match(html,/两款实际容量/);
+  assert.doesNotMatch(html,/未解决时，这个方向不能成立|选择前要核对/);
+  assert.ok(html.indexOf('完整依据与其他内容') < html.indexOf('两款实际容量'));
   assert.ok(html.indexOf('研究依据与制作条件') < html.indexOf('只有一张样品图'));
 });
 
@@ -540,6 +571,32 @@ test('structured script reads exact lines before optional pictures and the timel
   assert.match(html,/data-creator-path="\[&quot;caption&quot;\]"/);
   assert.match(html,/class="creator-script-caption"/);
   assert.match(html,/查看分镜顺序与其他依据/);
+  assert.match(html,/aria-label="脚本段落"/);
+  assert.match(html,/<a href="#script-segment-2">/);
+  assert.match(html,/<article id="script-segment-2"/);
+});
+
+test('script overview describes only the pending decision for this exact artifact', () => {
+  const hash='a'.repeat(64);
+  const script=step({stage:'writing',version:2,artifact_sha256:hash,blocks:[{type:'cards',cards:[
+    {head:'0:00–0:03',fields:[{label:'台词',value:'Pick the right size'}]},
+  ]}]});
+  const decision=pending({stage:'writing',version:2,artifact_sha256:hash,passed:false,findings:[
+    {category:'表达缺口',text:'没有给出选择理由'},
+  ]});
+  const current=stageHtml(script,{pending:decision});
+  assert.match(current,/审核未通过，建议先看修改意见 · 1 点/);
+  assert.match(current,/Pick the right size/);
+  const old=stageHtml(script,{pending:{...decision,artifact_sha256:'b'.repeat(64)}});
+  assert.doesNotMatch(old,/审核未通过，建议先看修改意见/);
+});
+
+test('script overview escapes model text before making segment links', () => {
+  const html=stageHtml(step({stage:'writing',blocks:[{type:'cards',cards:[
+    {head:'0:00–0:03',fields:[{label:'台词',value:'<img src=x onerror=alert(1)>'}]},
+  ]}]}),{});
+  assert.doesNotMatch(html,/<img/);
+  assert.match(html,/&lt;img src=x onerror=alert\(1\)&gt;/);
 });
 
 test('visual script shows every picture and sound without opening details or inventing silence', () => {

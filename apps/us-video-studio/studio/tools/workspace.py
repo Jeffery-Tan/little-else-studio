@@ -94,6 +94,7 @@ def render_structure(stage: str, structured: dict) -> str:
 STATUS_LABEL = {
     "empty": "尚无产物",
     "done": "已完成",
+    "needs_resolution": "关键缺口待处理",
     "stale": "已过期",
     "awaiting_review": "待审核",
     "reviewed": "已审核",
@@ -208,7 +209,8 @@ class Workspace:
             lines.append("- （没有可自动推进的动作）")
         return "\n".join(lines)
 
-    def render_artifact(self, stage: str, version: int | None = None) -> str:
+    def render_artifact(self, stage: str, version: int | None = None,
+                        *, include_layout: bool = True) -> str:
         self._check(stage)
         artifact: Artifact | None = (
             self.store.read_artifact(self.run_id, stage, version)
@@ -247,7 +249,7 @@ class Workspace:
                         f"是在更早的版本上写的，已失效"
                     )
 
-        layout = render_structure(stage, artifact.structured)
+        layout = render_structure(stage, artifact.structured) if include_layout else None
         if layout:
             head += [
                 "",
@@ -267,7 +269,8 @@ class Workspace:
             ]
         return "\n".join(head) + "\n\n---\n\n" + body
 
-    def render_context(self, stage: str, versions: dict[str, int] | None = None) -> str:
+    def render_context(self, stage: str, versions: dict[str, int] | None = None,
+                       *, include_layout: bool = True) -> str:
         """The actual fact inputs and user choice, not merely permission to read.
 
         Reviewers may pin versions before assembling their isolated request.
@@ -280,7 +283,8 @@ class Workspace:
         versions = versions or {}
         parts = ["# 共用事实与实际选择"]
         if "intake" in self.readable and stage != "intake":
-            parts.append(self.render_artifact("intake", versions.get("intake")))
+            parts.append(self.render_artifact("intake", versions.get("intake"),
+                                              include_layout=include_layout))
         if stage in ("material_plan", "writing") and "direction" in self.readable:
             state = self.pipeline.stage_state(self.run_id, "direction")
             artifact = (

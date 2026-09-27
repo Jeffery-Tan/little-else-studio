@@ -39,7 +39,7 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
                 continue
             state = pipeline.state(run.run_id).to_dict()
             rows = store.read_events(run.run_id)
-            brief = project_brief(state, latest_execution(store, run.run_id, rows))
+            brief = project_brief(state, latest_execution(store, run.run_id, rows), store.read_chat(run.run_id))
             selection = next((row['selection'] for row in reversed(rows)
                               if row.get('kind') == 'creative_context_selected'
                               and row.get('selection', {}).get('format') in ('video', 'photo')), None)

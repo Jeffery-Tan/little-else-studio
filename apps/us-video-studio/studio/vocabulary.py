@@ -48,6 +48,7 @@ ROLE_LABEL: dict[str, str] = {
 STATUS_LABEL: dict[str, str] = {
     "empty": "还没开始",
     "done": "已写完",
+    "needs_resolution": "关键缺口待处理",
     "awaiting_review": "审核中",
     "reviewed": "审核完了",
     "returned": "被打回",
@@ -492,7 +493,8 @@ def spend_sentence(spend: Any, usd_enforceable: bool) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def build_rail(stages: list[dict[str, Any]], next_stage: str | None) -> list[dict[str, Any]]:
+def build_rail(stages: list[dict[str, Any]], next_stage: str | None,
+               chat: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Top-of-screen progress, and the four stage views behind it.
 
     Each step reports one of three things: done (✓), the one being worked on now
@@ -511,7 +513,7 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None) -> list[dic
     (see ``Pipeline.stage_state``), so it always describes the version named by
     ``version`` on this same step; it can never be a verdict on an older draft.
     """
-    from .structured import view
+    from .structured import question_answered, view
 
     rail: list[dict[str, Any]] = []
     for st in stages:
@@ -528,7 +530,7 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None) -> list[dic
         # signpost to a stage that is waiting on him. A returned document is
         # mid-flight, not finished — the status `pipeline.stage_state` derives
         # for it is the same "not settled" the other two mean.
-        elif has_doc and st.get("status") in ("reviewed", "awaiting_review", "returned"):
+        elif has_doc and st.get("status") in ("reviewed", "awaiting_review", "returned", "needs_resolution"):
             mark, state = "●", "active"
         elif has_doc:
             mark, state = "✓", "done"
@@ -576,10 +578,11 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None) -> list[dic
                 "needs_you": bool(st.get("can_approve")),
                 "blank": blank,
                 "blocks": view(stage, structured),
-                "questions": [q for q in build_questions(stages) if q["stage"] == stage],
+                "questions": [q for q in build_questions(stages, chat) if q["stage"] == stage],
                 "team_issues": [q for q in (structured.get("open_questions") or [])
                                 if isinstance(q, dict) and q.get("question")
-                                and not any(q.get("question") == ask["question"] for ask in build_questions(stages)
+                                and not question_answered(chat, q["question"], latest.get("created_at", ""))
+                                and not any(q.get("question") == ask["question"] for ask in build_questions(stages, chat)
                                             if ask["stage"] == stage)],
                 "review": None
                 if not review.get("verdict")
@@ -589,7 +592,8 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None) -> list[dic
     return rail
 
 
-def build_questions(stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_questions(stages: list[dict[str, Any]],
+                    chat: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Every unanswered question, in stage order, each saying what it blocks.
 
     The screen's standing question to him: what is this waiting on you for. It
@@ -602,4 +606,4 @@ def build_questions(stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return []
     return [{**q, "stage_label": stage_label(q["stage"]), "numbered": numbered_stage(q["stage"]),
              "send_prefix": answer_prefix(q["question"])}
-            for q in project_brief({"stages": stages})["questions"]]
+            for q in project_brief({"stages": stages}, chat=chat)["questions"]]

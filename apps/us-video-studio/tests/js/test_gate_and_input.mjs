@@ -164,10 +164,30 @@ test('the brief-amendment card wires both of its buttons instead of throwing', a
     clause_id: 'goal.primary', op: 'replace', text: '目标收窄为设计细节种草，不要求出镜穿搭',
   }]);
   assert.equal(post.body.approve, true);
+  assert.equal(post.body.note, '', 'approval carries only the displayed replacement text');
   assert.equal(post.body.expected_artifact_sha256, SHA);
   assert.equal(app.refreshed, 1);
   assert.equal(app.toastIsError, false);
   assert.match(app.toastText, /重做/);
+});
+
+test('an amendment with typed changes cannot approve the unchanged proposal', async () => {
+  const app = wire({routes: {'brief-amendment': {id: 'amd-1', status: 'approved'}}});
+  const gate = bind(app, mountGate({}, proposalPending()));
+  gate.querySelector('.reason').value = '同意收窄目标，但还要加入价格对比';
+  gate.querySelector('[data-act="amend_brief"]').click();
+  await settle();
+  assert.equal(app.observed.filter(call => call.path.endsWith('/brief-amendment')).length, 0);
+  assert.match(gate.querySelector('.gate-feedback').textContent, /修改意见尚未进入简报/);
+  assert.equal(gate.querySelector('.reason').value, '同意收窄目标，但还要加入价格对比');
+
+  const inline = bind(app, mountGate({}, decisionPending({
+    amend: proposalPending().amend,
+  })));
+  inline.querySelector('.reason').value = '还要加入价格对比';
+  inline.querySelector('[data-act="amend_brief"]').click();
+  await settle();
+  assert.equal(app.observed.filter(call => call.path.endsWith('/brief-amendment')).length, 0);
 });
 
 test('a real proposal is shown as a before/after diff, not as a clause id', () => {
@@ -230,7 +250,7 @@ test('a return with no reason is refused in the card and never reaches the serve
   await settle();
   assert.equal(app.observed.filter(call => call.path.endsWith('/decision')).length, 0);
   assert.equal(gate.querySelector('.gate-feedback').textContent,
-    '请写明需要调整的地方，或覆盖审核的具体理由。');
+    '请写明需要调整的地方。');
 });
 
 test('an approval whose redo did not start is reported as not started', async () => {
@@ -244,14 +264,12 @@ test('an approval whose redo did not start is reported as not started', async ()
   assert.match(app.toastText, /正在运行/);
 });
 
-test('a failed amendment write keeps the note and reports it on the card', async () => {
+test('a failed amendment write reports the failure on the card', async () => {
   const failure = Object.assign(new Error('连接中断'), {status: 500});
   const app = wire({routes: {'brief-amendment': failure}});
   const gate = bind(app, mountGate({}, proposalPending()));
-  gate.querySelector('.reason').value = '请一并收窄目标';
   gate.querySelector('[data-act="amend_brief"]').click();
   await settle();
-  assert.equal(gate.querySelector('.reason').value, '请一并收窄目标');
   assert.match(gate.querySelector('.gate-feedback').textContent, /修订失败/);
   assert.match(gate.querySelector('.gate-feedback').textContent, /草稿仍保留/);
 });
@@ -436,9 +454,11 @@ test('the structured direction cards enforce the same per-option admission', () 
   const {gate} = mountStructuredGate(pending);
   assert.ok(gate, 'the inline gate is the one on screen');
 
-  const buttons = gate.querySelectorAll('[data-act="approve"]');
-  assert.equal(buttons.length, 1, 'only the admissible option gets an adopt button');
-  assert.equal(buttons[0].getAttribute('data-option-key'), 'B');
+  const buttons = gate.querySelectorAll('[data-act="pick-option"]');
+  assert.equal(buttons.length, 2, 'every option can be used as a revision reference');
+  assert.equal(buttons[0].dataset.admissible, '0');
+  assert.equal(buttons[1].dataset.admissible, '1');
+  assert.equal(gate.querySelectorAll('[data-act="approve"]').length, 1, 'one explicit adoption action');
   assert.ok(gate.textContent.includes('不能采用'), 'the refused option says so');
   assert.ok(gate.textContent.includes('未声明满足 goal.primary'), 'and why');
   const blockedCard = gate.querySelector('[data-direction-card="A"]');
@@ -488,14 +508,14 @@ test('a failed decision leaves the refused option disabled', async () => {
   });
   const {gate} = mountStructuredGate(pending);
   bind(app, gate);
-  const blocked = gate.querySelector('[data-direction-card="A"] [data-act="approve"]');
-  assert.equal(blocked, null, 'there was never a button to re-enable');
-
-  const adoptB = gate.querySelector('[data-direction-card="B"] [data-act="approve"]');
+  const blocked = gate.querySelector('[data-direction-card="A"] [data-act="pick-option"]');
+  assert.equal(blocked.dataset.admissible, '0');
+  gate.querySelector('[data-direction-card="B"] [data-act="pick-option"]').click();
+  const adoptB = gate.querySelector('.gate-actions [data-act="approve"]');
   adoptB.click();
   await settle();
   // The failed save re-enables what it disabled — but not the refused option.
-  assert.equal(gate.querySelector('[data-direction-card="A"] [data-act="approve"]'), null);
+  assert.equal(blocked.dataset.admissible, '0');
   assert.equal(adoptB.disabled, false, 'the admissible option is usable again for a retry');
   assert.match(gate.querySelector('.gate-feedback').textContent, /连接中断|失败/);
 });
@@ -510,11 +530,82 @@ test('the fallback form and the structured cards agree on admission', () => {
   });
   const structured = mountStructuredGate(pending).gate;
   const fallback = mountGate({}, pending);
-  const admitted = (gate) => [...gate.querySelectorAll('[data-act="approve"]')]
-    .map(button => button.getAttribute('data-option-key') || 'B');
-  assert.deepEqual(admitted(structured), ['B']);
-  assert.deepEqual(admitted(fallback), ['B'], 'both consumers read the same verdict');
+  assert.equal(structured.querySelector('[data-direction-card="A"] [data-act="pick-option"]').dataset.admissible, '0');
+  assert.equal(structured.querySelector('[data-direction-card="B"] [data-act="pick-option"]').dataset.admissible, '1');
   assert.equal(fallback.querySelectorAll('input[type="radio"]')[0].disabled, true);
+});
+
+test('a direction change request returns the old version and never approves it', async () => {
+  const app = wire({routes: {nonce: {nonce: 'n-revise'}, decision: {decision: 'returned', continuation: {status: 'started'}}}});
+  const {gate} = mountStructuredGate(decisionPending());
+  bind(app, gate);
+  gate.querySelector('[data-direction-card="B"] [data-act="pick-option"]').click();
+  gate.querySelector('.reason').value = '开头改成先展示展开动作';
+  gate.querySelector('.reason').oninput();
+  gate.querySelector('[data-act="approve"]').click();
+  await settle();
+  assert.equal(app.observed.filter(call => call.path.endsWith('/decision')).length, 0,
+    'an edit note must never be silently approved');
+  assert.match(gate.querySelector('.gate-feedback').textContent, /修改意见尚未处理/);
+  gate.querySelector('[data-act="reject"]').click();
+  await settle();
+  const post = app.observed.find(call => call.path.endsWith('/decision'));
+  assert.equal(post.body.decision, 'returned');
+  assert.equal(post.body.selected_option_id, null);
+  assert.match(post.body.note, /方向 B/);
+  assert.match(post.body.note, /开头改成先展示展开动作/);
+  assert.equal(post.body.continue_after, true);
+});
+
+test('adopting a direction sends only the exact version and selected option', async () => {
+  const app = wire({routes: {nonce: {nonce: 'n-adopt'}, decision: {decision: 'approved', continuation: {status: 'started'}}}});
+  const {gate} = mountStructuredGate(decisionPending());
+  bind(app, gate);
+  gate.querySelector('[data-direction-card="B"] [data-act="pick-option"]').click();
+  assert.equal(app.observed.length, 0, 'picking a direction is not an API decision');
+  gate.querySelector('[data-act="approve"]').click();
+  await settle();
+  const post = app.observed.find(call => call.path.endsWith('/decision'));
+  assert.equal(post.body.decision, 'approved');
+  assert.equal(post.body.note, '');
+  assert.equal(post.body.selected_option_id, 'B');
+  assert.equal(post.body.expected_version, 2);
+  assert.equal(post.body.expected_artifact_sha256, SHA_B);
+});
+
+test('a blocked direction can guide revision but cannot be adopted', async () => {
+  const app = wire();
+  const {gate} = mountStructuredGate(decisionPending({options: [
+    {key:'A', admissible:false, blocked_reason:'缺少证据'}, {key:'B', admissible:true},
+  ]}));
+  bind(app, gate);
+  gate.querySelector('[data-direction-card="A"] [data-act="pick-option"]').click();
+  gate.querySelector('[data-act="approve"]').click();
+  await settle();
+  assert.equal(app.observed.length, 0);
+  assert.match(gate.querySelector('.gate-feedback').textContent, /不能采用/);
+});
+
+test('failed review requires a separate override reason and no pending edits', async () => {
+  const app = wire({routes: {nonce: {nonce: 'n-override'}, decision: {decision: 'approved_override', continuation: {status: 'started'}}}});
+  const gate = bind(app, mountGate({stage:'writing', label:'脚本'}, decisionPending({
+    stage:'writing', stage_label:'脚本', options:[], passed:false,
+  })));
+  gate.querySelector('.reason').value = '修改第一句';
+  gate.querySelector('.reason').oninput();
+  gate.querySelector('[data-act="approve"]').click();
+  await settle();
+  assert.equal(app.observed.length, 0);
+  gate.querySelector('.reason').value = '';
+  gate.querySelector('.reason').oninput();
+  gate.querySelector('.override-reason').value = '此处由我承担取舍';
+  gate.querySelector('.override-reason').oninput();
+  gate.querySelector('[data-act="approve"]').click();
+  await settle();
+  const post = app.observed.find(call => call.path.endsWith('/decision'));
+  assert.equal(post.body.note, '');
+  assert.equal(post.body.override_reason, '此处由我承担取舍');
+  assert.equal(post.body.selected_option_id, null);
 });
 
 /* ----------------------------------------------------------------- R5 ---- */
@@ -559,13 +650,15 @@ test('a refusal from the same project with no newer input puts the words back', 
   assert.equal(input.value, '换了模型再试');
 });
 
-test('submit reports the runtime result instead of assuming it was accepted', async () => {
+test('the composer keeps a running task draft for the next turn', async () => {
   const app = composer({busy: true, steer: {ok: true},
     currentJob: {job_id: 'j9', job_kind: 'conversation', status: 'running', goal_revision: 0}});
   const input = app.ctx.document.getElementById('chat-input');
   input.value = '改成 12 秒';
   const result = await app.ctx.submit();
-  assert.equal(result.accepted, true, 'an accepted adjustment is reported as accepted');
+  assert.equal(result.accepted, false);
+  assert.equal(input.value, '改成 12 秒');
+  assert.equal(app.steers.length, 0);
 });
 
 test('an unknown result keeps its request identity instead of becoming a draft', async () => {
@@ -624,14 +717,14 @@ test('the real submitSteer path does not overwrite a newer same-project draft', 
     steerError: Object.assign(new Error('任务目标已更新，请刷新后按当前目标调整。'), {status: 409})});
   const input = app.ctx.document.getElementById('chat-input');
   input.value = '第一次调整';
-  const pending = app.ctx.submit();
+  const pending = app.ctx.send(input.value);
   // The user keeps typing while the adjustment is in flight.
   input.value = '后来写的新想法';
   app.ctx.updatesComposerVersion?.();
   const result = await pending;
   assert.equal(result.accepted, false);
   assert.equal(input.value, '后来写的新想法', 'the newer draft survives the late 409');
-  assert.equal(result.draft_restored, false);
+  assert.equal(result.rejected_text, '第一次调整');
 });
 
 test('switching project and back keeps each draft separate', async () => {
@@ -828,6 +921,28 @@ function composer({busy = false, currentJob = null, recoveryBlocked = false, acc
   return app;
 }
 
+test('clarification choice waits in the composer and sends its answer with the question id', async () => {
+  const app = composer();
+  vm.runInContext(webSource('journey.js'), app.ctx, {filename: 'journey.js'});
+  const question = {id: 'a'.repeat(32), question: '更偏哪种表达？', recommended: 0,
+    options: [{label: '日常分享'}, {label: '直接演示'}]};
+  const card = parseHtml(app.ctx.questionCardHtml(question))[0];
+  const input = app.ctx.document.getElementById('chat-input');
+  input.value = '不要夸张表演';
+  app.ctx.bindQuestionChoices(card, question);
+  card.querySelector('[data-question-choice="0"]').click();
+  assert.match(input.value, /日常分享/);
+  assert.match(input.value, /不要夸张表演/);
+  assert.equal(app.jobs.length, 0, 'picking an option must not start a model call');
+  card.querySelector('[data-question-choice="1"]').click();
+  assert.match(input.value, /直接演示/);
+  assert.doesNotMatch(input.value, /日常分享/);
+  await app.ctx.submit();
+  assert.equal(app.jobs.length, 1);
+  assert.equal(app.jobs[0].payload.question_id, question.id);
+  assert.match(app.jobs[0].payload.text, /不要夸张表演/);
+});
+
 test('Enter during a queued task keeps the message instead of eating it', async () => {
   const app = composer({busy: true,
     currentJob: {job_id: 'j1', job_kind: 'conversation', status: 'queued'}});
@@ -837,7 +952,7 @@ test('Enter during a queued task keeps the message instead of eating it', async 
   assert.equal(result.accepted, false);
   assert.equal(input.value, '把开场改成手部特写', 'the unsent text must survive the refusal');
   assert.equal(app.jobs.length, 0);
-  assert.match(app.toastText, /仍在执行本轮/);
+  assert.match(result.reason, /本轮仍在执行/);
 });
 
 test('Enter during a video analysis keeps the message and opens no turn', async () => {
@@ -872,29 +987,28 @@ test('a task that is actually over still starts a new round', async () => {
   assert.equal(input.value, '', 'an accepted send clears the box');
 });
 
-test('a running conversation is adjusted, not turned into a second request', async () => {
+test('a running conversation keeps the composer draft for after the task', async () => {
   const app = composer({busy: true, steer: {ok: true},
     currentJob: {job_id: 'j4', job_kind: 'conversation', status: 'running', goal_revision: 2}});
   const input = app.ctx.document.getElementById('chat-input');
   input.value = '改成 12 秒';
-  await app.ctx.submit();
-  assert.equal(app.steers.length, 1);
-  assert.equal(app.steers[0].payload.text, '改成 12 秒');
-  assert.equal(app.steers[0].payload.expected_goal_revision, 2);
-  assert.equal(app.jobs.length, 0, 'an adjustment is not a new conversation turn');
-  assert.equal(input.value, '');
+  const result = await app.ctx.submit();
+  assert.equal(result.accepted, false);
+  assert.equal(app.steers.length, 0);
+  assert.equal(app.jobs.length, 0);
+  assert.equal(input.value, '改成 12 秒');
 });
 
-test('an adjustment whose old turn already ended opens a fresh turn with the same text', async () => {
+test('a direct adjustment whose old turn ended opens a fresh turn with the same text', async () => {
   const app = composer({busy: true, steer: {ok: false, reason: 'job_not_active'},
     currentJob: {job_id: 'j6', job_kind: 'conversation', status: 'running', goal_revision: 1}});
   const input = app.ctx.document.getElementById('chat-input');
   input.value = '旧任务已经结束了';
-  await app.ctx.submit();
+  await app.ctx.send(input.value);
   assert.equal(app.steers.length, 1);
   assert.equal(app.jobs.length, 1, 'the prompt is not lost when the steer target is gone');
   assert.equal(app.jobs[0].payload.text, '旧任务已经结束了');
-  assert.equal(input.value, '');
+  assert.equal(input.value, '旧任务已经结束了');
 });
 
 test('a refused request puts the text back and reports why', async () => {
@@ -927,14 +1041,15 @@ test('a blocked recovery state refuses before clearing anything', async () => {
   assert.equal(app.jobs.length, 0);
 });
 
-test('the keyboard and the button run the same admission rule', () => {
+test('Enter only submits while the composer button switches between send and stop', () => {
   const source = webSource('app.js');
   const keydown = source.slice(source.indexOf('$("chat-input").addEventListener("keydown"'),
                                source.indexOf('$("chat-input").addEventListener("input"'));
   assert.match(keydown, /submit\(\)/, 'Enter goes through submit, not a second path');
   assert.match(keydown, /!e\.shiftKey/, 'Shift+Enter still inserts a newline');
-  assert.match(source, /\$\("send"\)\.onclick = \(\) => \{ void submit\(\); \};/,
-    'the button goes through the same submit');
+  assert.match(source, /\$\("send"\)\.onclick = \(\) => \{/);
+  assert.match(source, /JOB_ACTIVE\.has\(currentJob\.status\)\) void stopCurrentJob\(\)/);
+  assert.match(source, /else void submit\(\)/);
 });
 
 test('the composer draft tray also clears only after the request is accepted', async () => {

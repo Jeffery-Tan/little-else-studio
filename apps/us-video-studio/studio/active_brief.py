@@ -67,7 +67,10 @@ BLOCKER_GOAL_UNCOVERED = "goal_uncovered"
 BLOCKER_AMENDMENT_UNRESOLVED = "amendment_unresolved"
 
 #: ask_user replies written by the conversation path: 关于「问题」：答案
-_ANSWER = re.compile(r"^关于「(.+?)」[：:]\s*(.+)$", re.S)
+_ANSWER = re.compile(
+    r"(?:^|\n)(?:\d+\.\s*)?(?:关于|回答)「(.+?)」[：:][ \t]*(.*?)"
+    r"(?=\n(?:\d+\.\s*)?(?:关于|回答)「|\Z)", re.S,
+)
 
 #: Shortest question excerpt still considered a match against a chat reply.
 _MATCH_CHARS = 12
@@ -148,9 +151,9 @@ def _user_replies(chat: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
         if not isinstance(row, dict) or row.get("role") != "user":
             continue
         text = (row.get("text") or "").strip()
-        m = _ANSWER.match(text)
-        if m:
-            out.append((m.group(1).strip(), m.group(2).strip(), text))
+        for m in _ANSWER.finditer(text):
+            if m.group(2).strip():
+                out.append((m.group(1).strip(), m.group(2).strip(), text))
     return out
 
 

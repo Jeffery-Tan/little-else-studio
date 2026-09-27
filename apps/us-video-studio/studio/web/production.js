@@ -173,6 +173,21 @@
       detail:kind==='video'&&chosenReference?`已确认参考图：${chosenReference.name}。团队将基于这张图和当前脚本准备视频输入。`
         :'让团队基于已确认的脚本准备准确输入，之后再核对是否生成。'};
   }
+  function canvasHtml(data,kind,runId,rail){
+    const work=currentProductionWork(data,kind,runId);
+    const source=work.outputUrl||work.referenceUrl;
+    const media=source?(kind==='video'&&work.outputUrl
+      ? `<video controls preload="metadata" src="${esc(source)}"></video>`
+      : `<img src="${esc(source)}" alt="${work.outputUrl?'当前可查看的图片':'当前参考图'}">`):'';
+    const writing=(rail||[]).find(step=>step.stage==='writing'&&step.has_doc);
+    const paired=kind==='video'&&work.outputUrl&&captionMatches(writing,work);
+    const caption=paired?captionBlock(writing)?.text:'';
+    return `<article class="production-canvas"><header><span class="creator-kicker">${kind==='video'?'成片与文案':'当前画面'}</span><h2>${esc(work.label)}</h2></header>`+
+      (media?`<div class="production-canvas-media">${media}</div>`:'<div class="creator-production-empty">这里还没有可查看的画面。</div>')+
+      `<p>${esc(work.detail)}</p>`+
+      (kind==='video'&&work.outputUrl?`<section class="creator-caption"><h3>这段视频对应的发布文案</h3><p>${caption?esc(caption):'暂时没有可核对的同版发布文案。'}</p></section>`:'')+
+      '</article>';
+  }
   function historyDraftHtml(draft,data,runId){
     const reason=gate(draft,data),ref=(data.materials||[]).find(m=>m.name===draft.reference?.name&&m.sha256===draft.reference?.sha256),url=mediaUrl(ref?.url,runId);
     const attempts=draft.attempts||[];
@@ -286,7 +301,7 @@
       `<label class="production-consent"><input type="checkbox" data-consent>我已核对以上输入，同意本次${generation?'生成任务及其费用':'审核模型调用及其费用'}</label>`+
       `<div class="production-actions"><button class="primary" data-authorize disabled>${generation?'启动生成任务':'开始制作检查'}</button><button class="ghost" data-dismiss>返回修改</button></div></section>`;
   }
-  root.StudioProduction={esc,mediaUrl,price,gate,reviewGate,canRecoverUsage,usageQuantity,usageFormHtml,reviewHtml,captionHtml,captionMatches,canDiagnoseWork,uncertain,submission,actionRequest,currentProductionWork,draftHtml,historyDraftHtml,emptyWorkHtml,confirmationHtml};
+  root.StudioProduction={esc,mediaUrl,price,gate,reviewGate,canRecoverUsage,usageQuantity,usageFormHtml,reviewHtml,captionHtml,captionMatches,canDiagnoseWork,uncertain,submission,actionRequest,currentProductionWork,canvasHtml,draftHtml,historyDraftHtml,emptyWorkHtml,confirmationHtml};
   if(typeof module!=='undefined')module.exports=root.StudioProduction;
 })(typeof window!=='undefined'?window:globalThis);
 
@@ -303,7 +318,7 @@ async function openProduction(options={}){
   const storageKey=`studio-production:${runId}`;let data=null,timer=null,reading=false,busy=false,closed=false,pending=null,lastJob=null,renderedRecords='',values={kind:'video',source_version:'',source_sha256:'',reference_name:'',reference_sha256:'',prompt:'',model:'wan3.0-video',duration:'5',resolution:'720P'};
   const captionCache=new Map();
   try{const saved=JSON.parse(sessionStorage.getItem(storageKey)||'null');if(saved){values={...values,...saved.values};pending=saved.pending||null;lastJob=saved.lastJob||null;}}catch(_){}
-  if(mount&&!pending){values.kind=kind;values.model=kind==='image'?'codex-image':'wan3.0-video';}
+  if(!pending){values.kind=kind;values.model=kind==='image'?'codex-image':'wan3.0-video';}
   function persist(){try{sessionStorage.setItem(storageKey,JSON.stringify({values,pending,lastJob}));}catch(_){error.textContent='浏览器无法暂存本次输入，请保持窗口直到请求结果确认。';}}
   function current(){return !closed&&(mount?dialog.isConnected:dialog.open)&&state.runId===runId;}
   function close(){closed=true;clearTimeout(timer);if(mount)dialog.remove();else dialog.close();}
@@ -352,7 +367,7 @@ async function openProduction(options={}){
     const canPrepare=readySource&&(kind==='image'||readyReference);
     body.innerHTML=mount
       ? `<div class="production-workspace"><section><div data-records>${renderedRecords}</div><div data-caption>${captionMarkup()}</div></section><details class="production-advanced"><summary>高级：手动编辑制作输入</summary>${editor()}</details></div>`
-      : `<div class="production-layout"><aside>${editor()}</aside><section><div class="production-record-heading"><h3>生成记录</h3><span>${data.drafts.length} 个方案</span></div><div data-records>${renderedRecords}</div></section></div>`;
+      : `<div class="production-layout"><aside>${editor()}</aside><section><div class="production-record-heading"><h3>当前制作</h3></div><div data-records>${renderedRecords}</div></section></div>`;
     if(advancedWasOpen)body.querySelector('.production-advanced').open=true;
     const prepare=body.querySelector('[data-prepare]');if(prepare){prepare.disabled=!!data.active||!canPrepare;prepare.onclick=()=>{
       const reference=data.latest_approved_image;
@@ -373,14 +388,11 @@ async function openProduction(options={}){
     lock();if(pending)pendingView();
   }
   function records(){
-    const drafts=mount?data.drafts.filter(d=>d.kind===kind):data.drafts;
-    const selected=mount?U.currentProductionWork(data,kind,runId).draft:null;
-    const current=selected?[selected]:drafts.filter(d=>d.source_ready!==false);
-    const older=selected?drafts.filter(d=>d!==selected):drafts.filter(d=>d.source_ready===false);
-    const draw=rows=>rows.slice().reverse().map(d=>U.draftHtml(d,data,runId)).join('');
-    const main=current.length?draw(current):mount?U.emptyWorkHtml(U.currentProductionWork(data,kind,runId))
+    const currentKind=mount?kind:values.kind;
+    const work=U.currentProductionWork(data,currentKind,runId);
+    const main=work.draft?U.draftHtml(work.draft,data,runId):mount?U.emptyWorkHtml(work)
       :'<div class="production-empty"><span>从一个画面开始</span><p>可以继续在右侧讨论，团队会根据确认的方案准备制作输入。</p></div>';
-    return main+(older.length?`<details class="production-history"><summary>查看早前制作 · ${older.length}</summary>${older.slice().reverse().map(d=>U.historyDraftHtml(d,data,runId)).join('')}</details>`:'');
+    return main;
   }
   function pendingView(){confirm.innerHTML='<section class="production-confirm"><h3>上次请求结果待确认</h3><p>请重试同一请求。输入与请求身份已保留，不会另开一次生成。</p><button class="primary" data-retry>核实上次请求</button></section>';confirm.querySelector('[data-retry]').onclick=()=>{if(!busy)sendPending();};}
   async function sendPending(){

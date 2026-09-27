@@ -174,3 +174,19 @@ test('old reviewed content keeps a failed internal review visible with its exist
   assert.equal(view.stage,'direction');
   assert.equal(view.detail,'审核未完成，方案已保留。');
 });
+
+test('a saved direction awaiting its first review offers review instead of adoption',()=>{
+  const review={kind:'review_stage',label:'审核这一版',stage:'direction',version:1,sha256:'exact-v1'};
+  const view=creatorProjectView({...base,timeline:{rail:[direction],brief:{phase:'awaiting_review',
+    detail:'审核后再选择采用。',action:review,execution:{active:false}}}});
+  assert.equal(view.action,review);
+  assert.equal(view.stage,'direction');
+});
+
+test('critical material gap asks for a plan adjustment before a full script',()=>{
+  const view=creatorProjectView({...base,timeline:{rail:[direction,{stage:'material_plan',has_doc:true}],
+    brief:{phase:'needs_resolution',detail:'关键画面无法落实',execution:{active:false}}}});
+  assert.match(view.current,/素材方案有关键缺口/);
+  assert.equal(view.action.label,'调整素材方案');
+  assert.equal(view.stage,'material_plan');
+});

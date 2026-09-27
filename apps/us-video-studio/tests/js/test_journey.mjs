@@ -8,45 +8,46 @@ globalThis.escapeHtml=require('../../studio/web/md.js').escapeHtml;
 const stageMod=require('../../studio/web/stage.js');
 globalThis.gateApproveLabel=stageMod.gateApproveLabel;
 globalThis.gateRejectLabel=stageMod.gateRejectLabel;
-const {questionCardHtml,journeyGateHtml,journeyStatus,bindJourneyTabs,shouldShowQuestionInTurn}=require('../../studio/web/journey.js');
+const {questionCardHtml,artifactQuestionHtml,journeyStatus,bindJourneyTabs,shouldShowQuestionInTurn}=require('../../studio/web/journey.js');
 
 test('clarification supports recommendation and free text without implicit selection',()=>{
   const html=questionCardHtml({id:'abc',question:'<script>?</script>',options:[{label:'A',description:'one'},{label:'B'}],recommended:0});
   assert.ok(html.includes('推荐'));
   assert.ok(html.includes('data-question-choice'));
   assert.ok(!html.includes('<form'));
-  assert.ok(html.includes('下方对话'));
+  assert.ok(html.includes('填入对话框'));
   assert.ok(!html.includes(' checked'));
   assert.ok(!html.includes('<script>'));
   assert.ok(!html.includes('data-act="approve"'));
 });
-test('conversation directs the user to the single version-bound decision on the canvas',()=>{
-  const html=journeyGateHtml({stage:'writing',version:3,artifact_sha256:'a'.repeat(64),passed:true},{});
-  assert.ok(html.includes('data-view-plan'));
-  assert.ok(html.includes('阅读并决定'));
-  assert.ok(!html.includes('class="gate'));
-  assert.ok(!html.includes('data-act="approve"'));
+test('artifact questions are asked in the conversation with room for an uncertain answer',()=>{
+  const html=artifactQuestionHtml({stage:'direction',version:3,question:'能实拍吗？',reason:'需要决定拍法'});
+  assert.ok(html.includes('能实拍吗？'));
+  assert.ok(html.includes('没有或不确定也可以'));
+  assert.ok(html.includes('data-send-artifact-answer'));
+  assert.ok(!html.includes('不能成立'));
 });
 test('execution completion cannot replace an unresolved user decision',()=>{
   assert.equal(journeyStatus({execution:{active:false}},{stage:'direction'},null),'选一个你想继续的方向');
   assert.equal(journeyStatus({execution:{active:true}},null,null),'团队正在处理');
 });
-test('only the canvas exposes a version-bound choice and submit action',()=>{
+test('only the conversation exposes a version-bound choice and submit action',()=>{
   const options=[{key:'A',recommended:false,label:'方向',return_note:''},{key:'B',recommended:true,label:'方向',return_note:''}];
-  const journey=journeyGateHtml({stage:'direction',version:1,artifact_sha256:'b'.repeat(64),passed:true,options},{});
-  assert.ok(!journey.includes('type="radio"'));
-  assert.ok(!journey.includes('data-act="approve"'));
+  const conversation=stageMod.gateHtml({stage:'direction',version:1,artifact_sha256:'b'.repeat(64),passed:true,options},{});
+  assert.ok(conversation.includes('type="radio"'));
+  assert.ok(conversation.includes('data-act="approve"'));
   const { blocksHtml }=require('../../studio/web/blocks.js');
   globalThis.blocksHtml=blocksHtml;
   globalThis.renderMarkdown=require('../../studio/web/md.js').renderMarkdown;
   const { stageHtml }=require('../../studio/web/stage.js');
   const stage=stageHtml(
     {stage:'direction',label:'创意方向',has_doc:true,version:1,blocks:[],review:null,team_issues:[]},
-    {pending:{stage:'direction',version:1,artifact_sha256:'b'.repeat(64),passed:true,options,
+    {readOnly:true,pending:{stage:'direction',version:1,artifact_sha256:'b'.repeat(64),passed:true,options,
       stage_label:'创意方向',headline:'等你决定',findings:[]}}
   );
-  assert.ok(stage.includes('name="direction-choice"'));
-  assert.ok(stage.includes('data-act="approve"'));
+  assert.ok(!stage.includes('name="direction-choice"'));
+  assert.ok(!stage.includes('data-act="approve"'));
+  assert.ok(!stage.includes('pane-ask'));
 });
 test('canvas tabs keep one selected work surface as arrow keys move through available artifacts',()=>{
   const html=fs.readFileSync(new URL('../../studio/web/index.html',import.meta.url),'utf8');
@@ -57,16 +58,16 @@ test('canvas tabs keep one selected work surface as arrow keys move through avai
   assert.match(html,/id="journey-tab-script"[^>]*data-plan-stage="writing"[^>]*aria-controls="stage"/);
   const panels=Object.fromEntries(['stage','journey-assets','journey-storyboard','journey-video','project-stages']
     .map(id=>[id,{hidden:id!=='stage',attrs:{},setAttribute(name,value){this.attrs[name]=value;}}]));
-  let focused='',mounted='';
+  let focused='';
   const tabs=['plan','assets','script','storyboard','video'].map(id=>({id:`journey-tab-${id}`,
     dataset:{journeyTab:id==='script'?'plan':id,...(id==='script'?{planStage:'writing'}:id==='plan'?{planStage:'direction'}:{})},
     attrs:{},tabIndex:id==='plan'?0:-1,
     setAttribute(name,value){this.attrs[name]=value;},focus(){focused=id;}}));
   globalThis.document={querySelectorAll:()=>tabs,querySelector:()=>null};
-  globalThis.state={canvasTab:'plan',timeline:null,rail:[{stage:'direction'},{stage:'writing'}],activeStage:'direction'};
+  globalThis.state={canvasTab:'plan',timeline:null,rail:[{stage:'direction'},{stage:'writing'}],activeStage:'direction',productionData:{drafts:[]}};
   const nodes={...panels,...Object.fromEntries(tabs.map(tab=>[tab.id,tab]))};
   globalThis.$=id=>nodes[id];
-  globalThis.openProduction=({mount})=>{mounted=Object.entries(panels).find(([,value])=>value===mount)?.[0];};
+  globalThis.StudioProduction={canvasHtml:()=>'<article>当前成果</article>'};
   globalThis.renderCanvasMaterials=()=>{};
   globalThis.selectStage=stage=>{state.activeStage=stage;};
   bindJourneyTabs();
@@ -80,7 +81,7 @@ test('canvas tabs keep one selected work surface as arrow keys move through avai
   assert.equal(state.activeStage,'writing');assert.equal(panels.stage.attrs['aria-labelledby'],'journey-tab-script');
   tabs[2].onkeydown({key:'End',preventDefault(){}});
   assert.equal(focused,'video');assert.equal(panels['journey-video'].hidden,false);
-  assert.equal(mounted,'journey-video');
+  assert.equal(panels['journey-video'].innerHTML,'<article>当前成果</article>');
 });
 
 test("pending ask_user renders as an interactive producer bubble in the conversation", () => {

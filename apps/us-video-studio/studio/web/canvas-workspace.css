@@ -54,6 +54,28 @@ body[data-view="project"]:not([data-run-kind="learning"]) .profile-avatar {flex:
 .journey-tabs {gap:20px;overflow-x:auto;scrollbar-width:thin;white-space:nowrap}
 .journey-tabs button {flex:none}
 .journey-tabs button:disabled {opacity:.42;cursor:not-allowed}
+
+/* Project controls share the title bar; the canvas starts directly below it. */
+body[data-view="project"] .top {position:relative;z-index:10}
+body[data-view="home"] .top .project-tools,
+body[data-view="home"] .top #project-progress {display:none}
+.top .project-tools {display:flex;align-items:center;gap:8px;min-height:0;margin-left:0;padding:0;border:0;background:none;position:relative;z-index:1}
+.top .project-tools>[role="group"] {display:none}
+.top #project-progress {display:flex;align-items:center;min-width:0;flex:none}
+.top #project-progress[hidden] {display:none}
+.top #project-progress .creator-next {max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.project-workspace[data-focus="workbench"] {grid-template-rows:minmax(0,1fr)}
+.project-workspace[data-focus="workbench"]>.project-canvas {grid-area:1/1/2/2}
+.project-workspace[data-focus="workbench"]>.composer {grid-area:1/2/2/3}
+@media(max-width:950px) {
+  .top .project-tools>[role="group"] {display:flex}
+  .project-workspace[data-focus="workbench"]>.project-canvas,
+  .project-workspace[data-focus="workbench"]>.composer {grid-area:1/1/2/2}
+}
+@media(max-width:720px) {
+  body[data-view="project"] .project-select-wrap {display:none}
+  .top #project-progress .creator-next {max-width:112px}
+}
 .canvas-assets {
   flex:1;
   min-height:0;

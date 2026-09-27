@@ -31,8 +31,9 @@ from ..tools.workspace import ToolError, Workspace
 from ..revision_scope import work_plan, plan_revision, check_base, patch_payload, record_applied
 from ..creation_mode import current as current_creation_mode
 from ..task_contract import evaluate as evaluate_deliverable
+from ..public_reply import creator_reply
 from .budget import BudgetedClient
-from .client import JobCancelled, ModelClient, ModelError, run_agent_loop
+from .client import JobCancelled, ModelClient, ModelError, NonRetryableStageError, run_agent_loop
 from .codex_client import CodexUnavailable
 from ..connections import ConnectionUnavailable
 from .reviewer import run_review
@@ -104,6 +105,7 @@ class Orchestrator:
         self.method_context = None
         self._context_refs: list[str] = []
         self._current_user_message = ""
+        self._uncertain_review_versions: dict[str, str] = {}
         self.dispatcher = Dispatcher(
             store, pipeline, settings, client, ledger, run_id, on_event=on_event,
             check_cancel=check_cancel,
@@ -139,6 +141,7 @@ class Orchestrator:
         from ..interactions import answer
         answer(self.store, self.run_id, message)
         self._current_user_message = message
+        self._uncertain_review_versions.clear()
         self._reference_used = False
         previous = creative_selection(self.store, self.run_id)
         self._images_used = False
@@ -216,7 +219,7 @@ class Orchestrator:
             # without this a reload shows his question followed by silence and
             # no way to find out why. 'system' is filtered out of model requests
             # by _build_messages, so this cannot come back as a bad role.
-            detail = str(exc) if isinstance(exc, (JobCancelled, ModelError, PipelineError,
+            detail = str(exc) if isinstance(exc, (JobCancelled, ModelError, NonRetryableStageError, PipelineError,
                 CodexUnavailable, ConnectionUnavailable)) else '执行失败；请检查连接及已保留的调用状态。'
             self.store.append_chat(self.run_id, "system", f"{type(exc).__name__}: {detail}")
             raise
@@ -224,6 +227,18 @@ class Orchestrator:
         if getattr(self, '_reference_report', None):
             result.text = self._reference_report
             self._reference_report = None
+        delivery = self._deliverable_status()
+        if any(entry.get('tool') == 'ask_user' and entry.get('ok')
+               for entry in result.tool_log):
+            # ask_user persisted the question and ended the turn. Do not add a
+            # generic unfinished-deliverable reply below that question.
+            result.text = ''
+        else:
+            result.text = creator_reply(
+                result.text, delivery, self.pipeline.state(self.run_id),
+                technical_requested=bool(re.search(
+                    r'版本号|内部版本|技术记录|sha256|hash', message, re.I)),
+            )
         # A correction is accepted under the same run lock. If this final text
         # wins the lock it was committed before the correction; otherwise the
         # old goal cannot leak a late reply into the next turn's chat context.
@@ -232,7 +247,6 @@ class Orchestrator:
                 self.check_cancel()
             if result.text:
                 self.store.append_chat(self.run_id, "assistant", result.text)
-        delivery = self._deliverable_status()
         return OrchestratorTurn(
             text=result.text,
             stopped_because=result.stopped_because,
@@ -443,14 +457,14 @@ class Orchestrator:
             "# 你能做什么",
             "",
             "读状态和产物、自己写 intake、把阶段派给角色 Agent、送审。",
-            "用户提出创作需求时，prepare_creative_context显式设置deliverable=direction：本轮先理解意图、调用observe_images实际检查商品图片，再保存需求、内部dispatch导演形成创意方向并request_review完成独立审核，最终直接呈现具体开头、故事推进、推荐理由。不要以‘下一步建议派导演’结束，也不要在交付未完成且无需用户决策时停下写总结。仅用户明确只要需求整理时选intake；后续制作或只读任务选follow_up。",
+            "用户提出创作需求时，prepare_creative_context显式设置deliverable=direction：本轮先理解意图、调用observe_images实际检查商品图片，再保存需求、内部dispatch导演形成创意方向并request_review完成独立审核，最终直接呈现开场识别点、推进概念、方案差异和推荐理由。方向待选时不提前写完整台词、字幕或逐镜头脚本。不要以‘下一步建议派导演’结束，也不要在交付未完成且无需用户决策时停下写总结。仅用户明确只要需求整理时选intake；后续制作或只读任务选follow_up。",
             "有图片不能只读list_materials就宣称无观察能力。主语言模型不支持图片时，observe_images仍可通过现有百炼视觉能力看到像素并返回带来源的观察。图片可见特征可用于构思，不须先让用户逐条确认；尺寸/性能/实测效果保持未知。不把看图、分工或方法选择发回用户。状态/暂停/反馈不启动观察。",
             "**你不能批准任何东西**，也没有这个工具。采用或退回，由 Jeffery 在界面上亲自确认。",
             "对用户说话用他的语言：说目标、方向卡、采用与退回；不要用「门禁」、条款编号（如 goal.primary/must.xxx）、"
             "blocker 状态码（如 unmapped）或「准入/冲突」这类内部词，也不要把英文状态码念给他听。",
             "",
             "# 当前项目摘要（界面与对话共用）\n" + json.dumps(
-                project_brief(self.pipeline.state(self.run_id).to_dict(), latest_execution(self.store, self.run_id)), ensure_ascii=False),
+                project_brief(self.pipeline.state(self.run_id).to_dict(), latest_execution(self.store, self.run_id), self.store.read_chat(self.run_id)), ensure_ascii=False),
             "# 当前项目状态（本次重新读取，历史对话不能覆盖）",
             workspace.render_state(),
             workspace.render_context('writing' if self.store.latest_artifact(self.run_id, 'intake') else 'intake'),
@@ -647,7 +661,7 @@ class Orchestrator:
             # has just spent money on four dispatch rounds needs the current
             # number, not the number from before it started.
             return "# 当前项目摘要\n" + json.dumps(project_brief(
-                self.pipeline.state(self.run_id).to_dict(), latest_execution(self.store, self.run_id)), ensure_ascii=False) + "\n\n" + workspace.render_state()
+                self.pipeline.state(self.run_id).to_dict(), latest_execution(self.store, self.run_id), self.store.read_chat(self.run_id)), ensure_ascii=False) + "\n\n" + workspace.render_state()
         if name == "read_artifact":
             rendered = workspace.render_artifact(args["stage"], args.get("version"))
             artifact = (self.store.read_artifact(self.run_id, args["stage"], args["version"])
@@ -732,6 +746,16 @@ class Orchestrator:
     def _request_review(self, stage: str) -> ToolResult:
         if stage not in STAGE_SPEC:
             raise ToolError(f"unknown stage: {stage!r}")
+        state = self.pipeline.stage_state(self.run_id, stage)
+        fingerprint = state.latest.sha256 if state.latest else ""
+        if fingerprint and self._uncertain_review_versions.get(stage) == fingerprint:
+            return ToolResult(
+                '这版审核连接已超时或用量未确认，本轮不重复调用审核模型。'
+                '已保存的方案仍可阅读；请说明审核未完成，并等待用户后续明确操作。',
+                is_error=True,
+            )
+        before = {entry.call_id for entry in self.ledger.entries(self.run_id)
+                  if entry.role == 'reviewer' and entry.stage == stage}
         outcome = run_review(
             store=self.store,
             pipeline=self.pipeline,
@@ -744,4 +768,10 @@ class Orchestrator:
             check_cancel=self.check_cancel,
             learning_service=self.learning,
         )
+        if outcome.error and fingerprint and any(
+            entry.call_id not in before and entry.role == 'reviewer'
+            and entry.stage == stage and entry.usage_status != 'known'
+            for entry in self.ledger.entries(self.run_id)
+        ):
+            self._uncertain_review_versions[stage] = fingerprint
         return ToolResult(outcome.render(), is_error=bool(outcome.error or outcome.verdict is None))

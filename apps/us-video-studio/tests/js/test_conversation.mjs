@@ -67,7 +67,7 @@ test('a pending clarification is an extra card after the conclusion, not a repla
     interaction: CLARIFICATION,
     rail: [], questions: [], progress: {}, pending: null,
   };
-  p.read('state.timeline = globalThis.__tl; renderConversation(globalThis.__tl)');
+  p.read('state.machineDetail = true; state.timeline = globalThis.__tl; renderConversation(globalThis.__tl)');
 
   const host = p.el('conversation-body');
   const assistant = host.querySelectorAll('.msg.assistant');
@@ -85,13 +85,30 @@ test('a pending clarification is an extra card after the conclusion, not a repla
     'with its options (rendered through the real question card)');
 });
 
+test('creator conversation hides internal artifact handles without rewriting history', () => {
+  const p = page();
+  const raw = '需求已存档（intake-v1），创意方向稿出来了（direction-v2）。详情见 writing-v3。';
+  const saved = turn({reply:{text:raw},items:[
+    {kind:'progress',type:'agent_narration',text:'我在检查 direction-v2，先核对 intake。'},
+    {kind:'note',text:'技术记录：direction-v2'},
+  ]});
+  p.ctx.__tl = {turns:[saved],rail:[],questions:[],progress:{},pending:null};
+  p.read('state.machineDetail = true; state.timeline = globalThis.__tl; renderConversation(globalThis.__tl)');
+  const host = p.el('conversation-body');
+  assert.match(host.querySelector('.msg.assistant').textContent, /需求已存档，创意方向稿出来了。详情见 脚本/);
+  assert.doesNotMatch(host.querySelector('.msg.assistant').textContent, /(?:intake|direction|writing)-v\d+/);
+  assert.match(host.querySelector('.turn-progress').textContent, /我在检查 创意方向，先核对 创作需求/);
+  assert.match(host.querySelector('.turn-work').textContent, /技术记录：direction-v2/);
+  assert.equal(saved.reply.text, raw, 'the persisted reply is unchanged');
+});
+
 test('a finished round with no reply says so instead of leaving the assistant side blank', () => {
   const p = page();
   p.ctx.__tl = {
     turns: [turn({reply: null, items: [{kind: 'note', text: '导演这一次没能交出「创意方向」：派工失败'}]})],
     rail: [], questions: [], progress: {}, pending: null,
   };
-  p.read('state.busy = false; state.timeline = globalThis.__tl; renderConversation(globalThis.__tl)');
+  p.read('state.busy = false; state.machineDetail = true; state.timeline = globalThis.__tl; renderConversation(globalThis.__tl)');
 
   const host = p.el('conversation-body');
   const assistant = host.querySelectorAll('.msg.assistant');
@@ -184,7 +201,7 @@ test('only the live turn stays quiet — an older failed round still gets its fa
     'the live turn defers to the status row');
 });
 
-test('the workspace chrome keeps current progress visible beside the next action', () => {
+test('the title bar keeps only the next action without repeating current progress', () => {
   const p = page();
   vm.runInContext(`
     state.busy = false;
@@ -201,8 +218,8 @@ test('the workspace chrome keeps current progress visible beside the next action
   `, p.ctx);
 
   const slot = p.el('project-progress');
-  assert.equal(slot.querySelector('.creator-status-current')?.textContent, '等待重试审核');
-  assert.equal(slot.querySelector('.creator-status')?.getAttribute('aria-label'), '当前进展');
+  assert.equal(slot.querySelector('.creator-status'), null);
+  assert.equal(slot.hidden, false);
   const button = slot.querySelector('[data-creator-next]');
   assert.ok(button, 'the next action stays in the chrome as a plain slot button');
   assert.equal(button.textContent, '重试本版审核');
@@ -211,7 +228,7 @@ test('the workspace chrome keeps current progress visible beside the next action
     'a neutral toolbar control, not a banner call-to-action');
 });
 
-test('the chrome action disappears while the team is working', () => {
+test('the title bar action disappears while the team is working', () => {
   const p = page();
   vm.runInContext(`
     state.busy = true;
@@ -228,6 +245,5 @@ test('the chrome action disappears while the team is working', () => {
   `, p.ctx);
   assert.equal(p.el('project-progress').querySelector('[data-creator-next]'), null,
     'in-progress state belongs to the status row, not to a second action');
-  assert.equal(p.el('project-progress').querySelector('.creator-status-current')?.textContent,
-    '团队正在处理');
+  assert.equal(p.el('project-progress').hidden, true);
 });

@@ -379,8 +379,11 @@ export function makeStorage() {
  * friends), so two fixtures loaded in one file can never see each other's stubs.
  */
 const RUNTIME_SHIM = `
+const JOB_ACTIVE = new Set(['queued', 'running', 'cancelling']);
 let steerPosting = false;
 let restoreJob = async () => {};
+function syncComposerAction() {}
+async function stopCurrentJob() { return globalThis.__stopCurrentJob?.(); }
 async function submitJob(runId, payload, options = {}) {
   return globalThis.__submitJob ? globalThis.__submitJob(runId, payload, options)
                                 : {job_id: 'stub-job'};

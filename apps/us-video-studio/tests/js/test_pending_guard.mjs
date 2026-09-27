@@ -98,48 +98,42 @@ test('an unknown adjustment cannot be resent under a new identity', async () => 
   openRun(p);
 
   const input = el(p, 'chat-input');
-  input.value = '调整为十二秒';
-  const first = await p.ctx.submit();
+  input.value = '我还在写的草稿';
+  const first = await p.ctx.send('调整为十二秒');
   assert.equal(first.uncertain, true, 'lost response is unknown, not refused');
-  assert.equal(first.draft_restored, false, 'unknown words are not handed back to resend');
-  assert.equal(input.value, '');
+  assert.equal(input.value, '我还在写的草稿', 'the direct adjustment leaves the composer alone');
   const original = JSON.parse(p.storage.getItem('studio-steer-pending:run-1'));
   assert.equal(original.request_id, 'req-1');
   assert.equal(original.text, '调整为十二秒');
 
   // Second Enter with the same or another adjustment: no second identity, and
   // the original record must survive untouched.
-  input.value = '调整为十二秒';
-  const second = await p.ctx.submit();
+  input.value = '后来写的内容';
+  const second = await p.ctx.send('调整为十二秒');
   assert.equal(second.uncertain, true, 'the reply is still unknown');
   assert.equal(steer.calls.length, 1, 'no second request identity went out');
   const still = JSON.parse(p.storage.getItem('studio-steer-pending:run-1'));
   assert.equal(still.request_id, original.request_id, 'the original identity was not overwritten');
   assert.equal(still.text, '调整为十二秒');
-  assert.equal(input.value, '调整为十二秒', 'the newer draft is left alone');
+  assert.equal(input.value, '后来写的内容', 'the newer draft is left alone');
   assert.match(p.toastText, /还没有确认/);
   assert.doesNotMatch(p.toastText, /没有被接受/, 'unknown must not be downgraded to refused');
 });
 
-test('the send button refuses the same way while an adjustment is unknown', async () => {
+test('the composer button stops a running task without sending its draft', async () => {
   const steer = steerTransport(networkLost);
-  const p = page({routes: {'/steer': steer, 'jobs/latest': () => RUNNING}});
+  const cancels = [];
+  const p = page({routes: {'/steer': steer, '/cancel': ({body}) => {cancels.push(body); return {...RUNNING,status:'cancelling'};}, 'jobs/latest': () => RUNNING}});
   openRun(p);
 
   const input = el(p, 'chat-input');
-  input.value = '调整为十二秒';
-  await p.ctx.submit();
-  assert.equal(steer.calls.length, 1);
-
-  // The button runs the same admission rule as Enter (both call submit()).
-  input.value = '再调整一次';
+  input.value = '留待下一轮发送';
   await el(p, 'send').onclick();
   await settle();
-  assert.equal(steer.calls.length, 1, 'the button did not create a second identity');
-  const still = JSON.parse(p.storage.getItem('studio-steer-pending:run-1'));
-  assert.equal(still.request_id, 'req-1');
-  assert.equal(input.value, '再调整一次', 'the button refusal keeps the draft');
-  assert.match(p.toastText, /还没有确认/);
+  assert.equal(cancels.length, 1);
+  assert.equal(steer.calls.length, 0);
+  assert.equal(input.value, '留待下一轮发送');
+  assert.equal(read(p, 'currentJob.status'), 'cancelling');
 });
 
 test('an unknown adjustment still blocks a new conversation job once the old turn is over', async () => {
@@ -203,6 +197,7 @@ test('an accepted job clears its own pending and the next prompt is allowed', as
     'acceptance confirms the request_id and clears its marker');
 
   input.value = '第二条';
+  vm.runInContext(`showJob({job_id:'job-1',job_kind:'conversation',status:'succeeded',events:[]})`, p.ctx);
   const second = await p.ctx.submit();
   assert.equal(second.accepted, true);
   assert.equal(jobs.calls.length, 2);
@@ -221,17 +216,17 @@ test('a rejected adjustment clears only its own pending and allows a resend', as
 
   const input = el(p, 'chat-input');
   input.value = '调整为十二秒';
-  const refused = await p.ctx.submit();
+  const refused = await p.ctx.send(input.value);
   assert.equal(refused.accepted, false);
   assert.equal(refused.uncertain, false, 'a 4xx is a definite refusal');
-  assert.equal(refused.draft_restored, true, 'definite refusal returns the words');
+  assert.equal(refused.rejected_text, '调整为十二秒');
   assert.equal(input.value, '调整为十二秒');
   assert.equal(p.storage.getItem('studio-steer-pending:run-1'), null,
     'the refusal cleared the marker for this same request_id');
 
   // The user corrects and resends — allowed, because the outcome is settled.
   input.value = '调整为十五秒';
-  const resent = await p.ctx.submit();
+  const resent = await p.ctx.send(input.value);
   assert.equal(resent.accepted, true);
   assert.equal(steer.calls.length, 2);
   assert.equal(steer.calls[1].text, '调整为十五秒');
@@ -245,14 +240,14 @@ test('a newer same-project draft survives a late adjustment rejection on the rea
 
   const input = el(p, 'chat-input');
   input.value = '第一次调整';
-  const pending = p.ctx.submit();
+  const pending = p.ctx.send(input.value);
   await settle();
   input.value = '后来写的新想法';
   p.ctx.updatesComposerVersion();
   rejectFirst(Object.assign(new Error('目标版本冲突'), {status: 409}));
   const result = await pending;
   assert.equal(result.accepted, false);
-  assert.equal(result.draft_restored, false);
+  assert.equal(result.rejected_text, '第一次调整');
   assert.equal(input.value, '后来写的新想法', 'the late 409 does not overwrite newer words');
   assert.equal(p.storage.getItem('studio-steer-pending:run-1'), null,
     'its own settled marker is gone');
@@ -329,7 +324,7 @@ test('an unknown adjustment survives a refresh and the confirm entry retries the
   openRun(before);
   const firstInput = el(before, 'chat-input');
   firstInput.value = '调整为十二秒';
-  await before.ctx.submit();
+  await before.ctx.send(firstInput.value);
   assert.equal(steer.calls.length, 1);
   const original = JSON.parse(before.storage.getItem('studio-steer-pending:run-1'));
   assert.equal(original.request_id, 'req-1');
@@ -352,7 +347,7 @@ test('an unknown adjustment survives a refresh and the confirm entry retries the
   // Not a permanent lock: with the outcome settled, a new adjustment goes out.
   const input = el(after, 'chat-input');
   input.value = '改成十五秒';
-  const next = await after.ctx.submit();
+  const next = await after.ctx.send(input.value);
   assert.equal(next.accepted, true);
   assert.equal(steer.calls.length, 3);
   assert.notEqual(steer.calls[2].request_id, original.request_id);

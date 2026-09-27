@@ -71,6 +71,32 @@ def test_gated_stage_blocks_the_next_stage_until_the_user_approves(pipe):
     assert pipe.start_attempt(RUN, "material_plan").role == "material"
 
 
+def test_critical_material_gap_blocks_full_script_until_plan_is_revised(pipe):
+    submit_intake(pipe)
+    submit_direction(pipe)
+    review_pass(pipe, "direction")
+    approve(pipe, "direction")
+    attempt = pipe.start_attempt(RUN, 'material_plan')
+    pipe.submit(RUN, 'material_plan', attempt.token, content='', summary='Missing proof',
+                structured={'items': [{'shot': 'Core proof', 'status': '无法获得'}],
+                            'gaps': [{'gap': 'Core proof', 'consequence': 'Claim unsupported',
+                                      'blocking': '阻塞'}]})
+    state = pipe.stage_state(RUN, 'material_plan')
+    assert state.status == 'needs_resolution'
+    assert state.can_start
+    assert not pipe.is_complete(RUN, 'material_plan')
+    with pytest.raises(PipelineError, match='upstream'):
+        pipe.start_attempt(RUN, 'writing')
+
+    revision = pipe.start_attempt(RUN, 'material_plan')
+    pipe.submit(RUN, 'material_plan', revision.token, content='', summary='Alternative shot',
+                structured={'items': [{'shot': 'Alternative proof', 'status': '已有'}],
+                            'gaps': [{'gap': 'Polish', 'consequence': 'Can refine later',
+                                      'blocking': '可后补'}]})
+    assert pipe.is_complete(RUN, 'material_plan')
+    assert pipe.start_attempt(RUN, 'writing').role == 'writer'
+
+
 def test_recent_activity_does_not_open_a_stage_by_itself(pipe):
     """Direction being written is not direction being accepted."""
     submit_intake(pipe)
@@ -243,6 +269,27 @@ def test_returning_a_stage_needs_a_note_the_writer_can_act_on(pipe):
     with pytest.raises(PipelineError) as err:
         approve(pipe, "direction")
     assert "already has decision" in str(err.value) or "not valid" in str(err.value)
+
+
+@pytest.mark.parametrize("continue_after", [False, True])
+def test_approval_cannot_carry_unresolved_changes(pipe, continue_after):
+    submit_intake(pipe)
+    submit_direction(pipe)
+    review_pass(pipe, "direction")
+    nonce = pipe.issue_nonce(RUN, "direction")
+
+    with pytest.raises(PipelineError, match="cannot include requested changes"):
+        pipe.record_approval(
+            RUN, "direction", nonce=nonce, decision="approved",
+            note="选 A，但改开头", continue_after=continue_after,
+        )
+
+    # A rejected payload has not used the nonce or approved the old version.
+    approval = pipe.record_approval(
+        RUN, "direction", nonce=nonce, decision="returned",
+        note="参考 A，但先修改开头", continue_after=True,
+    )
+    assert approval.decision == "returned"
 
 
 def test_a_returning_review_does_not_open_the_gate(pipe):

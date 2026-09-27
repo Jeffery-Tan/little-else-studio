@@ -66,7 +66,7 @@ function bodyHtml(b) {
 
     case "matrix":
       return `<div class="tbl matrix">${matrixRows(b)}</div>` +
-        `<p class="blk-legend">✕ = 这个空白不解决，这个方案就站不住；— = 不受影响</p>`;
+        `<p class="blk-legend">● = 当前拍法需要核实或调整；— = 不直接受影响</p>`;
 
     case "cards":
       return `<div class="cardgrid">${(b.cards || []).map(cardHtml).join("")}</div>`;
@@ -125,7 +125,7 @@ function matrixRows(b) {
       const cells = (row.cells || [])
         .map(
           (hit) =>
-            `<div class="tbl-cell center ${hit ? "hit" : "miss"}">${hit ? "✕" : "—"}</div>`
+            `<div class="tbl-cell center ${hit ? "hit" : "miss"}">${hit ? "●" : "—"}</div>`
         )
         .join("");
       return `<div class="tbl-row"${style}><div class="tbl-cell">${escapeHtml(

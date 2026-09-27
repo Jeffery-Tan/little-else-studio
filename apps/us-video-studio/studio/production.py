@@ -278,6 +278,10 @@ class Production:
         now = time.monotonic()
         if self._image_probe_at is not None and now - self._image_probe_at < IMAGE_PROBE_RETRY_SECONDS:
             return self._image_probe_failure
+        # Other workspace requests may arrive while the CLI probe is running.
+        # Give them a valid temporary answer instead of returning None.
+        self._image_probe_failure = {'available': False, 'verified': False,
+            'reason': '本机 Codex 图片连接正在检查，请稍后重新打开制作页。'}
         self._image_probe_at = now
         try:
             self._image_capability = self.image_client().capability()

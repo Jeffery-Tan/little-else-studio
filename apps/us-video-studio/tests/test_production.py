@@ -465,6 +465,31 @@ def test_a_failed_image_probe_is_retried_not_cached_for_the_process(scene, monke
     assert len(calls) == 2 and images.calls
 
 
+def test_workspace_probe_in_progress_returns_a_valid_capability(scene, monkeypatch):
+    service, images = scene[0].app.state.production, scene[4]
+    entered, release = threading.Event(), threading.Event()
+    real = images.capability
+
+    def slow_probe():
+        entered.set()
+        assert release.wait(2)
+        return real()
+
+    monkeypatch.setattr(images, 'capability', slow_probe)
+    worker = threading.Thread(target=service.image_probe)
+    worker.start()
+    try:
+        assert entered.wait(2)
+        pending = service.capabilities()['image']
+        assert pending['available'] is False
+        assert pending['verified'] is False
+        assert '正在检查' in pending['reason']
+    finally:
+        release.set()
+        worker.join(2)
+    assert service.capabilities()['image']['available'] is True
+
+
 def test_submit_timeout_retains_fixed_endpoint_and_manual_binding_only_queries(scene):
     scene[5].error = WanVideoError('timeout', submission_unknown=True)
     d = ready(scene); wait(scene, action(scene, d, 'generate'))

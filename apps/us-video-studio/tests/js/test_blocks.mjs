@@ -145,15 +145,16 @@ test("a table emits a head row and one row per record, in order", () => {
   assert.ok(html.indexOf("义乌") < html.indexOf("500"), "row order follows the payload");
 });
 
-test("a matrix marks a dead cell and dashes a live one", () => {
+test("a matrix marks affected execution without declaring the direction impossible", () => {
   const html = one({
     type: "matrix",
     columns: ["A", "B"],
     rows: [{ label: "实拍官方图", cells: [true, false] }],
   });
-  assert.ok(html.includes('<div class="tbl-cell center hit">✕</div>'));
+  assert.ok(html.includes('<div class="tbl-cell center hit">●</div>'));
   assert.ok(html.includes('<div class="tbl-cell center miss">—</div>'));
-  assert.ok(html.includes("这个空白不解决，这个方案就站不住"), "the legend explains the glyphs");
+  assert.ok(html.includes("当前拍法需要核实或调整"), "the legend explains the glyphs");
+  assert.ok(!html.includes('站不住'));
 });
 
 test("a matrix sizes its columns from the payload's length", () => {

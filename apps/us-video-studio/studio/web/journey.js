@@ -6,6 +6,7 @@
 function journeyStatus(brief, pending, interaction) {
   if (brief?.execution?.active) return '团队正在处理';
   if (interaction) return '有一个问题想和你确认';
+  if (brief?.questions?.length) return '有一个细节想和你确认';
   if (pending) return pending.stage === 'direction' ? '选一个你想继续的方向' : '完整方案等你确认';
   if (brief?.phase === 'review_failed') return '方案已保存，内部检查未完成';
   if (brief?.stage === 'writing' || brief?.phase === 'ready') return '完善方案与画面';
@@ -17,7 +18,41 @@ function questionCardHtml(q) {
   return `<section class="conversation-question" data-question="${escapeHtml(q.id)}"><h3>${escapeHtml(q.question)}</h3>` +
     (q.context ? `<p>${escapeHtml(q.context)}</p>` : '') +
     `<div class="reference-quick-choices">${q.options.map((o,i)=>`<button type="button" class="ghost" data-question-choice="${i}"><strong>${escapeHtml(o.label)}${i===q.recommended?' · 推荐':''}</strong>${o.description?`<span> ${escapeHtml(o.description)}</span>`:''}</button>`).join('')}</div>` +
-    '<p class="muted">点一个选项，或直接在下方对话中回答。</p><p role="status" data-feedback></p></section>';
+    '<p class="muted">点选会先填入对话框；可以补充或修改，发送后团队才会继续。</p><p role="status" data-feedback></p></section>';
+}
+
+function artifactQuestionHtml(q) {
+  return `<section class="conversation-question artifact-question" data-artifact-question="${escapeHtml(q.stage)}:${escapeHtml(q.version)}">` +
+    `<h3>有个细节想和你确认</h3><p class="artifact-question-text">${escapeHtml(q.question)}</p>` +
+    (q.reason ? `<p>${escapeHtml(q.reason)}</p>` : '') +
+    `<textarea rows="3" data-artifact-answer aria-label="回答：${escapeHtml(q.question)}" placeholder="说说现有条件；没有或不确定也可以，团队会调整拍法。"></textarea>` +
+    `<button type="button" class="primary" data-send-artifact-answer>发送回答</button>` +
+    `<p role="status" data-feedback></p></section>`;
+}
+
+function bindArtifactQuestion(host, q) {
+  const button = host.querySelector('[data-send-artifact-answer]');
+  const input = host.querySelector('[data-artifact-answer]');
+  const feedback = host.querySelector('[data-feedback]');
+  if (!button || !input) return;
+  const runId = state.runId;
+  button.onclick = async () => {
+    if (state.busy || state.decisionBusy || state.runId !== runId) return;
+    const answer = input.value.trim();
+    if (!answer) { feedback.textContent = '说说目前知道的情况；不确定也可以直接说明。'; input.focus(); return; }
+    const current = (state.timeline?.questions || []).some(item =>
+      item.stage === q.stage && item.version === q.version && item.question === q.question);
+    if (!current) { feedback.textContent = '这个问题已更新，请刷新当前项目再回答。'; return; }
+    button.disabled = true;
+    // The prose answer format is accepted by both the current and earlier
+    // service process while a local restart is pending.
+    const result = await send(`关于「${q.question}」：${answer}`);
+    if (state.runId !== runId) return;
+    if (result?.accepted === false) {
+      feedback.textContent = result.reason || '发送未完成，回答仍保留在这里。';
+      button.disabled = false;
+    }
+  };
 }
 
 /** One structural rule: only server-tagged turns get the interactive clarification.
@@ -32,40 +67,42 @@ function bindQuestionChoices(root, q) {
   if (!root || !q?.options) return;
   const runId = state.runId;
   for (const button of root.querySelectorAll('[data-question-choice]')) {
-    button.onclick = async () => {
+    button.onclick = () => {
       if (state.busy || state.runId !== runId) return;
       const choice = q.options[Number(button.dataset.questionChoice)];
       if (!choice) return;
-      await submitJob(runId, {
-        text: `关于「${q.question}」：${choice.label}`,
-        question_id: q.id,
-        request_id: crypto.randomUUID(),
-      });
+      const input = $('chat-input');
+      if (!input) return;
+      if (state.feedbackTarget && typeof clearFeedbackTarget === 'function') clearFeedbackTarget();
+      const selected = `关于「${q.question}」：${choice.label}`;
+      const prior = state.clarificationChoices?.get(runId);
+      const draft = input.value.trim();
+      const rest = prior?.id === q.id && draft.startsWith(prior.text)
+        ? draft.slice(prior.text.length).trimStart() : draft;
+      input.value = [selected, rest].filter(Boolean).join('\n');
+      if (!state.clarificationChoices) state.clarificationChoices = new Map();
+      state.clarificationChoices.set(runId, {id: q.id, text: selected});
+      state.composerVersion = (state.composerVersion || 0) + 1;
+      input.style.height = 'auto';
+      input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
+      root.querySelector('[data-feedback]').textContent = '已填入对话框；补充后再发送。';
+      setProjectFocus('chat');
+      input.focus();
     };
   }
 }
 
-function journeyGateHtml(pending, step) {
-  return `<section class="conversation-question"><h3>${pending.stage==='direction'?'方向等你决定':'完整方案等你确认'}</h3>` +
-    '<p>请在创作板阅读当前版本并提交决定。选择、意见和确认只保留在这一处。</p>' +
-    '<button type="button" class="primary" data-view-plan>阅读并决定</button></section>';
-}
-
 function renderJourneyStatus() {
   const view=state.creatorView;
-  if (!view) { $('project-progress').replaceChildren(); return; }
+  if (!view) { $('project-progress').replaceChildren(); $('project-progress').hidden=true; return; }
   const visibleTarget=view.action?.kind==='navigate' && view.action.tab===state.canvasTab &&
     (view.action.tab!=='plan'||!view.action.stage||view.action.stage===state.activeStage);
   const next=state.busy||visibleTarget ? null : view.action;
-  // Keep the current result visible while the artifact and conversation scroll
-  // independently. The action is omitted when its target is already on screen.
+  // The conversation already shows execution progress. Keep only an actionable
+  // shortcut in the top bar when its destination is not on screen.
   const host=$('project-progress');
   host.replaceChildren();
-  const status=box('div','creator-status');
-  status.setAttribute('aria-label','当前进展');
-  status.append(box('span','creator-status-label','当前进展'),
-    box('strong','creator-status-current',view.current||'打开当前作品查看进展'));
-  host.append(status);
+  host.hidden=!next;
   if(next){
     const button=box('button','ghost small creator-next',next.label);
     button.type='button';
@@ -85,14 +122,9 @@ function renderJourneyStatus() {
       if(action.kind==='job'){setProjectFocus('chat');openTeamProgress();return;}
       if(action.kind==='chat'){setProjectFocus('chat');$('chat-input').focus();return;}
       if(action.kind==='prepare'){
-        const runId=state.runId;
-        button.disabled=true;
         await showJourneyTab(action.tab);
-        if(state.runId!==runId)return;
-        setProjectFocus('canvas');
-        const prepare=document.querySelector('.production-embedded [data-prepare]');
-        if(prepare&&!prepare.disabled)prepare.click();
-        else button.disabled=false;
+        setProjectFocus('chat');
+        $('production-action')?.scrollIntoView({block:'nearest'});
         return;
       }
       if(action.kind==='navigate'){
@@ -125,7 +157,6 @@ function configureJourneyTabs() {
   $('journey-tab-storyboard').disabled=!hasWriting&&!hasMedia;
   $('journey-tab-video').hidden=photo||analysis;
   $('journey-tab-video').disabled=!hasWriting&&!hasMedia;
-  $('project-stages').hidden=analysis;
   if (((photo || analysis) && state.canvasTab === 'video') || (analysis && ['storyboard','assets'].includes(state.canvasTab)))
     showJourneyTab('plan');
   syncJourneyTabs();
@@ -146,9 +177,10 @@ function syncJourneyTabs() {
 function renderJourneyDecision() {
   const host=$('journey-decision'),tl=state.timeline;
   if (!host || !tl) return;
-  const q=tl.interaction, pending=tl.pending, continuation=tl.pending_continuation;
+  const q=tl.interaction, artifactQuestion=tl.questions?.[0], pending=tl.pending, continuation=tl.pending_continuation;
   const briefRedo=tl.pending_brief_redo;
-  const key=JSON.stringify([state.runId,q?.id,pending?.version,pending?.artifact_sha256,
+  const key=JSON.stringify([state.runId,q?.id,artifactQuestion?.stage,artifactQuestion?.version,artifactQuestion?.question,
+    pending?.version,pending?.artifact_sha256,
     continuation?.expected_version,continuation?.expected_artifact_sha256,
     briefRedo?.amendment_id,Boolean(state.busy)]);
   if(host.dataset.key===key)return;
@@ -156,7 +188,7 @@ function renderJourneyDecision() {
   host.innerHTML='';
   if (state.busy) return;
   if (briefRedo) {
-    host.innerHTML='<section class="conversation-question"><h3>简报修订已保存</h3><p>方向版本已按新简报作废，但团队重做还没有启动。请检查模型连接，然后继续重做方向。</p><button type="button" class="primary" data-resume-brief-redo>继续重做方向</button><p role="status" data-feedback></p></section>';
+    host.innerHTML='<section class="conversation-question"><h3>简报修订已保存</h3><p>原方向已不适用，但团队重做还没有启动。请检查模型连接，然后继续重做方向。</p><button type="button" class="primary" data-resume-brief-redo>继续重做方向</button><p role="status" data-feedback></p></section>';
     const redoButton=host.querySelector('[data-resume-brief-redo]'), runId=state.runId;
     redoButton.onclick=async()=>{
       redoButton.disabled=true;
@@ -189,6 +221,15 @@ function renderJourneyDecision() {
     if (owned) { host.innerHTML=''; return; }
     host.innerHTML=questionCardHtml(q);
     bindQuestionChoices(host, q);
+  } else if (artifactQuestion) {
+    host.innerHTML=artifactQuestionHtml(artifactQuestion);
+    bindArtifactQuestion(host, artifactQuestion);
+  } else if (pending) {
+    const step=(tl.rail || []).find(row => row.stage === pending.stage && row.version === pending.version);
+    host.innerHTML=`<div class="conversation-decision"><p>当前作品已放在左侧工作区。看完后，在这里选择继续或说明修改意见。</p>` +
+      `<button type="button" class="ghost small" data-view-plan>查看当前作品 ↗</button>${gateHtml(pending, step)}</div>`;
+    host.querySelector('[data-view-plan]').onclick=()=>{showJourneyTab('plan',{stage:pending.stage});setProjectFocus('canvas');};
+    wireGate(host);
   }
 }
 
@@ -200,6 +241,28 @@ function scrollToJourneyDecision(host) {
   return true;
 }
 function closeEmbeddedProduction(){document.querySelector('.production-embedded')?.studioClose?.();}
+function renderProductionAction(){
+  const host=$('production-action');
+  if(!host)return;
+  host.replaceChildren();
+  if(!['storyboard','video'].includes(state.canvasTab)||!state.productionData||
+      state.timeline?.pending||state.timeline?.interaction)return;
+  const kind=state.canvasTab==='storyboard'?'image':'video';
+  const work=StudioProduction.currentProductionWork(state.productionData,kind,state.runId);
+  const heading=box('strong',null,work.label);
+  const detail=box('p',null,work.detail);
+  host.append(heading,detail);
+  if(work.primaryAction==='none')return;
+  if(work.primaryAction==='download'&&work.outputUrl){
+    const link=box('a','primary','下载当前作品');
+    link.href=work.outputUrl;link.download=work.outputName||'作品';host.append(link);
+  }else{
+    const button=box('button','primary','核对并继续');
+    button.type='button';
+    button.onclick=()=>openProduction({kind});
+    host.append(button);
+  }
+}
 function showJourneyTab(tab, options={}) {
   const button=tab==='plan' && options.stage==='writing' ? $('journey-tab-script') : $(`journey-tab-${tab}`);
   if(button?.hidden||button?.disabled)return;
@@ -210,18 +273,21 @@ function showJourneyTab(tab, options={}) {
   $('journey-assets').hidden=tab!=='assets';
   $('journey-storyboard').hidden=tab!=='storyboard';
   $('journey-video').hidden=tab!=='video';
-  $('project-stages').hidden=tab!=='plan'||Boolean(state.creatorView?.analysisOnly);
-  let opened=null;
   if(tab==='plan'){
     const candidate=(options.stage && (state.rail||[]).some(s=>s.stage===options.stage) ? options.stage : null)
       || state.timeline?.pending?.stage || (state.rail||[]).find(s=>s.stage==='writing'&&s.has_doc)?.stage
       || (state.rail||[]).find(s=>s.stage==='direction'&&s.has_doc)?.stage || 'intake';
     selectStage(candidate);
   } else if(tab==='assets') renderCanvasMaterials();
-  else opened=openProduction({mount:$(tab==='storyboard'?'journey-storyboard':'journey-video'),kind:tab==='storyboard'?'image':'video'});
+  else {
+    const kind=tab==='storyboard'?'image':'video';
+    $(tab==='storyboard'?'journey-storyboard':'journey-video').innerHTML=state.productionData
+      ? StudioProduction.canvasHtml(state.productionData,kind,state.runId,state.rail)
+      : '<div class="creator-production-empty">正在读取当前作品…</div>';
+  }
+  renderProductionAction();
   syncJourneyTabs();
   if(state.creatorView)renderJourneyStatus();
-  return opened;
 }
 
 function referenceAnalysisHtml(task,materials) {
@@ -306,4 +372,4 @@ function initJourney() {
   };
 }
 
-if(typeof module!=='undefined')module.exports={journeyStatus,questionCardHtml,journeyGateHtml,showJourneyTab,bindJourneyTabs,shouldShowQuestionInTurn,bindQuestionChoices};
+if(typeof module!=='undefined')module.exports={journeyStatus,questionCardHtml,artifactQuestionHtml,showJourneyTab,bindJourneyTabs,shouldShowQuestionInTurn,bindQuestionChoices};

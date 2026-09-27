@@ -1,21 +1,6 @@
-/* The stage panel: one stage, and everything about it, on one screen.
- *
- * The page used to be one conversation, oldest at the top. Every artifact ever
- * written sat above the thing that was actually waiting for him, so after a full
- * run the decision card landed more than eight screens down — behind four
- * documents he had already read and approved. The unit of work in this app is a
- * *stage*, not a message, so the page is now built out of stages: pick one on
- * the rail, see that stage.
- *
- * This file draws one stage and nothing else:
- *
- *   title    a human stage name and its purpose
- *   head     which version, who wrote it, when
- *   warn     the two reasons the document below may not be trustworthy
- *   doc      the document, laid out; or, if there is none, why there is none
- *   review   what the reviewer said about this exact version
- *   gate     the exact version decision, after the work and its review
- *   ask      what this stage could not settle, answerable in place
+/* The stage panel renders current creative results in the central canvas.
+ * Decisions and answers are projected into the conversation; readOnly mode
+ * suppresses the former in-canvas gate, question and review controls.
  *
  * WHAT IT DOES NOT KNOW. It does not decide whether a gate is open — the server
  * does (`timeline._pending_action`), and the gate is drawn only when the pending
@@ -62,26 +47,26 @@ function stageHtml(step, ctx) {
   // The gate is the server's to open. A pending item naming a different stage is
   // not this stage's business, and drawing an empty gate strip here would put a
   // box with no question in it above a document nobody is being asked about.
-  const pending = ctx.pending && ctx.pending.stage === step.stage &&
+  const pending = !ctx.readOnly && ctx.pending && ctx.pending.stage === step.stage &&
     ctx.pending.version === step.version &&
     (!step.artifact_sha256 || !ctx.pending.artifact_sha256 ||
       ctx.pending.artifact_sha256 === step.artifact_sha256) ? ctx.pending : null;
   const direction = step.stage === 'direction' && step.has_doc ? directionWorkHtml(step, pending, ctx) : null;
-  const writing = step.stage === 'writing' && step.has_doc ? writingWorkHtml(step, ctx) : null;
+  const writing = step.stage === 'writing' && step.has_doc ? writingWorkHtml(step, {...ctx, pending}) : null;
   const inlineDirection = Boolean(direction?.inlineGate);
 
   return (
     `<div class="pane${pending ? " has-gate" : ""}" data-stage="${escapeHtml(step.stage)}">` +
-    (pending && !inlineDirection ? `<a class="decision-jump" href="#stage-decision">阅读后提交决定 ↓</a>` : "") +
+    (pending && !inlineDirection ? `<a class="decision-jump" href="#stage-decision">查看审核意见与决定 ↓</a>` : "") +
     titleHtml(step) +
     warnHtml(step) +
-    headHtml(step) +
+    (ctx.readOnly ? '' : headHtml(step)) +
     (direction?.html || writing || docHtml(step, ctx)) +
     (step.decision_sentence ? `<div class="pane-decision">${escapeHtml(step.decision_sentence)}</div>` : "") +
-    (step.review ? reviewHtml(step.review) : "") +
+    (!ctx.readOnly && step.review ? reviewHtml(step.review) : "") +
     (pending && !inlineDirection ? gateHtml(pending) : "") +
-    askHtml(step, questions, drafts) +
-    teamIssuesHtml(step.team_issues || []) +
+    (ctx.readOnly ? '' : askHtml(step, questions, drafts)) +
+    (ctx.readOnly ? '' : teamIssuesHtml(step.team_issues || [])) +
     `</div>`
   );
 }
@@ -113,15 +98,18 @@ function directionWorkHtml(step, pending, ctx) {
     ...cards.filter(card => card.emphasis === 'chosen').map(card => keyOf(card)),
   ]);
   const recommendation = blocks.find(block => block.type === 'callout' && block.title === '推荐');
-  const dependencies = blocks.find(block => block.type === 'matrix' && block.rows?.length);
   const other = blocks.filter(block => block.type !== 'cards' && block !== recommendation);
   const ordered = inlineGate ? matching : cards;
   const optionCard = card => {
     const key = keyOf(card), titleField = fieldValue(card, ['标题', '名称', '创意名称']);
     const claim = fieldValue(card, ['主张', '创意主张']);
     const title = titleField || claim || `方向 ${key}`;
-    const story = fieldValue(card, ['画面与表达', '故事概述']);
-    const opening = fieldValue(card, ['开场', '前 3 秒', '开场句']);
+    const story = fieldValue(card, ['推进概念', '画面与表达', '故事概述']);
+    const opening = fieldValue(card, ['开场识别点', '开场', '前 3 秒', '开场句']);
+    // Older direction artifacts sometimes contain timed shots and full lines.
+    // Keep their source available, but let the choice screen compare concepts.
+    const hasDraftDetail = story.length > 280 || opening.length > 140 ||
+      /(?:\d+\s*[-–—]\s*\d+\s*(?:s|秒)|\d{1,2}:\d{2}|台词[：:]|字幕[：:]|说话人[：:])/iu.test(`${story} ${opening}`);
     const selectedHere = Boolean(selected && selected === key);
     // The same per-option verdict the gate enforces, read off the option the
     // server sent. This branch used to offer "采用这个方向" for every card, so a
@@ -130,31 +118,30 @@ function directionWorkHtml(step, pending, ctx) {
     const admission = inlineGate
       ? options.find(option => option.key === key) || {} : {};
     const blocked = admission.admissible === false;
-    const used = new Set(['标题', '名称', '创意名称', '主张', '创意主张', '画面与表达', '故事概述', '开场', '前 3 秒', '开场句']);
+    const used = new Set(['标题', '名称', '创意名称', '主张', '创意主张', '推进概念', '画面与表达', '故事概述', '开场识别点', '开场', '前 3 秒', '开场句']);
     const background = new Set(['依据', '证据强度', '素材依赖', '素材需求', '执行难度']);
     const choiceRisk = new Set(['方案取舍', '取舍', '风险', '可能失败', '限制']);
     const visible = (card.fields || []).filter(field => !used.has(field.label) &&
       (choiceRisk.has(field.label) || (!field.secondary && !background.has(field.label))));
     const details = (card.fields || []).filter(field => !used.has(field.label) && !visible.includes(field));
-    const dependencyRows = dependencies?.rows || [];
-    const optionIndex = (dependencies?.columns || []).indexOf(key);
-    const choiceDependencies = optionIndex < 0 ? [] : dependencyRows.filter(row => row.cells?.[optionIndex] && row.label);
     return `<article class="creator-direction-card${selectedHere ? ' is-selected' : ''}${blocked ? ' is-blocked' : ''}" data-direction-card="${escapeHtml(key)}">` +
       (card.media ? `<div class="creator-direction-media" data-media="${escapeHtml(card.media)}"></div>` : '') +
       `<div class="creator-direction-body"><span class="creator-kicker">${selectedHere ? `${selectedLabel} · ` : ''}${recommended.has(key) ? '团队推荐 · ' : ''}方向 ${escapeHtml(key)}</span>` +
       `<h3>${escapeHtml(title)}</h3>` +
       (titleField && claim ? `<p class="creator-direction-claim">${escapeHtml(claim)}</p>` : '') +
-      (story ? `<p class="creator-direction-story">${escapeHtml(story)}</p>` : '') +
-      (opening ? `<div class="creator-opening"><span>具体开场</span><p>${escapeHtml(opening)}</p></div>` : '') +
+      (!hasDraftDetail && story ? `<p class="creator-direction-story">${escapeHtml(story)}</p>` : '') +
+      (!hasDraftDetail && opening ? `<div class="creator-opening"><span>开场识别点</span><p>${escapeHtml(opening)}</p></div>` : '') +
       (visible.length ? `<dl class="creator-direction-fields">${visible.map(field => `<dt>${escapeHtml(field.label)}</dt><dd>${escapeHtml(field.value)}</dd>`).join('')}</dl>` : '') +
-      (choiceDependencies.length ? `<div class="creator-direction-risk"><strong>选择前要核对</strong><ul>${choiceDependencies.map(row => `<li>「${escapeHtml(row.label)}」未解决时，这个方向不能成立</li>`).join('')}</ul></div>` : '') +
+      (hasDraftDetail ? `<details class="creator-direction-draft"><summary>查看原稿中的制作细节</summary>` +
+        (opening ? `<div><strong>开场</strong><p>${escapeHtml(opening)}</p></div>` : '') +
+        (story ? `<div><strong>画面与表达</strong><p>${escapeHtml(story)}</p></div>` : '') +
+        `</details>` : '') +
       (details.length ? `<details class="creator-direction-details"><summary>研究依据与制作条件</summary><dl>${details.map(field => `<dt>${escapeHtml(field.label)}</dt><dd>${escapeHtml(field.value)}</dd>`).join('')}</dl></details>` : '') +
       (inlineGate && blocked
-        ? `<div class="creator-direction-blocked"><strong>不能采用</strong>` +
+        ? `<div class="creator-direction-blocked"><strong>当前版不能采用</strong>` +
           (admission.blocked_reason ? `<p>${escapeHtml(admission.blocked_reason)}</p>` : '') + `</div>`
-        : inlineGate
-          ? `<button type="button" class="good creator-direction-choose" data-act="approve" data-option-key="${escapeHtml(key)}" data-admissible="1">采用这个方向并继续</button>`
-          : '') +
+        : '') +
+      (inlineGate ? `<button type="button" class="ghost creator-direction-choose" data-act="pick-option" data-option-key="${escapeHtml(key)}" data-admissible="${blocked ? '0' : '1'}">${blocked ? '以此构想为基础修改' : `选择方向 ${escapeHtml(key)}`}</button>` : '') +
       `</div></article>`;
   };
   const selectedCard = selected && !inlineGate ? ordered.find(card => keyOf(card) === selected) : null;
@@ -168,7 +155,7 @@ function directionWorkHtml(step, pending, ctx) {
   const recommendationText = recommendation?.text || '';
   const recommendationShort = shortRecommendation(recommendationText);
   const recommendationHtml = recommendationText ? `<div class="creator-direction-recommendation"><strong>${selectedCard ? '当时的团队建议' : '团队建议'}</strong><p>${escapeHtml(recommendationShort)}</p>` +
-    (recommendation.items?.length || recommendationShort !== recommendationText ? `<details><summary>完整说明与成立前提</summary>` +
+    (recommendation.items?.length || recommendationShort !== recommendationText ? `<details><summary>推荐依据与待核实条件</summary>` +
       (recommendationShort !== recommendationText ? `<p>${escapeHtml(recommendationText)}</p>` : '') +
       (recommendation.items?.length ? `<ul>${recommendation.items.map(item => `<li>${escapeHtml(item.text)}</li>`).join('')}</ul>` : '') + '</details>' : '') + '</div>' : '';
   const gateAttrs = inlineGate ? ` id="stage-decision" class="gate creator-direction-gate" role="group" aria-label="选择这一版创意方向" data-stage="direction" data-version="${escapeHtml(pending.version)}" data-sha="${escapeHtml(pending.artifact_sha256 || '')}" data-passed="${pending.passed ? '1' : '0'}" data-needs-choice="1"` + gateAmendAttrs(pending) : ' class="creator-direction-work"';
@@ -176,10 +163,9 @@ function directionWorkHtml(step, pending, ctx) {
   // same three things the fallback form does: the brief the decision is bound
   // to, the amendment an option proposed, and the brief's own conflicts (T3).
   const footer = inlineGate ? `<div class="creator-direction-footer">` + conflictsHtml(pending) +
-    `<label class="gate-note-label">${pending.passed ? '补充意见' : '覆盖审核或退回的具体理由'}<textarea class="reason" rows="3" maxlength="8000" aria-label="决定意见" placeholder="想保留什么，哪里需要调整？"></textarea></label>` +
-    `<p class="gate-feedback" role="status">选择方向才会提交；推荐不代表已选</p>` +
-    amendBlockHtml(pending) +
-    `<button type="button" class="bad small" data-act="reject">都不合适，退回修改</button>` +
+    `<p class="gate-choice-summary" role="status">尚未选择方向；团队推荐不代表你已选择。</p>` +
+    revisionNoteHtml('想保留哪个想法、具体哪里要改？不选方向也可以要求全部重做。') +
+    amendBlockHtml(pending) + decisionActionsHtml(pending, true) +
     `<p class="gate-limit">仅确认这一版策划，不开始图片或视频生成。</p>` +
     `<details class="gate-next"><summary>后续阶段与历史用量</summary>${pending.next_stage_label ? `<div>下一步：${escapeHtml(pending.next_stage_label)} · ${escapeHtml(pending.next_owner)}</div>` : ''}<div class="gate-next-cost">${escapeHtml(pending.next_cost_sentence || '')}</div></details></div>` : '';
   const html = `<div class="pane-doc"><section${gateAttrs}><div class="creator-decision-intro"><span class="creator-kicker">${inlineGate ? '现在需要你决定' : '当前创意'}</span><h2>${inlineGate ? '选一个方向，继续写成方案' : selected ? `${selectedLabel}的方向` : '看看这些创意方向'}</h2></div>${decision}${selectedCard ? cardList + recommendationHtml : recommendationHtml + findings + cardList}${footer}${other.length ? `<details class="creator-direction-support"><summary>完整依据与其他内容</summary>${blocksHtml(other)}</details>` : ''}${sourceSummaryHtml(step)}</section></div>`;
@@ -204,6 +190,26 @@ function writingWorkHtml(step, ctx) {
   const caption = blocks.find(block => block.type === 'text' && block.title === '发布文案');
   const assumptions = blocks.find(block => block.type === 'list' && block.title === '这份脚本做了哪些假设');
   const other = blocks.filter(block => block !== caption && block !== assumptions && block.type !== 'cards');
+  const scenePreview = value => {
+    const plain = String(value || '').replace(/\s+/gu, ' ').trim();
+    const chars = Array.from(plain);
+    return chars.length > 48 ? `${chars.slice(0, 48).join('')}…` : plain;
+  };
+  const outline = cards.map((card, index) => {
+    const title = String(card.head || '').trim() || (isPhoto ? `第 ${index + 1} 页` : `第 ${index + 1} 段`);
+    const line = fieldValue(card, isPhoto ? ['图内文案', '图内文字', '文案', '台词', '台词或字幕'] : ['台词', '台词或字幕']);
+    const picture = fieldValue(card, ['画面', '画面与动作']);
+    const spoken = /^(?:[（(]?无台词[）)]?|不使用口播|无口播|无|—|-)$/u.test(line.trim()) ? '' : line;
+    const primary = isPhoto ? picture || spoken : spoken || picture;
+    const secondary = isPhoto ? (picture && spoken ? spoken : '') : (spoken && picture ? picture : '');
+    return `<li><a href="#script-segment-${index + 1}"><span>${escapeHtml(title)}</span>` +
+      `<span class="creator-script-overview-text"><strong>${escapeHtml(scenePreview(primary) || '内容待补充')}</strong>` +
+      (secondary ? `<small>${isPhoto ? '文案' : '画面'}：${escapeHtml(scenePreview(secondary))}</small>` : '') + '</span></a></li>';
+  }).join('');
+  const pending = ctx?.pending;
+  const reviewState = pending && pending.stage === step.stage && pending.version === step.version
+    ? `<p class="creator-script-review-state">${pending.passed ? '审核已通过，仍待你决定' : '审核未通过，建议先看修改意见'}${pending.findings?.length ? ` · ${pending.findings.length} 点` : ''}</p>` : '';
+  const overview = `<nav class="creator-script-overview" aria-label="${isPhoto ? '图文稿页码' : '脚本段落'}"><div class="creator-script-overview-head"><strong>${cards.length} ${isPhoto ? '页' : '段'}内容</strong><span>点一段直接阅读</span></div>${reviewState}<ol>${outline}</ol></nav>`;
   const segments = cards.map((card, index) => {
     const number = index + 1;
     const line = fieldValue(card, isPhoto ? ['图内文案', '图内文字', '文案', '台词', '台词或字幕'] : ['台词', '台词或字幕']);
@@ -223,10 +229,10 @@ function writingWorkHtml(step, ctx) {
     const audio = sound ? `<div class="creator-script-sound"><strong>声音</strong><p${fieldTarget(`${target}声音`,'sound')}>${escapeHtml(sound)}</p></div>` : '';
     const content = isPhoto || !hasLine ? visual + words : words + visual;
     const heading = isPhoto ? (time || `第 ${number} 页`) : `第 ${number} 段${time ? ` · ${time}` : ''}`;
-    return `<article class="creator-script-segment${isPhoto ? ' is-photo' : hasLine ? ' has-words' : ' is-visual'}"><header><span>${escapeHtml(heading)}</span>${duration && !isPhoto ? `<small>${escapeHtml(duration)}</small>` : ''}</header>` +
+    return `<article id="script-segment-${number}" class="creator-script-segment${isPhoto ? ' is-photo' : hasLine ? ' has-words' : ' is-visual'}"><header><span>${escapeHtml(heading)}</span>${duration && !isPhoto ? `<small>${escapeHtml(duration)}</small>` : ''}</header>` +
       `<div class="creator-script-content">${content}${audio}${!content && !audio ? `<p class="creator-script-unwritten">这一${isPhoto ? '页' : '段'}尚未写出可读内容。</p>` : ''}</div></article>`;
   }).join('');
-  return `<div class="pane-doc creator-script-work"><div class="creator-script-intro"><span class="creator-kicker">${isPhoto ? '当前图文稿' : '当前脚本'}</span><h2>${isPhoto ? '逐页看画面与图内文案' : '逐段读画面与表达'}</h2><p>${canSelect ? '点选画面或文字，可在对话中讨论，也可按意见直接修改该字段。' : '先阅读这份作品；来源或版本需要核对后才能针对具体内容修改。'}</p></div><div class="creator-script-lines">${segments}</div>` +
+  return `<div class="pane-doc creator-script-work"><div class="creator-script-intro"><span class="creator-kicker">${isPhoto ? '当前图文稿' : '当前脚本'}</span><h2>${isPhoto ? '逐页看画面与图内文案' : '逐段读画面与表达'}</h2><p>${canSelect ? '点选画面或文字，可在对话中讨论，也可按意见直接修改该字段。' : '先阅读这份作品；来源或版本需要核对后才能针对具体内容修改。'}</p></div>${overview}<div class="creator-script-lines">${segments}</div>` +
     (caption?.text ? `<section class="creator-script-caption"><h3>发布文案</h3><p class="blk-text"${canSelect ? ` data-creator-target="发布文案" data-creator-path="${escapeHtml(JSON.stringify(['caption']))}"` : ''}>${escapeHtml(caption.text)}</p></section>` : '') +
     (assumptions?.items?.length ? `<section class="creator-script-assumptions"><h3>这份脚本仍需核对</h3><ul>${assumptions.items.map(item => `<li>${escapeHtml(item.text)}</li>`).join('')}</ul></section>` : '') +
     (other.length ? `<details class="creator-script-support"><summary>查看分镜顺序与其他依据</summary>${blocksHtml(other)}</details>` : '') + sourceSummaryHtml(step) + '</div>';
@@ -275,9 +281,9 @@ function gateRejectLabel(surface) {
  * row, `data-passed` for whether a note is mandatory. A test can assert the
  * markup and the binder agree without a browser.
  */
-function gateHtml(pending) {
+function gateHtml(pending, step) {
   const amend = pending.kind === "brief_amendment";
-  return amend ? briefAmendmentGateHtml(pending) : stageDecisionGateHtml(pending);
+  return amend ? briefAmendmentGateHtml(pending) : stageDecisionGateHtml(pending, step);
 }
 
 /* The note box and the action row. Every gate type carries both — see the
@@ -289,6 +295,24 @@ function gateReasonHtml(placeholder) {
   return `<label class="gate-note-label">补充意见` +
     `<textarea class="reason" rows="3" maxlength="8000" aria-label="决定意见" ` +
     `placeholder="${escapeHtml(placeholder)}"></textarea></label>`;
+}
+
+function revisionNoteHtml(placeholder) {
+  return `<label class="gate-note-label">希望怎么修改` +
+    `<textarea class="reason" rows="3" maxlength="8000" aria-label="修改意见" ` +
+    `placeholder="${escapeHtml(placeholder)}"></textarea></label>`;
+}
+
+function decisionActionsHtml(pending, direction = false) {
+  const revise = `<button type="button" class="good small" data-act="reject">按意见修改，先出新版</button>`;
+  const adopt = pending.passed
+    ? `<button type="button" class="ghost small" data-act="approve">${direction ? '按所选方向继续' : pending.stage === 'direction' ? '确认当前方向并继续' : '确认当前脚本并继续'}</button>`
+    : `<details class="gate-override"><summary>仍要采用未通过审核的当前版？</summary>` +
+      `<p>这会跳过当前审核意见并继续。请单独说明原因。</p>` +
+      `<label class="gate-note-label">覆盖审核的理由<textarea class="override-reason" rows="3" maxlength="8000" aria-label="覆盖审核的理由"></textarea></label>` +
+      `<button type="button" class="bad small" data-act="approve">明确覆盖审核并采用当前版</button></details>`;
+  return gateActionsHtml(['approve', 'reject'], '选择和填写意见都不会立即提交。',
+    `<div class="gate-decision-buttons">${revise}${adopt}</div>`);
 }
 
 function gateActionsHtml(acts, hint, buttons) {
@@ -329,9 +353,11 @@ function briefAmendmentGateHtml(pending) {
     `<p class="gate-headline">${escapeHtml(pending.headline)}</p>` +
     `<p>${escapeHtml(pending.body || "")}</p>` + conflictsHtml(pending) + findingsHtml(pending) + blockersHtml(pending) +
     diff + missing +
-    gateReasonHtml(amend.valid === false ? "退回时请写明要在原简报下改什么" : "批准或退回的补充说明（可留空）") +
+    revisionNoteHtml(amend.valid === false
+      ? "请写明要在原简报下改什么，再退回团队"
+      : "这条简报改法还需调整？写明意见并退回团队出新版；批准只采用上方原文。") +
     gateActionsHtml(amend.valid === false ? ["reject"] : ["amend_brief", "reject"],
-      amend.valid === false ? "这一版不能批准修订；可以退回重做。" : "批准后会立即按新简报重做",
+      amend.valid === false ? "这一版不能批准修订；可以退回重做。" : "有修改意见请退回；批准只采用上方修订正文，并立即重做。",
       (amend.valid === false ? "" :
         `<button type="button" class="good small" data-act="amend_brief">` +
         `批准修订简报（本版作废，团队重做）</button>`) +
@@ -342,19 +368,27 @@ function briefAmendmentGateHtml(pending) {
     `</section>`;
 }
 
-function stageDecisionGateHtml(pending) {
+function stageDecisionGateHtml(pending, step) {
   const options = pending.options || [];
+  const cards = (step?.blocks || []).find(block => block.type === 'cards')?.cards || [];
+  const cardFor = key => cards.find(card => String(card.head || '').trim().replace(/^方向\s+/, '') === key);
   // An option the gate refuses is drawn but not selectable, with the reason next
   // to it. Leaving it selectable would advertise a click the server answers with
   // a refusal; hiding it would hide that the team proposed it at all (R3).
-  const choices = options.length ? `<fieldset class="gate-options"><legend>采用哪个方向</legend>` +
+  const choices = options.length ? `<fieldset class="gate-options"><legend>想以哪个方向继续</legend>` +
     options.map(o => {
       const blocked = o.admissible === false;
+      const card = cardFor(o.key);
+      const title = fieldValue(card || {}, ['标题', '名称', '创意名称']) ||
+        fieldValue(card || {}, ['主张', '创意主张']);
+      const claim = fieldValue(card || {}, ['主张', '创意主张']);
       return `<label class="gate-choice${blocked ? " is-blocked" : ""}">` +
         `<input type="radio" name="direction-choice" value="${escapeHtml(o.key)}"` +
         (blocked ? ` disabled data-blocked="1"` : "") + `>` +
-        `<span>方向 ${escapeHtml(o.key)}${o.recommended ? '<small>推荐</small>' : ''}` +
-        (blocked ? '<small class="gate-choice-blocked">不能采用</small>' : '') + `</span>` +
+        `<span><strong>方向 ${escapeHtml(o.key)}${title ? ` · ${escapeHtml(title)}` : ''}</strong>` +
+        (o.recommended ? '<small>团队推荐</small>' : '') +
+        (claim && claim !== title ? `<small>${escapeHtml(shortRecommendation(claim))}</small>` : '') +
+        (blocked ? '<small class="gate-choice-blocked">当前稿需先修改</small>' : '') + `</span>` +
         (blocked && o.blocked_reason
           ? `<small class="gate-choice-why">${escapeHtml(o.blocked_reason)}</small>` : '') +
         `</label>`;
@@ -366,16 +400,10 @@ function stageDecisionGateHtml(pending) {
     `<div class="gate-head">下一步 · ${escapeHtml(pending.stage_label)}</div>` +
     `<p class="gate-headline">${escapeHtml(pending.headline)}</p>` +
     conflictsHtml(pending) + findingsHtml(pending) + choices +
+    (options.length ? `<p class="gate-choice-summary" role="status">尚未选择方向；团队推荐不代表你已选择。</p>` : '') +
     amendBlockHtml(pending) +
-    gateReasonHtml("想保留什么，哪里需要调整？") +
-    gateActionsHtml(["approve", "reject"], "选择不会立即提交",
-      pending.passed
-        ? `<button type="button" class="good small" data-act="approve" data-stage="${escapeHtml(pending.stage)}">` +
-          `${escapeHtml(gateApproveLabel(pending, "stage"))}</button>` +
-          `<button type="button" class="bad small" data-act="reject" data-stage="${escapeHtml(pending.stage)}">${escapeHtml(gateRejectLabel("stage"))}</button>`
-        : `<button type="button" class="good small" data-act="reject" data-stage="${escapeHtml(pending.stage)}">${escapeHtml(gateRejectLabel("stage"))}</button>` +
-          `<button type="button" class="bad small" data-act="approve" data-stage="${escapeHtml(pending.stage)}">` +
-          `${escapeHtml(gateApproveLabel(pending, "stage"))}</button>`) +
+    revisionNoteHtml(options.length ? "想保留哪个想法、具体哪里要改？不选方向也可以要求全部重做。" : "当前脚本需要改哪里？") +
+    decisionActionsHtml(pending, Boolean(options.length)) +
     `<details class="gate-next"><summary>后续阶段与历史用量</summary>` +
     (pending.next_stage_label ? `<div>下一步：${escapeHtml(pending.next_stage_label)} · ${escapeHtml(pending.next_owner)}</div>` : '') +
     `<div class="gate-next-cost">${escapeHtml(pending.next_cost_sentence || '')}</div></details>` +
@@ -621,5 +649,5 @@ function askHtml(step, questions, drafts) {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { stageHtml, answerKey, gateApproveLabel, gateRejectLabel };
+  module.exports = { stageHtml, gateHtml, answerKey, gateApproveLabel, gateRejectLabel };
 }

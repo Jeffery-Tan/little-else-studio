@@ -73,9 +73,9 @@ def test_reviewer_actual_request_has_same_facts_and_choice(env):
     assert "selected_option_id=B" in seed
 
 
-def test_director_may_write_concrete_scenes_and_sample_dialogue():
-    assert "样例对白" in DIRECTOR.instructions
-    assert "不要写台词" not in DIRECTOR.instructions
+def test_director_stops_at_comparable_directions_before_selection():
+    assert "每个方向的推进概念控制在两三句话" in DIRECTOR.instructions
+    assert "不要写逐镜头/逐页方案、时间段、完整台词或字幕样稿" in DIRECTOR.instructions
 
 
 def material(store, name="still.jpg", content=b"synthetic image bytes"):

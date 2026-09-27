@@ -29,8 +29,8 @@ def latest_execution(store, run_id: str, rows=None) -> dict | None:
     return job
 
 
-def stage_issues(stage: dict) -> list[dict]:
-    from .structured import is_ask_user_question, question_kind
+def stage_issues(stage: dict, chat: list[dict] | None = None) -> list[dict]:
+    from .structured import is_ask_user_question, question_answered, question_kind
 
     artifact = stage.get("latest") or {}
     active = (not stage.get("stale") and stage.get("integrity_ok", True)
@@ -42,25 +42,26 @@ def stage_issues(stage: dict) -> list[dict]:
             continue
         explicit = row.get("owner") in {"user", "team"} and row.get("timing") in {"now", "later"}
         kind = question_kind(row)
+        answered = question_answered(chat, row["question"], artifact.get("created_at", ""))
         issues.append({**row, "kind": kind, "stage": stage["stage"], "version": artifact.get("version"),
                        "artifact_sha256": artifact.get("sha256"),
                        "owner": row.get("owner") if explicit else "team",
                        "timing": row.get("timing") if explicit else "later",
-                       "needs_triage": not explicit, "active": active,
+                       "needs_triage": not explicit, "active": active, "answered": answered,
                        # brief_amendment is never an ask_user blank — it means
                        # the product goal has to change via amend_brief.
-                       "ask_user": bool(active and is_ask_user_question(row))})
+                       "ask_user": bool(active and not answered and is_ask_user_question(row))})
     return issues
 
 
-def project_brief(state: dict, job: dict | None = None) -> dict:
+def project_brief(state: dict, job: dict | None = None, chat: list[dict] | None = None) -> dict:
     defaults = {"latest": None, "stale": False, "integrity_ok": True, "status": "empty",
                 "open_attempt": None, "can_approve": False, "can_review": False, "last_rejection": ""}
     state = {**state, "stages": [{**defaults, **s} for s in state["stages"]]}
     progress = project_progress(state)
     target = next((s for s in state["stages"] if s["stage"] == progress["stage"]), None)
     artifact = (target or {}).get("latest") or {}
-    issues = [issue for stage in state["stages"] for issue in stage_issues(stage)]
+    issues = [issue for stage in state["stages"] for issue in stage_issues(stage, chat)]
     # Only the currently actionable stage can assign user work. Old upstream
     # unknowns remain available for the team without resurfacing as questionnaires.
     question_stage = progress["stage"]
@@ -88,17 +89,19 @@ def project_brief(state: dict, job: dict | None = None) -> dict:
         review_failure |= bool((job or {}).get("job_kind") == "stage_review"
                                and (job or {}).get("status") in {"failed", "blocked", "interrupted", "cancelled"}
                                and payload.get("expected_artifact_sha256") == artifact.get("sha256"))
-        action.update(kind="review_stage", label="重试本版审核" if review_failure else "审核这一版")
-        title = f"{stage_label(target['stage'])}第 {artifact['version']} 版" + (" · 审核未完成" if review_failure else "已保存")
+        action.update(kind="review_stage", label="重新审核当前方案" if review_failure else "审核当前方案")
+        title = f"{stage_label(target['stage'])}" + (" · 审核未完成" if review_failure else "已保存")
         detail = "审核未完成，方案已保留。可先查看方案，或只重试这一版的审核。" if review_failure else "下一步由独立审核检查；审核后再由你选择采用。"
         phase = "review_failed" if review_failure else "awaiting_review"
-    if questions and target and not target.get("can_approve") and not target.get("open_attempt"):
+    # Resolve user-owned facts before another review/model call. The draft stays
+    # saved; the answer may lead the team to revise its current way of shooting.
+    if questions and target and not target.get("open_attempt"):
         title = f"有 {len(questions)} 项需要你确认"
-        detail = "只列出当前需要你提供的事实或选择，其余事项由制片团队处理。"
+        detail = "可以说明现有条件、不确定处或可接受的替代拍法；团队会据此调整方案。"
         action.update(kind="questions", label="查看待确认事项")
         action["stage"] = question_stage
         phase = "needs_input"
-    if job and job.get("status") in {"failed", "interrupted", "cancelled", "blocked"} and not review_failure:
+    if job and job.get("status") in {"failed", "interrupted", "cancelled", "blocked"} and not review_failure and not questions:
         historical_accounting = "reconcile provider evidence" in job.get("reason", "")
         if not historical_accounting and job.get("job_kind", "conversation") == "conversation":
             title = "本轮已停止" if job["status"] == "cancelled" else "本轮未完成，已有内容已保留"

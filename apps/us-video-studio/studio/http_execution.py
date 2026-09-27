@@ -88,7 +88,7 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
                 # Shared redaction: job polling must not return attempt tokens.
                 redact_http_event(event)
                 event["say"] = vocabulary.describe_event(event)
-            job['brief'] = project_brief(pipeline.state(job['run_id']).to_dict(), latest_execution(store, job['run_id']))
+            job['brief'] = project_brief(pipeline.state(job['run_id']).to_dict(), latest_execution(store, job['run_id']), store.read_chat(job['run_id']))
         return job
 
     @app.post('/api/runs/{run_id}/actions/review')

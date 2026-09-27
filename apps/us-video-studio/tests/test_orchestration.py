@@ -11,7 +11,7 @@ import json
 import pytest
 
 from fakes import ScriptedModel, final_turn, tool_turn
-from studio.agents.client import run_agent_loop
+from studio.agents.client import ModelError, NonRetryableStageError, Usage, run_agent_loop
 from studio.agents.orchestrator import Orchestrator
 from studio.agents.reviewer import run_review
 from studio.agents.roles import readable_stages
@@ -156,6 +156,23 @@ def test_a_role_agent_that_never_submits_leaves_no_artifact_and_closes_its_attem
     assert "没有提交" in state.last_rejection
     # And the stage is startable again straight away.
     assert state.can_start is True
+
+
+def test_invalid_paid_stage_response_stops_before_another_dispatch(env, tmp_path):
+    store, pipeline, ledger = env
+    seed_intake(pipeline)
+
+    class InvalidResponse:
+        def complete(self, **_):
+            raise ModelError(200, 'invalid Chat Completions response; received usage retained',
+                             usage=Usage(120, 900), usage_final=True)
+
+    dispatcher = Dispatcher(store, pipeline, settings_for(tmp_path), InvalidResponse(), ledger, RUN)
+    with pytest.raises(NonRetryableStageError, match='停止自动重试'):
+        dispatcher.dispatch('direction', 'Propose short concepts')
+    assert pipeline.stage_state(RUN, 'direction').open_attempt is None
+    rows = ledger.entries(RUN)
+    assert len(rows) == 1 and rows[0].output_tokens == 900
 
 
 def test_dispatch_refuses_a_stage_the_orchestrator_owns(env, tmp_path):
@@ -429,6 +446,31 @@ def test_review_is_not_repeated_for_the_same_fingerprint(env, tmp_path):
     assert model.calls == []
 
 
+def test_review_timeout_does_not_trigger_another_call_in_the_same_turn(env, tmp_path):
+    store, pipeline, ledger = env
+    seed_intake(pipeline)
+    attempt = pipeline.start_attempt(RUN, "direction")
+    pipeline.submit(RUN, "direction", attempt.token, content="方向", summary="s")
+
+    class TimeoutReviewer:
+        calls = 0
+
+        def complete(self, **kwargs):
+            self.calls += 1
+            raise ModelError(0, "Codex request timed out; usage unconfirmed")
+
+    model = TimeoutReviewer()
+    orchestrator = make_orchestrator(store, pipeline, ledger, model, tmp_path)
+    first = orchestrator._request_review("direction")
+    second = orchestrator._request_review("direction")
+
+    assert first.is_error and second.is_error
+    assert "本轮不重复调用" in second.content
+    assert model.calls == 1
+    assert ledger.totals().unknown_calls == 1
+    assert pipeline.stage_state(RUN, "direction").review is None
+
+
 def test_a_stale_version_is_not_sent_for_review(env, tmp_path):
     store, pipeline, ledger = env
     seed_intake(pipeline)
@@ -673,6 +715,29 @@ def test_the_users_message_is_on_disk_before_the_loop_runs(env, tmp_path):
 
     assert seen, "the model should have been called"
     assert [c["text"] for c in seen[0] if c["role"] == "user"] == ["先整理需求。"]
+
+
+def test_necessary_question_is_not_followed_by_generic_incomplete_reply(env, tmp_path):
+    store, pipeline, ledger = env
+    model = ScriptedModel([
+        tool_turn("route", "prepare_creative_context", {
+            "intent": "new", "format": "video", "deliverable": "direction"}),
+        tool_turn("question", "ask_user", {
+            "question": "这条片子主推哪一款？", "context": "两款容量不同，方向会随之变化。",
+            "options": [
+                {"label": "小款", "description": "主推小容量"},
+                {"label": "大款", "description": "主推大容量"},
+            ],
+            "recommended": 0,
+        }),
+    ])
+
+    turn = make_orchestrator(store, pipeline, ledger, model, tmp_path).send("先确定主推款，再出方向")
+
+    assert turn.text == ""
+    replies = [entry["text"] for entry in store.read_chat(RUN) if entry["role"] == "assistant"]
+    assert len(replies) == 1
+    assert "这条片子主推哪一款？" in replies[0]
 
 
 def test_a_message_is_not_lost_when_the_budget_stops_the_turn(env, tmp_path):

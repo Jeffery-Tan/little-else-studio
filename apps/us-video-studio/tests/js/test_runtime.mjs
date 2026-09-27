@@ -36,8 +36,31 @@ test('running conversation keeps the top strip compact while progress belongs to
     events:[{type:'agent_activity',role:'director',phase:'thinking',at:'2026-09-26T12:00:00Z'}]});
   const strip=visibleText(h.nodes.get('job-status'));
   assert.match(strip,/进展见下方对话/);
-  assert.match(strip,/停止本轮/);
+  assert.doesNotMatch(strip,/停止本轮/);
+  assert.match(h.nodes.get('send').textContent,/停止/);
   assert.doesNotMatch(strip,/最近操作|最近进展|构思创意方向/);
+});
+
+test('composer stop cancels only the viewed job once and keeps the draft', async()=>{
+  let release;
+  const calls=[];
+  const h=harness(async(url,options)=>{
+    calls.push({url,options});
+    return new Promise(resolve=>{release=resolve;});
+  });
+  const job={job_id:'active',job_kind:'conversation',status:'running',events:[]};
+  h.context.showJob(job);
+  h.context.$('chat-input').value='下轮再说';
+  const first=h.context.stopCurrentJob();
+  await h.context.stopCurrentJob();
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].url,'/api/runs/run-a/jobs/active/cancel');
+  assert.equal(h.nodes.get('send').disabled,true);
+  assert.match(h.nodes.get('send').textContent,/停止中/);
+  release({...job,status:'cancelling'});
+  await first;
+  assert.equal(h.nodes.get('chat-input').value,'下轮再说');
+  assert.equal(h.nodes.get('send').disabled,true);
 });
 
 test('uncertain review retries preserve the exact version and dedicated endpoint',async()=>{
@@ -123,7 +146,8 @@ test('uncertain image submission retains the same payload and image route',async
 test('an ended model turn surfaces the concrete missing deliverable', () => {
   const h = harness(async () => ({}));
   const job = {status:'blocked',reason:'交付未完成',deliverable:{goal:'writing',status:'incomplete',missing:['writing 当前准确版本']}};
-  assert.match(h.context.jobGuidance(job), /writing 当前准确版本/);
+  assert.match(h.context.jobGuidance(job), /脚本当前准确版本/);
+  assert.doesNotMatch(h.context.jobGuidance(job), /writing/);
   assert.doesNotMatch(h.context.jobGuidance(job), /已完成本轮/);
 });
 
@@ -289,13 +313,14 @@ test('a definitive validation failure restores text and clears uncertain accepta
   assert.equal(h.context.state.busy, false);
 });
 
-test('unchanged polling preserves the stop button and keyboard focus target', () => {
+test('unchanged polling preserves the composer stop button and keyboard focus target', () => {
   const h = harness(async () => {});
   const job = { job_id: 'j1', status: 'running', events: [] };
   h.context.showJob(job);
-  const stopButton = h.nodes.get('job-status').children.at(-1);
+  const stopButton = h.nodes.get('send');
   h.context.showJob({ ...job, cursor: 12 });
-  assert.equal(h.nodes.get('job-status').children.at(-1), stopButton);
+  assert.equal(h.nodes.get('send'), stopButton);
+  assert.match(stopButton.textContent,/停止/);
 });
 
 test('bounded diagnosis failure preserves an unsent composer draft', async () => {
@@ -354,25 +379,26 @@ test('refresh restores the bounded diagnosis UI option before an uncertain retry
   assert.equal(h.storage.size,0);
 });
 
-test('conversation stays correctable while running and old poll cannot undo cancellation', () => {
+test('conversation shows stop while running and old poll cannot undo cancellation', () => {
   const h = harness(async () => {});
   const job = {job_id:'j1', job_kind:'conversation', status:'running', cursor:10, events:[]};
   h.context.showJob(job);
   assert.equal(h.nodes.get('send').disabled, false);
-  assert.match(h.nodes.get('send').textContent, /调整任务/);
+  assert.match(h.nodes.get('send').textContent, /停止/);
   h.context.showJob({...job, status:'cancelling', cursor:12, goal_revision:1, steer_status:'received'});
   h.context.showJob({...job, cursor:11});
   assert.equal(vm.runInContext('currentJob.status', h.context), 'cancelling');
   assert.equal(vm.runInContext('currentJob.goal_revision', h.context), 1);
 });
 
-test('a stopped task does not offer adjustment unless a saved adjustment is settling', () => {
+test('a stopping task disables stop unless a saved adjustment is settling', () => {
   const h = harness(async () => {});
   h.context.showJob({job_id:'j1', job_kind:'conversation', status:'cancelling', cursor:12, events:[]});
   assert.equal(h.nodes.get('send').disabled, true);
   h.context.showJob({job_id:'j1', job_kind:'conversation', status:'cancelling', cursor:13,
     steer_status:'received', events:[]});
   assert.equal(h.nodes.get('send').disabled, false);
+  assert.match(h.nodes.get('send').textContent, /停止/);
 });
 
 test('steering uses one stable request receipt and does not start a concurrent job', async () => {
@@ -413,12 +439,13 @@ test('saved adjustment stays visible after interruption and resumes only on clic
   assert.equal(vm.runInContext('currentJob.job_id', h.context), 'child');
 });
 
-test('timeline failure after acceptance does not lose the running job or enable a second submission', async () => {
+test('timeline failure after acceptance keeps the running job and composer stop', async () => {
   const h = harness(async () => ({ job_id: 'accepted', status: 'running', events: [] }));
   h.context.refreshTimeline = async () => { throw new TypeError('timeline offline'); };
   await h.context.submitJob('run-a', { request_id: 'r1', text: 'test' });
   assert.equal(h.context.state.busy, true);
-  assert.equal(h.nodes.get('send').disabled, true);
+  assert.equal(h.nodes.get('send').disabled, false);
+  assert.match(h.nodes.get('send').textContent, /停止/);
   assert.equal(h.storage.size, 0);
   assert.equal(h.timers.length, 1);
   assert.equal(h.nodes.get('job-status').children[0].children[0].text, '正在执行');

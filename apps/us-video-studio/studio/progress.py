@@ -38,6 +38,10 @@ def project_progress(state):
     elif target['stale']:
         out.update(title=f'「{label}」需要更新', label='准备更新',
                    detail='资料或上游决定已变化，旧稿保留，更新后再确认。')
+    elif target['status'] == 'needs_resolution':
+        out.update(title='素材方案有关键缺口', label='调整素材方案',
+                   detail='关键画面还无法落实，先调整画面或补足依据，再写完整脚本。',
+                   prompt='请先检查素材方案中标为阻塞的画面和缺口。能替代的由团队调整素材方案；只有我能提供的事实或素材才问我。关键缺口解决后再写完整脚本，不要假设它已经解决。')
     elif target['can_approve']:
         out.update(title=f'「{label}」等你决定', detail='阅读这一版和审核意见，再选择采用或退回修改。',
                    action='review', label='阅读并决定')

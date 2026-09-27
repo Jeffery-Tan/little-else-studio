@@ -106,6 +106,23 @@ def test_revision_receives_exact_previous_work_and_only_bound_findings(env):
     assert "Preserve this unique prior direction" not in reviewer.requests_text()
 
 
+def test_producer_seed_uses_one_copy_of_facts_and_does_not_anchor_fresh_direction(env):
+    store, pipeline, settings, ledger = env
+    intake = pipeline.start_attempt(RUN, 'intake')
+    pipeline.submit(RUN, 'intake', intake.token, content='', summary='Facts',
+                    structured={'facts': [{'label': 'Evidence', 'value': 'UNIQUE_PRODUCT_FACT',
+                                           'source': 'fixture'}]})
+    submit(pipeline, 'direction', 'OLD_DIRECTION_REFERENCE')
+    model = ScriptedModel([tool_turn('save', 'submit_stage',
+                                     {'content': 'New concept', 'summary': 'New'})])
+    Dispatcher(store, pipeline, settings, model, ledger, RUN).dispatch('direction', 'Explore again')
+    seed = model.calls[0]['messages'][0]['content']
+    assert seed.count('UNIQUE_PRODUCT_FACT') == 1
+    assert 'OLD_DIRECTION_REFERENCE' in seed
+    assert '不必沿用旧稿的创意或结构' in seed
+    assert '未受影响的表达应保留' not in seed
+
+
 def test_stale_review_is_not_revision_evidence(env):
     store, pipeline, settings, ledger = env
     submit(pipeline, "intake", "Old facts")

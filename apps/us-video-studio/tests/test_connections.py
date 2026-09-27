@@ -7,7 +7,8 @@ from dataclasses import replace
 import pytest
 
 from studio.config import Pricing, Settings, ROLES
-from studio.connections import ConnectionConflict, ConnectionStore, ConnectionUnavailable, _dpapi, validate_base_url
+from studio.connections import (ConnectionConflict, ConnectionSnapshot, ConnectionStore,
+                                ConnectionUnavailable, _dpapi, validate_base_url)
 from studio.agents.budget import BudgetedClient
 from studio.agents.client import JobCancelled, ModelError, Turn, Usage
 from studio.ledger import Ledger
@@ -28,6 +29,16 @@ def api_payload(store):
                                    'input_usd_per_mtok': 1, 'output_usd_per_mtok': 2}}})
     payload['roles']['writer'] = {'connection': 'test-api', 'model': 'custom-model'}
     return payload
+
+
+def test_deepseek_direction_uses_configured_output_limit_other_roles_keep_default(tmp_path):
+    public = {'connections': [{'id': 'ds', 'provider': 'deepseek'}], 'roles': {
+        'director': {'connection': 'ds', 'model': 'deepseek-flash'},
+        'writer': {'connection': 'ds', 'model': 'deepseek-flash'}}}
+    snapshot = ConnectionSnapshot(json.dumps(public), {'ds': 'synthetic-only'}, tmp_path)
+    routed = snapshot.client(max_tokens=12000)
+    assert routed.for_role('director', 'fixture').max_tokens == 12000
+    assert routed.for_role('writer', 'fixture').max_tokens is None
 
 
 def test_default_is_codex_for_every_role_without_reading_environment_or_legacy(tmp_path, monkeypatch):

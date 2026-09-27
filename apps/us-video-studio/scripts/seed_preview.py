@@ -288,17 +288,17 @@ material = {
          "file": SHOT_BAG},
         {"shot": "三个颜色并排色卡", "status": "已有", "purpose": "补足颜色信息，不需要实拍",
          "note": "官方图里有三色并排的一张，直接用", "file": SHOT_COLORS},
-        {"shot": "内衬 / 保温层剖面对比", "status": "无法获得", "purpose": "证明保温效果",
-         "note": "需要拆一只，且采购量只有 90 件，拆一只少一只；不拆就没有这个画面。目录里没有这张，所以不填 file。"},
+        {"shot": "内衬 / 保温层剖面对比", "status": "不确定", "purpose": "可选的后续补充画面，本版脚本不展示保温效果",
+         "note": "若以后要拍，需先决定是否拆一只；本版不依赖剖面画面，也不作保温效果主张。"},
         {"shot": "真人从包里取出午餐包的使用场景", "status": "不确定", "purpose": "给内容一个人味儿的锚点",
          "note": "取决于你能不能出镜或者有没有人可用——这一点你没有说过。目录里也没有，不填 file。"},
     ],
     "gaps": [
-        {"gap": "官方图里没有剖面，也没有真人使用场景", "consequence": "保温证据只能靠文案说，不能靠画面证；这条片子说服力到此为止。"},
-        {"gap": "拆不拆一只做剖面？", "consequence": "不拆就没有保温画面；拆了 90 件变 89 件。"},
+        {"gap": "官方图里没有剖面，也没有真人使用场景", "consequence": "本版不展示保温效果，真人场景可以后补。", "blocking": "可后补"},
+        {"gap": "拆不拆一只做剖面？", "consequence": "仅在后续要证明保温效果时需要决定。", "blocking": "可后补"},
     ],
     "open_questions": [
-        {"question": "肯不肯拆一只做保温剖面？", "blocks": "不拆就没有保温证据，只能靠文案声称。"},
+        {"question": "以后是否拆一只做保温剖面？", "blocks": "只影响后续要展示保温效果的版本；本版不声称。"},
         {"question": "要不要补拍真人使用场景？", "blocks": "不补就全片都是产品图，没有人味儿。"},
     ],
 }
@@ -309,11 +309,11 @@ pipeline.submit(
     content=(
         "# material_plan — B 方案（US 线）\n\n"
         "## 素材清单\n\n六个镜头：四个用目录里已有的官方图，两个目录里没有。\n\n"
-        "## 缺口\n\n剖面与真人场景没有物料，全片因此没有保温证据。\n"
+        "## 缺口\n\n剖面与真人场景没有物料；本版不展示或声称保温效果。\n"
     ),
-    summary="六个镜头，四个用目录里已有的官方图，两个没有；没有保温证据。",
+    summary="六个镜头，四个用目录里已有的官方图，两个没有；本版不依赖保温证据。",
     evidence=["镜头清单对应 direction 的 B 方案", "四个镜头的 file 取自 runs/<id>/materials/ 的实际文件名"],
-    limitations=["剖面与真人场景没有物料，保温只能靠文案声称"],
+    limitations=["剖面与真人场景没有物料，本版不展示或声称保温效果"],
     structured=material,
 )
 
@@ -564,11 +564,11 @@ pipeline.submit(
     content=(
         "# material_plan — B 方案（US 线）\n\n"
         "## 素材清单\n\n六个镜头：四个用目录里已有的官方图，两个目录里没有。\n\n"
-        "## 缺口\n\n剖面与真人场景没有物料，全片因此没有保温证据。\n"
+        "## 缺口\n\n剖面与真人场景没有物料；本版不展示或声称保温效果。\n"
     ),
-    summary="六个镜头，四个用目录里已有的官方图，两个没有；没有保温证据。",
+    summary="六个镜头，四个用目录里已有的官方图，两个没有；本版不依赖保温证据。",
     evidence=["镜头清单对应 direction 的 B 方案", "四个镜头的 file 取自 runs/<id>/materials/ 的实际文件名"],
-    limitations=["剖面与真人场景没有物料，保温只能靠文案声称"],
+    limitations=["剖面与真人场景没有物料，本版不展示或声称保温效果"],
     structured=copy.deepcopy(material),
 )
 
@@ -603,10 +603,9 @@ pipeline.record_review(
 nonce = pipeline.issue_nonce(RUN_THREE, "writing")
 pipeline.record_approval(
     RUN_THREE, "writing", nonce=nonce, decision="approved",
-    note="收尾图那张我确认过目录里没有，先按现在这条走，图我回头补。",
 )
 
-store.append_chat(RUN_THREE, "user", "就这样，脚本收了。")
+store.append_chat(RUN_THREE, "user", "就这样，脚本收了。收尾图目前缺失，后续补图另行处理。")
 store.append_chat(RUN_THREE, "assistant",
                   "四个阶段都定了，两个门你都批过了。这条链路走完，没有下一步在等你。")
 

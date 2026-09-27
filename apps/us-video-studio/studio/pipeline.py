@@ -38,7 +38,7 @@ from .models import (
     utcnow,
 )
 from .store import Store, serialized_run, sha256_text
-from .structured import normalize, canonical_document, validate_canonical_input
+from .structured import normalize, canonical_document, validate_canonical_input, material_blockers
 
 
 @dataclass(frozen=True)
@@ -288,6 +288,8 @@ class Pipeline:
         integrity_ok = True
         if latest is not None:
             integrity_ok = self.store.verify_artifact(run_id, stage, latest.version)
+        material_gaps = (material_blockers(latest.structured)
+                         if stage == 'material_plan' and latest and not stale and integrity_ok else [])
 
         # --- review and approval, bound to the exact fingerprint ----------- #
         review = None
@@ -307,6 +309,7 @@ class Pipeline:
             latest is not None
             and not stale
             and integrity_ok
+            and not material_gaps
             and (approved or not spec.gated)
         )
         attempts = self._attempts(run_id, stage)
@@ -326,6 +329,8 @@ class Pipeline:
             # An open attempt is fine to leave behind only if it was rejected;
             # otherwise the guard above catches it.
             can_start = True
+            if material_gaps:
+                blocked = "关键素材缺口尚未解决：" + "；".join(material_gaps[:3])
 
         can_submit = open_attempt is not None
         if open_attempt is not None and not upstream_ready:
@@ -383,7 +388,7 @@ class Pipeline:
         if not spec.gated:
             status = "empty"
             if latest is not None:
-                status = "stale" if stale else "done"
+                status = "stale" if stale else "needs_resolution" if material_gaps else "done"
         else:
             if latest is None:
                 status = "empty"
@@ -817,6 +822,13 @@ class Pipeline:
                     and (expected_version is None or prior.artifact_version == expected_version)):
                 return prior
             raise PipelineError("approval", "this nonce was already used for a different decision")
+
+        if decision == "approved" and note.strip():
+            raise PipelineError(
+                "approval",
+                "approving the current version cannot include requested changes; "
+                "return it with those changes, review the new version, then approve",
+            )
 
         state = self.stage_state(run_id, stage)
         if state.latest is None:

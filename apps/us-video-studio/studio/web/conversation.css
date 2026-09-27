@@ -51,7 +51,7 @@
 #conversation-latest {margin-left:auto;font-size:12px;color:var(--ink-soft)}
 .job-status {position:relative;margin-top:8px;padding:10px 14px;font-size:13px;line-height:1.55;max-height:30%;border-color:#363d2e;background:#ceff6905}
 .job-status[data-chat-job="true"] {max-height:none;overflow:visible;padding:4px 0;border:0;background:transparent}
-.job-status[data-chat-job="true"] .job-copy {display:flex;flex-direction:row;align-items:center;gap:10px;flex-wrap:wrap;padding:0}
+.job-status[data-chat-job="true"] .job-copy {display:flex;flex-direction:row;align-items:center;gap:10px;min-width:0;padding:0}
 .job-status[data-chat-job="true"] .job-activity-open {position:static;margin-left:auto}
 .job-copy {gap:4px;position:relative}
 .job-copy>strong:first-child {font-size:13px;color:var(--accent)}
@@ -75,6 +75,9 @@
 .composer-inner {flex-direction:row;align-items:flex-end;gap:14px;padding:10px 12px;border-color:#50515d}
 #chat-input {min-height:46px;max-height:120px;font-size:14px;line-height:1.7;flex:1}
 #send {flex:none;margin:0 0 2px}
+#send[data-mode="stop"] {background:#3d2929;border-color:#8c5757;color:#ffe3e3;min-width:82px}
+#send[data-mode="stop"]:hover:not(:disabled) {background:#513030}
+#send[data-mode="stop"]:disabled {opacity:.65}
 .composer-hint {padding-top:6px;font-size:11px}
 .team-dialog {width:min(780px,94vw);max-height:86dvh;padding:0;background:#17171c;border:1px solid #45464f;border-radius:16px;color:var(--ink)}
 .team-dialog[open] {display:flex;flex-direction:column}
@@ -149,6 +152,10 @@
 /* Completed observation/review actions remain distinct clickable controls. */
 .job-status[data-active="false"] .job-copy {flex-wrap:wrap;justify-content:flex-start;gap:8px}
 .job-status[data-active="false"] .job-copy>strong {flex:0 0 auto}
+.job-status[data-active="false"] .job-copy>.job-warning {flex:1 1 100%;min-width:0;overflow-wrap:anywhere}
 .job-status[data-active="false"] .job-copy>.muted {flex:1 1 180px;min-width:0;margin-left:0}
 .job-status[data-active="false"] .job-activity-open {position:static;flex:0 0 auto}
 .job-status[data-active="false"] .job-copy>button {flex:0 0 auto;padding:4px 8px}
+.job-status[data-active="true"][data-chat-job="true"] .job-copy:has(.job-live) {flex-wrap:nowrap;min-width:0}
+.job-status[data-active="true"][data-chat-job="true"] .job-live {overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.job-status[data-active="true"][data-chat-job="true"] .job-activity-open {position:static;flex:none;white-space:nowrap}

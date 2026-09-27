@@ -86,13 +86,13 @@ def build_timeline(
         "run": state.get("run"),
         "interaction": interaction,
         "progress": project_progress(state),
-        "brief": project_brief(state, job),
+        "brief": project_brief(state, job, chat),
         "turns": turns,
-        "rail": v.build_rail(state["stages"], state.get("next_stage")),
+        "rail": v.build_rail(state["stages"], state.get("next_stage"), chat),
         # The standing list of what the run is waiting on him for. Separate from
         # the cards, which are a record of what happened; this is the only part
         # of the page that is a request.
-        "questions": v.build_questions(state["stages"]),
+        "questions": v.build_questions(state["stages"], chat),
         # How drafted answers are joined into the one message they are sent as.
         # Carried, not hard-coded in the screen, for the same reason every other
         # sentence is: see `vocabulary.ANSWERS_HEADER`.
@@ -453,13 +453,13 @@ def _pending_action(state: dict[str, Any], ledger: Any,
             # A real proposal is the only thing that can be approved. A diagnosis
             # is not a body and a clause id is not a body (F4).
             blockers = gate.get("blockers") or []
-            rec_amend = next(
+            amend_blocker = next(
                 (b for b in blockers
                  if b.get("kind") == "needs_amendment"
                  and (not rec or str(b.get("key") or "").upper() == rec)),
-                blockers[0] if blockers else None,
+                next((b for b in blockers if b.get("kind") == "needs_amendment"), None),
             )
-            amend_key = str((rec_amend or {}).get("key") or rec or "")
+            amend_key = str((amend_blocker or {}).get("key") or "")
             proposal = option_amend_proposal(structured, amend_key)
             clause_id = proposal["clause_id"]
             current_text = str(index.get(clause_id, {}).get("text") or "").strip()
@@ -467,7 +467,7 @@ def _pending_action(state: dict[str, Any], ledger: Any,
             amend_valid = bool(
                 clause_id and new_text and new_text != current_text and clause_id in index
             )
-            if clause_id or amend_key:
+            if amend_blocker:
                 amend_block = {
                     "clause_id": clause_id,
                     "op": "replace",

@@ -18,7 +18,8 @@ import json
 from typing import Any, Callable
 
 from ..agents.budget import BudgetedClient
-from ..agents.client import JobCancelled, ModelClient, SafePreflightError, run_agent_loop
+from ..agents.client import (JobCancelled, ModelClient, ModelError,
+                             NonRetryableStageError, SafePreflightError, run_agent_loop)
 from ..agents.roles import OWNER, ROLES, readable_stages, creative_selection, production_allowed
 from ..config import Settings
 from ..ledger import Ledger
@@ -261,6 +262,17 @@ class Dispatcher:
             # than print "[budget]".
             self._close_attempt(attempt, f"派工中断：{exc}")
             raise
+        except ModelError as exc:
+            self._close_attempt(attempt, f"派工失败：{type(exc).__name__}")
+            if exc.status == 200 and exc.message.startswith('invalid'):
+                # The provider was invoked, and usage may already be owed.
+                # The orchestrator cannot repair malformed wire structure by
+                # asking the same role again in the same turn.
+                raise NonRetryableStageError(
+                    '角色模型返回了无法读取的结果，本轮已停止自动重试；'
+                    '已保存调用记录，请检查连接后从当前阶段继续。') from None
+            outcome.error = str(exc)
+            return outcome
         except PipelineError as exc:
             outcome.error = str(exc)
             self._close_attempt(attempt, f"派工中断：{exc}")

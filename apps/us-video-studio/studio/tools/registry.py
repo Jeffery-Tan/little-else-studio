@@ -50,9 +50,10 @@ _STAGE = {"type": "string", "enum": ["intake", "direction", "material_plan", "wr
 #: slightly wrong should still get to submit the document it wrote.
 _SHAPE_NOTES = (
     "intake → facts[{label,value,source}], constraints[], open_questions[{question,blocks}]; "
-    "direction → options[{key,title?,claim,audience_moment,hook,story,gives_up,evidence_strength,"
+    "direction → concise options only (no timed shots or dialogue): options[{key,title?,claim,audience_moment,hook,story,gives_up,evidence_strength,"
     "difficulty,asset_needs}], recommended, recommended_because, prerequisites[], "
-    "dependency_matrix[{need,options:{A:true/B:false,...}}], open_questions[{question,blocks}]; "
+    "dependency_matrix[{need,options:{A:true/B:false,...}}] (true means current execution is affected, not impossible), "
+    "open_questions[{question,blocks,owner,timing,reason,kind}]; "
     "material_plan → items[{shot,purpose,status,note,file?}] where status is one of "
     "已有/需要拍/需要生成/无法获得/不确定, gaps[{gap,consequence}], open_questions[{question,blocks}]; "
     "writing → segments[{tc,picture,line,sound,duration,file?}], total_duration, assumptions[], "

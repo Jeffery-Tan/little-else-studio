@@ -67,6 +67,10 @@ class SafePreflightError(RuntimeError):
     """Non-retryable connection setup failure with safe user-facing text."""
 
 
+class NonRetryableStageError(RuntimeError):
+    """A paid stage response failed validation; stop this turn before redispatch."""
+
+
 @dataclass
 class Usage:
     input_tokens: int | None = 0
@@ -477,7 +481,7 @@ def run_agent_loop(
                 output, is_error = outcome.content, outcome.is_error
                 if not is_error:
                     concluded = outcome.concludes_turn or (stop_when is not None and stop_when())
-            except (BudgetExceeded, JobCancelled, SafePreflightError):
+            except (BudgetExceeded, JobCancelled, SafePreflightError, NonRetryableStageError):
                 # Deliberately *not* converted into a tool result. Doing so
                 # handed the model the string "派工失败" and let it retry: each
                 # retry is blocked pre-flight, so no money is lost, but every

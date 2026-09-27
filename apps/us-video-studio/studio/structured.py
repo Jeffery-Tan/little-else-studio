@@ -110,8 +110,8 @@ SHAPES: dict[str, Shape] = {
         # reason because they are what has to be checked first, and a reader
         # skimming the reason will not find them.
         Field("prerequisites", "texts"),
-        # ①实拍官方图 / ②目标观众 / ③主推SKU × each option. A grid, not a
-        # paragraph: this was prose listing which option died on which blank.
+        # Which current execution is affected by a condition; not a verdict on
+        # the whole creative direction or a substitute for asking the user.
         Field("dependency_matrix", "rows", ("need", "options")),
         Field("open_questions", "rows", QUESTION_COLUMNS),
     )),
@@ -122,7 +122,7 @@ SHAPES: dict[str, Shape] = {
         # cannot invent, which is why it has a read tool (`list_materials`) and
         # a visible failure when the name matches nothing.
         Field("items", "rows", ("shot", "purpose", "status", "note", "file")),
-        Field("gaps", "rows", ("gap", "consequence")),
+        Field("gaps", "rows", ("gap", "consequence", "blocking")),
         Field("open_questions", "rows", QUESTION_COLUMNS),
     )),
     "writing": Shape("writing", (
@@ -168,8 +168,9 @@ BRIEF: dict[str, str] = {
     "direction": """\
 - `options`：一个方案一行。`key` 用 A/B/C。`title` 可选，写能区分方案的短创意名称，
   不要用 A/B/C 作标题，也不要在标题里编造未证实的商品效果。`claim` 主张一句话。
-  `audience_moment` 给谁看、在什么场景下被看到。`hook` 开场识别点。
-  `story` 写清开场、关键动作、结尾回报及必要的样例对白，让用户看得见这条片子。
+  `audience_moment` 给谁看、在什么场景下被看到。`hook` 用一句话写开场识别点。
+  `story` 用两三句话（约 100–150 字）概括核心动作或页面推进、商品作用和结尾回报。
+  这里只产出供选择的方向，不写时间段、逐镜头/逐页方案、台词或字幕原文；选定方向后才做素材计划和完整脚本。
   `gives_up` 是创作方案的取舍，不要求角色必须放弃物品或承担代价。`evidence_strength` 证据强度。
   `difficulty` 执行难度。`asset_needs` 素材依赖。
   `satisfies`：本方案满足的有效简报条款 id，逗号分隔（如 `goal.primary,not.abc12345`）。
@@ -177,11 +178,14 @@ BRIEF: dict[str, str] = {
   `amend_clause` / `amend_proposal`：若要推荐本方案必须先修订哪条简报、怎么改；
   不需要修订则留空。不要只在正文里承认「做不到种草」却空着这些字段。
 - `recommended` / `recommended_because`：你推荐哪个，为什么。
-- `prerequisites`：**推荐成立的前提**，一条一行。写具体、写可验证的——
-  这几条只要有一条不成立，你的推荐就不成立。
-- `dependency_matrix`：一个未决的空白一行（比如「实拍官方图」「目标观众」
-  「主推 SKU」），`options` 写成 `{"A": true, "B": false, "C": true}`——
-  这个空白不解决的话，哪些方案站不住。""",
+- `prerequisites`：推荐时依赖的已知事实或待核实假设，一条一行；待核实不等于不成立。
+  若假设不成立，先考虑换镜头、换素材或调整表达，再重新比较方向。不能把缺少一种拍法
+  直接判为整个创意方向不可做；无证据的商品效果也不能当作已证实事实来表达。
+- `dependency_matrix`：一个待核实条件一行，`options` 写成
+  `{"A": true, "B": false, "C": true}`，true 仅表示该方向的当前拍法会受到影响，
+  不表示方向已失败或用户必须先补齐该素材。团队能核实或改拍的先自行处理；
+  只有用户独有的事实或创意取舍才写入 `open_questions`，注明 owner=user、timing=now、reason。
+  提问时允许用户回答「没有」「不确定」，再据此调整方案。""",
 
     "material_plan": """\
 - `items`：一个镜头或一段一行。`shot` 是什么画面，`purpose` 它证明或传达什么，
@@ -190,7 +194,9 @@ BRIEF: dict[str, str] = {
   `file`：**这个镜头用 `materials/` 里的哪个文件**，必须先调 `list_materials`
   看有什么，然后**逐字照抄**文件名。没有对应素材就别填，在 `note` 里写缺什么。
   编一个文件名会在界面上显示成「文件不在」，比空着更糟。
-- `gaps`：`gap` 缺什么，`consequence` 会导致什么后果。""",
+ - `gaps`：`gap` 缺什么，`consequence` 会导致什么后果，`blocking` 写「阻塞」或「可后补」。
+   若核心卖点或必要画面没有可信的拍摄、生成或替代办法，标「阻塞」；先调整素材方案，
+   不让编剧在这个缺口上写完整脚本。可在脚本后解决的细节标「可后补」。""",
 
     "writing": """\
 - `segments`：一段一行。`tc` 时码，`picture` 画面（拍什么/显示什么），
@@ -411,6 +417,30 @@ def open_questions(structured: dict[str, Any], stage: str) -> list[dict[str, str
     ]
 
 
+def question_answered(chat: list[dict[str, Any]] | None, question: str, since: str = "") -> bool:
+    """Whether the user answered this exact artifact question after it was saved.
+
+    Both the structured answer card and the explicit ask_user card quote the
+    question. A reply to an older version must not clear a new question.
+    """
+    if not chat or not question:
+        return False
+    pattern = re.compile(r"(?:^|\n)(?:\d+\.\s*)?(?:回答|关于)「" + re.escape(question) + r"」[：:][ \t]*\S")
+    return any(row.get("role") == "user" and (not since or row.get("at", "") >= since)
+               and pattern.search(str(row.get("text") or "")) for row in chat if isinstance(row, dict))
+
+
+def material_blockers(structured: dict[str, Any]) -> list[str]:
+    """Critical material gaps that must be resolved before full script writing."""
+    if not isinstance(structured, dict):
+        return []
+    blockers = [str(row.get('shot') or '未命名画面') for row in structured.get('items', [])
+                if isinstance(row, dict) and row.get('status') == '无法获得']
+    blockers.extend(str(row.get('gap') or '未命名缺口') for row in structured.get('gaps', [])
+                    if isinstance(row, dict) and str(row.get('blocking') or '').strip() == '阻塞')
+    return list(dict.fromkeys(blockers))
+
+
 def canonical_document(stage: str, data: dict[str, Any]) -> str:
     """Render the normalized source, never a second model-authored document."""
     core = {"intake": "facts", "direction": "options", "material_plan": "items", "writing": "segments"}
@@ -423,10 +453,10 @@ def canonical_document(stage: str, data: dict[str, Any]) -> str:
         "prerequisites": "需要验证的前提", "dependency_matrix": "方案依赖", "items": "素材安排",
         "gaps": "素材缺口", "segments": "分镜内容", "total_duration": "总时长", "caption": "发布文案", "assumptions": "时长假设",
         "label": "事实", "value": "内容", "source": "来源", "key": "方案", "title": "标题", "claim": "主张",
-        "audience_moment": "观众与处境", "hook": "开场", "story": "画面与表达", "gives_up": "方案取舍",
+        "audience_moment": "观众与处境", "hook": "开场", "story": "推进概念", "gives_up": "方案取舍",
         "evidence_strength": "依据", "difficulty": "执行难度", "asset_needs": "素材需求",
         "need": "前提", "shot": "画面", "purpose": "作用", "status": "状态", "note": "说明", "file": "素材文件",
-        "gap": "缺口", "consequence": "影响", "tc": "段落", "picture": "画面", "line": "台词或字幕",
+        "gap": "缺口", "consequence": "影响", "blocking": "是否阻塞脚本", "tc": "段落", "picture": "画面", "line": "台词或字幕",
         "sound": "声音", "duration": "时长", "question": "事项", "blocks": "影响", "owner": "责任人",
         "timing": "处理时机", "reason": "责任说明", "kind": "类型",
     }
@@ -537,9 +567,9 @@ LABEL: dict[str, str] = {
     "title": "标题",
     "claim": "主张",
     "audience_moment": "给谁看、什么场景",
-    "hook": "前 3 秒",
+    "hook": "开场识别点",
     "gives_up": "方案取舍",
-    "story": "画面与表达",
+    "story": "推进概念",
     "owner": "责任人",
     "timing": "处理时机",
     "reason": "需要确认的原因",
@@ -557,6 +587,7 @@ LABEL: dict[str, str] = {
     "note": "备注",
     "gap": "缺什么",
     "consequence": "会导致什么",
+    "blocking": "脚本是否受阻",
     "tc": "时码",
     "picture": "画面",
     "line": "台词",
@@ -716,7 +747,7 @@ def _direction(data: dict[str, Any]) -> list[dict[str, Any]]:
                 "text": " —— ".join(
                     p for p in (data.get("recommended", ""), data.get("recommended_because", "")) if p
                 ),
-                "items_title": "这个推荐要成立，先得确认：",
+                "items_title": "推荐时仍需核实：",
                 "items": [{"text": t} for t in data.get("prerequisites") or []],
             }
         )
@@ -729,10 +760,10 @@ def _direction(data: dict[str, Any]) -> list[dict[str, Any]]:
             {
                 "type": "matrix",
                 "collapsed": True,
-                "title": "这几个空白不解决，哪些方向站不住",
+                "title": "方向涉及的待核实条件",
                 "columns": keys,
-                # ``true`` means "dies on this blank" — see the brief for
-                # `dependency_matrix`. Drawn as a marked cell, not a tick.
+                # ``true`` means the current execution is affected. The UI
+                # must not turn it into an irreversible verdict.
                 "rows": [
                     {
                         "label": r.get("need", ""),
@@ -780,7 +811,10 @@ def _material(data: dict[str, Any]) -> list[dict[str, Any]]:
                 "type": "list",
                 "title": "缺口",
                 "items": [
-                    {"text": r.get("gap", ""), "note": r.get("consequence", "")}
+                    {"text": r.get("gap", ""),
+                     "note": " · ".join(part for part in (
+                         "阻塞脚本" if r.get("blocking") == "阻塞" else "",
+                         r.get("consequence", "")) if part)}
                     for r in data["gaps"]
                 ],
             }

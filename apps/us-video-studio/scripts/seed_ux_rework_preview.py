@@ -211,7 +211,7 @@ def approve(pipeline: Pipeline, run_id: str, stage: str, *, selected: str | None
                            expected_artifact_sha256=pipeline.stage_state(run_id, stage).latest.sha256)
     nonce = pipeline.issue_nonce(run_id, stage)
     pipeline.record_approval(run_id, stage, nonce=nonce, decision="approved",
-                             selected_option_id=selected, note="离线 UX fixture 决定；并非用户真实批准")
+                             selected_option_id=selected)
 
 
 def seed_stages(pipeline: Pipeline, run_id: str, *, stop: str,

@@ -398,6 +398,27 @@ def test_the_gate_card_offers_the_options_the_document_actually_lays_out(env):
     assert [o["recommended"] for o in pending["options"]] == [False, True, False]
     assert pending["options"][1]["label"] == v.option_button_label("B", True)
     assert pending["options_hint"], "without the hint the two clicks are a rule to remember"
+    assert pending["amend"] == {}, "a recommendation alone is not a brief amendment proposal"
+
+
+def test_a_nonrecommended_amendment_is_shown_only_when_that_option_proposes_it(env):
+    store, pipeline, ledger = env
+    write_intake(pipeline)
+    write_direction(pipeline, structured={
+        "options": [
+            {"key": "A", "claim": "保持原目标", "satisfies": "goal.primary"},
+            {"key": "B", "claim": "改目标后再做", "amend_clause": "goal.primary",
+             "amend_proposal": "将目标改为突出使用便利性"},
+        ],
+        "recommended": "推荐 A",
+    })
+    pipeline.record_review(RUN, "direction", verdict="pass", findings=[])
+
+    pending = timeline(store, pipeline, ledger)["pending"]
+    assert pending["kind"] == "decision_request"
+    assert pending["amend"]["key"] == "B"
+    assert pending["amend"]["valid"] is True
+    assert pending["amend"]["text"] == "将目标改为突出使用便利性"
 
 
 def test_a_button_that_is_not_the_recommendation_says_what_it_will_record(env):

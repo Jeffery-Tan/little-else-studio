@@ -49,6 +49,7 @@ const state = {
   runs: [],
   artifactBodies: new Map(),
   chatDrafts: new Map(),
+  clarificationChoices: new Map(),
   runId: null,
   currentJob: null,
   productionData: null,
@@ -147,7 +148,7 @@ async function loadRuns() {
   for (const run of runs) {
     const opt = document.createElement("option");
     opt.value = run.run_id;
-    opt.textContent = run.title;
+    opt.textContent = projectOptionLabel(run, runs);
     select.appendChild(opt);
   }
   const remembered = sessionStorage.getItem("studio-selected-run");
@@ -394,34 +395,16 @@ function renderPane() {
   const referenceWork = state.creatorView?.referenceCurrent && typeof referenceAnalysisHtml === 'function'
     ? referenceAnalysisHtml(state.creatorView.reference, state.materials) : '';
   host.innerHTML = referenceWork + stageHtml(displayStep, {
+    readOnly: true,
     artifactBody: state.artifactBodies.get(bodyKey),
-    // Every question the run has. `stageHtml` keeps the ones belonging to this
-    // stage — the rule lives there so it has one home and one test.
     questions: tl.questions || [],
-    // The gate is the server's pending decision for this stage (stageHtml
-    // draws only when it names this stage). Journey has its own card with a
-    // separate radio group name so the two never share one document group.
     pending: tl.pending || null,
     drafts: state.draft,
     contentFormat: state.creatorView?.format ||
       (state.runs || []).find(run => run.run_id === state.runId)?.content_format,
   });
-  if (step.stage === 'writing' && !step.stale && step.integrity_ok !== false &&
-      host.querySelector('[data-creator-target], .artifact-prose p, .artifact-prose li')) {
-    const hint = box('p', 'creator-feedback-hint',
-      host.querySelector('[data-creator-target]') ? '点一段画面、声音或台词，可讨论或直接修改。'
-        : '点一段原文，在对话中提出这段的修改。');
-    host.querySelector('.stage-heading')?.after(hint);
-  }
-  wireGate(host);
-  if (typeof wireRevisionActions === 'function') wireRevisionActions(host, state.runId, step);
-  if (typeof wireProductCards === 'function') wireProductCards(host, state.runId, step);
-  if (typeof wireInlineFeedback === 'function') wireInlineFeedback(host, state.runId, step);
-  const tools = box('details','plan-tools');tools.append(box('summary','','方案原文与修改记录'));
-  for(const node of host.querySelectorAll('.pane-head,.revision-entry'))tools.append(node);
-  if(tools.children.length>1)host.querySelector('.stage-heading')?.after(tools);
-  const review=host.querySelector('.pane-review');
-  if(review){const detail=box('details','plan-tools');detail.append(box('summary','','团队检查记录'));review.before(detail);detail.append(review);}
+  // The canvas presents the current work. Questions, edits and decisions live
+  // in the conversation so there is only one place to act.
   for (const button of host.querySelectorAll('[data-act="read"]')) {
     button.onclick = () => openReader(button.dataset.stage, Number(button.dataset.version))
       .catch(err => toast(`原文暂时无法打开：${err.message || err}`));
@@ -433,11 +416,9 @@ function renderPane() {
   // than once at load. Only the pane's boxes are in the map — the tray keeps
   // drafts for stages that are not on screen, and reaches their inputs by a key
   // that is deliberately absent from it.
-  wireAnswers(host);
   // After the pane exists, not per block: a picture an artifact names is only
   // resolvable once `state.materials` is loaded.
   wireMedia(host);
-  wireCreatorFeedback(host, step);
   if (referenceWork && typeof wireReferenceAnalysis === 'function') wireReferenceAnalysis(host);
   host.scrollTop = kept;
 }
@@ -828,6 +809,19 @@ function humanBytes(n) {
   return `${(n / 1048576).toFixed(1)} MB`;
 }
 
+function showMissingMedia(slot, label, name) {
+  slot.textContent = "";
+  slot.classList.add("missing");
+  const details = document.createElement("details");
+  details.className = "media-missing";
+  const summary = document.createElement("summary");
+  summary.textContent = label;
+  const source = document.createElement("small");
+  source.textContent = `引用文件：${name}`;
+  details.append(summary, source);
+  slot.appendChild(details);
+}
+
 function wireMedia(root) {
   for (const slot of root.querySelectorAll("[data-media]")) {
     const name = slot.getAttribute("data-media");
@@ -836,8 +830,7 @@ function wireMedia(root) {
     slot.classList.remove("missing", "is-video");
 
     if (!found || !found.usable) {
-      slot.classList.add("missing");
-      slot.appendChild(box("span", "media-missing", `文件不在：${name}`));
+      showMissingMedia(slot, "引用素材未找到 · 查看文件名", name);
       continue;
     }
 
@@ -862,9 +855,7 @@ function wireMedia(root) {
       // answer as one that was never there. The listing is a moment, not a
       // promise.
       img.onerror = () => {
-        slot.textContent = "";
-        slot.classList.add("missing");
-        slot.appendChild(box("span", "media-missing", `打不开：${name}`));
+        showMissingMedia(slot, "素材无法打开 · 查看文件名", name);
       };
       slot.appendChild(img);
     }
@@ -879,7 +870,7 @@ document.addEventListener("click", (e) => {
   const slot = e.target.closest("[data-media]");
   if (!slot) return;
   const found = materialByName(slot.getAttribute("data-media"));
-  if (found && found.usable) openViewer(found);
+  if (found && found.usable && !slot.classList.contains("missing")) openViewer(found);
 });
 
 /* One material, big. Clicking a photo must not take him off the screen he is
@@ -1119,6 +1110,8 @@ function renderConversation(tl) {
     host.appendChild(renderTurn(tl.turns[i], i === tl.turns.length - 1));
   const decision = box('div','journey-decision');decision.id='journey-decision';host.append(decision);
   if (typeof renderJourneyDecision === 'function') renderJourneyDecision();
+  const productionAction = box('div','conversation-production-action');productionAction.id='production-action';host.append(productionAction);
+  if (typeof renderProductionAction === 'function') renderProductionAction();
   renderJobProgress(currentJob);
   if (state.atBottom) host.scrollTop = host.scrollHeight;
   else host.scrollTop = previousScroll;
@@ -1130,6 +1123,18 @@ function setConversationOpen(open) {
   $("conversation").classList.toggle("open", open);
   $("conversation-toggle").setAttribute("aria-expanded", String(open));
   $("conversation-caret").textContent = open ? "收起" : "展开";
+}
+
+// Historical agent replies can contain storage handles. Project data and the
+// technical journal retain the exact text; only creator-facing prose is mapped.
+function creatorReplyText(value) {
+  const names = {intake:'创作需求',direction:'创意方向',material_plan:'素材计划',writing:'脚本'};
+  return String(value || '')
+    .replace(/[（(]\s*(?:intake|direction|material_plan|writing)-v\d+\s*[）)]/giu, '')
+    .replace(/\b(intake|direction|material_plan|writing)-v\d+\b/giu,
+      (_, stage) => names[stage.toLowerCase()])
+    .replace(/\b(intake|direction|material_plan|writing)\b/giu,
+      (_, stage) => names[stage.toLowerCase()]);
 }
 
 function renderTurn(turn, live = false) {
@@ -1153,7 +1158,7 @@ function renderTurn(turn, live = false) {
 
   const history = box('details','turn-work');
   const work = turn.items.filter(item => item.kind === 'note' || item.kind === 'artifact');
-  if(work.length) {
+  if(work.length && state.machineDetail) {
     history.append(box('summary','',`本轮工作记录 · ${work.length} 项`));
     for(const item of work) history.append(item.kind==='artifact' ? renderArtifactLine(item) : renderNote(item));
     wrap.append(history);
@@ -1161,7 +1166,10 @@ function renderTurn(turn, live = false) {
   // One link per stage, bound to the version produced in this turn. Intermediate
   // drafts stay in the expandable journal, not between the user and the answer.
   const delivered = new Map();
-  for(const item of work) if(item.kind==='artifact') delivered.set(item.stage,item);
+  for(const item of work) if(item.kind==='artifact') {
+    const current=(state.rail||[]).find(step=>step.stage===item.stage);
+    if(current?.has_doc && String(current.version)===String(item.version)) delivered.set(item.stage,item);
+  }
   if(delivered.size) {
     const links = box('div','turn-deliverables');
     for(const item of delivered.values()) {
@@ -1173,7 +1181,7 @@ function renderTurn(turn, live = false) {
           showJourneyTab('plan',{stage:item.stage});
           setProjectFocus('canvas');
           $('stage').scrollTop=0;
-        } else openReader(item.stage,item.version).catch(err=>toast(err.message,true));
+        } else showJourneyTab('plan',{stage:item.stage});
       };
       links.append(link);
     }
@@ -1198,8 +1206,9 @@ function renderTurn(turn, live = false) {
     const bubble = box("div", "msg assistant");
     const who = box("div", "who", "制片团队");
     const body = box("div", "body");
-    body.innerHTML = renderMarkdown(turn.reply.text);
-    if(turn.reply.text.length > 1400) {
+    const reply = creatorReplyText(turn.reply.text);
+    body.innerHTML = renderMarkdown(reply);
+    if(reply.length > 1400) {
       const full=box('details','reply-full');
       full.append(box('summary','','展开完整回复'),body);
       bubble.append(who,box('p','muted','这条回复较长。本轮进展见上方，方案可从本轮成果打开。'),full);
@@ -1241,7 +1250,7 @@ function renderProgressLine(item) {
   if (item.type !== 'agent_narration' &&
       !(item.type === 'agent_tool' && TEAM_CHAT_TOOLS.has(item.tool))) return null;
   const text = item.type === 'agent_narration'
-    ? String(item.text || '').trim() : teamAction(item, true);
+    ? creatorReplyText(item.text).trim() : teamAction(item, true);
   if (!text) return null;
   const line = box('div',`progress-line${item.ok === false ? ' failed' : ''}`);
   if (item.seq != null) line.setAttribute('data-progress-seq',String(item.seq));
@@ -1283,7 +1292,7 @@ function renderJobProgress(job) {
   const latest = [...(job.events || [])].reverse().find(event => event.type === 'agent_narration_preview');
   const last = job.events?.at(-1);
   const preview = last?.type === 'agent_narration_preview' && latest?.text
-    ? String(latest.text).trim().slice(0,500) : '';
+    ? creatorReplyText(latest.text).trim().slice(0,500) : '';
   const nextText = preview || teamProgress(job).current || '制片团队正在处理这一轮';
   const changed = working.textContent !== nextText;
   working.textContent = nextText;
@@ -1431,9 +1440,27 @@ function wireGate(host) {
     || null;
   const key = `studio-decision:${state.runId}:${gate.dataset.stage}:${gate.dataset.sha}:stage`;
   const legacyJourneyKey = `studio-decision:${state.runId}:${gate.dataset.stage}:${gate.dataset.sha}:journey`;
-  let draft = { note: "", option: null, nonce: null };
+  let draft = { note: "", override_reason: "", option: null, nonce: null };
   try { draft = { ...draft, ...JSON.parse(localStorage.getItem(key) || localStorage.getItem(legacyJourneyKey) || "{}") }; } catch {}
   reason.value = draft.note || "";
+  const overrideReason = gate.querySelector('.override-reason');
+  if (overrideReason) overrideReason.value = draft.override_reason || "";
+  const choiceSummary = gate.querySelector('.gate-choice-summary');
+  const choiceButtons = () => gate.querySelectorAll('[data-act="pick-option"]');
+  function showChoice() {
+    for (const card of gate.querySelectorAll('[data-direction-card]')) {
+      card.classList.toggle('is-picked', card.dataset.directionCard === draft.option);
+    }
+    for (const choice of choiceButtons()) {
+      choice.textContent = choice.dataset.optionKey === draft.option
+        ? `已选方向 ${draft.option}`
+        : choice.dataset.admissible === '0'
+          ? '以此构想为基础修改' : `选择方向 ${choice.dataset.optionKey}`;
+    }
+    if (choiceSummary) choiceSummary.textContent = draft.option
+      ? `已选方向 ${draft.option}。这只是草稿，采用当前版或按意见修改需再点一次。`
+      : '尚未选择方向；团队推荐不代表你已选择。';
+  }
   // Scope choices to the sole version-bound gate; legacy drafts from the old
   // conversation form are restored here without reusing its second submit path.
   const optionRadios = () => gate.querySelectorAll(
@@ -1441,17 +1468,26 @@ function wireGate(host) {
   );
   for (const radio of optionRadios()) {
     radio.checked = radio.value === draft.option;
-    radio.onchange = () => { draft.option = radio.value; draft.nonce = null; save(); };
+    radio.onchange = () => { draft.option = radio.value; draft.nonce = null; showChoice(); save(); };
   }
+  showChoice();
   function save() {
     draft.note = reason.value;
+    draft.override_reason = overrideReason?.value || "";
     try { localStorage.setItem(key, JSON.stringify(draft)); status.textContent = "草稿已保存 · 尚未提交"; }
     catch { status.textContent = "草稿仅暂存在此页，浏览器存储不可用。"; }
   }
   reason.oninput = () => { draft.nonce = null; save(); };
-  if (draft.note || draft.option) status.textContent = "已恢复此版本的草稿 · 尚未提交";
+  if (overrideReason) overrideReason.oninput = () => { draft.nonce = null; save(); };
+  if (draft.note || draft.option || draft.override_reason) status.textContent = "已恢复此版本的草稿 · 尚未提交";
   for (const btn of gate.querySelectorAll('[data-act]')) btn.onclick = async () => {
     if (state.busy || state.decisionBusy || gate.dataset.saving === "1") return;
+    if (btn.dataset.act === 'pick-option') {
+      draft.option = btn.dataset.optionKey;
+      draft.nonce = null;
+      showChoice(); save();
+      return;
+    }
     if (btn.dataset.act === "amend_brief") {
       const clause = (gate.dataset.amendClause || "").trim();
       const text = (gate.dataset.amendText || "").trim();
@@ -1462,6 +1498,11 @@ function wireGate(host) {
         status.textContent = "这一版没有可批准的修订正文；请退回让团队写出要改成什么。";
         return;
       }
+      if (reason.value.trim()) {
+        status.textContent = "修改意见尚未进入简报。请点“按意见修改，先出新版”；批准只采用上方展示的修订正文。";
+        reason.focus();
+        return;
+      }
       state.decisionBusy = true;
       gate.dataset.saving = "1";
       for (const control of gateControls(gate)) control.disabled = true;
@@ -1470,7 +1511,7 @@ function wireGate(host) {
       // below either owns *this* payload or is not used at all (U3).
       const body = {
         changes: [{ clause_id: clause, op: "replace", text }],
-        note: reason.value.trim() || "用户在方向卡上批准简报修订",
+        note: "",
         approve: true,
         // The brief this decision was framed against. The direction guard
         // cannot cover this: a second amendment moves the brief while the
@@ -1582,19 +1623,31 @@ function wireGate(host) {
       }
       return;
     }
-    if (btn.dataset.optionKey && draft.option !== btn.dataset.optionKey) {
-      draft.option = btn.dataset.optionKey;
-      draft.nonce = null;
-      save();
-    }
     const decision = btn.dataset.act === "reject" ? "returned" : "approved";
-    const note = reason.value.trim();
-    if ((decision === "returned" || gate.dataset.passed !== "1") && !note) {
-      status.textContent = "请写明需要调整的地方，或覆盖审核的具体理由。"; reason.focus(); return;
+    const revision = reason.value.trim();
+    const override = overrideReason?.value.trim() || '';
+    if (decision === "returned" && !revision) {
+      status.textContent = "请写明需要调整的地方。"; reason.focus(); return;
+    }
+    if (decision === "approved" && revision && gate.dataset.pendingKind !== 'brief_amendment') {
+      status.textContent = "修改意见尚未处理。请点“按意见修改，先出新版”；采用当前版前请清空修改意见。";
+      reason.focus(); return;
+    }
+    if (decision === "approved" && gate.dataset.passed !== "1" && !override) {
+      status.textContent = "审核未通过，请单独写明覆盖审核的理由。";
+      (overrideReason || reason).focus(); return;
     }
     if (decision === "approved" && (optionRadios().length || gate.dataset.needsChoice === '1') && !draft.option) {
       status.textContent = "请先选择一个方向；推荐不代表已选。"; return;
     }
+    if (decision === "approved" && draft.option && (
+      [...choiceButtons()].some(choice => choice.dataset.optionKey === draft.option && choice.dataset.admissible === '0') ||
+      [...optionRadios()].some(radio => radio.value === draft.option && radio.disabled))) {
+      status.textContent = `方向 ${draft.option} 当前不能采用；可以把它作为修改参考，先出新版。`; return;
+    }
+    const note = decision === 'returned' && draft.option && gate.dataset.stage === 'direction'
+      ? `请参考方向 ${draft.option} 的构想，按以下意见修改；新版仍须满足当前有效简报：${revision}`
+      : decision === 'returned' ? revision : '';
     const runId = state.runId;
     state.decisionBusy = true;
     $("run-select").disabled = true; $("send").disabled = true;
@@ -1611,7 +1664,7 @@ function wireGate(host) {
       }
       const result = await api(`/api/runs/${runId}/decision`, {method:"POST",body:JSON.stringify({
         ...shown, nonce:draft.nonce, decision, note,
-        override_reason: decision === "approved" && gate.dataset.passed !== "1" ? note : "",
+        override_reason: decision === "approved" && gate.dataset.passed !== "1" ? override : "",
         selected_option_id: decision === "approved" ? draft.option : null,
         continue_after: true,
       })});
@@ -1631,7 +1684,7 @@ function wireGate(host) {
       }
     } finally {
       state.decisionBusy = false;
-      $("run-select").disabled = false; $("send").disabled = (state.busy && !canSteerJob(currentJob)) || state.recoveryBlocked;
+      $("run-select").disabled = false; syncComposerAction();
       gate.dataset.saving = "0";
       for (const control of gateControls(gate)) control.disabled = control.dataset.wasDisabled === "1";
     }
@@ -1698,11 +1751,10 @@ async function loadReader() {
   const body = $("reader-body");
   body.innerHTML = "<p class='muted'>正在打开…</p>";
 
-  let record, versions;
+  let record;
   try {
     record = await api(`/api/runs/${runId}/artifacts/${stage}/${version}`);
     if (!current()) return;
-    versions = await api(`/api/runs/${runId}/artifacts?stage=${stage}`);
   } catch (err) {
     if (!current()) return;
     body.innerHTML = "";
@@ -1711,22 +1763,11 @@ async function loadReader() {
   }
   if (!current()) return;
 
-  $("reader-title").textContent = `${record.numbered} · ${record.version_label}`;
+  $("reader-title").textContent = record.numbered || '方案详情';
   const sub = `${record.author}写于 ${record.created_at}`;
   $("reader-sub").textContent = record.integrity_ok
     ? sub
     : `${sub} · 这份文件保存后被改动过，不能作为依据`;
-
-  const tabs = $("reader-versions");
-  tabs.innerHTML = "";
-  for (const v of versions) {
-    const btn = box("button", v.version === version ? "active" : null, v.version_label);
-    btn.onclick = () => {
-      readerState.version = v.version;
-      loadReader();
-    };
-    tabs.appendChild(btn);
-  }
 
   body.innerHTML = "";
   if (record.summary) {
@@ -1830,7 +1871,7 @@ $("conversation-body").addEventListener("scroll", () => {
  * is now cleared only for a request that was accepted (or durably saved), and
  * the keyboard and the button share this one admission rule.
  */
-async function send(text, requestKind = null) {
+async function send(text, requestKind = null, clarificationId = null) {
   if (steerPosting) return {accepted: false, reason: '正在提交上一次调整，请稍候。'};
   if (state.decisionBusy) return {accepted: false, reason: '正在保存你的决定，请稍候。'};
   if (state.recoveryBlocked) return {accepted: false, reason: '请先处理待恢复事项。'};
@@ -1909,7 +1950,8 @@ async function send(text, requestKind = null) {
     const payload = target
       ? {text, request_id:crypto.randomUUID(), feedback_target:target,
           ...(requestKind ? {request_kind:requestKind} : {})}
-      : {text, request_id:crypto.randomUUID()};
+      : {text, request_id:crypto.randomUUID(),
+          ...(clarificationId ? {question_id:clarificationId} : {})};
     // The result is passed through, not overwritten. `runtime.submitJob` is the
     // code that knows whether the server accepted this request, refused it, or
     // lost the answer; reporting `{accepted:true}` from here made the caller's
@@ -1928,6 +1970,8 @@ async function send(text, requestKind = null) {
       if (typeof StudioComposer !== 'undefined') StudioComposer.render();
       return {...result, run_id: runId};
     }
+    if (result === undefined || result?.accepted !== false)
+      state.clarificationChoices.delete(runId);
     return result === undefined ? {accepted: true} : {...result, run_id: runId};
   } catch(error){
     state.busy=false;$('send').disabled=false;
@@ -1970,6 +2014,8 @@ async function send(text, requestKind = null) {
  */
 async function submit(requestKind = null) {
   const input = $("chat-input");
+  if (currentJob && JOB_ACTIVE.has(currentJob.status))
+    return {accepted: false, reason: '本轮仍在执行。可先停止，或等它完成后发送。'};
   const value = input.value.trim() || (typeof StudioComposer!=='undefined' && StudioComposer.files(state.runId).length ? '我附上了素材，请先确认我想如何使用。' : '');
   if (!value || !state.runId || steerPosting ||
       state.decisionBusy || state.recoveryBlocked) return {accepted: false, reason: '现在不能发送。'};
@@ -1983,10 +2029,11 @@ async function submit(requestKind = null) {
     return {accepted: false, uncertain: true, reason: message, run_id: state.runId};
   }
   const owner = state.runId;
+  const clarification = state.clarificationChoices.get(owner);
   const stamp = (state.composerVersion = (state.composerVersion || 0) + 1);
   input.value = "";
   input.style.height = "auto";
-  const result = await send(value, requestKind);
+  const result = await send(value, requestKind, clarification?.id || null);
   const restorable = result && result.accepted === false && !result.uncertain
     && state.runId === owner
     && state.composerVersion === stamp;
@@ -1995,6 +2042,8 @@ async function submit(requestKind = null) {
     input.style.height = "auto";
     input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
   }
+  if (result?.accepted !== false || result.uncertain)
+    state.clarificationChoices.delete(owner);
   return {...result, draft_restored: Boolean(restorable)};
 }
 
@@ -2018,7 +2067,10 @@ function pendingSubmission(runId) {
 
 function updatesComposerVersion() { state.composerVersion = (state.composerVersion || 0) + 1; }
 
-$("send").onclick = () => { void submit(); };
+$("send").onclick = () => {
+  if (currentJob && JOB_ACTIVE.has(currentJob.status)) void stopCurrentJob();
+  else void submit();
+};
 $("chat-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
@@ -2028,6 +2080,9 @@ $("chat-input").addEventListener("keydown", (e) => {
 $("chat-input").addEventListener("input", (e) => {
   // Typing is the user moving the draft on. Any in-flight refusal is now stale.
   updatesComposerVersion();
+  const chosen = state.clarificationChoices.get(state.runId);
+  if (chosen && !e.target.value.includes(chosen.text))
+    state.clarificationChoices.delete(state.runId);
   e.target.style.height = "auto";
   e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`;
 });

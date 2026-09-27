@@ -31,17 +31,22 @@ def assemble_role_task(store, pipeline, learning, run_id, workspace: Workspace,
                     for name, artifact in visible.items() if artifact)
 
     parts = ['# 给你的任务', '', brief.strip(), '', f'# 你要交付的阶段：{stage}', '']
-    parts += [workspace.render_context(stage, versions=versions), '']
+    # A producing role needs source facts once. The rendered UI layout repeats
+    # the same structured document and is reserved for the independent reviewer.
+    parts += [workspace.render_context(stage, versions=versions, include_layout=False), '']
     for up in workspace.readable:
         if up in ('intake', stage):
             continue
-        parts += [f'## 上游产物 {up}', '', workspace.render_artifact(up, versions.get(up)), '']
+        parts += [f'## 上游产物 {up}', '', workspace.render_artifact(
+            up, versions.get(up), include_layout=False), '']
     if previous is not None:
         if not store.verify_artifact(run_id, stage, previous.version):
             raise ToolError('上一版内容指纹校验失败，不能作为修订基线。')
-        parts += ['# 本任务的修订基线（旧稿供修改，不覆盖当前事实和真实选择）',
-                  workspace.render_artifact(stage, previous.version),
-                  '按当前任务和问题修改；未受影响的表达应保留，不机械重做全部方案。']
+        parts += [('# 本任务的修订基线（旧稿供修改，不覆盖当前事实和真实选择）'
+                   if revision_scope else '# 上一版仅供对照（当前任务可以重新构思）'),
+                  workspace.render_artifact(stage, previous.version, include_layout=False),
+                  ('按当前任务和问题修改；未受影响的表达应保留，不机械重做全部方案。'
+                   if revision_scope else '以当前事实和本次任务为准；不必沿用旧稿的创意或结构。')]
         findings = []
         for source_stage, state in pipeline.state(run_id).stages.items():
             review, artifact = state.review, state.latest

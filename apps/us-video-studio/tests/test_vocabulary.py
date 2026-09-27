@@ -453,6 +453,20 @@ def test_each_open_question_carries_the_line_its_answer_becomes():
     assert questions[0]["stage"] == "direction"
 
 
+def test_answered_question_is_removed_from_the_standing_list():
+    stages = [_stage("direction", latest={
+        "version": 2, "created_at": "2026-09-27T12:00:00+00:00",
+        "digest_algorithm": "artifact-v2", "sha256": "a" * 64,
+        "structured": {"open_questions": [{"question": "能实拍吗？", "blocks": "当前拍法",
+            "owner": "user", "timing": "now", "reason": "只有用户知道"}]},
+    })]
+    before = [{"role": "user", "at": "2026-09-27T11:00:00+00:00", "text": "回答「能实拍吗？」：能"}]
+    after = [{"role": "user", "at": "2026-09-27T13:00:00+00:00", "text": "回答「能实拍吗？」：不能，但能拍别的"}]
+    assert len(v.build_questions(stages, before)) == 1
+    assert v.build_questions(stages, after) == []
+    assert v.build_rail(stages, "direction", after)[0]["team_issues"] == []
+
+
 def test_the_two_option_buttons_differ_in_what_they_do_not_in_which_letter():
     """One keeps the director's recommendation, one sends the stage back.
 

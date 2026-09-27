@@ -14,6 +14,16 @@ function studioDate(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? '日期未记录' : date.toLocaleDateString('zh-CN', {month:'short',day:'numeric'});
 }
+function studioDateTime(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '时间未记录' : date.toLocaleString('zh-CN',
+    {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});
+}
+function projectOptionLabel(run, runs) {
+  const title = run.title || '未命名作品';
+  return runs.filter(item => (item.title || '未命名作品') === title).length > 1
+    ? `${title} · 创建于 ${studioDateTime(run.created_at)}` : title;
+}
 function shortTitle(title, max = 18) {
   const text = String(title ?? '').trim();
   if (!text) return '未命名作品';
@@ -40,16 +50,16 @@ function projectCardHtml(run, cover) {
     :run.content_format==='video'?`商品视频${requestedCaption?'与发布文案':''}`:'交付形式待确认');
   const next=learning?'打开原片、讨论与变更记录':run.creator_view?.current||'打开查看当前作品与下一步';
   const visual = cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy">` : `<div class="project-cover-art">${studioIcon(learning?'spark':'film')}<span>${format}项目</span></div>`;
-  const date=studioDate(run.updated_at||run.created_at);
+  const created=studioDateTime(run.created_at);
   return `<div class="project-card-item"><button class="project-card" data-open-project="${id}" title="${escapeHtml(fullTitle)}"><span class="project-cover">${visual}<span class="project-open">${learning?'打开研究':'打开作品'} ↗</span></span><span class="project-card-copy"><strong title="${escapeHtml(fullTitle)}">${title}</strong>` +
-    `<span class="project-next">${escapeHtml(next)}</span><span>目标：${escapeHtml(goal)} · 更新于 ${escapeHtml(date)}<i aria-hidden="true">↗</i></span></span></button><button class="project-delete ghost small" data-delete-project="${id}" aria-label="删除项目：${title}">删除</button></div>`;
+    `<span class="project-next">${escapeHtml(next)}</span><span>目标：${escapeHtml(goal)} · 创建于 ${escapeHtml(created)}<i aria-hidden="true">↗</i></span></span></button><button class="project-delete ghost small" data-delete-project="${id}" aria-label="删除项目：${title}，创建于 ${escapeHtml(created)}">删除</button></div>`;
 }
 function referenceCardHtml(item, hero=false) {
   const id = encodeURIComponent(item.id), title = escapeHtml(item.title);
   const media = `/api/learning/cases/${id}/media#t=0.1`;
   return `<button class="${hero?'hero-reference':'reference-card'}" data-open-reference="${escapeHtml(item.id)}" aria-label="查看参考：${title}"><span class="reference-visual"><video src="${media}" preload="metadata" muted playsinline aria-hidden="true" tabindex="-1"></video><span class="reference-play" aria-hidden="true">▷</span><span class="reference-label">参考片</span></span><span class="reference-copy"><strong>${title}</strong>${!hero?`<span>${escapeHtml(item.strategy?.situation || '打开查看表达方法与适用范围')}</span>`:''}</span></button>`;
 }
-if (typeof module !== 'undefined' && module.exports) module.exports={filterProjects,inspirationCases,projectCardHtml,referenceCardHtml,shortTitle};
+if (typeof module !== 'undefined' && module.exports) module.exports={filterProjects,inspirationCases,projectCardHtml,referenceCardHtml,shortTitle,studioDateTime,projectOptionLabel};
 
 function setStudioView(view) {
   const project = view === 'project' && Boolean(state.runId);
@@ -70,7 +80,9 @@ function setStudioView(view) {
   document.querySelector('.producer-heading strong+span').textContent=learning?'讨论观察、疑问与方法变更':'讨论、分工与结果，都在这里';
   document.querySelector('.conversation-bar>span').textContent=learning?'学习对话':'项目对话';
   $('chat-input').setAttribute('aria-label',learning?'讨论参考与纠正观察':'与制片团队对话');
-  $('page-heading').textContent = project ? (state.runs.find(r=>r.run_id===state.runId)?.title || '创作项目') : '工作空间';
+  $('page-heading').textContent = project ? (selectedRun?.title || '创作项目') : '工作空间';
+  document.querySelector('.top-context').textContent = project
+    ? `创建于 ${studioDateTime(selectedRun?.created_at)}` : 'Little Else Studio';
   for (const [id, active] of [['nav-home',!project],['nav-project',project]]) {
     $(id).classList.toggle('active',active);
     if (active) $(id).setAttribute('aria-current','page'); else $(id).removeAttribute('aria-current');
@@ -84,13 +96,14 @@ function setStudioView(view) {
 function renderProjects() {
   const host = $('project-grid');
   if (!host) return;
-  document.body.dataset.hasProjects = state.runs.length ? 'true' : 'false';
+  const hasProjects = Boolean(state.runs.length);
+  document.body.dataset.hasProjects = hasProjects ? 'true' : 'false';
+  document.querySelector('.projects-section').hidden = !hasProjects;
   const found = filterProjects(state.runs || [], $('project-search').value);
   host.innerHTML = found.map(run => {
     const cover = run.run_id === state.runId ? state.materials.find(m=>m.kind==='image' && m.usable) : null;
     return projectCardHtml(run,cover ? materialUrl(cover.name) : null);
-  }).join('') || `<div class="project-empty"><span>${studioIcon('film')}</span><h3>${state.runs.length?'还没有找到这个项目':'你的第一个故事，从这里开始'}</h3><p>${state.runs.length?'换一个关键词，或清空搜索。':'添加商品素材，和制片团队一起构思。'}</p>${state.runs.length?'':'<button class="primary" data-create-format="video">新建创作项目</button>'}</div>`;
-  if (found.length) host.insertAdjacentHTML('beforeend','<button class="project-new" data-create-format="video"><span>＋</span><strong>新的想法</strong><small>开启下一个创作项目</small></button>');
+  }).join('') || (hasProjects ? `<div class="project-empty"><span>${studioIcon('film')}</span><h3>还没有找到这个项目</h3><p>换一个关键词，或清空搜索。</p></div>` : '');
 }
 async function loadInspiration() {
   try {
@@ -115,20 +128,16 @@ function initStudioNavigation() {
   $('delivery-open').onclick = openDelivery;
   $('outcomes-open').onclick = openOutcomes;
   $('production-open').onclick = ()=>showJourneyTab('storyboard');
-  $('history-open').onclick = openProjectHistory;
   for (const node of document.querySelectorAll('[data-icon]')) node.innerHTML = studioIcon(node.dataset.icon);
   $('nav-home').onclick = $('brand-home').onclick = () => setStudioView('home');
   $('nav-project').onclick = () => {
     if (state.runId) setStudioView('project'); else newRunDialog();
   };
-  $('top-create').onclick = ()=>newRunDialog();
   $('start-learning').onclick=()=>StudioLearningSession.openCreateDialog();
   $('browse-inspiration').onclick = ()=>window.StudioLearning.open({tab:'cases'});
   $('project-search').oninput = renderProjects;
   $('material-upload').onchange = async event => {await uploadFiles([...event.target.files]);event.target.value='';};
   document.addEventListener('click',async event=> {
-    const create=event.target.closest('[data-create-format]');
-    if (create) newRunDialog(create.dataset.createFormat);
     const project=event.target.closest('[data-open-project]');
     if (project && !state.decisionBusy) {
       const id=project.dataset.openProject;

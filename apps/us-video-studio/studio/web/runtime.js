@@ -20,7 +20,12 @@ function jobGuidance(job) {
   // Why the round stopped outranks what it was missing — the failure explains
   // the missing part (and is the thing to fix).
   if (/连续失败/.test(reason)) return "本轮因同一问题反复失败已停止。具体错误见「团队工作记录」，改掉原因后再发新的指令。";
-  if (job.deliverable?.status === 'incomplete') return `本轮交付还缺：${job.deliverable.missing.join('、')}。已完成的内容已保留，请查看准确版本后继续。`;
+  if (job.deliverable?.status === 'incomplete') {
+    const stageNames = {intake:'创作需求',direction:'创意方向',material_plan:'素材计划',writing:'脚本'};
+    const missing = (job.deliverable.missing || []).map(item => String(item).replace(
+      /^(intake|direction|material_plan|writing)\s+(?=当前)/u, (_, stage) => stageNames[stage]));
+    return `本轮交付还缺：${missing.join('、')}。已完成的内容已保留，请查看准确版本后继续。`;
+  }
   // Missing accounting data is diagnostic, never a creative workflow warning.
   if (/soft cap|预算.*上限|预算不足/i.test(reason)) return state.timeline?.budget?.limit_mode === 'none'
     ? "上一轮被旧额度设置中断。已保存内容仍可阅读；当前不会自动重试，请明确发送下一步要求。"
@@ -100,9 +105,42 @@ let currentJob = null;
 let currentRecovery = null;
 let jobRenderKey = "";
 let steerPosting = false;
+let cancelPosting = false;
 function canSteerJob(job) {
   return Boolean(job && job.job_kind === 'conversation' &&
     (job.status === 'running' || (job.status === 'cancelling' && job.steer_status === 'received')));
+}
+function syncComposerAction(job = currentJob) {
+  const active = Boolean(job && JOB_ACTIVE.has(job.status));
+  const unresolved = readPendingJob(state.runId) || readPendingSteer(state.runId);
+  const button = $('send');
+  const stopping = active && job.status === 'cancelling' && job.steer_status !== 'received';
+  button.setAttribute?.('data-mode', active ? 'stop' : 'send');
+  button.textContent = active ? (stopping || cancelPosting ? '停止中…' : '停止 ■') : '发送 ↑';
+  button.setAttribute?.('aria-label', active ? '停止当前任务' : '发送消息');
+  const hint = $('composer-key-hint');
+  if (hint) hint.textContent = active
+    ? '任务进行中，输入内容会留作草稿 · Shift + Enter 换行'
+    : 'Enter 发送 · Shift + Enter 换行';
+  button.disabled = Boolean(unresolved) || cancelPosting || steerPosting || state.decisionBusy
+    || state.recoveryBlocked || stopping || (!active && state.busy);
+}
+async function stopCurrentJob() {
+  const job = currentJob;
+  const runId = state.runId;
+  if (!job || !JOB_ACTIVE.has(job.status) || (job.status === 'cancelling' && job.steer_status !== 'received') || cancelPosting
+      || readPendingJob(runId) || readPendingSteer(runId)) return;
+  cancelPosting = true;
+  syncComposerAction(job);
+  try {
+    const updated = await api(`/api/runs/${runId}/jobs/${job.job_id}/cancel`, {method:'POST', body:'{}'});
+    if (state.runId === runId && currentJob?.job_id === job.job_id) showJob(updated);
+  } catch (err) {
+    if (state.runId === runId && currentJob?.job_id === job.job_id) toast(err.message, true);
+  } finally {
+    cancelPosting = false;
+    if (state.runId === runId) syncComposerAction();
+  }
 }
 function pendingJobKey(runId) { return `studio-job-pending:${runId}`; }
 function pendingJobUiKey(runId) { return `studio-job-ui:${runId}`; }
@@ -193,11 +231,7 @@ function showJob(job, notice = "") {
   state.busy = view.active || Boolean(unresolved);
   state.recoveryBlocked = Boolean((currentRecovery && !currentRecovery.can_continue)
     || (!currentRecovery && (job?.open_attempts?.length)));
-  const adjusting = canSteerJob(job);
-  $("send").disabled = Boolean(unresolved) || (state.busy && !adjusting)
-    || steerPosting || state.decisionBusy || state.recoveryBlocked;
-  $("send").textContent = adjusting ? '调整任务 ↑' : '发送 ↑';
-  $("send").setAttribute?.('aria-label', adjusting ? '调整当前任务' : '发送消息');
+  syncComposerAction(job);
   if (typeof renderProjectProgress === 'function') renderProjectProgress();
   if (typeof renderJourneyDecision === 'function') renderJourneyDecision();
   const host = $("job-status");
@@ -218,14 +252,13 @@ function showJob(job, notice = "") {
   // Project status is above both views. This strip is only the live execution
   // observer; historical usage cannot turn it back into a second status panel.
   if (job && !notice && !state.recoveryBlocked && ['conversation','stage_review'].includes(job.job_kind)) {
-    if (view.active) copy.append(box('span','job-live','制片团队正在工作 · 进展见下方对话'));
+    if (view.active) copy.append(box('span','job-live',job.steer_status === 'received'
+      ? '调整已收到 · 等待接续' : '制片团队正在工作 · 进展见下方对话'));
     if (!view.active && view.guidance) {
       const warning = box('strong','job-warning',view.guidance);
       warning.setAttribute?.('role','alert');
       copy.append(warning);
     }
-    if (job.steer_status === 'received' && view.active)
-      copy.append(box('span','job-live','调整已收到，等待旧步骤结束后继续'));
     if (job.steer_status === 'blocked') {
       copy.append(box('span','job-warning',job.steer_reason || '调整已保存，暂时不能自动继续'));
       if (job.steer_latest_text) copy.append(box('span','muted',`最近的调整：${job.steer_latest_text.slice(0, 200)}`));
@@ -244,20 +277,9 @@ function showJob(job, notice = "") {
       };
       copy.append(resumeAdjustment);
     }
-    const activity = box('button','text-button','团队工作记录 ↗');
+    const activity = box('button','text-button job-activity-open','团队工作记录 ↗');
     activity.onclick = openTeamProgress;
     copy.append(activity);
-    if (view.active && (job.status !== 'cancelling' || job.steer_status === 'received')) {
-      const stop = box('button','ghost small',job.steer_status === 'received' ? '停止接续' : '停止本轮');
-      stop.onclick = async () => {
-        const runId=state.runId, jobId=job.job_id;
-        stop.disabled=true;
-        try {const updated=await api(`/api/runs/${runId}/jobs/${jobId}/cancel`,{method:'POST',body:'{}'});
-          if(state.runId===runId && currentJob?.job_id===jobId) showJob(updated);
-        } catch(err) {toast(err.message,true);stop.disabled=false;}
-      };
-      copy.append(stop);
-    }
     host.append(copy);
     return;
   }
@@ -311,18 +333,6 @@ function showJob(job, notice = "") {
       else { $("chat-input").value = text; $("chat-input").focus?.(); }
     };
     copy.append(resume);
-  }
-  if (view.active && job.status !== "cancelling") {
-    const cancel = box("button", "ghost small", "停止本轮");
-    cancel.onclick = async () => {
-      const runId = state.runId, id = job.job_id;
-      cancel.disabled = true;
-      try {
-        const updated = await api(`/api/runs/${runId}/jobs/${id}/cancel`, { method: "POST", body: "{}" });
-        if (runId === state.runId && currentJob?.job_id === id) showJob(updated);
-      } catch (err) { toast(err.message, true); cancel.disabled = false; }
-    };
-    host.append(cancel);
   }
 }
 

@@ -81,23 +81,29 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
     {kind: 'brief-redo', label: '继续重做方向'}, 'plan', 'direction');
   if (interaction) return result(interaction.question || '有一项需要你确认',
     {kind: 'question', label: '回答这个问题'}, 'plan');
+  if (timeline.brief?.questions?.length) return result('有个细节想和你确认',
+    {kind: 'question', label: '回答这个问题'}, 'plan', timeline.brief.questions[0].stage,
+    '说出现有条件或还不确定的地方，团队会调整表达与素材安排。');
   if (pending?.stage === 'direction') return pending.passed === false
     ? nav('查看方向与审核', 'plan', '创意方向已保存，但审核提出修改意见', 'direction')
     : nav('选择创意方向', 'plan', '正在选择创意方向；采用后会继续准备脚本', 'direction');
   if (pending?.stage === 'writing') return pending.passed === false
     ? nav('查看脚本与审核', 'plan', '脚本新版已保存，但审核提出修改意见', 'writing')
     : nav('阅读并决定脚本', 'plan', '脚本已准备好，等待你阅读和决定', 'writing');
-  if (timeline.brief?.phase === 'review_failed' && timeline.brief.action?.kind === 'review_stage') {
+  if (timeline.brief?.action?.kind === 'review_stage') {
     const review = timeline.brief.action;
     const name = review.stage === 'direction' ? '创意方向' : review.stage === 'writing' ? '脚本' : '当前作品';
     return result(`${name}已保存，内部审核未完成`, review, 'plan', review.stage,
-      timeline.brief.detail || '先阅读当前作品与审核记录，再决定是否重试本版审核。');
+      timeline.brief.detail || '先阅读当前作品与审核记录，再决定是否重新审核当前方案。');
   }
   if (referenceCurrent) return result(reference?.report
     ? '本轮只分析新参考：拆解报告已保存' : '本轮只分析新参考：报告尚未完成',
     reference?.report ? null : {kind:'reference',label:'查看参考任务'}, 'plan',
     writing?.stage || direction?.stage || null,
     '下方阅读本轮参考；原项目的最终交付仍按作品目标保留。');
+  if (timeline.brief?.phase === 'needs_resolution') return result(
+    '素材方案有关键缺口，完整脚本暂不继续',
+    {kind:'chat',label:'调整素材方案'}, 'plan', 'material_plan', timeline.brief.detail || '');
 
   // The latest unresolved attempt controls recovery; a verified earlier result
   // can remain the readable work. The selector checks its material bytes and URL.
@@ -151,9 +157,6 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
       {kind:'chat',label:'讨论下一份脚本'}, 'plan', 'direction');
     return nav('阅读创意方向', 'plan', '当前创意方向可阅读', 'direction');
   }
-  if (timeline.brief?.action?.kind === 'review_stage') return result(
-    '当前作品已保存，团队检查尚未完成',
-    {...timeline.brief.action, kind:'review_stage'}, 'plan', timeline.brief.action.stage);
   if (timeline.brief?.phase === 'interrupted' && String(run.brief || '').trim()) return result(
     '你的需求已保存，本轮制片未完成',
     {kind:'job',label:'查看本轮记录'}, 'plan', null,

@@ -49,6 +49,38 @@ def test_succeeded_execution_does_not_mean_direction_approved(tmp_path):
     assert not store.list_approvals(RUN)
 
 
+def test_unreviewed_direction_asks_for_user_fact_before_another_review(tmp_path):
+    _, pipeline = project(tmp_path)
+    direction(pipeline, [question()])
+    out = project_brief(pipeline.state(RUN).to_dict())
+    assert out['phase'] == 'needs_input'
+    assert out['action']['kind'] == 'questions'
+    assert len(out['questions']) == 1
+
+
+def test_failed_review_asks_for_user_fact_before_retrying(tmp_path):
+    _, pipeline = project(tmp_path)
+    direction(pipeline, [question()])
+    job = {'status': 'blocked', 'job_kind': 'conversation', 'events': [
+        {'type': 'agent_tool', 'tool': 'request_review', 'args': {'stage': 'direction'},
+         'ok': False, 'at': '9999-01-01T00:00:00Z'}]}
+    out = project_brief(pipeline.state(RUN).to_dict(), job)
+    assert out['phase'] == 'needs_input'
+    assert out['action']['kind'] == 'questions'
+    assert len(out['questions']) == 1
+
+
+def test_answer_closes_the_current_question_but_keeps_review_pending(tmp_path):
+    store, pipeline = project(tmp_path)
+    direction(pipeline, [question()])
+    store.append_chat(RUN, 'user', '回答「Which tablet?」：目前没有，改拍不需要平板的画面')
+    chat = store.read_chat(RUN)
+    out = project_brief(pipeline.state(RUN).to_dict(), chat=chat)
+    assert out['questions'] == []
+    assert out['issues'][0]['answered'] is True
+    assert out['action']['kind'] == 'review_stage'
+
+
 @pytest.mark.parametrize('row,expected', [
     (question(), 1), (question('team'), 0), (question(timing='later'), 0),
     (question(reason=''), 0), ({'question': 'Who reads the images?', 'blocks': 'Creative work'}, 0),

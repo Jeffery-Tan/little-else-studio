@@ -7,15 +7,15 @@
 <meta name="description" content="从商品灵感到视频与图文方案，你的创作工作空间。">
 <meta name="theme-color" content="#0b0b0d">
 <link rel="icon" type="image/svg+xml" href="/static/studio-mark.svg?v=creative-20260919">
-<link rel="stylesheet" href="/static/style.css?v=creative-20260919">
+<link rel="stylesheet" href="/static/style.css?v=ux-audit-20260927">
 <link rel="stylesheet" href="/static/history.css?v=migration-20260919">
 <link rel="stylesheet" href="/static/cinema.css?v=chat-refactor-20260925">
-<link rel="stylesheet" href="/static/conversation.css?v=chat-progress-20260926">
+<link rel="stylesheet" href="/static/conversation.css?v=composer-stop-20260927-r2">
 <link rel="stylesheet" href="/static/connections.css?v=codex-login-20260920">
 <link rel="stylesheet" href="/static/learning.css?v=creative-20260919">
 <link rel="stylesheet" href="/static/learning-session.css?v=learning-20260924-r1">
 <link rel="stylesheet" href="/static/revisions.css?v=revision-20260919">
-<link rel="stylesheet" href="/static/product-cards.css?v=reuse-20260919-final"><link rel="stylesheet" href="/static/inline-feedback.css?v=reuse-20260919-final"><link rel="stylesheet" href="/static/outcomes.css?v=production-20260919"><link rel="stylesheet" href="/static/project-costs.css?v=production-20260919"><link rel="stylesheet" href="/static/production.css?v=ux-20260924-r1"><link rel="stylesheet" href="/static/journey.css?v=ux-compact-20260924-r2"><link rel="stylesheet" href="/static/creator-workspace.css?v=chat-refactor-20260925"><link rel="stylesheet" href="/static/canvas-workspace.css?v=canvas-20260927-r2"></head>
+<link rel="stylesheet" href="/static/product-cards.css?v=reuse-20260919-final"><link rel="stylesheet" href="/static/inline-feedback.css?v=reuse-20260919-final"><link rel="stylesheet" href="/static/outcomes.css?v=production-20260919"><link rel="stylesheet" href="/static/project-costs.css?v=production-20260919"><link rel="stylesheet" href="/static/production.css?v=conversation-decisions-20260927"><link rel="stylesheet" href="/static/journey.css?v=conversation-decisions-20260927"><link rel="stylesheet" href="/static/creator-workspace.css?v=direction-choice-20260927"><link rel="stylesheet" href="/static/canvas-workspace.css?v=top-controls-20260927"></head>
 <body data-view="home">
 <a class="skip-link" href="#workspace">跳到内容</a>
 <aside class="sidebar" aria-label="主导航">
@@ -30,11 +30,12 @@
   <div class="sidebar-bottom">
     <button id="connections-open" class="nav-item" aria-label="模型设置" title="模型设置"><span class="nav-icon" data-icon="sliders"></span><span>模型设置</span></button>
     <button id="spend" class="nav-item" aria-label="用量与费用" title="用量与费用">用量与费用</button>
+    <button id="trash-open" class="nav-item" aria-label="回收站" title="回收站"><span class="nav-icon" data-icon="folder"></span><span>回收站</span></button>
     <div class="profile"><span class="profile-avatar">J</span><div><strong>Jeffery</strong><small>个人工作空间</small></div></div>
   </div>
 </aside>
 <div class="app-shell">
-  <header class="top"><div class="top-breadcrumb"><span id="page-heading">工作空间</span><span class="top-context">Little Else Studio</span></div><div class="project-select-wrap"><select id="run-select" aria-label="选择项目"></select></div><button id="top-create" class="ghost top-create">＋ 开始创作</button></header>
+  <header class="top"><div class="top-breadcrumb"><span id="page-heading">工作空间</span><span class="top-context">Little Else Studio</span></div><div class="project-select-wrap"><select id="run-select" aria-label="选择项目"></select></div><div id="project-progress" hidden></div><div class="project-tools"><div role="group" aria-label="工作区视图"><button class="ghost small" data-project-focus="canvas" aria-pressed="true">看作品</button><button class="ghost small" data-project-focus="chat" aria-pressed="false">聊修改</button></div><details class="project-more"><summary>项目与设置</summary><div class="project-delivery-actions"><button id="materials-toggle" class="ghost small" aria-label="项目素材" aria-expanded="false" aria-controls="materials">素材与参考</button><button id="production-open" class="ghost small">高级制作管理</button><button id="outcomes-open" class="ghost small">作品与表现</button><button id="delivery-open" class="ghost small">导出策划资料</button><button id="project-delete-current" class="ghost small">删除项目</button></div></details></div></header>
   <div id="spend-panel" class="spend-panel" hidden></div>
   <main id="workspace" class="workspace" tabindex="-1">
     <section class="conversation-start" aria-labelledby="hero-title">
@@ -53,7 +54,7 @@
     </section>
     <section class="projects-section" aria-labelledby="projects-heading">
       <div class="section-heading"><div><h2 id="projects-heading">继续你的创作</h2><p>想法、素材和每一次修改，都留在项目里。</p></div><label class="project-search"><span data-icon="search" aria-hidden="true"></span><input id="project-search" type="search" aria-label="搜索项目" placeholder="搜索项目"></label></div>
-      <div class="project-library-actions"><button id="trash-open" class="ghost small">回收站</button></div><div id="project-grid" class="project-grid"><div class="loading-card">正在读取项目…</div></div>
+      <div id="project-grid" class="project-grid"><div class="loading-card">正在读取项目…</div></div>
     </section>
     <section class="inspiration-section" aria-labelledby="inspiration-heading">
       <div class="section-heading"><div><h2 id="inspiration-heading">从好表达里找灵感</h2><p>看具体的画面，理解选择背后的理由。</p></div><button id="browse-inspiration" class="text-button">探索灵感库 <span aria-hidden="true">↗</span></button></div>
@@ -62,10 +63,6 @@
     <footer class="workspace-footer"><span>little else. <span>Make something worth watching.</span></span><span>你的内容，你来决定。</span></footer>
   </main>
   <section id="project-workspace" class="project-workspace" data-focus="workbench" data-mobile-focus="canvas" aria-label="项目工作区" hidden>
-    <div class="project-chrome">
-      <div id="project-progress"></div>
-      <div class="project-tools"><div role="group" aria-label="工作区视图"><button class="ghost small" data-project-focus="canvas" aria-pressed="true">看作品</button><button class="ghost small" data-project-focus="chat" aria-pressed="false">聊修改</button></div><details class="project-more"><summary>项目与设置</summary><div class="project-delivery-actions"><button id="materials-toggle" class="ghost small" aria-label="项目素材" aria-expanded="false" aria-controls="materials">素材与参考</button><button id="history-open" class="ghost small">历史版本</button><button id="production-open" class="ghost small">高级制作管理</button><button id="outcomes-open" class="ghost small">作品与表现</button><button id="delivery-open" class="ghost small">导出策划资料</button><button id="project-delete-current" class="ghost small">删除项目</button></div></details></div>
-    </div>
     <div class="project-canvas">
       <nav class="journey-tabs" role="tablist" aria-label="作品内容">
         <button id="journey-tab-plan" role="tab" data-journey-tab="plan" data-plan-stage="direction" aria-controls="stage" aria-selected="true" tabindex="0">创意方向</button>
@@ -77,7 +74,7 @@
       <section id="journey-assets" class="canvas-assets" role="tabpanel" aria-labelledby="journey-tab-assets" tabindex="0" hidden></section>
       <div id="journey-storyboard" role="tabpanel" aria-labelledby="journey-tab-storyboard" tabindex="0" hidden></div>
       <div id="journey-video" role="tabpanel" aria-labelledby="journey-tab-video" tabindex="0" hidden></div>
-      <details id="project-stages" class="creator-stage-history"><summary>查看早前内容与版本</summary><nav class="rail" id="rail" aria-label="创作内容阶段"></nav></details>
+      <nav class="rail" id="rail" aria-label="创作内容阶段" hidden></nav>
       <main id="stage" class="stage" role="tabpanel" aria-labelledby="journey-tab-plan" tabindex="0"></main>
     </div>
     <aside class="composer" aria-label="制片对话">
@@ -86,7 +83,7 @@
       <div id="conversation" class="conversation"><button id="conversation-toggle" class="conversation-bar" aria-expanded="true" aria-controls="conversation-body"><span>项目对话</span><span id="conversation-count" class="conversation-count">还没有对话</span><span id="conversation-caret" class="conversation-caret">收起</span></button><div id="conversation-body" class="conversation-body" aria-live="polite"></div></div>
       <div id="draft" class="draft" hidden></div><div id="feedback-target" class="feedback-target" hidden></div>
       <div id="chat-attachments" aria-live="polite"></div><input id="chat-files" type="file" accept="image/*,video/*" multiple hidden><div class="composer-inner"><button type="button" id="chat-attach" class="ghost" aria-label="添加图片或视频">＋</button><textarea id="chat-input" rows="2" aria-label="与制片团队对话" placeholder="说说想做什么，也可直接粘贴 TK 链接…"></textarea><button id="send" class="primary" aria-label="发送消息">发送 <span aria-hidden="true">↑</span></button></div>
-      <div class="composer-hint"><span>Enter 发送 · Shift + Enter 换行</span><button id="detail-toggle" class="ghost small" aria-pressed="false">技术记录</button></div>
+      <div class="composer-hint"><span id="composer-key-hint">Enter 发送 · Shift + Enter 换行</span><button id="detail-toggle" class="ghost small" aria-pressed="false">技术记录</button></div>
     </aside>
   </section>
 </div>
@@ -98,10 +95,10 @@
   <div id="reference-video-results"></div>
   <div id="materials-grid" class="materials-grid"></div>
 </section>
-<div id="reader" class="reader" hidden><div class="reader-box" role="dialog" aria-modal="true" aria-labelledby="reader-title"><div class="reader-head"><div><h2 id="reader-title">方案详情</h2><div class="reader-sub" id="reader-sub"></div></div><div class="reader-actions"><div class="versions" id="reader-versions"></div><button id="reader-close" class="ghost">关闭</button></div></div><div class="reader-body" id="reader-body"></div></div></div>
+<div id="reader" class="reader" hidden><div class="reader-box" role="dialog" aria-modal="true" aria-labelledby="reader-title"><div class="reader-head"><div><h2 id="reader-title">方案详情</h2><div class="reader-sub" id="reader-sub"></div></div><div class="reader-actions"><div class="versions" id="reader-versions" hidden></div><button id="reader-close" class="ghost">关闭</button></div></div><div class="reader-body" id="reader-body"></div></div></div>
 <div id="viewer" class="viewer" hidden><div class="viewer-box" role="dialog" aria-modal="true" aria-label="素材预览"><div class="viewer-head"><span id="viewer-name"></span><button id="viewer-close" class="ghost small">关闭</button></div><div id="viewer-body" class="viewer-body"></div></div></div>
 <div id="toast" class="toast" role="status"></div>
 <script src="/static/learning-session.js?v=learning-integration-20260924"></script>
-<script src="/static/md.js?v=creative-20260919"></script><script src="/static/blocks.js?v=project-trash-20260921"></script><script src="/static/stage.js?v=direct-writing-20260926"></script><script src="/static/project-management.js?v=project-trash-20260921"></script><script src="/static/workspace.js?v=canvas-20260927"></script><script src="/static/progress.js?v=learning-integration-20260924"></script><script src="/static/materials.js?v=migration-20260919"></script><script src="/static/image-analysis.js?v=reference-video-20260921"></script><script src="/static/image-workspace.js?v=reference-video-20260921"></script><script src="/static/conversation-input.js?v=natural-reference-20260921"></script><script src="/static/reference-video.js?v=natural-reference-20260921"></script><script src="/static/material-workspace.js?v=project-title-20260924"></script><script src="/static/team-progress.js?v=failed-detail-20260927"></script><script src="/static/runtime.js?v=failed-guidance-20260927"></script><script src="/static/revisions.js?v=revision-20260919"></script><script src="/static/revision-workspace.js?v=studio-20260923-r3"></script><script src="/static/product-cards.js?v=reuse-20260919-final"></script><script src="/static/outcomes.js?v=production-20260919"></script><script src="/static/project-costs.js?v=budget-20260924-r1"></script><script src="/static/history.js?v=migration-20260919"></script><script src="/static/production.js?v=ux-closeout-20260924-r1"></script><script src="/static/creator-view.js?v=fresh-state-20260927-r2"></script><script src="/static/journey.js?v=canvas-20260927-r4"></script><script src="/static/app.js?v=canvas-20260927-r2"></script><script src="/static/codex-login.js?v=codex-login-20260920-final"></script><script src="/static/connections.js?v=studio-20260923-r2"></script><script src="/static/learning.js?v=learning-integration-20260924"></script><script src="/static/inline-feedback.js?v=reuse-20260919-final"></script>
+<script src="/static/md.js?v=creative-20260919"></script><script src="/static/blocks.js?v=project-trash-20260921"></script><script src="/static/stage.js?v=conversation-decisions-20260927"></script><script src="/static/project-management.js?v=project-trash-20260921"></script><script src="/static/workspace.js?v=project-identity-20260927"></script><script src="/static/progress.js?v=top-controls-20260927"></script><script src="/static/materials.js?v=migration-20260919"></script><script src="/static/image-analysis.js?v=reference-video-20260921"></script><script src="/static/image-workspace.js?v=reference-video-20260921"></script><script src="/static/conversation-input.js?v=natural-reference-20260921"></script><script src="/static/reference-video.js?v=natural-reference-20260921"></script><script src="/static/material-workspace.js?v=project-title-20260924"></script><script src="/static/team-progress.js?v=failed-detail-20260927"></script><script src="/static/runtime.js?v=direction-choice-20260927-r2"></script><script src="/static/revisions.js?v=revision-20260919"></script><script src="/static/revision-workspace.js?v=studio-20260923-r3"></script><script src="/static/product-cards.js?v=reuse-20260919-final"></script><script src="/static/outcomes.js?v=production-20260919"></script><script src="/static/project-costs.js?v=budget-20260924-r1"></script><script src="/static/history.js?v=migration-20260919"></script><script src="/static/production.js?v=conversation-decisions-20260927"></script><script src="/static/creator-view.js?v=conversation-decisions-20260927"></script><script src="/static/journey.js?v=conversation-decisions-20260927"></script><script src="/static/app.js?v=conversation-decisions-20260927"></script><script src="/static/codex-login.js?v=codex-login-20260920-final"></script><script src="/static/connections.js?v=studio-20260923-r2"></script><script src="/static/learning.js?v=learning-integration-20260924"></script><script src="/static/inline-feedback.js?v=reuse-20260919-final"></script>
 </body>
 </html>

@@ -345,9 +345,11 @@ class RoutedClient:
             try:
                 if not valid_deepseek_key(token):
                     raise ValueError('Invalid local DeepSeek key')
-                # The shared legacy cap is for compatibility transports. Native
-                # DeepSeek uses its provider default, including on restored jobs.
-                return DeepSeekClient(token, check_cancel=self.check_cancel,
+                # A direction is a short decision document. Bound its combined
+                # reasoning and answer to the configured per-call limit; other
+                # roles retain their existing provider default.
+                return DeepSeekClient(token, max_tokens=self.max_tokens if role == 'director' else None,
+                                      check_cancel=self.check_cancel,
                                       cancel_event=self.cancel_event)
             except (ValueError, TypeError):
                 # This happens before the budget wrapper opens a call intent.
