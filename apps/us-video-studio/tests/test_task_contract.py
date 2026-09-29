@@ -45,18 +45,36 @@ def test_revision_requires_this_turns_applied_plan():
     assert evaluate(FakeStore(events), pipeline, 'fixture', 'revision', revision_scope=scope)['status'] == 'complete'
 
 
-def test_production_input_must_match_current_source_and_user_approval(monkeypatch):
+def test_production_input_requires_an_adopted_script_before_any_shot_is_checked(monkeypatch):
+    """The upstream reason is named first; a script nobody adopted has no inputs.
+
+    This test used to monkeypatch ``draft_records`` and assert only that the word
+    "已确认" appeared. The contract now reads the real production projection, so a
+    fake store would be testing the fake. The shot-level rules are covered against
+    a real store in ``test_shots.py``; what matters here is the ordering: an
+    unadopted script is reported as such rather than as missing inputs.
+    """
     from studio import production
+
     pipeline = FakePipeline(writing=stage(verdict='pass'))
-    monkeypatch.setattr(production, 'source_snapshot', lambda store, run: 'current-snapshot')
-    drafts = {'first': {'source_sha256': 'exact', 'source_snapshot': 'old-snapshot', 'kind': 'video', 'review': {'verdict': 'ready'}}}
-    monkeypatch.setattr(production, 'draft_records', lambda store, run: drafts)
-    assert evaluate(FakeStore(), pipeline, 'fixture', 'production_input', production_kind='video')['status'] == 'incomplete'
-    drafts['first']['source_snapshot'] = 'current-snapshot'
-    drafts['first']['review'] = {'verdict': 'revise'}
-    assert evaluate(FakeStore(), pipeline, 'fixture', 'production_input', production_kind='video')['status'] == 'complete'
     pipeline.approved = False
-    assert '已确认' in evaluate(FakeStore(), pipeline, 'fixture', 'production_input', production_kind='video')['missing'][0]
+    result = evaluate(FakeStore(), pipeline, 'fixture', 'production_input',
+                      production_kind='video')
+    assert result['status'] == 'incomplete'
+    assert result['missing'] == ['已确认的当前完整方案']
+    assert '采用' in result['note']
+
+    # Media has its own wording: the blocker is upstream, not a failed generation.
+    media = evaluate(FakeStore(), pipeline, 'fixture', 'production_media', media_kind='image')
+    assert media['status'] == 'incomplete'
+    assert media['missing'] == ['当前脚本待用户采用']
+
+
+def test_a_read_only_follow_up_promises_nothing_and_asks_for_nothing():
+    result = evaluate(FakeStore(), FakePipeline(), 'fixture', 'follow_up')
+    assert result['status'] == 'informational'
+    assert result['missing'] == []
+    assert evaluate(FakeStore(), FakePipeline(), 'fixture', None)['status'] == 'unspecified'
 
 
 def test_analysis_requires_saved_report_signal():

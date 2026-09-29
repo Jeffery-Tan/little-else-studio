@@ -281,43 +281,69 @@ function openProductionBatch(kind){
   if(kind==='generate'&&StudioProduction.batchBlocker(data,runId)){
     toast('整组中仍有首帧任务待核实，请先处理原任务。',true);return false;
   }
+  const target=['video_prepare','video_generate','assemble'].includes(kind)?'video':'storyboard';
   const existing=currentBatchIntent();
   if(existing){
     if(existing.kind!==kind&&(existing.uncertain||existing.submitting)){
       toast('上一次整组请求仍待核实，请先处理原请求。',true);return false;
     }
     if(existing.kind===kind){
-      if(state.canvasTab!=='storyboard')showJourneyTab('storyboard');
+      if(state.canvasTab!==target)showJourneyTab(target);
       setProjectFocus('chat');renderProductionAction();return true;
     }
   }
+  if(kind==='choose'){
+    saveBatchIntent({kind,runId});
+    if(state.canvasTab!=='storyboard')showJourneyTab('storyboard');
+    setProjectFocus('chat');renderProductionAction();return true;
+  }
   const selected=kind==='approve'?StudioProduction.batchApprovalImages(data,runId)
-    :StudioProduction.batchGenerationDrafts(data,runId);
+    :kind==='generate'?StudioProduction.batchGenerationDrafts(data,runId)
+    :kind==='video_generate'?StudioProduction.videoBatchGenerationDrafts(data,runId)
+    :kind==='assemble'?StudioProduction.assemblyClips(data,runId)
+    :StudioProduction.videoSequenceState(data,runId).filter(shot=>shot.approved&&shot.reference);
+  if(kind==='assemble'&&!data.edit_plan){
+    toast('当前脚本还没有准确剪辑计划，请先完成计划再拼接。',true);return false;
+  }
   if(!selected.length){toast(kind==='approve'?'当前没有待确认的生成图。':'当前没有可提交的首帧方案。',true);return false;}
   const intent={kind,runId,request_id:crypto.randomUUID(),
+    ...(kind==='generate'?{connection_revision:data.capabilities?.image?.connection_revision}:{}),
     ...(kind==='approve'?{images:selected.map(item=>({name:item.output.name,sha256:item.output.sha256}))}
+      :kind==='video_prepare'?{images:selected.map(item=>shotReference(item))}
+      :kind==='assemble'?{clips:selected,edit_plan_id:data.edit_plan.request_id,
+          edit_plan_sha256:data.edit_plan.plan_sha256}
       :{drafts:selected.map(item=>({draft_id:item.draft_id,expected_sha256:item.draft_sha256}))})};
   saveBatchIntent(intent);
-  if(state.canvasTab!=='storyboard')showJourneyTab('storyboard');
+  if(state.canvasTab!==target)showJourneyTab(target);
   setProjectFocus('chat');renderProductionAction();
   $('production-action')?.scrollIntoView({block:'nearest'});
   return true;
 }
+function shotReference(shot){return {name:shot.reference.name,sha256:shot.reference.sha256};}
 async function submitProductionBatch(){
   const intent=currentBatchIntent();if(!intent||intent.submitting||state.runId!==intent.runId)return;
   intent.submitting=true;intent.error='';renderProductionAction();
-  const path=intent.kind==='approve'?'/material-approvals/batch':'/batch-generate';
-  const body={request_id:intent.request_id,nonce:state.productionData?.nonce,
-    ...(intent.kind==='approve'?{images:intent.images}:{drafts:intent.drafts,consent:true})};
+  const path=intent.kind==='approve'?'/material-approvals/batch'
+    :intent.kind==='video_prepare'?'/material-approvals/batch/continue'
+    :intent.kind==='assemble'?'/assemble':'/batch-generate';
+  const body={request_id:intent.request_id,
+    ...(intent.kind==='approve'||intent.kind==='video_prepare'?{images:intent.images}:{}),
+    ...(intent.kind==='generate'||intent.kind==='video_generate'?{drafts:intent.drafts,consent:true}:{}),
+    ...(intent.kind==='generate'?{expected_connection_revision:intent.connection_revision}:{}),
+    ...(intent.kind==='assemble'?{clips:intent.clips,edit_plan_id:intent.edit_plan_id,
+      edit_plan_sha256:intent.edit_plan_sha256}:{}),
+    ...(intent.kind==='video_prepare'||intent.kind==='assemble'?{}:{nonce:state.productionData?.nonce})};
   try{
     const result=await api(`/api/runs/${encodeURIComponent(intent.runId)}/production${path}`,
       {method:'POST',body:JSON.stringify(body)});
     if(state.runId!==intent.runId)return;
     saveBatchIntent(null);
-    if(result.job_id)void restoreJob(intent.runId);
+    if(result.job_id||result.continuation?.job_id)void restoreJob(intent.runId);
     await refreshTimeline();
-    toast(intent.kind==='approve'?`已一次确认 ${result.approved} 张生成图。`:
-      `整组出图已启动；团队将按顺序处理 ${intent.drafts.length} 张。`);
+    toast(intent.kind==='approve'?`已一次确认 ${result.approved} 张生成图。${result.continuation?.status==='started'?'团队正在准备视频输入。':''}`
+      :intent.kind==='video_prepare'?'团队正在准备逐段视频输入。'
+      :intent.kind==='assemble'?'本地拼接已启动。'
+      :`整组生成已启动；将按顺序处理 ${intent.drafts.length} ${intent.kind==='video_generate'?'段':'张'}。`);
   }catch(error){
     if(state.runId!==intent.runId)return;
     intent.submitting=false;
@@ -336,12 +362,23 @@ async function submitProductionBatch(){
 function productionBatchCommand(text,available={}){
   const value=String(text||'').trim().replace(/^(?:好|好的|可以|行)[，,\s]*/,'').trim();
   if(value.length>64||/[，。；;\n]/.test(value)||/(不要|别|暂不|先不|修改|调整|问题|重写)/.test(value))return null;
-  if(/^(?:批准|确认)(?:全部|所有|这批|这些)$/.test(value)||/^(?:按这版做|现在执行)$/.test(value)){
-    if(available.generate&&!available.approve)return 'generate';
-    if(available.approve&&!available.generate)return 'approve';
-    return null;
+  if(/(全部|所有|整组|这[一二三四五六七八九十\d]+段)/.test(value)&&/(视频|片段|视频段)/.test(value)){
+    if(/准备/.test(value)&&available.video_prepare)return 'video_prepare';
+    if(/(生成|制作|开始)/.test(value)&&available.video_generate)return 'video_generate';
   }
-  if(!/(全部|所有|整组|这批|这[一二三四五六七八九十\d]+张)/.test(value)||!/(首帧|分镜|图|画面)/.test(value))return null;
+  if(/(拼接|合成).*(成片|视频|片段)/.test(value)&&available.assemble)return 'assemble';
+  if(/^(?:批准|确认)(?:全部|所有|这批|这些)$/.test(value)||/^(?:按这版做|现在执行)$/.test(value)){
+    const options=[['generate',available.generate],['approve',available.approve],
+      ['video_prepare',available.video_prepare],['video_generate',available.video_generate],['assemble',available.assemble]]
+      .filter(([,count])=>count);
+    return options.length===1?options[0][0]:options.length>1?'choose':null;
+  }
+  // A whole-set request about shots. The position marker is optional: people say
+  // 「按这六镜生成」as readily as 「生成全部首帧」, and the unit word is what says
+  // a set is meant. A request that names one shot still carries a revision word
+  // and is rejected above.
+  if(!/(全部|所有|整组|这批|(?:这|那|按)?[一二三四五六七八九十百两\d]+个?(?:张|镜|段))/.test(value)
+     ||!/(首帧|分镜|镜头|镜|图|画面)/.test(value))return null;
   if(/(确认|批准|通过|采用)/.test(value)){
     if(available.generate&&!available.approve&&!/(生成图|成图|结果|已出图)/.test(value))return 'generate';
     return 'approve';
@@ -376,6 +413,25 @@ function renderProductionAction(){
     return;
   }
   if(intent){
+    if(intent.kind==='choose'){
+      host.append(box('strong',null,'“批准全部”需要明确范围'),
+        box('p',null,'当前有多种操作可以继续。请选择这次要核对的范围。'));
+      const unmade=StudioProduction.batchGenerationDrafts(state.productionData,state.runId).length;
+      const unapproved=StudioProduction.batchApprovalImages(state.productionData,state.runId).length;
+      if(unmade){const button=box('button','primary',`核对并生成 ${unmade} 张首帧`);
+        button.onclick=()=>openProductionBatch('generate');host.append(button);}
+      if(unapproved){const button=box('button','ghost',`查看并确认 ${unapproved} 张生成图`);
+        button.onclick=()=>openProductionBatch('approve');host.append(button);}
+      const shots=StudioProduction.videoSequenceState(state.productionData,state.runId);
+      if(shots.length>1&&shots.every(shot=>shot.approved)&&shots.some(shot=>!shot.draft)){
+        const button=box('button','ghost','准备整组视频输入');button.onclick=()=>openProductionBatch('video_prepare');host.append(button);}
+      const videoCount=StudioProduction.videoBatchGenerationDrafts(state.productionData,state.runId).length;
+      if(videoCount){const button=box('button','ghost',`核对并生成 ${videoCount} 段视频`);
+        button.onclick=()=>openProductionBatch('video_generate');host.append(button);}
+      if(state.productionData.edit_plan&&StudioProduction.assemblyClips(state.productionData,state.runId).length&&!StudioProduction.currentAssembly(state.productionData,state.runId)){
+        const button=box('button','ghost','拼接成片');button.onclick=()=>openProductionBatch('assemble');host.append(button);}
+      return;
+    }
     const html=StudioProduction.batchConfirmationHtml(intent,state.productionData,state.runId);
     if(!html){host.append(box('p',null,'本次核对的版本已变化。请刷新后重新选择整组画面。'));
       const reset=box('button','ghost small','重新选择');reset.onclick=()=>{saveBatchIntent(null);renderProductionAction();};
@@ -391,6 +447,46 @@ function renderProductionAction(){
       saveBatchIntent(null);renderProductionAction();};
     host.querySelector('[data-batch-status]').textContent=intent.error||'';
     return;
+  }
+  if(state.canvasTab==='video'&&(state.productionData.video_sequence||[]).length>1){
+    const shots=StudioProduction.videoSequenceState(state.productionData,state.runId);
+    const ready=shots.every(shot=>shot.approved&&shot.reference);
+    const missing=shots.filter(shot=>!shot.draft).length;
+    const blocked=shots.find(shot=>shot.unresolved);
+    const clips=StudioProduction.assemblyClips(state.productionData,state.runId);
+    const assembly=StudioProduction.currentAssembly(state.productionData,state.runId);
+    host.append(box('strong',null,`${shots.length} 段视频流程`));
+    if(!ready){
+      host.append(box('p',null,'先完成整组首帧出图与准确图片确认。'));
+      const button=box('button','primary','查看整组首帧');button.onclick=()=>showJourneyTab('storyboard');host.append(button);return;
+    }
+    if(missing){
+      host.append(box('p',null,`仍有 ${missing} 段缺少视频输入；团队将按已确认脚本和五张首帧准备逐段描述。`));
+      const button=box('button','primary','准备整组视频输入');button.onclick=()=>openProductionBatch('video_prepare');host.append(button);return;
+    }
+    if(blocked){
+      host.append(box('p',null,`第 ${blocked.index} 段任务待核实；后续视频不会跳过提交。`));
+      const button=box('button','primary','查看这段任务');button.onclick=()=>openProduction({kind:'video',focusDraft:blocked.draft.draft_id});host.append(button);return;
+    }
+    const unmade=StudioProduction.videoBatchGenerationDrafts(state.productionData,state.runId);
+    if(unmade.length){
+      const total=unmade.reduce((sum,draft)=>sum+(draft.estimate?.amount||0),0);
+      host.append(box('p',null,`已取回 ${shots.length-unmade.length}/${shots.length} 段。待生成 ${unmade.length} 段，公开原价估算合计 CNY ${total.toFixed(2)}；请核对逐段输入与费用。`));
+      const button=box('button','primary',`核对并顺序生成 ${unmade.length} 段`);
+      button.onclick=()=>openProductionBatch('video_generate');host.append(button);return;
+    }
+    if(assembly){
+      host.append(box('p',null,'成片已保存。请播放核对画面、口播和衔接。'));
+      const link=box('a','primary','下载成片');link.href=assembly.output.url;
+      link.download=assembly.output.name;host.append(link);return;
+    }
+    if(clips.length===shots.length){
+      const plan=state.productionData.edit_plan;
+      host.append(box('p',null,plan?`${clips.length} 段已取回，可按当前脚本的 ${plan.cuts.length} 个画面切点拼接 ${plan.duration_seconds} 秒成片。`:
+        '视频段已取回，当前脚本的准确剪辑计划尚未保存。'));
+      if(plan){const button=box('button','primary','核对剪辑计划并拼接成片');button.onclick=()=>openProductionBatch('assemble');host.append(button);}
+      return;
+    }
   }
   const kind=state.canvasTab==='storyboard'?'image':'video';
   const imageDrafts=kind==='image'?(state.productionData.drafts||[]).filter(d=>d.kind==='image'&&d.source_ready!==false):[];

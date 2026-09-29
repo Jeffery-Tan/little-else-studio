@@ -3,6 +3,8 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import threading
 import time
 
@@ -19,7 +21,7 @@ from studio.ledger import Ledger
 from studio.materials import accept_upload
 from studio.pipeline import Pipeline
 from studio.models import Approval, PipelineError
-from studio.production import DraftIn, prepare_draft, read_image, source_snapshot
+from studio.production import DraftIn, assemble_videos, prepare_draft, read_image, source_snapshot
 from studio.server import build_app
 from studio.store import Store
 from test_server import RUN, settings_for
@@ -336,6 +338,58 @@ def batch_payload(scene, drafts, request_id='batch-1'):
                        for item in drafts]}
 
 
+def set_material_model(scene, model):
+    saved = scene[0].get('/api/connections').json()
+    saved['roles']['material'] = {'connection': 'codex', 'model': model}
+    response = scene[0].put('/api/connections', json={
+        'expected_revision': saved['revision'], 'connections': saved['connections'],
+        'roles': saved['roles']})
+    assert response.status_code == 200, response.text
+    return response.json()['revision']
+
+
+def test_saved_material_model_reaches_single_image_request_and_ledger(scene):
+    revision = set_material_model(scene, 'gpt-6-sol')
+    d = ready(scene, 'image')
+    cap = workspace(scene)['capabilities']['image']
+    assert cap['controller_model'] == 'gpt-6-sol'
+    assert cap['connection_revision'] == revision
+    assert wait(scene, action(scene, d, 'generate', expected_connection_revision=revision))['status'] == 'succeeded'
+    assert scene[4].calls[0].model == 'gpt-6-sol'
+    row = Ledger(scene[1], scene[-1]).entries()[-1]
+    assert row.model == 'gpt-6-sol' and row.actual_model == 'fixture-codex'
+
+
+def test_image_generation_refuses_changed_model_before_submission(scene):
+    old_revision = workspace(scene)['capabilities']['image']['connection_revision']
+    d = ready(scene, 'image')
+    set_material_model(scene, 'gpt-6-sol')
+    response = action(scene, d, 'generate', expected_connection_revision=old_revision)
+    assert response.status_code == 409
+    assert not scene[4].calls
+    assert not Ledger(scene[1], scene[-1]).entries()
+
+
+def test_selected_image_model_requires_a_fresh_confirmation_page(scene):
+    set_material_model(scene, 'gpt-6-sol')
+    d = ready(scene, 'image')
+    assert action(scene, d, 'generate').status_code == 409
+    assert not scene[4].calls
+
+
+def test_saved_material_model_reaches_every_image_in_batch(scene):
+    revision = set_material_model(scene, 'gpt-6-sol')
+    first = draft(scene, kind='image', request_id='model-shot-1').json()
+    second = draft(scene, kind='image', request_id='model-shot-2').json()
+    payload = {**batch_payload(scene, [first, second], 'model-batch'),
+               'expected_connection_revision': revision}
+    assert scene[0].post(BASE + '/batch-generate', json={
+        key: value for key, value in payload.items() if key != 'expected_connection_revision'}).status_code == 409
+    assert not scene[4].calls
+    assert wait(scene, scene[0].post(BASE + '/batch-generate', json=payload))['status'] == 'succeeded'
+    assert [request.model for request in scene[4].calls] == ['gpt-6-sol', 'gpt-6-sol']
+
+
 def test_one_batch_decision_generates_pinned_images_once_and_approves_exact_outputs(scene):
     http, store, _, _, images, videos, _ = scene
     first = draft(scene, kind='image', request_id='shot-1').json()
@@ -363,6 +417,152 @@ def test_one_batch_decision_generates_pinned_images_once_and_approves_exact_outp
     assert all(item['approved'] for item in workspace(scene)['materials'] if item['name'] in {o['name'] for o in outputs})
     assert http.post(BASE + '/material-approvals/batch', json=approval).json()['already_saved'] is True
     assert len([event for event in store.read_events(RUN) if event.get('kind') == 'production_batch_approval']) == 1
+
+
+def test_five_approved_frames_prepare_five_clips_then_generate_and_assemble_in_order(scene, monkeypatch):
+    http, store, _, _, images, videos, _ = scene
+    video_goal(scene)
+    image_drafts = [draft(scene, kind='image', request_id=f'frame-{index}',
+                          prompt=f'Synthetic frame {index}.').json() for index in range(1, 6)]
+    source = workspace(scene)['sources'][-1]
+    plan_payload = {'request_id': 'five-scene-edit', 'source_version': source['version'],
+        'source_sha256': source['artifact_sha256'], 'confirmed_product': 'Small deep olive green bag',
+        'cuts': [
+            {'clip_index': 1, 'start_seconds': 0, 'audio_clip_index': 1,
+             'audio_start_seconds': 0, 'duration_seconds': 1},
+            {'clip_index': 2, 'start_seconds': 0, 'audio_clip_index': 1,
+             'audio_start_seconds': 1, 'duration_seconds': 1},
+            {'clip_index': 1, 'start_seconds': 1, 'audio_clip_index': 1,
+             'audio_start_seconds': 2, 'duration_seconds': 1},
+            *[{'clip_index': index, 'start_seconds': 0, 'audio_clip_index': index,
+               'audio_start_seconds': 0, 'duration_seconds': 1} for index in (3, 4, 5)]],
+        'overlays': [{'text': 'one bag.', 'start_seconds': 0, 'duration_seconds': 2}]}
+    plan_response = http.post(BASE + '/edit-plan', json=plan_payload)
+    assert plan_response.status_code == 200, plan_response.text
+    plan = plan_response.json()
+    assert workspace(scene)['edit_plan']['plan_sha256'] == plan['plan_sha256']
+    assert http.post(BASE + '/edit-plan', json={**plan_payload, 'confirmed_product': 'Other'}).status_code == 409
+    assert wait(scene, http.post(BASE + '/batch-generate', json=batch_payload(scene, image_drafts)))['status'] == 'succeeded'
+    outputs = [next(d for d in workspace(scene)['drafts'] if d['draft_id'] == image['draft_id'])
+               ['attempts'][0]['output'] for image in image_drafts]
+    assert all(not shot['approved'] for shot in workspace(scene)['video_sequence'])
+    calls, prompts = [], []
+    def prepare(run_id):
+        calls.append(run_id)
+        def run(text, emit, check_cancel):
+            prompts.append(text)
+            source = workspace(scene)['sources'][-1]
+            for index, output in enumerate(outputs, 1):
+                payload = DraftIn(request_id=f'clip-{index}', kind='video',
+                    prompt=f'Synthetic segment {index}.', source_version=source['version'],
+                    source_sha256=source['artifact_sha256'],
+                    reference={'name': output['name'], 'sha256': output['sha256']},
+                    model='wan3.0-video', duration=3, resolution='720P')
+                prepare_draft(store, scene[2], run_id, payload, actor='agent')
+            return OrchestratorTurn('Prepared five synthetic clips.', 'done', 1)
+        return run, {'source': 'offline-five-clip-continuation'}
+    http.app.state.jobs.prepare = prepare
+    approval = {'request_id': 'approve-five', 'nonce': workspace(scene)['nonce'],
+                'images': [{'name': output['name'], 'sha256': output['sha256']} for output in outputs]}
+    saved = http.post(BASE + '/material-approvals/batch', json=approval)
+    assert saved.status_code == 200, saved.text
+    job_id = saved.json()['continuation']['job_id']
+    assert wait(scene, http.get(f'/api/runs/{RUN}/jobs/{job_id}'))['status'] == 'succeeded'
+    assert calls == [RUN] and not videos.calls
+    assert '第 1 段原片至少 3 秒' in prompts[0]
+    assert 'Small deep olive green bag' in prompts[0]
+    assert http.post(BASE + '/material-approvals/batch/continue', json={
+        'request_id': 'partial-video-prepare', 'images': approval['images'][:2]}).status_code == 409
+    assert [shot['video_draft_id'] for shot in workspace(scene)['video_sequence']] == [f'clip-{i}' for i in range(1, 6)]
+    repeated = http.post(BASE + '/material-approvals/batch', json=approval)
+    assert repeated.json()['already_saved'] is True and calls == [RUN]
+    clips = [next(d for d in workspace(scene)['drafts'] if d['draft_id'] == f'clip-{i}') for i in range(1, 6)]
+    wrong_order = batch_payload(scene, clips[::-1], 'videos-wrong')
+    assert http.post(BASE + '/batch-generate', json=wrong_order).status_code == 409
+    assert not videos.calls
+    generated = wait(scene, http.post(BASE + '/batch-generate', json=batch_payload(scene, clips, 'videos-five')))
+    assert generated['status'] == 'succeeded' and len(videos.calls) == 5
+    assert [call.image_sha256 for call in videos.calls] == [output['sha256'] for output in outputs]
+    assembled_inputs = []
+    def assemble_fixture(paths, cuts, overlays):
+        assembled_inputs.extend(path.name for path in paths)
+        assert cuts == plan_payload['cuts']
+        assert overlays == plan_payload['overlays']
+        return b'Fixture assembled video bytes only'
+    monkeypatch.setattr('studio.production.assemble_videos', assemble_fixture)
+    state = workspace(scene)
+    selected = [next(d for d in state['drafts'] if d['draft_id'] == f'clip-{i}') for i in range(1, 6)]
+    assembly_clips = [{'draft_id': d['draft_id'], 'draft_sha256': d['draft_sha256'],
+                       'attempt_id': d['attempts'][0]['attempt_id'], **d['attempts'][0]['output']}
+                      for d in selected]
+    for clip in assembly_clips:
+        clip.pop('url')
+    assembly_payload = {'edit_plan_id': plan['request_id'], 'edit_plan_sha256': plan['plan_sha256']}
+    assert http.post(BASE + '/assemble', json={'request_id': 'wrong-order',
+        **assembly_payload, 'clips': assembly_clips[::-1]}).status_code == 409
+    completed = wait(scene, http.post(BASE + '/assemble', json={'request_id': 'assemble-five',
+        **assembly_payload, 'clips': assembly_clips}))
+    assert completed['status'] == 'succeeded'
+    assert assembled_inputs == [clip['name'] for clip in assembly_clips]
+    assembly = workspace(scene)['assemblies'][-1]
+    assert assembly['clips'] == assembly_clips
+    assert assembly['edit_plan_sha256'] == plan['plan_sha256']
+    assert http.get(assembly['output']['url']).content == b'Fixture assembled video bytes only'
+    assert len(videos.calls) == 5
+
+
+def test_local_assembly_normalizes_video_and_missing_audio(tmp_path):
+    ffmpeg, ffprobe = shutil.which('ffmpeg'), shutil.which('ffprobe')
+    if not ffmpeg or not ffprobe:
+        pytest.skip('FFmpeg and FFprobe are not installed')
+    first, second = tmp_path / 'first.mp4', tmp_path / 'second.mp4'
+    commands = [
+        [ffmpeg, '-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=red:s=64x64:r=30:d=0.4',
+         '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.4', '-shortest',
+         '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', str(first)],
+        [ffmpeg, '-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=blue:s=96x64:r=24:d=0.4',
+         '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(second)],
+    ]
+    for command in commands:
+        result = subprocess.run(command, capture_output=True, timeout=60)
+        assert result.returncode == 0, result.stderr.decode(errors='replace')
+    assembled = assemble_videos([first, second])
+    output = tmp_path / 'full.mp4'
+    output.write_bytes(assembled)
+    probe = subprocess.run([ffprobe, '-v', 'error', '-show_streams', '-of', 'json', str(output)],
+                           capture_output=True, timeout=60)
+    assert probe.returncode == 0
+    streams = json.loads(probe.stdout)['streams']
+    assert {'video', 'audio'} <= {stream['codec_type'] for stream in streams}
+    video = next(stream for stream in streams if stream['codec_type'] == 'video')
+    assert (video['width'], video['height']) == (720, 1280)
+
+
+def test_local_assembly_uses_explicit_picture_audio_cuts_and_overlay(tmp_path):
+    ffmpeg, ffprobe = shutil.which('ffmpeg'), shutil.which('ffprobe')
+    if not ffmpeg or not ffprobe:
+        pytest.skip('FFmpeg and FFprobe are not installed')
+    first, second = tmp_path / 'first.mp4', tmp_path / 'second.mp4'
+    for color, frequency, path in [('red', 440, first), ('blue', 660, second)]:
+        result = subprocess.run([ffmpeg, '-v', 'error', '-y', '-f', 'lavfi', '-i',
+            f'color=c={color}:s=64x64:r=30:d=0.8', '-f', 'lavfi', '-i',
+            f'sine=frequency={frequency}:duration=0.8', '-shortest',
+            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', str(path)],
+            capture_output=True, timeout=60)
+        assert result.returncode == 0, result.stderr.decode(errors='replace')
+    cuts = [{'clip_index': 1, 'start_seconds': 0, 'audio_clip_index': 1,
+             'audio_start_seconds': 0, 'duration_seconds': .2},
+            {'clip_index': 2, 'start_seconds': 0, 'audio_clip_index': 1,
+             'audio_start_seconds': .2, 'duration_seconds': .2},
+            {'clip_index': 1, 'start_seconds': .4, 'audio_clip_index': 1,
+             'audio_start_seconds': .4, 'duration_seconds': .2}]
+    output = tmp_path / 'edited.mp4'
+    output.write_bytes(assemble_videos([first, second], cuts,
+        [{'text': 'one bag.', 'start_seconds': 0, 'duration_seconds': .4}]))
+    probe = subprocess.run([ffprobe, '-v', 'error', '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1', str(output)], capture_output=True, timeout=60)
+    assert probe.returncode == 0
+    assert .55 <= float(probe.stdout.strip()) <= .8
 
 
 def test_unknown_first_image_blocks_the_remaining_batch_until_user_accepts_uncertainty(scene, monkeypatch):

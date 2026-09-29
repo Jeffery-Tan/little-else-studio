@@ -35,7 +35,7 @@ def route(intent="edit"):
     return tool_turn("route-" + intent, "prepare_creative_context", {"intent": intent, "format": "video"})
 
 
-@pytest.mark.parametrize("intent", ["status", "pause", "feedback"])
+@pytest.mark.parametrize("intent", ["status", "pause"])
 def test_readonly_scope_cannot_escalate_but_next_user_turn_can_resume(env, intent):
     store, pipeline, settings, ledger = env
     model = ScriptedModel([route(intent), route(),
@@ -51,6 +51,25 @@ def test_readonly_scope_cannot_escalate_but_next_user_turn_can_resume(env, inten
     assert not second.failed_tools
     assert store.read_artifact_text(RUN, "intake", 1) == "resumed"
     assert len({e["turn_id"] for e in store.read_events(RUN) if e["kind"] == "agent_turn_scope_started"}) == 2
+
+
+def test_a_feedback_scope_can_widen_when_the_message_is_actually_a_correction(env):
+    """F6: one wrong intent choice must not lock the turn out of the user's request.
+
+    ``status`` and ``pause`` stay locked above because they say the user does not
+    want work done right now. ``feedback`` is different: a correction the user
+    sent while a task was running arrives as feedback about the running work, and
+    the whole point is that it gets handled. The lock belongs on the user's
+    actual intent, not on an enumeration the model filled in once.
+    """
+    store, pipeline, settings, ledger = env
+    model = ScriptedModel([route("feedback"), route("edit"),
+        tool_turn("write", "write_stage", {"stage": "intake", "content": "handled", "summary": "s"}),
+        final_turn("Handled")])
+    main = Orchestrator(store, pipeline, settings, model, ledger, RUN)
+    result = main.send("第二镜不要太像广告，改得自然一点，其他先不动")
+    assert not result.failed_tools
+    assert store.read_artifact_text(RUN, "intake", 1) == "handled"
 
 
 def test_even_same_orchestrator_cannot_inherit_previous_production_scope(env):

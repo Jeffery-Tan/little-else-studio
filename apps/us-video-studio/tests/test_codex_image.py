@@ -43,7 +43,8 @@ class Session:
         return {}
 
     def policy_metadata(self):
-        return {"mcp_enabled": {}, "features": {**dict.fromkeys(transport.DISABLED_FEATURES, False), "image_generation": True},
+        return {"mcp_enabled": {}, "features": {**dict.fromkeys(transport.DISABLED_FEATURES, False),
+                                                 "image_generation": True, "code_mode_host": True},
                 "skip_host_skill_discovery": True, "web_search": "disabled", "sandbox_mode": "read-only",
                 "approval_policy": "never", "model_provider": "openai", "forced_login_method": "chatgpt",
                 "project_doc_max_bytes": 0, "developer_instructions_empty": True, "agents_disabled": True}
@@ -109,6 +110,8 @@ def test_reference_input_is_inline_and_other_tools_disabled(client, tmp_path):
     client.generate(adapter.ImageRequest("Edit this reference", tmp_path / "out", (reference,), tmp_path))
     session = Session.instances[0]
     assert session.config["features.image_generation"] is True
+    assert session.config["features.code_mode_host"] is True
+    assert session.config["features.code_mode"] is False
     assert session.config["features.shell_tool"] is False
     assert session.config["features.view_image"] is False
     thread = next(params for method, params in session.sent if method == "thread/start")
@@ -152,6 +155,7 @@ def test_second_image_call_unknown_preserves_first_output(client, tmp_path):
     result = client.generate(adapter.ImageRequest("image", tmp_path / "out"))
     assert result.status == "unknown"
     assert result.observed_image_calls == 2
+    assert result.failure_code == 'protocol_or_payload'
     assert len(result.images) == 1
     assert result.images[0].path.exists()
     assert sum(method == "turn/start" for method, _ in Session.instances[0].sent) == 1
@@ -171,14 +175,29 @@ def test_invalid_result_or_other_native_tool_leaves_usage_unknown(client, tmp_pa
     Session.events = [event("item/completed", item=item)]
     result = client.generate(adapter.ImageRequest("image", tmp_path / "out"))
     assert result.status == "unknown"
+    assert result.failure_code in {'protocol_or_payload', 'payload_decode'}
     assert not result.images
     assert result.usage.input_tokens is None
+
+
+def test_code_mode_wrapper_is_allowed_but_other_wrappers_are_rejected(client, tmp_path):
+    Session.events = [event("item/completed", item={"id": "wrapper", "type": "functionCallOutput",
+                                                    "namespace": "functions", "name": "exec", "output": "done"}),
+                      *complete()]
+    result = client.generate(adapter.ImageRequest("image", tmp_path / "out"))
+    assert result.status == "completed" and result.observed_image_calls == 1
+
+    Session.events = [event("item/completed", item={"id": "other", "type": "functionCallOutput",
+                                                    "namespace": "functions", "name": "unknown", "output": ""})]
+    result = client.generate(adapter.ImageRequest("image", tmp_path / "another"))
+    assert result.status == "unknown" and result.failure_code == "protocol_or_payload"
 
 
 def test_disconnect_after_image_preserves_valid_file(client, tmp_path):
     Session.events = [event("item/completed", item=image())]
     result = client.generate(adapter.ImageRequest("image", tmp_path / "out"))
     assert result.status == "unknown"
+    assert result.failure_code == 'transport_or_timeout'
     assert len(result.images) == 1
     assert result.usage_status == "unknown"
 
@@ -228,7 +247,7 @@ def test_capability_is_local_only_and_does_not_overclaim(monkeypatch, tmp_path):
     class ProbeSession(Session):
         def request(self, method, params):
             assert method == "modelProvider/capabilities/read"
-            return {"imageGeneration": True}
+            return {"imageGeneration": True, "namespaceTools": True}
 
     monkeypatch.setattr(transport, "CodexClient", Probe)
     monkeypatch.setattr(adapter, "_verify_image_schema", lambda *args: None)
@@ -254,6 +273,17 @@ def test_image_policy_does_not_accept_shell_tool_enabled():
         adapter._verify_image_policy(metadata)
 
 
+def test_image_policy_requires_only_code_mode_host_exception():
+    metadata = Session("", Path("."), {}, 1).policy_metadata()
+    metadata["features"]["code_mode_host"] = False
+    with pytest.raises(transport.CodexUnavailable):
+        adapter._verify_image_policy(metadata)
+    metadata["features"]["code_mode_host"] = True
+    metadata["features"]["code_mode"] = True
+    with pytest.raises(transport.CodexUnavailable):
+        adapter._verify_image_policy(metadata)
+
+
 def test_cancel_after_invocation_returns_unknown_and_closes(client, tmp_path):
     from studio.agents.client import JobCancelled
     checks = []
@@ -266,6 +296,7 @@ def test_cancel_after_invocation_returns_unknown_and_closes(client, tmp_path):
     client.check_cancel = check
     result = client.generate(adapter.ImageRequest("image", tmp_path / "out"))
     assert result.status == "unknown" and result.usage_status == "unknown"
+    assert result.failure_code == 'cancelled'
     assert Session.instances[0].closed
 
 

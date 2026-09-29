@@ -92,6 +92,91 @@ def test_midflight_message_pauses_an_atomic_job_then_reaches_producer(tmp_path):
         assert '不自动重复媒体提交' in successor['text']
 
 
+def test_a_progress_question_while_generating_is_answered_without_stopping_work(tmp_path):
+    """F6: the question must not kill the generation it is asking about."""
+    with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: pytest.fail('no model call'))) as http:
+        make_run(http)
+        jobs = http.app.state.jobs
+        entered, release = threading.Event(), threading.Event()
+        def atomic(_run_id):
+            def run(_text, _emit, check_cancel):
+                entered.set()
+                assert release.wait(2)
+                check_cancel()
+                return SimpleNamespace(stopped_because='done', text='本次制作状态已保存', rounds=1, used_tools=[])
+            return run, {'source': 'synthetic-atomic'}
+        original = jobs.submit(RUN, '按顺序生成整组媒体', 'gen-1',
+                               kind='production_batch_generation', prepare=atomic)
+        assert entered.wait(2)
+        url = f'/api/runs/{RUN}/jobs/{original["job_id"]}/steer'
+        asked = http.post(url, json={'text': '现在进度怎么样？', 'request_id': 'ask-1',
+                                     'expected_goal_revision': 0})
+        assert asked.status_code == 200, asked.text
+        body = asked.json()
+        # Still working: no local wait was torn down for a read-only question.
+        assert body['status'] == 'running'
+        assert body['steer_status'] == 'received'
+        assert body['steer_class'] == 'status'
+        release.set()
+        finished = wait_job(http, original['job_id'])
+        # A question starts nothing: no successor, and no cancelled turn.
+        assert finished['status'] == 'succeeded'
+        assert finished.get('successor_job_id') is None
+        assert http.get(f'/api/runs/{RUN}/jobs/latest').json()['job_id'] == original['job_id']
+        assert '现在进度怎么样？' in finished['steer_latest_text']
+
+
+def test_an_explicit_stop_while_generating_is_not_recycled_into_new_work(tmp_path):
+    """F6: a stop is a stop; it must not become an automatic new request."""
+    with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: pytest.fail('no model call'))) as http:
+        make_run(http)
+        jobs = http.app.state.jobs
+        entered, release = threading.Event(), threading.Event()
+        def atomic(_run_id):
+            def run(_text, _emit, check_cancel):
+                entered.set()
+                assert release.wait(2)
+                check_cancel()
+                return SimpleNamespace(stopped_because='done', text='未使用', rounds=1, used_tools=[])
+            return run, {'source': 'synthetic-atomic'}
+        jobs.prepare = lambda _run_id: (
+            lambda _text, _emit, _check: SimpleNamespace(
+                stopped_because='done', text='不应被调用', rounds=1, used_tools=[]),
+            {'source': 'synthetic-producer'})
+        original = jobs.submit(RUN, '按顺序生成整组媒体', 'gen-2',
+                               kind='production_batch_generation', prepare=atomic)
+        assert entered.wait(2)
+        url = f'/api/runs/{RUN}/jobs/{original["job_id"]}/steer'
+        stopped = http.post(url, json={'text': '停', 'request_id': 'stop-1',
+                                       'expected_goal_revision': 0})
+        assert stopped.status_code == 200, stopped.text
+        assert stopped.json()['steer_class'] == 'stop'
+        release.set()
+        finished = wait_job(http, original['job_id'])
+        assert finished['status'] == 'cancelled'
+        assert finished.get('successor_job_id') is None
+
+
+def test_a_status_question_left_by_a_restart_never_starts_work_on_resume(tmp_path):
+    """Even after a restart, a question is not turned into work."""
+    settings = settings_for(tmp_path)
+    store = Store(tmp_path)
+    store.create_run(RUN, '测试', '测试')
+    store.append_event(RUN, 'job_created', job_id='old-job', request_id='original',
+                       text='先做方向', model_config={}, context_refs={}, job_kind='conversation')
+    store.append_event(RUN, 'job_status', job_id='old-job', status='running')
+    store.append_event(RUN, 'job_steer_received', job_id='old-job', request_id='ask',
+                       text='现在进度怎么样？', expected_goal_revision=0, goal_revision=1,
+                       steer_class='status')
+    with TestClient(build_app(settings, client_factory=lambda: pytest.fail('no model call'))) as http:
+        old = http.get(f'/api/runs/{RUN}/jobs/old-job').json()
+        assert old['steer_class'] == 'status'
+        # A question is already answered, not a correction waiting for a click.
+        assert old['steer_status'] == 'answered'
+        resumed = http.post(f'/api/runs/{RUN}/jobs/old-job/resume-steer', json={})
+        assert resumed.status_code == 409
+
+
 def test_inline_script_feedback_rejects_changed_version_before_model_call(tmp_path):
     model = ScriptedModel([final_turn('收到。')])
     with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: model)) as http:
@@ -261,7 +346,7 @@ def test_request_receipt_reads_exact_job_and_steer_identity_without_writing(tmp_
         store = Store(tmp_path)
         store.append_event(RUN, 'job_steer_received', job_id=first['job_id'],
                            request_id='steer-first', text='修改这轮目标',
-                           expected_goal_revision=0, goal_revision=1)
+                           expected_goal_revision=0, goal_revision=1, steer_class='work')
         before = len(store.read_events(RUN))
         base = f'/api/runs/{RUN}/request-receipts/'
         accepted = http.get(base + 'first').json()
@@ -499,7 +584,8 @@ def test_restart_keeps_steer_receipt_without_replaying_model(tmp_path, before, a
                        text='先做方向', model_config={}, context_refs={}, job_kind='conversation')
     store.append_event(RUN, 'job_status', job_id='old-job', status=before)
     store.append_event(RUN, 'job_steer_received', job_id='old-job', request_id='adjust',
-                       text='改成分析', expected_goal_revision=0, goal_revision=1)
+                       text='改成分析', expected_goal_revision=0, goal_revision=1,
+                       steer_class='work')
     with TestClient(build_app(settings, client_factory=lambda: pytest.fail('no replay model'))) as http:
         job = http.get(f'/api/runs/{RUN}/jobs/old-job').json()
         assert job['status'] == after
@@ -520,7 +606,8 @@ def test_restart_resumes_saved_steer_only_after_explicit_action(tmp_path, before
                        text='先做方向', model_config={}, context_refs={}, job_kind='conversation')
     store.append_event(RUN, 'job_status', job_id='old-job', status=before)
     store.append_event(RUN, 'job_steer_received', job_id='old-job', request_id='adjust',
-                       text='改成分析', expected_goal_revision=0, goal_revision=1)
+                       text='改成分析', expected_goal_revision=0, goal_revision=1,
+                       steer_class='work')
     model = ScriptedModel([final_turn('按新目标完成')])
     with TestClient(build_app(settings, client_factory=lambda: model)) as http:
         old = http.get(f'/api/runs/{RUN}/jobs/old-job').json()

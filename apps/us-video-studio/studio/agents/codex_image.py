@@ -62,6 +62,7 @@ class ImageResult:
     # Text tokens do not establish the native image provider's usage.
     usage_status: str = "unknown"
     message: str = ""
+    failure_code: str = ""
     model: str = ""
     thread_id: str = ""
     turn_id: str = ""
@@ -144,7 +145,14 @@ def _inputs(request: ImageRequest):
 def _verify_image_policy(metadata):
     if metadata.get("features", {}).get("image_generation") is not True:
         raise transport.CodexUnavailable("Codex image generation is not enabled for this isolated session")
-    checked = {**metadata, "features": {**metadata["features"], "image_generation": False}}
+    # The current Codex image-capable models use code_mode_only. Without its
+    # host, Codex silently removes image_gen from the model-visible tool list.
+    # Keep this exception local to image turns; every other native capability
+    # remains subject to the shared restricted policy.
+    if metadata["features"].get("code_mode_host") is not True:
+        raise transport.CodexUnavailable("Codex code-mode host is not enabled for this image session")
+    checked = {**metadata, "features": {**metadata["features"],
+                                         "image_generation": False, "code_mode_host": False}}
     transport._verify_policy(checked)
 
 
@@ -184,11 +192,13 @@ class CodexImageClient:
             _verify_image_schema(client.command, Path(directory))
             config = transport._overrides(client._mcp_names or ())
             config["features.image_generation"] = True
+            config["features.code_mode_host"] = True
             session = _ImageSession(client.command, Path(directory), config, min(self.timeout, 30))
             try:
                 session.initialize()
                 _verify_image_policy(session.policy_metadata())
-                supported = session.request("modelProvider/capabilities/read", {}).get("imageGeneration") is True
+                provider = session.request("modelProvider/capabilities/read", {})
+                supported = provider.get("imageGeneration") is True and provider.get("namespaceTools") is True
             finally:
                 session.close()
         self.command, self._mcp_names = client.command, client._mcp_names
@@ -196,7 +206,7 @@ class CodexImageClient:
                             "verified": False, "model_invoked": False, "single_image_limit_enforced": False,
                             "image_usage_available": False,
                             "reason": ("Local native-image protocol is available; real generation has not been verified"
-                                       if supported else "The selected Codex provider does not advertise native image generation")}
+                                       if supported else "The selected Codex provider lacks native image or namespaced tool support")}
         return dict(self._capability)
 
     def generate(self, request: ImageRequest) -> ImageResult:
@@ -218,6 +228,7 @@ class CodexImageClient:
             raise transport.CodexUnavailable("Image request or local reference could not be validated") from exc
         config = transport._overrides(self._mcp_names or ())
         config["features.image_generation"] = True
+        config["features.code_mode_host"] = True
         result = ImageResult(status="unknown")
         images, seen, completed = [], set(), set()
         invoked = False
@@ -301,6 +312,11 @@ class CodexImageClient:
                                 with destination.open("xb") as handle:
                                     handle.write(data)
                                 images.append(GeneratedImage(destination, hashlib.sha256(data).hexdigest(), mime, width, height))
+                        elif item.get("type") == "functionCallOutput":
+                            if (item.get("namespace"), item.get("name")) not in {
+                                ("functions", "exec"), ("functions", "wait")
+                            }:
+                                raise ValueError("Unexpected code-mode tool")
                         elif item.get("type") not in {"userMessage", "agentMessage", "reasoning"}:
                             raise ValueError("Unexpected native tool")
                     elif method == "turn/completed":
@@ -308,9 +324,13 @@ class CodexImageClient:
                         result.status = "completed" if ok else "failed"
                         result.message = "Image saved; image usage requires verification" if ok else "No complete image result; usage requires verification"
                         break
-            except (ModelError, OSError, ValueError, binascii.Error, JobCancelled):
+            except (ModelError, OSError, ValueError, binascii.Error, JobCancelled) as exc:
                 if not invoked:
                     raise transport.CodexUnavailable("Codex image setup failed; no model request sent") from None
+                result.failure_code = ('cancelled' if isinstance(exc, JobCancelled) else
+                    'transport_or_timeout' if isinstance(exc, ModelError) else
+                    'local_io' if isinstance(exc, OSError) else
+                    'payload_decode' if isinstance(exc, binascii.Error) else 'protocol_or_payload')
                 result.status, result.message = "unknown", "Image task interrupted or returned an unsupported result; verify usage before continuing"
             finally:
                 session.close()

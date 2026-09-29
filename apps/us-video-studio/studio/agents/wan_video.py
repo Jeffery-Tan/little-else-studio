@@ -25,7 +25,7 @@ from PIL import Image, UnidentifiedImageError
 MODEL = 'wan3.0-video'
 API_REFERENCE = 'https://help.aliyun.com/zh/model-studio/wan3-video-generation-api-reference'
 PRICE_REFERENCE = 'https://help.aliyun.com/zh/model-studio/wan3-0-video'
-PRICE_CHECKED_AT = '2026-09-19'
+PRICE_CHECKED_AT = '2026-09-29'
 RATES_CNY = {'480P': Decimal('0.3'), '720P': Decimal('0.6'), '1080P': Decimal('1.2')}
 RATIOS = {'adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'}
 STATUSES = {'PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELED', 'UNKNOWN'}

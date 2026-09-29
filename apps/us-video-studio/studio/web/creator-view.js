@@ -137,8 +137,11 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
       return result(work.label, null, tab, null, work.detail);
     if (work.phase === 'failed' || work.phase === 'blocked' || work.phase === 'stale')
       return nav('说明这次问题', tab,
-        work.resultIsPrevious ? `上一份已生成${work.kind === 'video' ? '视频' : '图片'}仍可查看；${work.label}`
-          : work.label || '本次制作需要处理后继续');
+        // The actual reason, not only the label. Dropping it here was how a
+        // failed generation reached the project view as "未完成" with no cause.
+        work.resultIsPrevious
+          ? `上一份已生成${work.kind === 'video' ? '视频' : '图片'}仍可查看；${work.detail || work.label}`
+          : work.detail || work.label || '本次制作需要处理后继续');
     if (work.phase === 'prepare') return result(
       work.kind === 'image' ? '脚本已确认，下一步准备画面' : '参考图已确认，下一步准备视频',
       {kind:'prepare',label:work.kind === 'image' ? '准备画面输入' : '准备这张图的视频输入',tab}, tab);

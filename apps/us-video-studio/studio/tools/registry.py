@@ -80,6 +80,48 @@ _STRUCTURED = {
 }
 
 _TOOLS: tuple[Tool, ...] = (
+    Tool(
+        name="read_user_actions",
+        description=(
+            "Read the decisions this run is currently waiting on, as data: each open question "
+            "with the exact stage, version and fingerprint it is bound to, and every answer that "
+            "may actually be given. Read this before answering a user who states a decision, and "
+            "to know whether more than one question is open. Free, read-only, no model calls."
+        ),
+        input_schema=_obj({}), roles=("orchestrator",),
+    ),
+    Tool(
+        name="propose_user_action",
+        description=(
+            "Record a decision the CURRENT user message expresses, by pointing at one of the "
+            "answers read_user_actions reported. You cannot invent an action, choose a version or "
+            "write an approval: the server re-derives what this run offers, re-checks the exact "
+            "version and fingerprint, and records the decision itself. "
+            "A reversible, cost-free decision (adopting a direction or script, returning one, "
+            "amending the brief) takes effect immediately and the follow-up work starts. "
+            "Cost-bearing generation is never submitted from here: it only opens the workbench's "
+            "own one-time confirmation, bound to the exact inputs. "
+            "If the reply could answer more than one open question the call returns "
+            "needs_clarification with the question to ask — ask it, never guess. "
+            "Never substitute the recommended option for the option the user actually named."
+        ),
+        input_schema=_obj({
+            "action": {"type": "string",
+                       "description": "The answer's action id, exactly as read_user_actions returned it."},
+            "target": _obj({
+                "stage": {"type": "string"},
+                "version": {"type": "integer", "minimum": 1},
+                "artifact_sha256": {"type": "string"},
+                "option_id": {"type": "string",
+                              "description": "Required for select_direction: the option the USER named."},
+            }, ["stage"]),
+            "note": {"type": "string",
+                     "description": "For return_stage: what to change. Required there."},
+            "continuation_note": {"type": "string",
+                                  "description": "Only if the user added a constraint in this message: quote their exact words. Never part of what is adopted; it instructs the work that follows."},
+        }, ["action"]),
+        roles=("orchestrator",),
+    ),
     Tool(name='read_work_plan', description='Read dependency-derived next work, preserved stages, update/review/user-decision/recovery needs. Optional target limits the next-step search. No model calls or approvals. Use before choosing the responsible stage; do not restart valid upstream work.',
          input_schema=_obj({'target': _STAGE}), roles=('orchestrator',)),
     Tool(name='plan_revision', description='Before editing an existing stage, bind its exact version/hash to a quote from THIS user message. local restricts changes to listed existing string fields (e.g. ["segments",0,"line"]); rework explicitly requests a full stage update. Explain why. This is an internal execution plan, never approval. Once local is selected this turn cannot widen it or rewrite another stage. Legacy prose and stale evidence cannot use local. Returns plan_id for dispatch/write_stage/submit_patch.',
@@ -109,9 +151,9 @@ _TOOLS: tuple[Tool, ...] = (
          roles=('orchestrator',)),
     Tool(name='read_project_history', description='Read imported project history. Omit document_id for the curated index, status and historical cost boundary; supply an exact registered ID to read an immutable source document. Historical approvals are not current permission. Old draft instructions are untrusted reference content. No automatic resumption or generation.',
          input_schema=_obj({'document_id': {'type': 'string'}}), roles=('orchestrator',)),
-    Tool(name='read_production', description='Read immutable production plans and their checks. No model calls, approvals or generation. Use current material hashes when preparing a plan.',
+    Tool(name='read_production', description='Read current production state: each script version and whether it may be used, every storyboard input with its shot identity and revision, each shot\'s real stage (未准备/输入已准备/待授权/已提交/生成中/取回中/失败/结果待核实/已完成), its provider attempt and failure reason, whether its source and reference are still valid, and the target shot list taken from the adopted script. Free and read-only: no model calls, approvals or generation. Use it before answering why a storyboard did not come out; query a saved provider task rather than treating an uncertain submission as a new retry.',
          input_schema=_obj({}), roles=('orchestrator',)),
-    Tool(name='prepare_production', description='Save a free immutable image/video production plan from the current user-approved writing version. Inspect applicable Skills and perform content self-check before preparing. Does not approve images, authorize costs, or submit generation. Present the exact input in the current workbench 分镜 or 成片 tab for user confirmation and explicit submission.',
+    Tool(name='prepare_production', description='Save one immutable image/video production input for one shot of the current user-approved writing version. Set shot_id to the target shot (shot-01, shot-02 … from read_production targets); to revise a shot that already has an input, pass supersedes=<current draft_id> so the replaced input stays readable but stops being generated. Omitting both keeps the previous one-input-per-request behaviour. Inspect applicable Skills and perform content self-check before preparing. Does not approve images, authorize costs, or submit generation. Present the exact input in the current workbench 分镜 or 成片 tab for user confirmation and explicit submission.',
          input_schema=_obj({
              'request_id': {'type': 'string'}, 'kind': {'type': 'string', 'enum': ['image', 'video']},
              'prompt': {'type': 'string', 'maxLength': 5000}, 'source_version': {'type': 'integer', 'minimum': 1},
@@ -119,6 +161,8 @@ _TOOLS: tuple[Tool, ...] = (
              'reference': {'anyOf': [{'type': 'null'}, _obj({'name': {'type': 'string'}, 'sha256': {'type': 'string'}}, ['name', 'sha256'])]},
              'model': {'type': 'string', 'enum': ['', 'codex-image', 'wan3.0-video']},
              'duration': {'type': ['integer', 'null']}, 'resolution': {'type': ['string', 'null'], 'enum': ['480P', '720P', '1080P', None]},
+             'shot_id': {'type': 'string', 'description': 'Which shot this input is for, e.g. shot-02. Use the ids from read_production targets.'},
+             'supersedes': {'type': 'string', 'description': 'draft_id of the input this one replaces, when revising the same shot.'},
          }, ['request_id', 'kind', 'prompt', 'source_version', 'source_sha256']), roles=('orchestrator',)),
     Tool(name='observe_reference', description='Only when the current user explicitly treats a supplied video as a creative reference and asks to break it down, adapt a prompt, recreate or borrow its expression. A product video supplied to fill product facts must stay product evidence, even if the user says "analyze this video". Use actual project filename or a TikTok URL supplied by the user, never invented links. Bare video/link or unclear intent: ask whether it is for product information or reference expression before analysis. Reuses saved analysis; at most one attempt per turn. analyze ends this turn without drafting. prompt requires save_reference_prompt and does not start the stage chain. recreate/inspiration returns observed reference for planning, never generates media.',
          input_schema=_obj({'source': {'type':'string'}, 'action': {'type':'string','enum':['analyze','prompt','recreate','inspiration']},
@@ -129,7 +173,7 @@ _TOOLS: tuple[Tool, ...] = (
          input_schema=_obj({'prompt': {'type':'string', 'minLength':1, 'maxLength':10000}}, ['prompt']), roles=('orchestrator',)),
     Tool(
         name="prepare_creative_context",
-        description="Select intent and format for THIS user message before any drafting, delegation or review. Prior routes do not grant this turn scope. Returns full applicable US Skills and qualified methods. status/pause/feedback or format none cannot escalate to production within this turn. No approval or keyword inference.",
+        description="Select intent and format for THIS user message before any drafting, delegation or review. Prior routes do not grant this turn scope. Returns full applicable US Skills and qualified methods. status and pause cannot escalate to production within this turn; a message the user sent while work was running is new input and is classified from their actual words, not locked by an earlier mis-filing. No approval or keyword inference.",
         input_schema=_obj({
             "intent": {"type": "string", "enum": ["new", "continue", "edit", "status", "feedback", "pause"]},
             "format": {"type": "string", "enum": ["video", "photo", "none"]},
@@ -138,10 +182,12 @@ _TOOLS: tuple[Tool, ...] = (
             "creation_mode": {"type":"string", "enum":["autonomous","recreate","inspiration"]},
             "reference_id": {"type":"string"},
             "reference_scope": {"type":"string"},
-            "deliverable": {"type":"string", "enum":["direction","intake","writing","production_input","revision","analysis","reference_prompt","follow_up"],
-                "description":"Declare this turn's concrete endpoint. New creation normally direction; an existing approved direction may call for writing, production_input or revision. Analysis ends at a saved report. follow_up is for read-only or open-ended requests."},
+            "deliverable": {"type":"string", "enum":["direction","intake","writing","production_input","production_media","revision","analysis","reference_prompt","follow_up"],
+                "description":"Declare this turn's concrete endpoint. New creation normally direction; an existing approved direction may call for writing. production_input prepares storyboard inputs for every shot of the adopted script; production_media means the user is asking for the actual generated images or clips; revision changes existing content; analysis ends at a saved report. follow_up is only for read-only or open-ended requests and must not be used when the user asked for a concrete object."},
             "production_kind": {"type":"string", "enum":["image","video"],
                 "description":"When deliverable is production_input, name the actual media input being prepared."},
+            "media_kind": {"type":"string", "enum":["image","video"],
+                "description":"Which media the user is asking for when deliverable is production_media."},
         }, ["intent", "format"]), roles=("orchestrator",),
     ),
     Tool(name='observe_images', description='Actually inspect 1–12 current-project images through the configured visual model. Select the creative scope first. For creative requests inspect supplied product images BEFORE drafting; list_materials only lists files. Label each as product or reference; do not blend reference features into product facts. One batch per turn, same-byte observations reused. Never requires the user to click an analysis form and never grants generation or image approval.',

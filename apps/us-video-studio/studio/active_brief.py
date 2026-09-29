@@ -1171,8 +1171,32 @@ def _chosen_option(structured: dict[str, Any]) -> str:
     return ""
 
 
+def single_clause_id(value: Any, known) -> str:
+    """One clause id out of whatever the author put in the field.
+
+    ``amend_clause`` is meant to name the one clause a revision replaces, but an
+    author that changes two clauses at once tends to write both — ``"must.a,dec.b"``
+    — and an id that is really a list resolves to nothing: the card cannot find
+    the clause's current text, so its approve button stays disabled and the user
+    is left with a decision they cannot make. Observed 2026-09-29 on
+    direction-v4, where all three options were blocked by exactly this.
+
+    Picking one is not a guess about what the other ids meant: the first id that
+    is actually in the brief is the clause this revision can replace. Anything
+    else is dropped, and the proposal's own text still states the full intent.
+    """
+    if isinstance(value, (list, tuple)):
+        candidates = [str(part).strip() for part in value]
+    else:
+        candidates = [part.strip() for part in str(value or "").replace(";", ",").split(",")]
+    for candidate in candidates:
+        if candidate and candidate in known:
+            return candidate
+    return ""
+
+
 def option_amend_proposal(structured: dict[str, Any] | None,
-                          key: str) -> dict[str, str]:
+                          key: str, known=None) -> dict[str, str]:
     """The amendment *an option actually proposes*, or empty fields.
 
     A proposal is a change the author wrote down — ``amend_proposal`` naming how
@@ -1181,14 +1205,21 @@ def option_amend_proposal(structured: dict[str, Any] | None,
     an identifier; neither is a replacement body. Conflating them is what let a
     diagnostic sentence be offered to the user as the new product goal (F4), so
     this function returns nothing rather than a fallback.
+
+    ``known`` is the brief's clause index. When given, the clause id is reduced
+    to the single clause this revision can actually replace (see
+    ``single_clause_id``); without it the raw field is returned, which keeps the
+    function usable where no brief is at hand.
     """
     for row in (structured or {}).get("options") or []:
         if not isinstance(row, dict):
             continue
         if str(row.get("key") or "").upper() != str(key or "").upper():
             continue
+        raw = row.get("amend_clause") or ""
         return {
-            "clause_id": str(row.get("amend_clause") or "").strip(),
+            "clause_id": (single_clause_id(raw, known) if known is not None
+                          else str(raw).strip()),
             "text": str(row.get("amend_proposal") or "").strip(),
         }
     return {"clause_id": "", "text": ""}

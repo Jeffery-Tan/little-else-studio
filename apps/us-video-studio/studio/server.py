@@ -238,21 +238,14 @@ def build_app(
     codex_auth = CodexAuth(jobs)
     jobs.before_submit = codex_auth.require_idle
 
-    def continuation_request_id(approval):
-        return f'decision:{approval.nonce_sha256}'
-
-    def continuation_text(approval):
-        if approval.decision == 'returned':
-            return f'请按我的补充意见调整当前方案：{approval.note}。完成内部检查后让我看方案。'
-        if approval.stage == 'direction':
-            return (f'我已在界面选择方向 {approval.selected_option_id}。{approval.note} '
-                    '请继续完成素材安排和完整方案，完成内部审核后展示给我确认。')
-        return (f'我已在界面确认完整方案。{approval.note} '
-                '请准备对应的分镜参考图制作方案，在工作区展示实际输入供我确认。'
-                '先不提交图片或视频生成。')
+    # One identity and one text for a decision's follow-up work, shared by the
+    # browser's click and a decision the user stated in conversation. Two copies
+    # is how the two channels would start behaving differently for one decision.
+    from .decision import continuation_request_id, continuation_text
 
     def continuation_job(run_id, approval):
-        return jobs.submit(run_id, continuation_text(approval), continuation_request_id(approval))
+        return jobs.submit(run_id, continuation_text(approval),
+                           continuation_request_id(approval))
 
     # ---- brief amendment → team redo (F5) --------------------------------- #
     #
@@ -317,7 +310,22 @@ def build_app(
         return {'amendment_id': newest.get('id'),
                 'message': '简报修订已保存，团队重做还没有启动。请检查连接后点击继续。'}
 
-    def pending_continuation(run_id):
+    def pending_continuation(run_id, *, job_busy=None):
+        # A running job is itself the evidence that the next step started. Without
+        # this the card reappeared for a moment after the user clicked it: the
+        # check below only asked whether the continuation job had ever been
+        # *created*, and between the approval being written and the job row
+        # landing, "not created yet" was still true. The user saw a card flash
+        # under the cursor for a step that was already under way.
+        #
+        # ``job_busy`` is passed in by callers that already hold this run's lock,
+        # because asking the job manager here would invert the lock order and
+        # deadlock against the worker (`jobs._work` holds `jobs.lock` and then
+        # takes the run lock). Callers without the lock may let it default.
+        if job_busy is None:
+            job_busy = jobs.busy(run_id)
+        if job_busy:
+            return None
         rows = store.read_events(run_id)
         created = {row.get('request_id') for row in rows if row.get('kind') == 'job_created'}
         for approval in reversed(store.list_approvals(run_id)):

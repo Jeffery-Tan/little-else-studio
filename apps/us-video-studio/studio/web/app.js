@@ -1521,11 +1521,10 @@ function wireGate(host) {
         status.textContent = "这一版没有可批准的修订正文；请退回让团队写出要改成什么。";
         return;
       }
-      if (reason.value.trim()) {
-        status.textContent = "修改意见尚未进入简报。请点“按意见修改，先出新版”；批准只采用上方展示的修订正文。";
-        reason.focus();
-        return;
-      }
+      // Approving adopts exactly the revision body shown above; the note box is
+      // not part of it. Text left there therefore must not refuse the approval —
+      // it would be the same locked door as on the ordinary gate. What the note
+      // can still do is *propose* a different change: the revise button sends it.
       state.decisionBusy = true;
       gate.dataset.saving = "1";
       for (const control of gateControls(gate)) control.disabled = true;
@@ -1651,10 +1650,12 @@ function wireGate(host) {
     if (decision === "returned" && !revision) {
       status.textContent = "请写明需要调整的地方。"; reason.focus(); return;
     }
-    if (decision === "approved" && revision && gate.dataset.pendingKind !== 'brief_amendment') {
-      status.textContent = "修改意见尚未处理。请点“按意见修改，先出新版”；采用当前版前请清空修改意见。";
-      reason.focus(); return;
-    }
+    // Adopting does not carry the note at all (see `note` below), so text left in
+    // the box must not stand in the way of adopting. It used to refuse with
+    // "采用当前版前请清空修改意见", which turned a note the user was still writing
+    // into a locked door. The safety property is unchanged — a note is never
+    // silently approved as a change request — because adoption ignores it
+    // entirely rather than pretending to act on it.
     if (decision === "approved" && (optionRadios().length || gate.dataset.needsChoice === '1') && !draft.option) {
       status.textContent = "请先选择一个方向；推荐不代表已选。"; return;
     }
@@ -1912,6 +1913,11 @@ async function send(text, requestKind = null, clarificationId = null) {
     &&typeof productionBatchCommand==='function'?productionBatchCommand(text,{
       generate:StudioProduction.batchGenerationDrafts(state.productionData,state.runId).length,
       approve:StudioProduction.batchApprovalImages(state.productionData,state.runId).length,
+      video_prepare:(()=>{const shots=StudioProduction.videoSequenceState(state.productionData,state.runId);
+        return shots.length>1&&shots.every(shot=>shot.approved)&&shots.some(shot=>!shot.draft)?1:0;})(),
+      video_generate:StudioProduction.videoBatchGenerationDrafts(state.productionData,state.runId).length,
+      assemble:state.productionData.edit_plan&&StudioProduction.assemblyClips(state.productionData,state.runId).length&&
+        !StudioProduction.currentAssembly(state.productionData,state.runId)?1:0,
     }):null;
   if(batchKind&&typeof openProductionBatch==='function')
     return openProductionBatch(batchKind)?{accepted:true}:{accepted:false,reason:'整组画面暂不能执行。'};
@@ -2100,10 +2106,14 @@ function pendingSubmission(runId) {
 
 function updatesComposerVersion() { state.composerVersion = (state.composerVersion || 0) + 1; }
 
+// One button, two meanings, decided by `syncComposerAction` — never by the
+// click itself. Reading the mode here is what keeps a press from doing the
+// opposite of the word printed on the button.
 $("send").onclick = () => {
+  if ($("send").dataset.mode === 'stop') { void stopCurrentJob(); return; }
   void submit();
 };
-if ($("job-stop")) $("job-stop").onclick = () => { void stopCurrentJob(); };
+if ($("job-stop")) $("job-stop").onclick = () => { void submit(); };
 $("chat-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();

@@ -752,18 +752,31 @@ class Pipeline:
         expected_artifact_sha256: str | None = None,
         expected_version: int | None = None,
         continue_after: bool = False,
+        source: str = "ui",
+        continuation_note: str = "",
     ) -> Approval:
-        """Record a user decision. Only the server calls this, only after a click.
+        """Record a user decision. Every input channel ends up here.
 
-        Historical independent reviews are read-only evidence. A current,
-        intact version needs Jeffery's decision, not a review verdict. Returning
-        a version still requires a concrete note; approval does not.
+        The server calls this for a browser click and for a decision the user
+        stated in conversation. What makes it a *user* decision is the binding,
+        not the channel: the version and fingerprint must be the ones the user
+        was shown, and a click additionally has to carry a nonce the browser was
+        given. No agent can mint either.
+
+        ``note`` records what is wrong with the version being judged, so an
+        approval cannot carry one. ``continuation_note`` is different: it
+        instructs the work that *follows* the decision and never touches the
+        adopted artifact, so "adopt B, and next time make the opening less like
+        an ad" is expressible without editing what was adopted.
         """
         spec = STAGE_SPEC[stage]
         if not spec.gated:
             raise PipelineError("approval", f"{stage} is not a gated stage")
         if decision not in ("approved", "returned"):
             raise PipelineError("approval", f"unknown decision: {decision!r}")
+        if source not in ("ui", "conversation"):
+            raise PipelineError("approval", f"unknown decision source: {source!r}")
+        final_continuation = continuation_note.strip()[:2000]
         # A lost HTTP response can be retried without creating a second vote.
         # The same nonce must never mean a different decision or option.
         prior = next((a for a in self.store.list_approvals(run_id, stage)
@@ -776,6 +789,7 @@ class Pipeline:
                     and prior.note == final_note
                     and prior.selected_option_id == selected_option_id
                     and prior.continue_after == continue_after
+                    and prior.continuation_note == final_continuation
                     and (expected_artifact_sha256 is None or prior.artifact_sha256 == expected_artifact_sha256)
                     and (expected_version is None or prior.artifact_version == expected_version)):
                 return prior
@@ -786,6 +800,14 @@ class Pipeline:
                 "approval",
                 "approving the current version cannot include requested changes; "
                 "return it with those changes, review the new version, then approve",
+            )
+        if final_continuation and decision != "approved":
+            # An instruction for the next round only makes sense when the round
+            # was adopted. A return already carries its changes in ``note``.
+            raise PipelineError(
+                "approval",
+                "only an approval can carry an instruction for the next round; "
+                "a return states what to change in its note",
             )
 
         state = self.stage_state(run_id, stage)
@@ -880,6 +902,8 @@ class Pipeline:
             artifact_version=state.latest.version,
             selected_option_id=selected_option_id,
             continue_after=continue_after,
+            source=source,
+            continuation_note=final_continuation,
         )
         self.store.append_approval(run_id, approval)
         self.store.append_event(
@@ -889,5 +913,7 @@ class Pipeline:
             artifact=f"{stage}-v{state.latest.version}",
             decision=recorded,
             selected_option_id=selected_option_id,
+            source=source,
+            has_continuation_note=bool(final_continuation),
         )
         return approval

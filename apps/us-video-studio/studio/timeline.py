@@ -95,14 +95,15 @@ def build_timeline(
         "run": state.get("run"),
         "interaction": interaction,
         "progress": progress,
-        "brief": project_brief(state, job, chat, direction_action=direction_action),
+        "brief": project_brief(state, job, chat, direction_action=direction_action,
+                               store=store, run_id=run_id),
         "next_action": direction_action,
         "turns": turns,
         "rail": v.build_rail(state["stages"], state.get("next_stage"), chat),
         # The standing list of what the run is waiting on him for. Separate from
         # the cards, which are a record of what happened; this is the only part
         # of the page that is a request.
-        "questions": v.build_questions(state["stages"], chat),
+        "questions": v.build_questions(state["stages"], chat, store=store, run_id=run_id),
         # How drafted answers are joined into the one message they are sent as.
         # Carried, not hard-coded in the screen, for the same reason every other
         # sentence is: see `vocabulary.ANSWERS_HEADER`.
@@ -461,7 +462,7 @@ def _pending_action(state: dict[str, Any], ledger: Any,
                 next((b for b in blockers if b.get("kind") == "needs_amendment"), None),
             )
             amend_key = str((amend_blocker or {}).get("key") or "")
-            proposal = option_amend_proposal(structured, amend_key)
+            proposal = option_amend_proposal(structured, amend_key, index)
             clause_id = proposal["clause_id"]
             current_text = str(index.get(clause_id, {}).get("text") or "").strip()
             new_text = proposal["text"].strip()

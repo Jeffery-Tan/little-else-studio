@@ -91,7 +91,8 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
             from .direction_command import available as direction_command
             job['brief'] = project_brief(pipeline.state(job['run_id']).to_dict(),
                 latest_execution(store, job['run_id']), store.read_chat(job['run_id']),
-                direction_action=direction_command(store, pipeline, job['run_id']))
+                direction_action=direction_command(store, pipeline, job['run_id']),
+                store=store, run_id=job['run_id'])
         return job
 
     @app.post('/api/runs/{run_id}/actions/review')

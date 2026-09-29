@@ -554,7 +554,14 @@ def test_orchestrator_state_view_prioritizes_project_not_accounting(env, tmp_pat
 
     system = model.calls[0]["system"]
     assert "0.0020" not in system
-    assert "不能批准" in system
+    # F5: the old wording was "你不能批准任何东西" — true, but it read as "a
+    # conversation can never produce a user decision", which is the confusion
+    # that left the producer asking the user to go click a button. What has to
+    # hold now is narrower and still absolute: the agent cannot decide *for* the
+    # user, and cannot authorise spending.
+    assert "不能替用户做决定" in system
+    assert "propose_user_action" in system
+    assert "收费生成不由你提交" in system
     assert "当前项目摘要" in system
 
 

@@ -298,18 +298,18 @@ class Dispatcher:
             self._close_attempt(attempt, f"派工失败：{type(exc).__name__}")
             if exc.status == 0 and 'usage unconfirmed' in exc.message:
                 raise NonRetryableStageError(
-                    '受托角色的模型连接超时或中断，本阶段新版未保存；本次调用用量无法确认，'
+                    '负责这一步的团队模型连接超时或中断，本阶段新版未保存；本次调用用量无法确认，'
                     '本轮已停止自动重试以避免重复计费。请检查连接后从当前阶段继续。') from None
             if exc.status == 200 and exc.message.startswith('output truncated at max_tokens'):
                 raise NonRetryableStageError(
-                    '受托角色的模型输出达到单次上限，结果不完整，未保存为新版；'
+                    '负责这一步的团队模型输出达到单次上限，结果不完整，未保存为新版；'
                     '本轮已停止自动重试以避免重复计费，请从当前阶段继续。') from None
             if exc.status == 200 and exc.message.startswith('invalid'):
                 # The provider was invoked, and usage may already be owed.
                 # The orchestrator cannot repair malformed wire structure by
                 # asking the same role again in the same turn.
                 raise NonRetryableStageError(
-                    '角色模型返回了无法读取的结果，本轮已停止自动重试；'
+                    '团队模型返回的结果读不出来，本轮已停止自动重试；'
                     '已保存调用记录，请检查连接后从当前阶段继续。') from None
             outcome.error = str(exc)
             return outcome

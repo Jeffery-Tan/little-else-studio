@@ -39,11 +39,11 @@ function jobGuidance(job) {
   if (/Codex CLI is not installed or not on PATH/i.test(reason)) return "服务没有找到 Codex CLI。请确认本机已安装 Codex，重启工作台服务后再发送消息；已保存的内容不受影响。";
   if (/连接准备未通过|ConnectionUnavailable|CodexUnavailable/i.test(reason)) return "模型连接尚未准备好。请检查制作团队中的对应服务设置，再发送继续指令。";
   if (/模型连接超时或中断/.test(reason))
-    return "受托角色的模型连接超时或中断，新版未保存；本次用量无法确认，系统已停止自动重试。请检查连接后从当前阶段继续。";
+    return "负责这一步的团队模型连接超时或中断，新版未保存；本次用量无法确认，系统已停止自动重试。请检查连接后从当前阶段继续。";
   if (/模型输出达到单次上限/.test(reason))
-    return "受托角色的模型输出达到单次上限，新版没有保存；系统已停止自动重试以避免重复计费。请从当前阶段重新发起。";
-  if (/角色模型返回了无法读取的结果/.test(reason))
-    return "受托角色的模型回复格式不完整，新版没有保存；系统已停止自动重试以避免重复计费。请从当前阶段重新发起。";
+    return "负责这一步的团队模型输出达到单次上限，新版没有保存；系统已停止自动重试以避免重复计费。请从当前阶段重新发起。";
+  if (/团队模型返回的结果读不出来|角色模型返回了无法读取的结果/.test(reason))
+    return "团队模型的回复格式不完整，新版没有保存；系统已停止自动重试以避免重复计费。请从当前阶段重新发起。";
   if (job.job_kind === 'reference_video' && /视频文件获取失败（HTTP 403）/.test(reason))
     return "TikTok 页面已读取，但视频文件地址返回 HTTP 403。可重试原链接或上传原视频继续；不会自动重试或调用声画模型。";
   if (job.job_kind === 'reference_video' && /reference_fetch|无法连接TikTok|视频下载中断/i.test(reason))
@@ -165,16 +165,44 @@ function syncComposerAction(job = currentJob) {
   const button = $('send');
   const stop = $('job-stop');
   const stopping = active && job.status === 'cancelling' && job.steer_status !== 'received';
-  button.setAttribute?.('data-mode', canInsert ? 'insert' : 'send');
-  button.textContent = canInsert ? '插入调整 ↑' : '发送 ↑';
-  button.setAttribute?.('aria-label', canInsert ? '插入当前任务的调整' : '发送消息');
+  const blocked = Boolean(unresolved) || cancelPosting || steerPosting || state.decisionBusy
+    || state.recoveryBlocked;
+  // While a job holds the run, 停止 *is* the primary action and it stays the
+  // primary action until the job ends — whatever is in the composer, and whether
+  // or not this kind of job accepts a mid-flight adjustment. It used to swap its
+  // identity with 发送/插入调整 depending on those two things, so the main button
+  // changed meaning under the user's hands: "agent starts working, so send should
+  // become stop; but as soon as I type, stop becomes send again."
+  //
+  // The composer's own action therefore moves to the secondary button, which
+  // keeps one position and one meaning per state instead of one button that
+  // alternates. `data-mode` drives the click handler, so the two never disagree
+  // about what a press does.
+  if (active) {
+    button.setAttribute?.('data-mode', 'stop');
+    button.textContent = stopping ? '正在停止…' : '停止';
+    button.setAttribute?.('aria-label', '停止本轮');
+    button.disabled = blocked || stopping;
+  } else {
+    button.setAttribute?.('data-mode', 'send');
+    button.textContent = '发送 ↑';
+    button.setAttribute?.('aria-label', '发送消息');
+    button.disabled = blocked || state.busy;
+  }
   const hint = $('composer-key-hint');
   if (hint) hint.textContent = active
     ? '中途补充会先保存，当前调用结束后由主制片处理 · Shift + Enter 换行'
     : 'Enter 发送 · Shift + Enter 换行';
-  button.disabled = Boolean(unresolved) || cancelPosting || steerPosting || state.decisionBusy
-    || state.recoveryBlocked || (active && !canInsert) || (!active && state.busy);
-  if(stop){stop.hidden=!active;stop.disabled=Boolean(unresolved)||cancelPosting||steerPosting||stopping;}
+  if (stop) {
+    // The secondary slot carries the composer action while the job runs: an
+    // adjustment if this job can take one, otherwise plain sending (which the
+    // server records rather than refusing, per F6).
+    stop.hidden = !active;
+    stop.disabled = blocked;
+    stop.textContent = canInsert ? '插入调整 ↑' : '发送 ↑';
+    stop.setAttribute?.('aria-label', canInsert ? '插入当前任务的调整' : '发送消息');
+    stop.setAttribute?.('data-mode', canInsert ? 'insert' : 'send');
+  }
 }
 async function stopCurrentJob() {
   const job = currentJob;

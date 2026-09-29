@@ -18,6 +18,16 @@ test('unavailable generation capability leads to settings, while another active 
  assert.equal(active.phase,'blocked');assert.equal(active.primaryAction,'none');
 });
 test('network retry retains identical consent request and nonce',()=>{const p=ui.actionRequest('generate',draft,'old-nonce','same-request');assert.deepEqual(ui.actionRequest('generate',draft,'new-nonce','new-request',JSON.parse(JSON.stringify(p))),p);assert.equal(p.body.expected_sha256,hash);assert.equal(p.body.consent,true);assert.throws(()=>ui.actionRequest('review',draft,'n','r',p));assert.throws(()=>ui.actionRequest('generate',{...draft,draft_id:'other'},'n','r',p));});
+test('image confirmation names the selected controller model and pins its settings revision',()=>{
+ const image={...draft,kind:'image',model:'codex-image',estimate:{amount:null,currency:null},prompt:'Exact frame'};
+ const shown={...data,capabilities:{...data.capabilities,image:{available:true,controller_model:'gpt-6-sol',connection_revision:3}}};
+ assert.match(ui.confirmationHtml(image,shown,'demo'),/Codex Image \/ gpt-6-sol/);
+ const request=ui.actionRequest('generate',image,'nonce','one',null,3);
+ assert.equal(request.body.expected_connection_revision,3);
+ const intent={kind:'generate',connection_revision:3,drafts:[{draft_id:image.draft_id,expected_sha256:hash}]};
+ assert.match(ui.batchConfirmationHtml(intent,{...shown,drafts:[image]},'demo'),/Codex Image \/ gpt-6-sol/);
+ assert.equal(ui.batchConfirmationHtml(intent,{...shown,capabilities:{...shown.capabilities,image:{...shown.capabilities.image,connection_revision:4}},drafts:[image]},'demo'),'');
+});
 test('media only renders same project material endpoints',()=>{assert.equal(ui.mediaUrl('/api/runs/demo/materials/a%20b.png','demo'),'/api/runs/demo/materials/a%20b.png');for(const url of ['https://evil.test/a.png','//evil.test/a.png','javascript:alert(1)','/api/runs/other/materials/a.png','/api/runs/demo/materials/../x','/api/runs/demo/materials/%2e%2e','/api/runs/demo/materials/a%2fb.png','/api/runs/demo/materials/a.png?x=1'])assert.equal(ui.mediaUrl(url,'demo'),'');});
 test('canvas shows the current media without approval, generation or version controls',()=>{
  const movie={name:'movie.mp4',sha256:hash,kind:'video',url:'/api/runs/demo/materials/movie.mp4'};
@@ -31,8 +41,8 @@ test('storyboard shows every saved image input and labels uploaded photos as ref
  const imageTwo={...draft,kind:'image',draft_id:'evening',prompt:'Evening street shot',attempts:[]};
  const shown={...data,capabilities:{...data.capabilities,image:{available:true}},drafts:[imageOne,imageTwo]};
  const html=ui.canvasHtml(shown,'image','demo',[]);
- assert.match(html,/首帧方案（2）/);
- assert.match(html,/首帧 01/);assert.match(html,/首帧 02/);
+ assert.match(html,/分镜首帧（2）/);
+ assert.match(html,/镜头 01/);assert.match(html,/镜头 02/);
  assert.match(html,/Morning &lt;street&gt; shot/);assert.match(html,/Evening street shot/);
  assert.equal((html.match(/<details class="production-shot"/g)||[]).length,2);
  assert.doesNotMatch(html,/<details class="production-shot"[^>]+open/);
@@ -50,6 +60,17 @@ test('one batch review pins every eligible shot and shows exact images before ap
  const confirm=ui.batchConfirmationHtml({kind:'generate',drafts:[
   {draft_id:'first',expected_sha256:hash},{draft_id:'second',expected_sha256:hash}]},shown,'demo');
  assert.match(confirm,/一次生成整组首帧/);assert.match(confirm,/估算合计 CNY 4.00/);
+ // Scenario E: the one-time confirmation names what it is bound to, so a later
+ // edit to any shot invalidates it visibly rather than silently.
+ assert.match(confirm,/来源：脚本第 2 版/);
+ assert.match(confirm,/输入：当前 2 面准确分镜/);
+ assert.match(confirm,/模型：Codex Image/);
+ assert.match(confirm,/费用：估算 CNY 4\.00/);
+ const unknownCost=ui.batchConfirmationHtml({kind:'generate',drafts:[
+  {draft_id:'first',expected_sha256:hash},{draft_id:'second',expected_sha256:hash}]},
+  {...shown,drafts:[{...image,estimate:{amount:null,currency:null,notice:'费用未知'}},second]},'demo');
+ assert.match(unknownCost,/费用：未知/);
+ assert.doesNotMatch(unknownCost,/CNY 0\.00/);
  assert.match(confirm,/First &lt;frame&gt;/);assert.match(confirm,/确认并生成 2 张/);
  assert.equal(ui.batchConfirmationHtml({kind:'generate',drafts:[{draft_id:'first',expected_sha256:'0'.repeat(64)}]},shown,'demo'),'');
  const output={name:'generated.png',sha256:hash,url:'/api/runs/demo/materials/generated.png',approved:false};
@@ -61,6 +82,47 @@ test('one batch review pins every eligible shot and shows exact images before ap
  assert.match(approve,/src="\/api\/runs\/demo\/materials\/generated.png"/);
  assert.match(approve,/确认这 1 张图片/);
 });
+test('five video shots keep their approved references, costs, stop state and assembly order',()=>{
+ const references=Array.from({length:5},(_,index)=>({name:`frame-${index+1}.png`,sha256:hash,
+  kind:'image',approved:true,url:`/api/runs/demo/materials/frame-${index+1}.png`}));
+ const clips=Array.from({length:5},(_,index)=>({...draft,draft_id:`clip-${index+1}`,
+  reference:{name:references[index].name,sha256:hash},prompt:`Scene ${index+1} <bag>`,
+  duration:3,estimate:{amount:1.8,currency:'CNY',notice:'原价估算'},attempts:[]}));
+ const sequence=clips.map((clip,index)=>({index:index+1,image_draft_id:`frame-${index+1}`,
+  reference:{name:references[index].name,sha256:hash},approved:true,
+  video_draft_id:clip.draft_id,video_draft_sha256:clip.draft_sha256}));
+ const shown={...data,materials:[...data.materials,...references],drafts:clips,video_sequence:sequence};
+ assert.deepEqual(ui.videoBatchGenerationDrafts(shown,'demo').map(item=>item.draft_id),clips.map(item=>item.draft_id));
+ const confirm=ui.batchConfirmationHtml({kind:'video_generate',drafts:clips.map(item=>({draft_id:item.draft_id,expected_sha256:item.draft_sha256}))},shown,'demo');
+ assert.match(confirm,/一次生成整组视频段/);assert.match(confirm,/CNY 9.00/);
+ assert.match(confirm,/Scene 1 &lt;bag&gt;/);assert.match(confirm,/确认并生成 5 段/);
+ const unknown={...clips[0],attempts:[{attempt_id:'uncertain',status:'unknown'}]};
+ assert.deepEqual(ui.videoBatchGenerationDrafts({...shown,drafts:[unknown,...clips.slice(1)]},'demo'),[]);
+ const outputs=clips.map((clip,index)=>({name:`clip-${index+1}.mp4`,sha256:hash,kind:'video',
+  url:`/api/runs/demo/materials/clip-${index+1}.mp4`}));
+ const completed=clips.map((clip,index)=>({...clip,attempts:[{attempt_id:`attempt-${index+1}`,
+  status:'succeeded',output:outputs[index]}]}));
+ const edit_plan={request_id:'script-plan',plan_sha256:hash,duration_seconds:15,
+  cuts:clips.map((_,index)=>({clip_index:index+1,audio_clip_index:index+1,start_seconds:0,
+   audio_start_seconds:0,duration_seconds:3})),overlays:[{text:'one bag.',start_seconds:0,duration_seconds:2}]};
+ const ready={...shown,drafts:completed,materials:[...shown.materials,...outputs],edit_plan};
+ const assemblyClips=ui.assemblyClips(ready,'demo');
+ assert.equal(assemblyClips.length,5);assert.deepEqual(assemblyClips.map(item=>item.name),outputs.map(item=>item.name));
+ const assemblyConfirm=ui.batchConfirmationHtml({kind:'assemble',clips:assemblyClips,
+  edit_plan_id:edit_plan.request_id,edit_plan_sha256:edit_plan.plan_sha256},ready,'demo');
+ assert.match(assemblyConfirm,/5 个切点/);assert.match(assemblyConfirm,/one bag\./);
+ assert.equal(ui.batchConfirmationHtml({kind:'assemble',clips:assemblyClips,
+  edit_plan_id:edit_plan.request_id,edit_plan_sha256:'0'.repeat(64)},ready,'demo'),'');
+ const assembled={name:'full.mp4',sha256:hash,kind:'video',url:'/api/runs/demo/materials/full.mp4'};
+ const final={...ready,materials:[...ready.materials,assembled],assemblies:[{clips:assemblyClips,
+  edit_plan_sha256:edit_plan.plan_sha256,output:assembled}]};
+ assert.equal(ui.currentAssembly(final,'demo').output.name,'full.mp4');
+ const html=ui.canvasHtml(final,'video','demo',[]);
+ assert.match(html,/下载成片/);assert.match(html,/当前脚本的成片剪辑计划/);
+ assert.match(html,/15 秒 · 5 个画面切点/);
+ assert.equal((html.match(/<details class="production-shot"/g)||[]).length,5);
+ assert.doesNotMatch(html,/<bag>|data-generate/);
+});
 test('a generated image never appears as another storyboard frame',()=>{
  const picture={name:'generated.png',sha256:hash,kind:'image',url:'/api/runs/demo/materials/generated.png',approved:false};
  const done={...draft,kind:'image',draft_id:'done',attempts:[{attempt_id:'one',status:'succeeded',output:picture}]};
@@ -71,7 +133,45 @@ test('a generated image never appears as another storyboard frame',()=>{
  assert.doesNotMatch(ui.draftHtml(pending,shown,'demo'),/generated\.png/);
  const html=ui.canvasHtml(shown,'image','demo',[]);
  assert.equal((html.match(/generated\.png/g)||[]).length,1);
- assert.match(html,/首帧 02[\s\S]*<small>待生成<\/small>/);
+ assert.match(html,/镜头 02[\s\S]*<small>本次制作还不能提交<\/small>/);
+});
+test('a failed shot shows its own reason and its real stage in place',()=>{
+ const picture={name:'generated.png',sha256:hash,kind:'image',url:'/api/runs/demo/materials/generated.png',approved:false};
+ const failed={...draft,kind:'image',draft_id:'shot-two',prompt:'Second frame',
+  attempts:[{attempt_id:'try-2',status:'failed',message:'Provider rejected this frame description.'}]};
+ const shots={kind:'image',total:2,complete_list:true,ready:false,delivered:false,failed:true,pending:false,
+  unready_shots:[],shots:[
+   {ordinal:1,shot_id:'shot-01',label:'Bag on the table',draft_id:'shot-one',revision:1,source_ready:true,
+    stage:'completed',stage_label:'已完成',blocker:null,next_action:'review_result',reason:'',
+    attempt_status:'succeeded',output:{name:'generated.png',sha256:hash}},
+   {ordinal:2,shot_id:'shot-02',label:'Zip opens',draft_id:'shot-two',revision:1,source_ready:true,
+    stage:'failed',stage_label:'失败',blocker:'generation_failed',next_action:'diagnose_attempt',
+    reason:'Provider rejected this frame description.',attempt_status:'failed',attempt_id:'try-2'}]};
+ const shown={...data,capabilities:{...data.capabilities,image:{available:true}},
+  materials:[...data.materials,picture],drafts:[failed],shots:{image:shots}};
+ const html=ui.canvasHtml(shown,'image','demo',[]);
+ assert.match(html,/Provider rejected this frame description\./);
+ assert.match(html,/<small>失败<\/small>/);
+ assert.match(html,/production-shot-cause/);
+ assert.match(html,/镜头 01[\s\S]*这面镜头还没有制作输入/);
+});
+test('a revised shot replaces its input instead of adding a shot',()=>{
+ const old={...draft,kind:'image',draft_id:'prompt-v1',prompt:'Old framing',shot_id:'shot-01',
+  is_current:false,superseded_by:'prompt-v2',attempts:[]};
+ const fresh={...draft,kind:'image',draft_id:'prompt-v2',prompt:'Natural framing',shot_id:'shot-01',
+  is_current:true,supersedes:'prompt-v1',attempts:[]};
+ const shots={kind:'image',total:1,complete_list:true,ready:true,delivered:false,failed:false,pending:false,
+  unready_shots:[],shots:[{ordinal:1,shot_id:'shot-01',label:'Natural framing',draft_id:'prompt-v2',
+   revision:2,source_ready:true,stage:'input_ready',stage_label:'输入已准备',blocker:null,
+   next_action:'authorise_generation',reason:'',attempt:null}]};
+ const shown={...data,capabilities:{...data.capabilities,image:{available:true}},
+  drafts:[old,fresh],shots:{image:shots}};
+ const html=ui.canvasHtml(shown,'image','demo',[]);
+ assert.equal((html.match(/data-draft-id=/g)||[]).length,1,'the replaced input is not a second shot');
+ assert.doesNotMatch(html,/<span>Old framing<\/span>/);
+ assert.match(html,/已被替换的历史输入 · 1/);
+ assert.match(html,/Old framing/);
+ assert.deepEqual(ui.batchGenerationDrafts(shown,'demo').map(row=>row.draft_id),['prompt-v2']);
 });
 test('video canvas keeps reference material separate from a generated video',()=>{
  const html=ui.canvasHtml({...data,drafts:[draft]},'video','demo',[]);

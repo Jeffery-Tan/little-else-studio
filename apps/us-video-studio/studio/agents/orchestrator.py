@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import re
+import time
 import uuid
 from typing import Any, Callable
 
@@ -41,6 +42,11 @@ from .roles import ORCHESTRATOR, OWNER, creative_selection, production_allowed
 #: How many past chat turns to carry into a request. The state read supplies
 #: everything else, so this only needs to cover the current conversation.
 CHAT_WINDOW = 20
+
+#: How long the same undelivered item may stand before the completion reminder
+#: stops repeating itself. Short enough not to spin, long enough that a genuine
+#: in-flight provider task is not mistaken for a stalled turn.
+STALL_SECONDS = 20.0
 
 
 @dataclass
@@ -90,6 +96,11 @@ class Orchestrator:
         self._images_used = False
         self._deliverable = None
         self._production_kind = None
+        self._media_kind = None
+        #: Guards the completion reminder against nagging forever about a
+        #: deliverable that cannot move this turn. See ``_stalled``.
+        self._deliverable_progress: tuple[str, float | None] = ('', None)
+        self._deliverable_stalls = 0
         self._analysis_completed = False
         self._reference_used = False
         self._reference_prompt = None
@@ -152,6 +163,9 @@ class Orchestrator:
         self._images_used = False
         self._deliverable = None
         self._production_kind = None
+        self._media_kind = None
+        self._deliverable_progress = ('', None)
+        self._deliverable_stalls = 0
         self._analysis_completed = False
         self._scope_selected = False
         self._revision_scope = None
@@ -408,9 +422,13 @@ class Orchestrator:
             return None
         if self._ready_direction_command():
             return None
+        if self._stalled(delivery):
+            return None
         missing = '、'.join(delivery['missing'])
         if self._deliverable == 'reference_prompt':
             return f'本轮只交付参考适配提示词，仍缺：{missing}。请核对当前商品事实和参考观察后调用 save_reference_prompt；不要派工或生成媒体。'
+        if self._deliverable in ('production_input', 'production_media'):
+            return self._production_reminder(delivery, missing)
         heading = '本轮约定交付具体创意方向，尚未完成。' if self._deliverable == 'direction' else '本轮约定的交付尚未完成。'
         return (
             f'{heading}仍缺：{missing}。'
@@ -419,6 +437,60 @@ class Orchestrator:
             '只有真正影响结果、且只有用户能提供的事实或选择，才 ask_user。'
             '不要自行批准或生成媒体。'
         )
+
+    def _production_reminder(self, delivery, missing):
+        """What to say about a half-delivered storyboard.
+
+        The target is a set of shots, not one draft. Two facts have to be in the
+        reminder and nowhere else: a shot that is already generating must not be
+        submitted again, and a shot that failed needs its reason read, not a
+        fresh submission. Both are how a controller pays twice for one image.
+        """
+        note = f'（{delivery["note"]}）' if delivery.get('note') else ''
+        if self._deliverable == 'production_input':
+            return (
+                f'本轮要在已采用脚本上准备整套分镜输入，尚缺：{missing}。{note}'
+                '目标镜头由脚本段落决定，不由你指定数量；'
+                '给每一面还没有输入的镜头保存一份绑定当前脚本版本与指纹的制作输入，'
+                '同一面镜头的修改必须用 supersedes 指向它替换的那一份，不要新增一路镜头。'
+                '全部镜头齐备后再交用户核对；不要提交生成，也不要替用户批准图片。'
+            )
+        return (
+            f'本轮约定的整套生成结果尚未齐备，尚缺：{missing}。{note}'
+            '先用 read_production 读取每一面镜头的真实阶段：'
+            '仍在等待或取回中的镜头只查询原任务，绝不重新提交；'
+            '失败或结果待核实的镜头先说明实际原因与可执行下一步；'
+            '只有用户尚未授权的镜头才需要请用户在制作界面核对参考、范围与费用。'
+            '不要用一面镜头的结果冒充整套分镜完成。'
+        )
+
+    def _stalled(self, delivery):
+        """Stop asking for a deliverable that is not moving.
+
+        A completion reminder is right when the model simply has not finished.
+        It is wrong when the deliverable cannot be produced at all this turn —
+        image generation happens in the browser behind the user's click, so a
+        controller nagged after the last shot is missing will eventually retry a
+        submission instead of reporting. Two checks of the same missing set with
+        no progress between them means the turn has said everything it can, and
+        the real blocker belongs in the job status where the user reads it.
+        """
+        key = delivery.get('repeat_key') or ''
+        now = time.monotonic()
+        previous, previous_at = self._deliverable_progress
+        if previous == key and previous_at is not None and now - previous_at >= STALL_SECONDS:
+            if self._deliverable_stalls == 0:
+                with self.store.run_lock(self.run_id):
+                    self.store.append_event(
+                        self.run_id, 'agent_deliverable_stalled', deliverable=self._deliverable,
+                        missing=list(delivery.get('missing') or []),
+                        note='同一缺项重复出现且没有进展；已停止继续催促，交由用户读取原因。')
+            self._deliverable_stalls += 1
+            return True
+        if previous != key:
+            self._deliverable_stalls = 0
+        self._deliverable_progress = (key, now)
+        return False
 
     def _ready_direction_command(self):
         if (self._deliverable != 'direction' or self._revision_scope is not None
@@ -440,6 +512,7 @@ class Orchestrator:
                                     revision_scope=self._revision_scope,
                                     analysis_completed=self._analysis_completed,
                                     production_kind=self._production_kind,
+                                    media_kind=self._media_kind,
                                     turn_id=self._turn_id)
 
     def _build_messages(self) -> list[dict[str, Any]]:
@@ -521,9 +594,16 @@ class Orchestrator:
             "# 你能做什么",
             "",
             "读状态和产物、自己写 intake、把阶段派给角色 Agent。",
-            "用户提出创作需求时，prepare_creative_context显式设置deliverable=direction：本轮先理解意图、调用observe_images实际检查商品图片，再保存需求、内部dispatch导演形成创意方向并自检，最终直接呈现开场识别点、推进概念、方案差异和推荐理由，交由用户决定。方向待选时不提前写完整台词、字幕或逐镜头脚本。不要以‘下一步建议派导演’结束，也不要在交付未完成且无需用户决策时停下写总结。仅用户明确只要需求整理时选intake；后续制作或只读任务选follow_up。",
+            "用户提出创作需求时，prepare_creative_context显式设置deliverable=direction：本轮先理解意图、调用observe_images实际检查商品图片，再保存需求、内部dispatch导演形成创意方向并自检，最终直接呈现开场识别点、推进概念、方案差异和推荐理由，交由用户决定。方向待选时不提前写完整台词、字幕或逐镜头脚本。不要以‘下一步建议派导演’结束，也不要在交付未完成且无需用户决策时停下写总结。deliverable要按用户这次实际要的东西填：只要需求整理选intake，要完整方案选writing，要在已采用脚本上准备整套分镜输入选production_input，要的是实际生成出来的整套图片或视频段选production_media，改已有内容选revision，只要参考分析选analysis。follow_up只用于只读或开放式讨论，并且只表示‘本轮没有具体交付物’——用户说了要做什么具体东西时不要选它。选错deliverable不会降低用户的要求：程序仍按你声明的目标检查这一轮是否真的交付了。",
             "有图片不能只读list_materials就宣称无观察能力。主语言模型不支持图片时，observe_images仍可通过现有百炼视觉能力看到像素并返回带来源的观察。图片可见特征可用于构思，不须先让用户逐条确认；尺寸/性能/实测效果保持未知。不把看图、分工或方法选择发回用户。状态/暂停/反馈不启动观察。",
-            "**你不能批准任何东西**，也没有这个工具。采用或退回，由 Jeffery 在界面上亲自确认。",
+            "**你不能替用户做决定，也没有自授权的工具。** 但用户在对话里说出的决定就是决定："
+            "他说「采用 B」「这个脚本可以，继续」「第二镜重做」，你用 read_user_actions 看现在真正在等什么，"
+            "再用 propose_user_action 指认他表达的那一件事，由服务端核验版本与指纹后记录，后续工作随即开始。"
+            "不要让他去别的页面再点一次，也不要说「请到创作板确认」。"
+            "同一时刻有多件事等他决定而他只说「行」时，propose_user_action 会要求澄清：照它给的问题问一句，不要猜。"
+            "收费生成不由你提交：你只能把准确的这一次生成准备成一张确认卡，等他点确认。"
+            "他在这条消息里另外加了要求（例如「开头别那么像广告」）时，把原话逐字放进 continuation_note；"
+            "那句话会成为下一轮的指示，不改变他刚采用的那一版。不要改写他的话，也不要把自己想到的要求写成他的。",
             "对用户说话用他的语言：说目标、方向卡、采用与退回；不要用「门禁」、条款编号（如 goal.primary/must.xxx）、"
             "blocker 状态码（如 unmapped）或「准入/冲突」这类内部词，也不要把英文状态码念给他听。",
             "",
@@ -562,6 +642,57 @@ class Orchestrator:
                                                   self.run_id, args), ensure_ascii=False)
         if name == 'read_work_plan':
             return json.dumps(work_plan(self.pipeline, self.run_id, **args), ensure_ascii=False)
+        if name == 'read_user_actions':
+            from ..decision import actions, candidates, prepare_generation_candidate
+            decisions = candidates(self.store, self.pipeline, self.run_id)
+            payload = {'decisions': decisions, 'actions': actions(decisions),
+                       'notice': ('这些是本项目现在真正在等你决定的事。用户表达了其中一个，就用 '
+                                  'propose_user_action 指认它；多于一个问题时不要猜，问一句。'
+                                  '用户要的是实际生成时，那属于收费执行：这里只把它准备成'
+                                  '一次确认，不提交生成。')}
+            for kind in ('image', 'video'):
+                ready = prepare_generation_candidate(self.store, self.pipeline, self.run_id, kind)
+                if ready:
+                    payload.setdefault('preparable_execution', []).append(ready)
+            return json.dumps(payload, ensure_ascii=False)
+        if name == 'propose_user_action':
+            from ..decision import DecisionError, candidates, commit, reject_event, resolve
+            decisions = candidates(self.store, self.pipeline, self.run_id)
+            proposed = {k: v for k, v in args.items() if k != 'continuation_note'}
+            verdict = resolve(decisions, proposed, source='conversation')
+            if verdict['status'] == 'commit':
+                try:
+                    result = commit(self.store, self.pipeline, self.run_id, verdict['action'],
+                                    source='conversation',
+                                    user_message=self._current_user_message,
+                                    note=args.get('continuation_note', ''))
+                except (DecisionError, PipelineError) as exc:
+                    reject_event(self.store, self.run_id, proposed,
+                                 {'reason': getattr(exc, 'code', 'decision')},
+                                 source='conversation')
+                    raise ToolError(
+                        f'这个决定没有记录：{exc}。请核对当前版本后重新确认，不要猜。') from exc
+                return json.dumps({
+                    **result,
+                    'notice': ('决定已按用户原话记录，后续工作已经开始。用用户看得懂的话说明'
+                               '采用了什么、接下来做什么；不要说内部阶段名，也不要让用户'
+                               '再去点一次。'),
+                }, ensure_ascii=False)
+            if verdict['status'] == 'clarify':
+                if verdict.get('reason') not in {'no_action_proposed', 'nothing_open'}:
+                    reject_event(self.store, self.run_id, proposed, verdict, source='conversation')
+                return json.dumps({
+                    'status': 'needs_clarification',
+                    'reason': verdict.get('reason'),
+                    'question': verdict.get('question'),
+                    'notice': '不要替用户猜。用一句话问清是哪一件事，然后等回复。',
+                }, ensure_ascii=False)
+            reject_event(self.store, self.run_id, proposed, verdict, source='conversation')
+            return json.dumps({
+                'status': 'refused', 'reason': verdict.get('reason'),
+                'message': verdict.get('message'),
+                'notice': '如实说明原因，请用户核对当前版本；不要改用另一个动作绕过。',
+            }, ensure_ascii=False)
         if name == 'read_capabilities':
             from ..tools.context import capabilities
             return json.dumps(capabilities(self.settings, 'orchestrator'), ensure_ascii=False)
@@ -581,7 +712,16 @@ class Orchestrator:
             selection = {"intent": args["intent"], "format": args["format"],
                          "tags": args.get("tags", []), "case_ids": args.get("case_ids")}
             if self._scope_selected and not production_allowed(self.selection) and production_allowed(selection):
-                raise ToolError("本轮已明确为只读/反馈/暂停，不能自行升级制作；等待新的用户指令。")
+                # An explicit decision to pause, or a request to only report
+                # state, is not upgraded inside its own turn. A correction the
+                # user sent while work was running is different: it is new input,
+                # and the point of accepting it is that it gets handled — so it
+                # may widen the turn. What must not happen is a message being
+                # permanently locked as read-only because it was filed under the
+                # wrong intent once.
+                if self.selection.get('intent') in ('pause', 'status'):
+                    raise ToolError(
+                        "本轮用户只要求查询状态或暂停，不能自行升级制作；等待新的用户指令。")
             if self._reference_prompt and args.get('deliverable') != 'reference_prompt':
                 raise ToolError('本轮用户只要参考适配提示词；请将 deliverable 设为 reference_prompt。')
             from ..creation_mode import select_for_turn, select, current
@@ -596,12 +736,15 @@ class Orchestrator:
             self.store.append_event(self.run_id, "creative_context_selected", selection=selection,
                                     snapshot_sha256=context["snapshot_sha256"], turn_id=self._turn_id,
                                     deliverable=args.get('deliverable', self._deliverable),
-                                    production_kind=args.get('production_kind', self._production_kind))
+                                    production_kind=args.get('production_kind', self._production_kind),
+                                    media_kind=args.get('media_kind', self._media_kind))
             self.selection, self.method_context = selection, context
             if args.get('deliverable'):
                 self._deliverable = args['deliverable']
                 if 'production_kind' in args:
                     self._production_kind = args['production_kind']
+                if 'media_kind' in args:
+                    self._media_kind = args['media_kind']
             self._scope_selected = True
             self._context_refs.append(context["evidence_ref"])
             self._emit({"type": "learning_context", "role": "orchestrator",
@@ -740,11 +883,9 @@ class Orchestrator:
                 current_user_message=self._current_user_message, actor="agent")
             return json.dumps(proposal_for_agent(proposal), ensure_ascii=False)
         if name == 'read_production':
-            from ..production import draft_records
-            from ..evidence import evidence_snapshot
-            return json.dumps({'drafts': list(draft_records(self.store, self.run_id).values()),
-                               'materials': evidence_snapshot(self.store, self.run_id)['materials'],
-                               'notice': '准备方案免费；生成、图审与费用只能由用户在制作界面确认。'}, ensure_ascii=False)
+            from ..production import agent_production_state
+            return json.dumps(agent_production_state(self.store, self.pipeline, self.run_id),
+                              ensure_ascii=False)
         if name in ("write_stage", "dispatch", "compile_creative_package", "prepare_production", "plan_revision", "submit_patch"):
             if self._deliverable == 'reference_prompt':
                 raise ToolError('本轮只交付参考适配提示词，不能启动完整制片阶段。')
@@ -780,11 +921,14 @@ class Orchestrator:
                 impact = record_applied(self.store, self.pipeline, self.run_id, scope, artifact, changes)
             return json.dumps({'version': artifact.version, 'sha256': artifact.sha256, 'work_plan': impact}, ensure_ascii=False)
         if name == 'prepare_production':
-            from ..production import DraftIn, prepare_draft
+            from ..production import DraftIn, ProductionError, prepare_draft, preparation_failure
             try:
-                return json.dumps(prepare_draft(self.store, self.pipeline, self.run_id, DraftIn(**args), actor='agent'), ensure_ascii=False)
+                return json.dumps(prepare_draft(self.store, self.pipeline, self.run_id,
+                                                DraftIn(**args), actor='agent'), ensure_ascii=False)
+            except ProductionError as exc:
+                raise ToolError(json.dumps(preparation_failure(exc), ensure_ascii=False)) from exc
             except (ValueError, PipelineError) as exc:
-                raise ToolError('制作方案未保存，请核对当前已批准脚本、参考图和参数。') from exc
+                raise ToolError(json.dumps(preparation_failure(exc), ensure_ascii=False)) from exc
         if name == "compile_creative_package":
             from ..creative_packages import CreativePackages
             if args["format"] != self.selection["format"]:
@@ -797,7 +941,8 @@ class Orchestrator:
             # has just spent money on four dispatch rounds needs the current
             # number, not the number from before it started.
             return "# 当前项目摘要\n" + json.dumps(project_brief(
-                self.pipeline.state(self.run_id).to_dict(), latest_execution(self.store, self.run_id), self.store.read_chat(self.run_id)), ensure_ascii=False) + "\n\n" + workspace.render_state()
+                self.pipeline.state(self.run_id).to_dict(), latest_execution(self.store, self.run_id), self.store.read_chat(self.run_id),
+                store=self.store, run_id=self.run_id), ensure_ascii=False) + "\n\n" + workspace.render_state()
         if name == "read_artifact":
             rendered = workspace.render_artifact(args["stage"], args.get("version"))
             artifact = (self.store.read_artifact(self.run_id, args["stage"], args["version"])

@@ -422,9 +422,20 @@ def _verify_schema(command: str, directory: Path):
         raise CodexUnavailable("Codex local protocol schema is unsupported") from exc
 
 
+#: How long one Codex request may take. Measured 2026-09-29 on this machine: a
+#: request whose entire prompt was "reply PONG" took 122 s, because the local CLI
+#: tries its WebSocket transport first, waits for that to time out, and falls back
+#: to HTTPS before the model is even asked. With `reasoning_effort = "xhigh"` and a
+#: real deliverable on top of that 122 s, the previous 180 s left almost no room:
+#: every素材统筹 attempt ended in "Codex request timed out" rather than in an answer.
+#: The budget has to cover the transport fallback *plus* the slowest reasoning the
+#: local config asks for.
+DEFAULT_TIMEOUT_SECONDS = 900.0
+
+
 class CodexClient:
     def __init__(self, *, run_id: str, role: str, data_root: str | Path,
-                 command: str = "codex", timeout: float = 180.0,
+                 command: str = "codex", timeout: float = DEFAULT_TIMEOUT_SECONDS,
                  check_cancel: Callable[[], None] | None = None):
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", run_id) or not re.fullmatch(r"[a-z][a-z_]*", role):
             raise CodexUnavailable("Invalid Studio run or role identity")

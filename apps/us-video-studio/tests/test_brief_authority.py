@@ -693,6 +693,33 @@ def test_option_amend_proposal_never_falls_back_to_a_diagnosis():
     assert ab.option_amend_proposal(None, "A") == {"clause_id": "", "text": ""}
 
 
+def test_an_amend_clause_holding_two_ids_still_yields_one_revisable_clause():
+    """Observed 2026-09-29: all three direction options were unusable.
+
+    An author that wants two clauses changed wrote ``"must.a,dec.b"`` into
+    ``amend_clause``. A revision replaces exactly one clause, so the comma-joined
+    string matched nothing: the card could not show the clause's current text and
+    its approve button stayed disabled — a decision the user could not make.
+    """
+    known = {"must.a": {}, "dec.b": {}}
+    assert ab.single_clause_id("must.a,dec.b", known) == "must.a"
+    assert ab.single_clause_id(" must.a , dec.b ", known) == "must.a"
+    # The first id that is actually in the brief wins; unknown ones are dropped.
+    assert ab.single_clause_id("must.zzz;dec.b", known) == "dec.b"
+    assert ab.single_clause_id(["must.a", "dec.b"], known) == "must.a"
+    assert ab.single_clause_id("must.zzz,dec.yyy", known) == ""
+    assert ab.single_clause_id("", known) == ""
+
+    structured = {"options": [{"key": "A", "amend_clause": "must.900aea05,dec.8d19f7d3",
+                               "amend_proposal": "改写后的要求"}]}
+    with_index = ab.option_amend_proposal(structured, "A", {"must.900aea05": {}})
+    assert with_index == {"clause_id": "must.900aea05", "text": "改写后的要求"}
+    # Without a brief to check against the field is passed through unchanged, so
+    # the function stays usable where no index exists.
+    assert ab.option_amend_proposal(structured, "A")["clause_id"] == \
+        "must.900aea05,dec.8d19f7d3"
+
+
 def test_blocker_detail_is_a_diagnosis_and_proposed_text_is_the_proposal(store):
     """The gate keeps both, and they are different fields."""
     pipe, _ = _gated_direction(

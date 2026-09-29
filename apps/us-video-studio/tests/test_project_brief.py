@@ -263,3 +263,65 @@ def test_project_list_keeps_original_brief_for_creation_recovery(tmp_path):
         assert row['brief'] == original
         assert row['project_brief']['phase'] == 'awaiting_decision'
         assert row['progress']['title'] == row['project_brief']['title']
+
+
+def product_question(text, **over):
+    return {'question': text, 'blocks': 'Whole-film colour', 'owner': 'user',
+            'timing': 'later', 'reason': 'Only the owner knows the SKU',
+            'kind': 'product_choice', **over}
+
+
+def test_a_product_question_survives_adopting_the_version_that_asked_it(tmp_path):
+    """Observed 2026-09-29: the card vanished under the user's hands.
+
+    The question moved to ``timing=later`` as soon as the direction was adopted —
+    it was never blocking that draft — and a later version reworded it. Reading
+    only the latest artifact and only rows asking for ``now`` dropped it at the
+    exact moment the user went to answer it.
+    """
+    from studio.project_brief import durable_questions
+
+    store, pipeline = project(tmp_path)
+    # Options have to declare what they satisfy before the brief gate lets one be
+    # adopted; this test is about the question, not about the gate.
+    mapped = [{'key': 'A', 'claim': 'A', 'satisfies': 'goal.primary'},
+              {'key': 'B', 'claim': 'B', 'satisfies': 'goal.primary'}]
+    attempt = pipeline.start_attempt(RUN, 'direction')
+    first = pipeline.submit(RUN, 'direction', attempt.token, content='', summary='v1',
+                            structured={'options': mapped,
+                                        'open_questions': [product_question('Which colourway?')]})
+    pipeline.record_approval(RUN, 'direction', nonce=pipeline.issue_nonce(RUN, 'direction'),
+                            decision='approved', selected_option_id='A')
+    # The next version rewords the same question and no longer asks for it now.
+    second = pipeline.submit(
+        RUN, 'direction', pipeline.start_attempt(RUN, 'direction').token,
+        content='', summary='v2',
+        structured={'options': mapped,
+                    'open_questions': [product_question('Which colourway and size?')]})
+
+    chat = store.read_chat(RUN)
+    rows = durable_questions(store, RUN, chat=chat)
+    assert len(rows) == 1, 'one card per product question, not one per version'
+    assert rows[0]['question'] == 'Which colourway and size?', 'the newest wording wins'
+    assert rows[0]['version'] == second.version
+
+    state = pipeline.state(RUN).to_dict()
+    brief = project_brief(state, None, chat, store=store, run_id=RUN)
+    assert len(brief['questions']) == 1
+    assert brief['questions'][0]['durable'] is True
+    assert brief['questions'][0]['ask_user'] is True
+
+    # Once the user answers, it stops being asked.
+    store.append_chat(RUN, 'user', f"关于「Which colourway and size?」：khaki, small")
+    resolved = durable_questions(store, RUN, chat=store.read_chat(RUN))
+    assert resolved == []
+
+
+def test_a_draft_specific_question_still_goes_when_its_version_is_replaced(tmp_path):
+    """Only product questions are durable; a design question belongs to its draft."""
+    from studio.project_brief import durable_questions
+
+    store, pipeline = project(tmp_path)
+    direction(pipeline, questions=[
+        product_question('Which tablet?', kind='local_design', timing='now')])
+    assert durable_questions(store, RUN, chat=store.read_chat(RUN)) == []

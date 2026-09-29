@@ -38,7 +38,10 @@ test('running conversation says what is actually pending while progress belongs 
   assert.match(strip,/正在等待创意导演的模型回复/);
   assert.match(strip,/本轮结果尚未提交/);
   assert.doesNotMatch(strip,/停止本轮/);
-  assert.match(h.nodes.get('send').textContent,/插入调整/);
+  assert.match(h.nodes.get('send').textContent,/停止/);
+  // The composer action rides the secondary button while the job runs, so 停止
+  // keeps one identity instead of swapping with 发送 as the user types.
+  assert.match(h.nodes.get('job-stop').textContent,/插入调整/);
   assert.equal(h.nodes.get('job-stop').hidden,false);
   assert.doesNotMatch(strip,/最近操作|构思创意方向/);
 });
@@ -73,7 +76,8 @@ test('running direction attempt is progress, not recovery, with checked sources 
   assert.match(strip,/最近记录/);
   assert.doesNotMatch(strip,/尚未结束的制作阶段|internal-attempt/);
   assert.equal(h.nodes.get('send').disabled,false);
-  assert.match(h.nodes.get('send').textContent,/插入调整/);
+  assert.match(h.nodes.get('send').textContent,/停止/);
+  assert.match(h.nodes.get('job-stop').textContent,/插入调整/);
   assert.equal(h.nodes.get('job-stop').hidden,false);
 });
 
@@ -110,9 +114,12 @@ test('reference media refusal is distinct from page retrieval and model analysis
 test('blocked malformed role output explains why work stopped and how to continue',()=>{
   const h=harness(async()=>{});
   const message=h.context.jobGuidance({job_kind:'conversation',status:'blocked',
-    reason:'NonRetryableStageError: 角色模型返回了无法读取的结果，本轮已停止自动重试'});
-  assert.match(message,/模型回复格式不完整/);
+    reason:'NonRetryableStageError: 团队模型返回的结果读不出来，本轮已停止自动重试'});
+  // The user-facing sentence names the team, not an internal "role model"; the
+  // old wording leaked the architecture into a failure message.
+  assert.match(message,/团队模型的回复格式不完整/);
   assert.match(message,/没有保存.*重新发起/);
+  assert.doesNotMatch(message,/角色/);
 });
 
 test('unknown-usage model timeout says the role will not retry automatically',()=>{
@@ -289,9 +296,18 @@ test('uncertain video observation retries acceptance identity without becoming a
 });
 function harness(api) {
   const nodes = new Map();
-  const node = () => ({ children: [], disabled: false, hidden: false, value: '',
+  const node = () => ({ children: [], disabled: false, hidden: false, value: '', dataset: {},
     append(...items) { this.children.push(...items); }, replaceChildren() { this.children = []; },
-    setAttribute() {}, addEventListener() {}, showModal() { this.open = true; },
+    setAttribute(name, value) {
+      // Mirror the real DOM: data-* lands in `dataset` under its camelCase key,
+      // so a test can read back exactly what the renderer set.
+      const key = String(name).startsWith('data-')
+        ? String(name).slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())
+        : name;
+      if (key === name) this.attributes = {...(this.attributes || {}), [name]: value};
+      else this.dataset[key] = value;
+    },
+ addEventListener() {}, showModal() { this.open = true; },
     querySelector(selector) { return descendants(this, n=>n.className?.split(' ').includes(selector.slice(1)))[0]; } });
   const body = node();
   const storage = new Map();
@@ -306,6 +322,7 @@ function harness(api) {
     refreshTimeline: async () => {}, toast() {}, api,
   });
   vm.runInContext(source, context);
+  context.syncComposerActionForTest = () => vm.runInContext('syncComposerAction()', context);
   return { context, nodes, storage, timers, body };
 }
 
@@ -476,7 +493,7 @@ test('conversation shows stop while running and old poll cannot undo cancellatio
   const job = {job_id:'j1', job_kind:'conversation', status:'running', cursor:10, events:[]};
   h.context.showJob(job);
   assert.equal(h.nodes.get('send').disabled, false);
-  assert.match(h.nodes.get('send').textContent, /插入调整/);
+  assert.match(h.nodes.get('send').textContent, /停止/);
   assert.equal(h.nodes.get('job-stop').hidden,false);
   h.context.showJob({...job, status:'cancelling', cursor:12, goal_revision:1, steer_status:'received'});
   h.context.showJob({...job, cursor:11});
@@ -491,7 +508,7 @@ test('a stopping task disables stop unless a saved adjustment is settling', () =
   h.context.showJob({job_id:'j1', job_kind:'conversation', status:'cancelling', cursor:13,
     steer_status:'received', events:[]});
   assert.equal(h.nodes.get('send').disabled, false);
-  assert.match(h.nodes.get('send').textContent, /插入调整/);
+  assert.match(h.nodes.get('job-stop').textContent, /插入调整/);
   assert.equal(h.nodes.get('job-stop').disabled,false);
 });
 
@@ -539,7 +556,7 @@ test('timeline failure after acceptance keeps the running job and composer stop'
   await h.context.submitJob('run-a', { request_id: 'r1', text: 'test' });
   assert.equal(h.context.state.busy, true);
   assert.equal(h.nodes.get('send').disabled, false);
-  assert.match(h.nodes.get('send').textContent, /插入调整/);
+  assert.match(h.nodes.get('send').textContent, /停止/);
   assert.equal(h.nodes.get('job-stop').hidden,false);
   assert.equal(h.storage.size, 0);
   assert.equal(h.timers.length, 1);
@@ -551,6 +568,66 @@ function visibleText(node) {
   if (node.tag === 'details' && !node.open) return visibleText(node.children[0]);
   return [node.text || '', ...node.children.map(visibleText)].join(' ');
 }
+
+test('the primary button keeps one identity while a job runs, whatever is typed', () => {
+  // Reported 2026-09-30: "the agent starts working, so send becomes stop — but
+  // as soon as I type, stop becomes send again." The primary button used to swap
+  // between 发送 / 插入调整 / (separately) 停止 depending on whether the running
+  // job accepted an adjustment, so its meaning changed under the user's hands.
+  //
+  // ``syncComposerAction`` is the one place that decides this, so the test reads
+  // its output directly: the identity must be a function of "is a job running",
+  // and of nothing the user types.
+  const h = harness(async () => {});
+  // ``syncComposerAction()`` reads the module's ``currentJob`` when given no
+  // argument — that is how every production caller invokes it — so the test
+  // drives that same variable rather than passing a job the real code never does.
+  const sync = (job) => {
+    vm.runInContext(`currentJob = ${JSON.stringify(job)}`, h.context);
+    h.context.syncComposerActionForTest();
+  };
+  const primary = () => h.nodes.get('send');
+  const secondary = () => h.nodes.get('job-stop');
+
+  // Idle: the primary button sends and there is nothing to stop.
+  sync(null);
+  assert.equal(primary().dataset.mode, 'send');
+  assert.match(primary().textContent, /发送/);
+  assert.equal(secondary().hidden, true);
+
+  // A steerable job is running: 停止 takes the primary slot and stays there.
+  const job = {job_id: 'j1', job_kind: 'conversation', status: 'running', events: []};
+  sync(job);
+  assert.equal(primary().dataset.mode, 'stop');
+  assert.match(primary().textContent, /停止/);
+  assert.match(secondary().textContent, /插入调整/);
+  assert.equal(secondary().hidden, false);
+
+  // Re-rendering (which is what a keystroke triggers) must not move it.
+  sync({...job, cursor: 2});
+  assert.equal(primary().dataset.mode, 'stop');
+  assert.match(primary().textContent, /停止/);
+
+  // A reference-video job is steerable too, so 停止 still leads and the
+  // composer's action stays on the secondary button.
+  sync({job_id: 'j2', job_kind: 'reference_video', status: 'running', events: []});
+  assert.equal(primary().dataset.mode, 'stop');
+  assert.match(primary().textContent, /停止/);
+  assert.match(secondary().textContent, /插入调整/);
+  assert.equal(secondary().hidden, false);
+
+  // A job already stopping keeps 停止 in place and says so.
+  sync({job_id: 'j3', job_kind: 'conversation', status: 'cancelling', events: []});
+  assert.equal(primary().dataset.mode, 'stop');
+  assert.match(primary().textContent, /正在停止/);
+  assert.equal(primary().disabled, true);
+
+  // Once it ends the primary button goes back to sending.
+  sync({job_id: 'j2', job_kind: 'reference_video', status: 'succeeded', events: []});
+  assert.equal(primary().dataset.mode, 'send');
+  assert.match(primary().textContent, /发送/);
+  assert.equal(secondary().hidden, true);
+});
 
 test('raw errors stay collapsed and unfinished stages remain actionable without accounting forms', () => {
   const h = harness(async () => { throw new Error('must not call'); });

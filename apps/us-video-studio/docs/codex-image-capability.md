@@ -20,7 +20,7 @@
 
 `ImageRequest` 接收 `prompt`、绝对路径且为空的 `output_dir`、最多五个 `reference_paths`、其允许目录 `reference_root` 和可选的主控 `model`。主控模型不是图片模型选择器；原生图片工具的模型由 Codex 决定。参考仅支持静态 PNG/JPEG/WebP，总字节不超过 24 MiB。
 
-适配器建立全新 ephemeral thread，关闭 shell、浏览、MCP、插件、子 Agent 等能力，只开启原生图片工具；无执行环境，参考先在应用内校验，再作为 inline image 输入。模型不会收到原素材路径。输出只接收事件内图片字节，校验格式、尺寸与上限后用排他新建方式写到调用方给定的空目录；不读取服务器 `savedPath`。业务层仍负责把结果导入当前项目 materials、保存来源、图审与后续视频授权。
+适配器建立全新 ephemeral thread，关闭 shell、浏览、MCP、插件、子 Agent 等能力；图片会话单独开启 `image_generation` 和 `code_mode_host`。当前默认模型的工具模式为 `code_mode_only`，若关闭宿主，模型看不到图片工具。`code_mode_host` 只提供受限会话内的工具调用容器，其余原生能力仍保持关闭并由有效配置校验。无执行环境，参考先在应用内校验，再作为 inline image 输入。模型不会收到原素材路径。输出只接收事件内图片字节，校验格式、尺寸与上限后用排他新建方式写到调用方给定的空目录；不读取服务器 `savedPath`。业务层仍负责把结果导入当前项目 materials、保存来源、图审与后续视频授权。
 
 `ImageResult` 包含 `status`（completed/failed/unknown）、`images`（path/hash/MIME/尺寸）、`usage`（已观测主控文字总 token）、`observed_image_calls`、`usage_status`、实际主控模型及 thread/turn 标识。图片事件没有图生成费用或用量字段，因此 `usage_status` 保持 unknown，不能因文件成功或文字 token 已知而填零或声称已结清。
 
@@ -29,4 +29,8 @@
 - app-server 没有可强制执行的“恰好一次图片工具调用”字段。一次按钮启动一个生成任务，不能保证模型仅调用一次。提示词只请求一次；观察到第二次立即结束，但不能声称阻止已经发生的第二次调用或费用。`single_image_limit_enforced=false` 必须保留。
 - 图片失败、协议异常、取消、断连都不会自动重试。已保存的有效结果保留，用量缺失保持未知，不要求手工核账；重新生成仍需本次明确授权。提交状态与计费用量分别判断，不能因金额未知而重复已有任务。
 - CLI 可能在自己的 `generated_images` 保存额外缓存。适配器不声称完全隔离 CLI 的底层文件写入，也不清理 Codex 自身缓存；业务输出只从验证过的内联字节导入。
-- `available=true` 只表示本机协议和 provider 声明支持；`verified=false` 表示尚无真实出图验收。不能在界面标成“已测试成功”。
+- `available=true` 只表示本机协议和 provider 声明支持；`verified=false` 表示这次能力查询本身未执行真实出图。不能仅据此在界面标成“已测试成功”。
+
+## 2026-09-30 实测
+
+本机 `codex-cli 0.158.0-alpha.2.1` 的默认 `gpt-6-astra` 在模型目录中为 `code_mode_only`，支持图片输入。修复前图片会话关闭 `code_mode_host`，文字回合结束时未产生图片调用。修复后用 Studio 自己的 `CodexImageClient.generate()` 仅执行一次白底红圈验证：`status=completed`、`observed_image_calls=1`、`images=1`，保存为 1536×1024 PNG，SHA-256 前 12 位 `8a39c3be754e`，并已目视核对。此验证不涉及当前商品项目的五张首帧，也不证明图片费用可自动结清。图片专用会话的其余禁用功能由 `_verify_image_policy()` 继续逐项校验，文字 Agent 仍使用原有 `SAFE_CONFIG`。

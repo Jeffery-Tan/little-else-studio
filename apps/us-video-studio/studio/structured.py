@@ -49,6 +49,14 @@ QUESTION_COLUMNS = ("question", "blocks", "owner", "timing", "reason", "kind")
 #: an ask_user blank — it means the brief itself has to change (see amend_brief).
 QUESTION_KINDS = ("fact", "product_choice", "local_design", "brief_amendment")
 
+#: Kinds whose answer is a property of the *product*, not of one draft. A
+#: `product_choice` ("which colourway, which size") stays open until it is
+#: answered, even across a new direction version — its author has no reason to
+#: repeat a question about the user's own SKU, and the user found it vanishing
+#: the moment they adopted a version (observed 2026-09-29). `local_design` and
+#: `fact` belong to the draft that raised them and go when it is superseded.
+DURABLE_QUESTION_KINDS = ("product_choice",)
+
 
 @dataclass(frozen=True)
 class Field:

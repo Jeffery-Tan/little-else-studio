@@ -192,10 +192,23 @@ class Review:
 class Approval:
     """A user decision.
 
+    The record is the same whether the user clicked or said it: a decision is a
+    decision, and only the *input channel* differs. ``source`` says which one,
+    purely for the audit trail — no code branches on it to decide whether the
+    decision counts.
+
+    ``continuation_note`` is separate from ``note`` on purpose. ``note`` is a
+    return's requested changes, recorded against the version being judged.
+    ``continuation_note`` is an instruction for the *next* round ("B, but make
+    the opening less like a family ad") and leaves the adopted version's bytes
+    and fingerprint untouched. Folding the two together would either forbid
+    "adopt B and, next, do X" or quietly rewrite what was adopted.
+
     Only the *hash* of the approval nonce is persisted. The plaintext is minted
     by the server, handed to the browser, and never written to disk — otherwise
-    an agent that can read the run directory could replay it. No agent tool has
-    a path to writing this record, and none can produce a nonce that verifies.
+    an agent that can read the run directory could replay it. A conversation
+    decision carries no nonce at all: it is verified against the run's own
+    derived action candidates instead, so there is nothing to replay.
     """
 
     stage: str
@@ -207,6 +220,10 @@ class Approval:
     selected_option_id: str | None = None
     artifact_version: int | None = None
     continue_after: bool = False
+    #: 'ui' when the browser clicked, 'conversation' when the user said it.
+    source: str = "ui"
+    #: Instruction for the work that follows this decision; never part of it.
+    continuation_note: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -219,6 +236,8 @@ class Approval:
             "selected_option_id": self.selected_option_id,
             "artifact_version": self.artifact_version,
             "continue_after": self.continue_after,
+            "source": self.source,
+            "continuation_note": self.continuation_note,
         }
 
 

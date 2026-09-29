@@ -14,9 +14,22 @@ test('direct batch instructions open the right decision without treating revisio
   assert.equal(productionBatchCommand('生成全部首帧'),'generate');
   assert.equal(productionBatchCommand('确认这批生成图'),'approve');
   assert.equal(productionBatchCommand('好，批准全部',{generate:5,approve:0}),'generate');
-  assert.equal(productionBatchCommand('批准全部',{generate:2,approve:1}),null);
+  assert.equal(productionBatchCommand('批准全部',{generate:2,approve:1}),'choose');
+  assert.equal(productionBatchCommand('生成全部视频',{video_generate:5}),'video_generate');
+  assert.equal(productionBatchCommand('准备整组视频输入',{video_prepare:1}),'video_prepare');
+  assert.equal(productionBatchCommand('拼接成片',{assemble:1}),'assemble');
   assert.equal(productionBatchCommand('这五张图的描述都要调整'),null);
   assert.equal(productionBatchCommand('先不要生成这些图'),null);
+});
+
+test('a request phrased about shots still opens the one-time generation confirmation',()=>{
+  // F5 scenario E: the whole-set request is spoken about in shots now, and it
+  // must reach the same confirmation card rather than being read as a revision.
+  assert.equal(productionBatchCommand('按这六镜生成吧',{generate:6}),'generate');
+  assert.equal(productionBatchCommand('这六个镜头都生成',{generate:6}),'generate');
+  assert.equal(productionBatchCommand('生成这六镜',{generate:6}),'generate');
+  assert.equal(productionBatchCommand('这六个镜头先别生成'),null);
+  assert.equal(productionBatchCommand('第二镜重做一下'),null);
 });
 
 test('clarification supports recommendation and free text without implicit selection',()=>{

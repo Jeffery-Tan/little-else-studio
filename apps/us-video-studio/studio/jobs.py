@@ -17,6 +17,7 @@ from .agents.client import JobCancelled, ModelError, NonRetryableStageError
 from .agents.codex_client import CodexUnavailable
 from .connections import ConnectionUnavailable
 from .models import BudgetExceeded, PipelineError, STAGES
+from .steer_intent import classify, continuation_allowed, needs_stop
 from .store import Store
 
 TERMINAL = frozenset({'succeeded', 'failed', 'blocked', 'cancelled', 'interrupted'})
@@ -27,7 +28,10 @@ def _continuation_text(original, corrections, job_kind='conversation'):
         target = row.get('feedback_target')
         location = ('\n   用户选定的准确对象：' + json.dumps(target, ensure_ascii=False, sort_keys=True) +
                     '。先核对这个版本仍存在；若已变化，说明冲突并请用户重新选，不能猜测对应新版。') if target else ''
-        return f'{i}. {row["text"]}{location}'
+        kind = row.get('steer_class')
+        label = {'status': '（执行中提问，只回答，不改动在途工作）',
+                 'stop': '（执行中要求停止）'}.get(kind, '')
+        return f'{i}. {row["text"]}{label}{location}'
     additions = '\n'.join(correction_line(i, row) for i, row in enumerate(corrections, 1))
     if job_kind != 'conversation':
         return ('用户在上一项任务执行中插入了新要求。上一项任务是「' + original + '」，'
@@ -39,7 +43,9 @@ def _continuation_text(original, corrections, job_kind='conversation'):
     return ('调整上一条正在执行的任务。原要求：\n' + original +
             '\n执行中收到的补充要求（按顺序，以后者为准）：\n' +
             additions +
-            '\n先核对已保存成果和当前权限，再按最新要求继续。')
+            '\n先核对已保存成果和当前权限，再按最新要求继续。'
+            '注意：用户在执行中说的话可能是询问、讨论或修改要求，先按原话判断是哪一种；'
+            '只有确实改变要求的才改动已保存的成果，纯询问只回答事实。')
 
 
 class WriterLease:
@@ -91,6 +97,18 @@ class WriterLease:
 
 
 class JobManager:
+    """One manager per data root; ``self.lock`` guards its bookkeeping.
+
+    **Lock order — always ``jobs.lock`` first, then ``store.run_lock``.** The
+    worker's finishing path holds ``jobs.lock`` and then appends its status event
+    through ``_event``, which takes the run lock; ``get`` does the same in that
+    order. Any caller that already holds a run lock must therefore *not* ask this
+    manager anything — take the value before acquiring the run lock instead.
+    On 2026-09-30 a single ``jobs.busy()`` call from inside the timeline's run
+    lock deadlocked the two (ABBA) and froze every endpoint that reads a run: the
+    worker waited for the run lock while the reader waited for ``jobs.lock``.
+    """
+
     def __init__(self, store: Store, pipeline, ledger, prepare: Callable):
         self.store, self.pipeline, self.ledger, self.prepare = store, pipeline, ledger, prepare
         self.lease = WriterLease(store.root)
@@ -117,12 +135,22 @@ class JobManager:
                             self._event(run.run_id, job['job_id'], 'job_status', status='interrupted',
                                         reason='服务曾中断；未自动重发。先检查调用台账，再发送新的继续指令。')
                         rows = [r for r in all_rows if r.get('job_id') == job['job_id']]
-                        if (any(r['kind'] == 'job_steer_received' for r in rows)
-                                and not any(r['kind'] in {'job_steer_discarded', 'job_steer_blocked'} for r in rows)
+                        steers = [r for r in rows if r['kind'] == 'job_steer_received']
+                        settled = any(r['kind'] in {'job_steer_discarded', 'job_steer_blocked',
+                                                    'job_steer_answered'} for r in rows)
+                        if (steers and not settled
                                 and not any(r.get('kind') == 'job_created'
                                             and r.get('parent_job_id') == job['job_id'] for r in all_rows)):
-                            self._event(run.run_id, job['job_id'], 'job_steer_blocked',
-                                        reason='服务中断，调整已保存但未自动接续；检查进度后请明确接续。')
+                            if any(continuation_allowed(r) for r in steers):
+                                self._event(run.run_id, job['job_id'], 'job_steer_blocked',
+                                            reason='服务中断，调整已保存但未自动接续；检查进度后请明确接续。')
+                            else:
+                                # A question or a stop is not a correction waiting
+                                # to be resumed. Asking the user to click "continue"
+                                # for it would start work they did not ask for.
+                                self._event(run.run_id, job['job_id'], 'job_steer_answered',
+                                            classes=[r.get('steer_class') or 'work' for r in steers],
+                                            reason='服务中断；这条中途消息不是修改要求，没有待接续的工作。')
                 self.initialized = True
             except Exception:
                 self.lease.close()
@@ -155,7 +183,7 @@ class JobManager:
         out = {k: v for k, v in created.items() if k not in ('kind', 'seq')}
         out.update(run_id=run_id, status='queued', events=[], cursor=created['seq'], reason='',
                    deliverable=None, revision_result=None, goal_revision=0,
-                   steer_status=None, successor_job_id=None)
+                   steer_status=None, steer_class=None, successor_job_id=None)
         corrections = []
         for row in rows:
             out['cursor'] = row['seq']
@@ -173,11 +201,15 @@ class JobManager:
                 corrections.append(row)
                 out['goal_revision'] = row['goal_revision']
                 out['steer_status'] = 'received'
+                out['steer_class'] = row.get('steer_class') or 'work'
             if row['kind'] == 'job_steer_blocked':
                 out['steer_status'] = 'blocked'
                 out['steer_reason'] = row['reason']
             if row['kind'] == 'job_steer_discarded':
                 out['steer_status'] = 'discarded'
+            if row['kind'] == 'job_steer_answered':
+                out['steer_status'] = 'answered'
+                out['steer_answered_classes'] = row.get('classes')
         successor = next((r for r in all_rows if r.get('kind') == 'job_created'
                           and r.get('parent_job_id') == job_id), None)
         if successor is not None:
@@ -271,10 +303,16 @@ class JobManager:
 
     def steer(self, run_id, job_id, text, request_id, expected_goal_revision,
               feedback_target=None, validate_target=None):
-        """Durably accept an in-flight correction, then stop the old model turn.
+        """Durably accept an in-flight message, then decide if work must stop.
 
-        The successor starts only after the old worker has settled. Retried
-        requests return their original receipt even after that worker exits.
+        The message is persisted first, always. What happens to the running turn
+        depends on what the message is: a question about progress must not kill
+        the generation it is asking about, and an explicit stop must not be
+        recycled into an automatic successor. Only work that genuinely changes
+        the request interrupts the turn. See ``studio/steer_intent.py``.
+
+        Retried requests return their original receipt even after that worker
+        exits.
         """
         text = text.strip()
         if not text:
@@ -282,6 +320,8 @@ class JobManager:
         with self.lock:
             self.initialize()
             current = self.get(run_id, job_id)
+            job_kind = current.get('job_kind', 'conversation')
+            classification = classify(text)
             rows = [r for r in self.store.read_events(run_id)
                     if r.get('job_id') == job_id and r.get('kind') == 'job_steer_received']
             prior = next((r for r in rows if r['request_id'] == request_id), None)
@@ -302,18 +342,26 @@ class JobManager:
                 raise PipelineError('steer_limit', '这轮补充内容已经较长，请等当前任务结束后发起新对话。')
             if feedback_target and validate_target:
                 validate_target()
+            acknowledged = {
+                'status': '已收到你的询问。正在执行的任务不会被中断，主制片会在本轮结束前回答当前真实进展。',
+                'stop': '已收到停止要求，正在安全收尾；提供方可能仍在生成并计费，可从制作记录查询原任务。',
+            }.get(classification['class'],
+                  '已收到调整，等待当前调用结束后按新要求继续。')
             with self.store.run_lock(run_id):
                 self._event(run_id, job_id, 'job_steer_received', text=text, request_id=request_id,
                             expected_goal_revision=expected_goal_revision,
                             goal_revision=expected_goal_revision + 1,
-                            feedback_target=feedback_target)
+                            feedback_target=feedback_target,
+                            steer_class=classification['class'],
+                            steer_reason=classification['reason'])
                 self._event(run_id, job_id, 'job_progress', event={
-                    'type': 'agent_control', 'message': '已收到调整，等待当前调用结束后按新要求继续。'})
-                self.cancelled.set()
-            if current['status'] != 'cancelling':
+                    'type': 'agent_control', 'message': acknowledged})
+                if needs_stop(classification):
+                    self.cancelled.set()
+            if current['status'] != 'cancelling' and needs_stop(classification):
                 self._event(run_id, job_id, 'job_status', status='cancelling',
                             reason=('已记录中途意见，等待当前调用结束；随后主制片按当前真实进展处理。'
-                                    if current.get('job_kind', 'conversation') != 'conversation' else
+                                    if job_kind != 'conversation' else
                                     '正在停止旧任务，随后按调整后的目标继续。'))
             return self.get(run_id, job_id)
 
@@ -322,7 +370,13 @@ class JobManager:
             raise JobCancelled('用户已请求停止；未启动下一次模型调用或工具。')
 
     def resume_steer(self, run_id, job_id):
-        """Explicitly continue a correction left behind by recovery or restart."""
+        """Explicitly continue a correction left behind by recovery or restart.
+
+        Only a message that actually changed the request is continued. The user
+        asking for progress must not be served by starting work they did not ask
+        for, however long the service was down; a new request is still the way to
+        ask for new work.
+        """
         with self.lock:
             self.initialize()
             current = self.get(run_id, job_id)
@@ -334,6 +388,9 @@ class JobManager:
                 raise PipelineError('steer_recovery', '请先在恢复面板处理未完成阶段。')
             corrections = [r for r in self.store.read_events(run_id)
                            if r.get('job_id') == job_id and r.get('kind') == 'job_steer_received']
+            if not any(continuation_allowed(r) for r in corrections):
+                raise PipelineError('steer_state', '这条中途消息不是修改要求，没有需要接续的工作；'
+                                                   '请直接发送新的指令。')
             return self.submit(run_id, _continuation_text(current['text'], corrections,
                                current.get('job_kind', 'conversation')),
                                f'steer:{job_id}', parent_job_id=job_id)
@@ -385,11 +442,20 @@ class JobManager:
                                if r.get('job_id') == job_id and r.get('kind') == 'job_steer_received']
                 discarded = any(r.get('job_id') == job_id and r.get('kind') == 'job_steer_discarded'
                                 for r in self.store.read_events(run_id))
-                if corrections and not discarded and not self.closing:
+                resumed = [r for r in corrections if continuation_allowed(r)]
+                if corrections and not resumed and not discarded:
+                    # A status question is answered by the turn that was already
+                    # running, and an explicit stop is a stop. Neither may be
+                    # recycled into a new request the user did not ask for, and
+                    # this must be recorded before the closing check below so a
+                    # shutdown cannot leave the message looking unanswered.
+                    self._event(run_id, job_id, 'job_steer_answered',
+                                classes=[r.get('steer_class') or 'work' for r in corrections])
+                if resumed and not discarded and not self.closing:
                     # The old user's instruction is included even if cancellation
                     # happened before Orchestrator.send could write it to chat.
                     completed = self.get(run_id, job_id)
-                    revised = _continuation_text(completed['text'], corrections,
+                    revised = _continuation_text(completed['text'], resumed,
                                                  completed.get('job_kind', 'conversation'))
                     try:
                         if self.get(run_id, job_id)['open_attempts']:

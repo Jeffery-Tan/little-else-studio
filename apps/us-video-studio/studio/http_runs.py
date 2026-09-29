@@ -39,7 +39,8 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
                 continue
             state = pipeline.state(run.run_id).to_dict()
             rows = store.read_events(run.run_id)
-            brief = project_brief(state, latest_execution(store, run.run_id, rows), store.read_chat(run.run_id))
+            brief = project_brief(state, latest_execution(store, run.run_id, rows),
+                                  store.read_chat(run.run_id), store=store, run_id=run.run_id)
             selection = next((row['selection'] for row in reversed(rows)
                               if row.get('kind') == 'creative_context_selected'
                               and row.get('selection', {}).get('format') in ('video', 'photo')), None)
@@ -192,6 +193,13 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
         cached view that could disagree with the run directory.
         """
         require_run(run_id)
+        # Read the job manager *before* taking the run lock. The job worker takes
+        # these two in the other order (`jobs._work` holds `jobs.lock`, then
+        # `_event` takes `store.run_lock`), so asking the manager from inside the
+        # run lock is an ABBA deadlock: on 2026-09-30 that froze every endpoint
+        # that reads a run while a turn was finishing. The flag is a plain
+        # snapshot; nothing here needs it to be atomic with the run state.
+        job_busy = jobs.busy(run_id)
         with store.run_lock(run_id):
             result = build_timeline(store, pipeline, ledger, run_id, latest_execution(store, run_id))
             # Shared redact across the whole view payload (red line 11): any
@@ -207,7 +215,7 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
             _redact_tree(result)
             from .creation_mode import current
             result['creation_mode'] = current(store, run_id)
-            result['pending_continuation'] = pending_continuation(run_id)
+            result['pending_continuation'] = pending_continuation(run_id, job_busy=job_busy)
             if pending_brief_redo is not None:
                 result['pending_brief_redo'] = pending_brief_redo(run_id)
             return result

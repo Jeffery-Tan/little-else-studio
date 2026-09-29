@@ -128,14 +128,22 @@ test('the composer sends a midflight instruction while a separate stop control r
 
   const input = el(p, 'chat-input');
   input.value = '现在把第 3 张改成室内';
-  await el(p, 'send').onclick();
+  // While a job runs, 停止 holds the primary button and the composer's action —
+  // sending a mid-flight instruction — is the secondary control. The two never
+  // trade places, so a press always matches the word on the button.
+  vm.runInContext('syncComposerAction();', p.ctx);
+  assert.equal(el(p, 'send').dataset.mode, 'stop');
+  assert.match(el(p, 'send').textContent, /停止/);
+  assert.match(el(p, 'job-stop').textContent, /插入调整/);
+  await el(p, 'job-stop').onclick();
   await settle();
   assert.equal(cancels.length, 0);
   assert.equal(steer.calls.length, 1);
   assert.equal(steer.calls[0].text, '现在把第 3 张改成室内');
   assert.equal(input.value, '');
   assert.equal(read(p, 'currentJob.status'), 'cancelling');
-  await el(p, 'job-stop').onclick();
+  // The primary button still stops the turn.
+  await el(p, 'send').onclick();
   await settle();
   assert.equal(cancels.length, 1);
 });

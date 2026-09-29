@@ -396,11 +396,11 @@ def failure_note(text: str) -> str:
     if 'unknown, partial or pending usage' in text or 'reconcile provider evidence' in text:
         return '这一轮当时因用量记录缺失而暂停，已有内容已保留。现已取消核账限制，可以继续。'
     if '模型输出达到单次上限' in text:
-        return '这轮受托角色的模型输出达到单次上限，结果不完整，新版未保存。系统已停止自动重试，避免重复计费；请从当前阶段继续。'
-    if '角色模型返回了无法读取的结果' in text:
-        return '这轮受托角色的模型回复格式不完整，新版未保存。系统已停止自动重试，避免重复计费；请从当前阶段继续。'
+        return '这轮负责这一步的团队模型输出达到单次上限，结果不完整，新版未保存。系统已停止自动重试，避免重复计费；请从当前阶段继续。'
+    if '团队模型返回的结果读不出来' in text or '角色模型返回了无法读取的结果' in text:
+        return '这轮团队模型的回复格式不完整，新版未保存。系统已停止自动重试，避免重复计费；请从当前阶段继续。'
     if '模型连接超时或中断' in text:
-        return '这轮受托角色的模型连接超时或中断，新版未保存。用量无法确认，系统已停止自动重试；请检查连接后从当前阶段继续。'
+        return '这轮负责这一步的团队模型连接超时或中断，新版未保存。用量无法确认，系统已停止自动重试；请检查连接后从当前阶段继续。'
     if re.fullmatch(
         r'BudgetExceeded: \[budget\] (?:\d+ tokens reached the soft cap of \d+'
         r'|estimated known spend reached the soft cap of \d+(?:\.\d+)? USD)'
@@ -600,17 +600,23 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None,
 
 
 def build_questions(stages: list[dict[str, Any]],
-                    chat: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+                    chat: list[dict[str, Any]] | None = None,
+                    store=None, run_id: str | None = None) -> list[dict[str, Any]]:
     """Every unanswered question, in stage order, each saying what it blocks.
 
-    The screen's standing question to him: what is this waiting on you for. It
-    has no dismiss button and no read flag — a question stops being open when the
-    stage that raised it is rewritten without it, which is the only honest way to
-    close one.
+    The screen's standing question to him: what is this waiting on you for.
+
+    A question about a draft stops being open when the stage is rewritten without
+    it — that is the honest way to close one. A question about the *product*
+    ("which colourway, which size") is not answered by adopting a draft, so it
+    stays until it is answered; see ``project_brief.durable_questions``.
     """
     from .project_brief import project_brief
-    if not any((s.get('latest') or {}).get('structured', {}).get('open_questions') for s in stages):
+    has_latest = any((s.get('latest') or {}).get('structured', {}).get('open_questions')
+                     for s in stages)
+    if not has_latest and not (store is not None and run_id):
         return []
+    brief = project_brief({"stages": stages}, chat=chat, store=store, run_id=run_id)
     return [{**q, "stage_label": stage_label(q["stage"]), "numbered": numbered_stage(q["stage"]),
              "send_prefix": answer_prefix(q["question"])}
-            for q in project_brief({"stages": stages}, chat=chat)["questions"]]
+            for q in brief["questions"]]

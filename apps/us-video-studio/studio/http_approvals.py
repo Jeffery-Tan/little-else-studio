@@ -207,6 +207,17 @@ def install_approval_routes(app, jobs, pipeline, store, require_run, continuatio
 
     @app.post("/api/runs/{run_id}/decision")
     def decide(run_id: str, payload: DecisionIn) -> dict[str, Any]:
+        """Record the decision the user made by clicking.
+
+        The click carries the nonce the browser was issued, which is what makes it
+        a click; a decision stated in conversation reaches the same function
+        (``decision.record``) with a server-issued nonce instead. Everything that
+        decides whether the decision counts — the exact version and fingerprint,
+        staleness, integrity, one decision per version, a real option for an
+        adoption — is below that shared line, so the two channels cannot diverge.
+        """
+        from .decision import DecisionError, record
+
         require_run(run_id)
         if payload.stage not in STAGE_SPEC:
             raise HTTPException(400, "unknown stage")
@@ -214,15 +225,21 @@ def install_approval_routes(app, jobs, pipeline, store, require_run, continuatio
             with jobs.lock:
                 if jobs.busy(run_id):
                     raise HTTPException(409, "当前制作仍在运行，请等这一轮结束后确认。")
-                approval = pipeline.record_approval(
-                    run_id, payload.stage, nonce=payload.nonce,
-                    decision=payload.decision, note=payload.note,
+                approval = record(
+                    store, run_id, pipeline,
+                    stage=payload.stage,
+                    artifact_sha256=payload.expected_artifact_sha256,
+                    version=payload.expected_version,
+                    decision=payload.decision,
+                    source="ui",
+                    nonce=payload.nonce,
+                    note=payload.note,
                     override_reason=payload.override_reason,
-                    expected_artifact_sha256=payload.expected_artifact_sha256,
-                    expected_version=payload.expected_version,
                     selected_option_id=payload.selected_option_id,
                     continue_after=payload.continue_after,
                 )
+        except DecisionError as exc:
+            raise HTTPException(409, str(exc)) from exc
         except PipelineError as exc:
             raise HTTPException(409, str(exc)) from exc
         result = approval.to_dict()

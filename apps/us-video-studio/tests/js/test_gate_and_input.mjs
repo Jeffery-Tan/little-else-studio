@@ -171,23 +171,20 @@ test('the brief-amendment card wires both of its buttons instead of throwing', a
   assert.match(app.toastText, /重做/);
 });
 
-test('an amendment with typed changes cannot approve the unchanged proposal', async () => {
+test('a note never blocks approving a brief amendment, and is not part of it', async () => {
+  // The note box is not the amendment body, so text left in it must not refuse
+  // the approval — that was the same locked door as on the ordinary gate. The
+  // approval carries exactly the displayed replacement text and nothing else.
   const app = wire({routes: {'brief-amendment': {id: 'amd-1', status: 'approved'}}});
   const gate = bind(app, mountGate({}, proposalPending()));
   gate.querySelector('.reason').value = '同意收窄目标，但还要加入价格对比';
   gate.querySelector('[data-act="amend_brief"]').click();
   await settle();
-  assert.equal(app.observed.filter(call => call.path.endsWith('/brief-amendment')).length, 0);
-  assert.match(gate.querySelector('.gate-feedback').textContent, /修改意见尚未进入简报/);
-  assert.equal(gate.querySelector('.reason').value, '同意收窄目标，但还要加入价格对比');
-
-  const inline = bind(app, mountGate({}, decisionPending({
-    amend: proposalPending().amend,
-  })));
-  inline.querySelector('.reason').value = '还要加入价格对比';
-  inline.querySelector('[data-act="amend_brief"]').click();
-  await settle();
-  assert.equal(app.observed.filter(call => call.path.endsWith('/brief-amendment')).length, 0);
+  const post = app.observed.find(call => call.path.endsWith('/brief-amendment'));
+  assert.ok(post, 'a note must not block approving the displayed revision');
+  assert.equal(post.body.note, '', 'approval carries only the displayed replacement text');
+  assert.equal(gate.querySelector('.reason').value, '同意收窄目标，但还要加入价格对比',
+    'the note stays where the user left it');
 });
 
 test('a real proposal is shown as a before/after diff, not as a clause id', () => {
@@ -542,11 +539,6 @@ test('a direction change request returns the old version and never approves it',
   gate.querySelector('[data-direction-card="B"] [data-act="pick-option"]').click();
   gate.querySelector('.reason').value = '开头改成先展示展开动作';
   gate.querySelector('.reason').oninput();
-  gate.querySelector('[data-act="approve"]').click();
-  await settle();
-  assert.equal(app.observed.filter(call => call.path.endsWith('/decision')).length, 0,
-    'an edit note must never be silently approved');
-  assert.match(gate.querySelector('.gate-feedback').textContent, /修改意见尚未处理/);
   gate.querySelector('[data-act="reject"]').click();
   await settle();
   const post = app.observed.find(call => call.path.endsWith('/decision'));
@@ -555,6 +547,26 @@ test('a direction change request returns the old version and never approves it',
   assert.match(post.body.note, /方向 B/);
   assert.match(post.body.note, /开头改成先展示展开动作/);
   assert.equal(post.body.continue_after, true);
+});
+
+test('a note in the box never blocks adopting, and is never adopted as a change', async () => {
+  // Reported 2026-09-30: typing in 希望怎么修改 locked the adopt button behind
+  // "采用当前版前请清空修改意见". Adoption carries no note at all, so the text must
+  // be inert: the decision goes through and no edit is silently approved.
+  const app = wire({routes: {nonce: {nonce: 'n-adopt-note'},
+                             decision: {decision: 'approved', continuation: {status: 'started'}}}});
+  const {gate} = mountStructuredGate(decisionPending());
+  bind(app, gate);
+  gate.querySelector('[data-direction-card="A"] [data-act="pick-option"]').click();
+  gate.querySelector('.reason').value = '开头改成先展示展开动作';
+  gate.querySelector('.reason').oninput();
+  gate.querySelector('[data-act="approve"]').click();
+  await settle();
+  const post = app.observed.find(call => call.path.endsWith('/decision'));
+  assert.ok(post, 'adopting must not be refused because the note box has text');
+  assert.equal(post.body.decision, 'approved');
+  assert.equal(post.body.note, '', 'the note is not part of an adoption');
+  assert.equal(post.body.selected_option_id, 'A');
 });
 
 test('adopting a direction sends only the exact version and selected option', async () => {
@@ -586,22 +598,20 @@ test('a blocked direction can guide revision but cannot be adopted', async () =>
   assert.match(gate.querySelector('.gate-feedback').textContent, /不能采用/);
 });
 
-test('historical reviewer return requires no override but pending edits still block adoption', async () => {
+test('historical reviewer return requires no override and a note never blocks adoption', async () => {
   const app = wire({routes: {nonce: {nonce: 'n-approve'}, decision: {decision: 'approved', continuation: {status: 'started'}}}});
   const gate = bind(app, mountGate({stage:'writing', label:'脚本'}, decisionPending({
     stage:'writing', stage_label:'脚本', options:[], passed:false,
   })));
+  // A note left in the box is inert for adoption: it is neither a reason to
+  // refuse nor part of the approved payload.
   gate.querySelector('.reason').value = '修改第一句';
   gate.querySelector('.reason').oninput();
   gate.querySelector('[data-act="approve"]').click();
   await settle();
-  assert.equal(app.observed.length, 0);
-  gate.querySelector('.reason').value = '';
-  gate.querySelector('.reason').oninput();
-  gate.querySelector('[data-act="approve"]').click();
-  await settle();
   const post = app.observed.find(call => call.path.endsWith('/decision'));
-  assert.equal(post.body.note, '');
+  assert.ok(post, 'a note must not block adopting the version on screen');
+  assert.equal(post.body.note, '', 'the note is not part of an adoption');
   assert.equal(post.body.override_reason, '');
   assert.equal(post.body.selected_option_id, null);
 });
@@ -1065,7 +1075,10 @@ test('Enter and send submit while stop has a separate button', () => {
   assert.match(keydown, /submit\(\)/, 'Enter goes through submit, not a second path');
   assert.match(keydown, /!e\.shiftKey/, 'Shift+Enter still inserts a newline');
   assert.match(source, /\$\("send"\)\.onclick = \(\) => \{/);
-  assert.match(source, /\$\("job-stop"\)\.onclick = \(\) => \{ void stopCurrentJob\(\); \}/);
+  // Both buttons dispatch on the mode the renderer set, so a press can never do
+  // the opposite of the word printed on it.
+  assert.match(source, /dataset\.mode === 'stop'/, 'the primary button reads its own mode');
+  assert.match(source, /\$\("job-stop"\)\.onclick = \(\) => \{ void submit\(\); \}/);
 });
 
 test('the composer draft tray also clears only after the request is accepted', async () => {

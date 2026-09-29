@@ -29,6 +29,55 @@ def latest_execution(store, run_id: str, rows=None) -> dict | None:
     return job
 
 
+def durable_questions(store, run_id: str, stages=("intake", "direction", "material_plan", "writing"),
+                      chat: list[dict] | None = None) -> list[dict]:
+    """The product questions still waiting on the user, one card per question.
+
+    A ``product_choice`` — which colourway, which size — is a fact about the
+    user's own SKU. Adopting a draft does not answer it, and its author has no
+    reason to ask again next version: the next version usually marks it
+    ``timing=later`` precisely *because* it is not blocking that draft. Reading
+    only the latest artifact, and only rows asking for ``now``, made the card
+    vanish the instant a version was adopted — observed 2026-09-29, before the
+    user could answer.
+
+    Two consequences shape this:
+
+    * ``timing`` is ignored, and the question survives across versions.
+    * Every stage and version words it slightly differently ("四色中的哪一个",
+      "四种可见配色中的哪一个", "主推哪个实际在售配色"), so de-duplicating on the
+      sentence would stack eight cards asking one thing. They are grouped by
+      question *kind* — one product question at a time — and the **newest**
+      wording wins, because the later drafts state it with the context that makes
+      it answerable.
+    """
+    from .structured import DURABLE_QUESTION_KINDS, question_answered, question_kind
+
+    newest: dict[str, dict] = {}
+    for stage in stages:
+        for artifact in store.list_artifacts(run_id, stage):
+            for row in (artifact.structured or {}).get("open_questions") or []:
+                if not isinstance(row, dict) or not row.get("question"):
+                    continue
+                if row.get("owner") != "user" or not str(row.get("reason") or "").strip():
+                    continue
+                kind = question_kind(row)
+                if kind not in DURABLE_QUESTION_KINDS:
+                    continue
+                prior = newest.get(kind)
+                # Version breaks a timestamp tie: two drafts can share a second,
+                # and picking the older wording then would present the question
+                # without the context that makes it answerable.
+                if prior is None or (artifact.created_at, artifact.version) > \
+                        (prior["created_at"], prior["version"]):
+                    newest[kind] = {**row, "kind": kind, "stage": stage,
+                                    "version": artifact.version,
+                                    "artifact_sha256": artifact.sha256,
+                                    "created_at": artifact.created_at, "durable": True}
+    return [row for row in newest.values()
+            if not question_answered(chat, row["question"], row["created_at"])]
+
+
 def stage_issues(stage: dict, chat: list[dict] | None = None) -> list[dict]:
     from .structured import is_ask_user_question, question_answered, question_kind
 
@@ -54,8 +103,23 @@ def stage_issues(stage: dict, chat: list[dict] | None = None) -> list[dict]:
     return issues
 
 
+def durable_stage_issues(store, run_id: str, stage: dict, chat: list[dict] | None = None) -> list[dict]:
+    """This stage's share of the durable questions, in ``stage_issues`` shape.
+
+    Kept for callers that want the rows directly. ``project_brief`` marks the row
+    it already has instead of appending these, so a durable question never
+    becomes two cards for one question.
+    """
+    stage_name = stage["stage"]
+    return [{**row, "stage": stage_name, "owner": "user", "timing": "now",
+             "needs_triage": False, "active": True, "answered": False, "ask_user": True}
+            for row in durable_questions(store, run_id, chat=chat)
+            if row["stage"] == stage_name]
+
+
 def project_brief(state: dict, job: dict | None = None, chat: list[dict] | None = None,
-                  *, direction_action: dict | None = None) -> dict:
+                  *, direction_action: dict | None = None,
+                  store=None, run_id: str | None = None) -> dict:
     defaults = {"latest": None, "stale": False, "integrity_ok": True, "status": "empty",
                 "open_attempt": None, "can_approve": False, "can_review": False, "last_rejection": ""}
     state = {**state, "stages": [{**defaults, **s} for s in state["stages"]]}
@@ -63,6 +127,16 @@ def project_brief(state: dict, job: dict | None = None, chat: list[dict] | None 
     target = next((s for s in state["stages"] if s["stage"] == progress["stage"]), None)
     artifact = (target or {}).get("latest") or {}
     issues = [issue for stage in state["stages"] for issue in stage_issues(stage, chat)]
+    # A question about the user's own product is not answered by a draft being
+    # adopted, so it has to keep being asked even when the version that raised it
+    # is decided or superseded. Marking the row we already have — rather than
+    # adding a second row for the same question — keeps one card per question and
+    # keeps the version that asked it in the row.
+    durable_texts = ({row["question"] for row in durable_questions(store, run_id, chat=chat)}
+                     if store is not None and run_id else set())
+    for issue in issues:
+        if issue.get("question") in durable_texts:
+            issue["durable"] = True
     # Only the currently actionable stage can assign user work. Old upstream
     # unknowns remain available for the team without resurfacing as questionnaires.
     question_stage = progress["stage"]
@@ -71,7 +145,11 @@ def project_brief(state: dict, job: dict | None = None, chat: list[dict] | None 
         if previous:
             question_stage = previous[-1]["stage"]
     for issue in issues:
-        issue["ask_user"] = issue["ask_user"] and issue["stage"] == question_stage
+        # A durable question is about the user's product, not about the draft
+        # that happened to raise it, so the stage currently being worked on does
+        # not decide whether it is still being asked.
+        issue["ask_user"] = (issue["ask_user"] and issue["stage"] == question_stage) \
+            or bool(issue.get("durable"))
     questions = [i for i in issues if i["ask_user"]]
     action = {"kind": progress["action"], "label": progress["label"], "stage": progress["stage"],
               "prompt": progress["prompt"], "version": artifact.get("version"), "sha256": artifact.get("sha256")}

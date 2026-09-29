@@ -265,6 +265,50 @@ def test_decision_continuation_can_resume_without_repeating_approval_or_job(clie
     assert len(Store(box['tmp_path']).list_approvals(RUN, 'direction')) == 1
 
 
+def test_a_running_job_is_never_announced_as_a_continuation_that_has_not_started(client_factory):
+    """Observed 2026-09-29: the card flashed under the user's cursor.
+
+    ``pending_continuation`` only asked whether the continuation job had ever
+    been *created*. Until that job row landed, "not created yet" was still true —
+    so the card for a step that was already under way appeared and vanished again.
+    """
+    box = client_factory
+    drive_intake_and_direction(box)
+    http = box['http']
+    box['model'] = ScriptedModel([final_turn('继续完成方案。')])
+    jobs = box['app'].state.jobs
+    store = Store(box['tmp_path'])
+
+    original_check = jobs.before_submit
+
+    def blocked():
+        raise PipelineError('test_connection', '连接暂时不可用')
+
+    # Write a decision whose continuation job cannot start: this is the window in
+    # which the card is legitimate — the user has decided and nothing is running.
+    jobs.before_submit = blocked
+    payload = {**shown(http), 'stage': 'direction', 'nonce': nonce_for(http),
+               'decision': 'returned', 'note': '请把开场改得更具体', 'continue_after': True}
+    assert http.post(f'/api/runs/{RUN}/decision', json=payload).status_code == 200
+    assert len(store.list_approvals(RUN, 'direction')) == 1
+    def continuation_jobs():
+        return [e for e in store.read_events(RUN) if e['kind'] == 'job_created'
+                and str(e.get('request_id', '')).startswith('decision:')]
+    assert continuation_jobs() == []
+    assert http.get(f'/api/runs/{RUN}/timeline').json()['pending_continuation'] is not None
+
+    # Same stored state, but a job now holds the run: the step has started, so
+    # there is nothing left to prompt for.
+    jobs.active = (RUN, 'in-flight')
+    try:
+        assert jobs.busy(RUN) is True
+        assert http.get(f'/api/runs/{RUN}/timeline').json()['pending_continuation'] is None
+    finally:
+        jobs.active = None
+        jobs.before_submit = original_check
+    assert http.get(f'/api/runs/{RUN}/timeline').json()['pending_continuation'] is not None
+
+
 def test_a_return_with_no_note_is_refused_by_the_route(client_factory):
     """The rule reaches the screen as a 400, not only as a Python exception.
 
