@@ -417,17 +417,26 @@ def open_questions(structured: dict[str, Any], stage: str) -> list[dict[str, str
     ]
 
 
-def question_answered(chat: list[dict[str, Any]] | None, question: str, since: str = "") -> bool:
-    """Whether the user answered this exact artifact question after it was saved.
-
-    Both the structured answer card and the explicit ask_user card quote the
-    question. A reply to an older version must not clear a new question.
-    """
+def question_answers(chat: list[dict[str, Any]] | None, question: str,
+                     since: str = "") -> list[dict[str, str]]:
+    """Exact user replies to one saved question, with their source time."""
     if not chat or not question:
-        return False
-    pattern = re.compile(r"(?:^|\n)(?:\d+\.\s*)?(?:回答|关于)「" + re.escape(question) + r"」[：:][ \t]*\S")
-    return any(row.get("role") == "user" and (not since or row.get("at", "") >= since)
-               and pattern.search(str(row.get("text") or "")) for row in chat if isinstance(row, dict))
+        return []
+    pattern = re.compile(r"(?:^|\n)(?:\d+\.\s*)?(?:回答|关于)「" + re.escape(question)
+                         + r"」[：:][ \t]*(\S[^\n]*)")
+    answers = []
+    for row in chat:
+        if not isinstance(row, dict) or row.get("role") != "user" or (since and row.get("at", "") < since):
+            continue
+        for match in pattern.finditer(str(row.get("text") or "")):
+            answers.append({"question": question, "answer": match.group(1).strip(),
+                            "at": str(row.get("at") or "")})
+    return answers
+
+
+def question_answered(chat: list[dict[str, Any]] | None, question: str, since: str = "") -> bool:
+    """Whether the user answered this exact artifact question after it was saved."""
+    return bool(question_answers(chat, question, since))
 
 
 def material_blockers(structured: dict[str, Any]) -> list[str]:

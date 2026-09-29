@@ -6,6 +6,7 @@ One writer lease and one active job cover this data root's shared cost ledger.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import threading
 import uuid
@@ -21,10 +22,23 @@ from .store import Store
 TERMINAL = frozenset({'succeeded', 'failed', 'blocked', 'cancelled', 'interrupted'})
 
 
-def _continuation_text(original, corrections):
+def _continuation_text(original, corrections, job_kind='conversation'):
+    def correction_line(i, row):
+        target = row.get('feedback_target')
+        location = ('\n   用户选定的准确对象：' + json.dumps(target, ensure_ascii=False, sort_keys=True) +
+                    '。先核对这个版本仍存在；若已变化，说明冲突并请用户重新选，不能猜测对应新版。') if target else ''
+        return f'{i}. {row["text"]}{location}'
+    additions = '\n'.join(correction_line(i, row) for i, row in enumerate(corrections, 1))
+    if job_kind != 'conversation':
+        return ('用户在上一项任务执行中插入了新要求。上一项任务是「' + original + '」，'
+                '可能只完成了一部分，也可能留下需要核实的媒体请求。\n'
+                '补充要求（按收到顺序，以后者为准）：\n' +
+                additions +
+                '\n先读取当前项目、准确产物和未完成调用，再由主制片判断哪些内容需要立即修正、'
+                '哪些适合下一步处理。不要继承上一项任务的图审或费用授权，不自动重复媒体提交。')
     return ('调整上一条正在执行的任务。原要求：\n' + original +
             '\n执行中收到的补充要求（按顺序，以后者为准）：\n' +
-            '\n'.join(f'{i}. {row["text"]}' for i, row in enumerate(corrections, 1)) +
+            additions +
             '\n先核对已保存成果和当前权限，再按最新要求继续。')
 
 
@@ -255,7 +269,8 @@ class JobManager:
             threading.Thread(target=self._work, args=(run_id, job_id, text, runner), daemon=True).start()
             return self.get(run_id, job_id)
 
-    def steer(self, run_id, job_id, text, request_id, expected_goal_revision):
+    def steer(self, run_id, job_id, text, request_id, expected_goal_revision,
+              feedback_target=None, validate_target=None):
         """Durably accept an in-flight correction, then stop the old model turn.
 
         The successor starts only after the old worker has settled. Retried
@@ -271,31 +286,35 @@ class JobManager:
                     if r.get('job_id') == job_id and r.get('kind') == 'job_steer_received']
             prior = next((r for r in rows if r['request_id'] == request_id), None)
             if prior is not None:
-                if prior['text'] != text or prior['expected_goal_revision'] != expected_goal_revision:
+                if (prior['text'] != text or prior['expected_goal_revision'] != expected_goal_revision
+                        or prior.get('feedback_target') != feedback_target):
                     raise PipelineError('request_conflict', '相同 request_id 对应另一条调整指令。')
                 return current
             if self.active != (run_id, job_id) or current['status'] not in {'running', 'cancelling'}:
                 raise PipelineError('job_not_active', '原任务已经结束，请刷新后发送新的指令。')
             if current['status'] == 'cancelling' and current['steer_status'] != 'received':
                 raise PipelineError('steer_scope', '当前任务已经要求停止；请等待结束后发送新指令。')
-            if current.get('job_kind', 'conversation') != 'conversation':
-                raise PipelineError('steer_scope', '当前任务不能在执行中调整；请停止后从对应入口重新发起。')
             if current['steer_status'] == 'discarded':
                 raise PipelineError('steer_scope', '当前任务已要求停止，请等待结束后重新发送。')
             if expected_goal_revision != current['goal_revision']:
                 raise PipelineError('goal_conflict', '任务目标已更新，请刷新后按当前目标调整。')
             if len(rows) >= 8 or sum(len(r['text']) for r in rows) + len(text) > 12000:
                 raise PipelineError('steer_limit', '这轮补充内容已经较长，请等当前任务结束后发起新对话。')
+            if feedback_target and validate_target:
+                validate_target()
             with self.store.run_lock(run_id):
                 self._event(run_id, job_id, 'job_steer_received', text=text, request_id=request_id,
                             expected_goal_revision=expected_goal_revision,
-                            goal_revision=expected_goal_revision + 1)
+                            goal_revision=expected_goal_revision + 1,
+                            feedback_target=feedback_target)
                 self._event(run_id, job_id, 'job_progress', event={
                     'type': 'agent_control', 'message': '已收到调整，等待当前调用结束后按新要求继续。'})
                 self.cancelled.set()
             if current['status'] != 'cancelling':
                 self._event(run_id, job_id, 'job_status', status='cancelling',
-                            reason='正在停止旧任务，随后按调整后的目标继续。')
+                            reason=('已记录中途意见，等待当前调用结束；随后主制片按当前真实进展处理。'
+                                    if current.get('job_kind', 'conversation') != 'conversation' else
+                                    '正在停止旧任务，随后按调整后的目标继续。'))
             return self.get(run_id, job_id)
 
     def check_cancel(self):
@@ -315,7 +334,8 @@ class JobManager:
                 raise PipelineError('steer_recovery', '请先在恢复面板处理未完成阶段。')
             corrections = [r for r in self.store.read_events(run_id)
                            if r.get('job_id') == job_id and r.get('kind') == 'job_steer_received']
-            return self.submit(run_id, _continuation_text(current['text'], corrections),
+            return self.submit(run_id, _continuation_text(current['text'], corrections,
+                               current.get('job_kind', 'conversation')),
                                f'steer:{job_id}', parent_job_id=job_id)
 
     def _work(self, run_id, job_id, text, runner):
@@ -368,7 +388,9 @@ class JobManager:
                 if corrections and not discarded and not self.closing:
                     # The old user's instruction is included even if cancellation
                     # happened before Orchestrator.send could write it to chat.
-                    revised = _continuation_text(self.get(run_id, job_id)['text'], corrections)
+                    completed = self.get(run_id, job_id)
+                    revised = _continuation_text(completed['text'], corrections,
+                                                 completed.get('job_kind', 'conversation'))
                     try:
                         if self.get(run_id, job_id)['open_attempts']:
                             raise PipelineError('steer_recovery', '原任务留下未完成阶段，请先在恢复面板处理，再发送调整要求。')
@@ -396,7 +418,7 @@ class JobManager:
             if current['status'] != 'cancelling':
                 self._event(run_id, job_id, 'job_status', status='cancelling',
                             reason=('停止本地制作等待；提供方可能仍在生成并计费。请从制作记录查询原任务并核实用量。'
-                                    if current.get('job_kind') in {'production_generation', 'production_refresh'} else
+                                    if current.get('job_kind') in {'production_generation', 'production_batch_generation', 'production_refresh'} else
                                     '等待当前调用结算后停止，不强杀在途请求；未知用量保持待核实。'))
             return self.get(run_id, job_id)
 

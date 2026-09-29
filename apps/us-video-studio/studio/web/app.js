@@ -169,7 +169,8 @@ async function selectRun(runId) {
   if (typeof closeEmbeddedProduction === 'function') closeEmbeddedProduction();
   state.canvasTab = 'plan';
   state.canvasTouched = false;
-  $('stage').hidden=false;$('journey-assets').hidden=true;$('journey-storyboard').hidden=true;$('journey-video').hidden=true;
+  $('stage').hidden=false;$('journey-assets').hidden=true;$('journey-reference').hidden=true;
+  $('journey-storyboard').hidden=true;$('journey-video').hidden=true;
   for(const tab of document.querySelectorAll('[data-journey-tab]')){
     const selected=tab.id==='journey-tab-plan';tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;
   }
@@ -184,6 +185,7 @@ async function selectRun(runId) {
   state.currentJob = null;
   state.productionData = null;
   state.referenceTasks = [];
+  state.referenceSelectedId = null;
   state.learningSession = null;
   state.learningCatalog = null;
   state.creatorView = null;
@@ -268,6 +270,7 @@ async function refreshTimeline() {
   // drawn one last time.
   pruneDrafts(tl);
   renderPane();
+  if (state.canvasTab === 'reference' && typeof renderProjectReference === 'function') renderProjectReference();
   renderConversation(tl);
   if (typeof renderJourneyDecision === 'function') renderJourneyDecision();
   renderDraft();
@@ -366,7 +369,8 @@ function renderPane() {
       library:state.learningCatalog,
       referenceTasks:state.referenceTasks,request:api,reload:refreshTimeline,notify:toast,
       openMaterials:()=>toggleMaterials(true),openChat:()=>{setProjectFocus('chat');$('chat-input').focus();},
-      openAnalysis:()=>StudioLearningSession.openAnalysisDialog().catch(error=>toast(error.message,true))});
+      openAnalysis:()=>StudioLearningSession.openAnalysisDialog().catch(error=>toast(error.message,true)),
+      openResumeReference:task=>openReferenceVideo(run.run_id,task).catch(error=>toast(error.message,true))});
     return;
   }
   if (state.canvasTab && state.canvasTab !== 'plan') return;
@@ -392,8 +396,8 @@ function renderPane() {
   // to the bottom, which is half of what 「翻来翻去」 meant: a stage that updated
   // under him moved the text out from beneath his eyes.
   const kept = host.scrollTop;
-  const referenceWork = state.creatorView?.referenceCurrent && typeof referenceAnalysisHtml === 'function'
-    ? referenceAnalysisHtml(state.creatorView.reference, state.materials) : '';
+  const referenceWork = state.creatorView?.referenceCurrent && state.creatorView.reference?.candidate
+    ? '<section class="reference-inline"><strong>本轮参考已拆解</strong><button type="button" class="ghost small" data-open-reference>查看逐段观察 ↗</button></section>' : '';
   host.innerHTML = referenceWork + stageHtml(displayStep, {
     readOnly: true,
     artifactBody: state.artifactBodies.get(bodyKey),
@@ -419,7 +423,7 @@ function renderPane() {
   // After the pane exists, not per block: a picture an artifact names is only
   // resolvable once `state.materials` is loaded.
   wireMedia(host);
-  if (referenceWork && typeof wireReferenceAnalysis === 'function') wireReferenceAnalysis(host);
+  host.querySelector('[data-open-reference]')?.addEventListener('click',()=>showJourneyTab('reference'));
   host.scrollTop = kept;
 }
 
@@ -440,7 +444,10 @@ function setMediaFeedbackTarget(runId, attempt, kind, atSeconds) {
     output_sha256:attempt.output.sha256};
   if (kind === 'video') target.at_seconds = Math.max(0, Math.round(Number(atSeconds || 0) * 10) / 10);
   state.feedbackTarget = target;
-  const label = kind === 'video' ? `正在反馈视频 ${target.at_seconds.toFixed(1)} 秒` : '正在反馈这张图片';
+  const shotIndex=kind==='image'?(state.productionData?.drafts||[]).filter(row=>row.kind==='image')
+    .findIndex(row=>row.draft_id===attempt.draft_id):-1;
+  const label = kind === 'video' ? `正在反馈视频 ${target.at_seconds.toFixed(1)} 秒`
+    :shotIndex>=0?`正在批注首帧 ${String(shotIndex+1).padStart(2,'0')} 的生成图`:'正在反馈这张图片';
   const chip = $('feedback-target');
   chip.replaceChildren();
   const clear = box('button', 'ghost small', '取消');
@@ -469,7 +476,11 @@ function setProductionFeedbackTarget(runId, draft, attempt) {
   state.feedbackTarget = target;
   const chip = $('feedback-target');
   chip.replaceChildren();
-  const label = box('span', '', `正在说明这版${draft.kind === 'video' ? '视频' : '图片'}制作的问题`);
+  const shotIndex=draft.kind==='image'?(state.productionData?.drafts||[]).filter(row=>row.kind==='image')
+    .findIndex(row=>row.draft_id===draft.draft_id):-1;
+  const label = box('span', '', shotIndex>=0
+    ?`正在修改首帧 ${String(shotIndex+1).padStart(2,'0')} 的出图描述`
+    :`正在说明这版${draft.kind === 'video' ? '视频' : '图片'}制作的问题`);
   const clear = box('button', 'ghost small', '取消');
   clear.type = 'button'; clear.onclick = clearFeedbackTarget;
   chip.append(label, clear); chip.hidden = false;
@@ -1222,9 +1233,25 @@ function renderTurn(turn, live = false) {
     // rounds keep their fallback even while a new round runs.
     const bubble = box("div", "msg assistant");
     const body = box("div", "body");
-    body.append(box("p", "muted", work.length || progress.children.length
+    const failure = work.findLast(item => item.kind === 'note' && item.failure);
+    const explanation = failure?.text || (work.length || progress.children.length
       ? "本轮没有留下结论回复；过程与原因见本轮进展和「本轮工作记录」。"
-      : "本轮没有留下结论回复。"));
+      : "本轮没有留下结论回复。");
+    const note = box("p", failure ? "turn-failure" : "muted", explanation);
+    if (failure) note.setAttribute('role', 'alert');
+    body.append(note);
+    const resume = (state.projectBrief || state.timeline?.brief)?.action;
+    if (failure && live && !state.busy &&
+        ((resume?.kind === 'draft' && resume.prompt) || resume?.kind === 'resume_direction')) {
+      const button = box('button', 'ghost small', resume.label || '填写继续要求');
+      button.type = 'button';
+      button.onclick = () => {
+        if (state.busy) return;
+        if (resume.kind === 'resume_direction') resumeDirection(resume);
+        else prepareProjectDraft(resume.prompt);
+      };
+      body.append(button);
+    }
     bubble.append(box("div", "who", "制片团队"), body);
     wrap.appendChild(bubble);
   }
@@ -1440,11 +1467,9 @@ function wireGate(host) {
     || null;
   const key = `studio-decision:${state.runId}:${gate.dataset.stage}:${gate.dataset.sha}:stage`;
   const legacyJourneyKey = `studio-decision:${state.runId}:${gate.dataset.stage}:${gate.dataset.sha}:journey`;
-  let draft = { note: "", override_reason: "", option: null, nonce: null };
+  let draft = { note: "", option: null, nonce: null };
   try { draft = { ...draft, ...JSON.parse(localStorage.getItem(key) || localStorage.getItem(legacyJourneyKey) || "{}") }; } catch {}
   reason.value = draft.note || "";
-  const overrideReason = gate.querySelector('.override-reason');
-  if (overrideReason) overrideReason.value = draft.override_reason || "";
   const choiceSummary = gate.querySelector('.gate-choice-summary');
   const choiceButtons = () => gate.querySelectorAll('[data-act="pick-option"]');
   function showChoice() {
@@ -1473,13 +1498,11 @@ function wireGate(host) {
   showChoice();
   function save() {
     draft.note = reason.value;
-    draft.override_reason = overrideReason?.value || "";
     try { localStorage.setItem(key, JSON.stringify(draft)); status.textContent = "草稿已保存 · 尚未提交"; }
     catch { status.textContent = "草稿仅暂存在此页，浏览器存储不可用。"; }
   }
   reason.oninput = () => { draft.nonce = null; save(); };
-  if (overrideReason) overrideReason.oninput = () => { draft.nonce = null; save(); };
-  if (draft.note || draft.option || draft.override_reason) status.textContent = "已恢复此版本的草稿 · 尚未提交";
+  if (draft.note || draft.option) status.textContent = "已恢复此版本的草稿 · 尚未提交";
   for (const btn of gate.querySelectorAll('[data-act]')) btn.onclick = async () => {
     if (state.busy || state.decisionBusy || gate.dataset.saving === "1") return;
     if (btn.dataset.act === 'pick-option') {
@@ -1625,17 +1648,12 @@ function wireGate(host) {
     }
     const decision = btn.dataset.act === "reject" ? "returned" : "approved";
     const revision = reason.value.trim();
-    const override = overrideReason?.value.trim() || '';
     if (decision === "returned" && !revision) {
       status.textContent = "请写明需要调整的地方。"; reason.focus(); return;
     }
     if (decision === "approved" && revision && gate.dataset.pendingKind !== 'brief_amendment') {
       status.textContent = "修改意见尚未处理。请点“按意见修改，先出新版”；采用当前版前请清空修改意见。";
       reason.focus(); return;
-    }
-    if (decision === "approved" && gate.dataset.passed !== "1" && !override) {
-      status.textContent = "审核未通过，请单独写明覆盖审核的理由。";
-      (overrideReason || reason).focus(); return;
     }
     if (decision === "approved" && (optionRadios().length || gate.dataset.needsChoice === '1') && !draft.option) {
       status.textContent = "请先选择一个方向；推荐不代表已选。"; return;
@@ -1664,7 +1682,7 @@ function wireGate(host) {
       }
       const result = await api(`/api/runs/${runId}/decision`, {method:"POST",body:JSON.stringify({
         ...shown, nonce:draft.nonce, decision, note,
-        override_reason: decision === "approved" && gate.dataset.passed !== "1" ? override : "",
+        override_reason: "",
         selected_option_id: decision === "approved" ? draft.option : null,
         continue_after: true,
       })});
@@ -1888,6 +1906,15 @@ async function send(text, requestKind = null, clarificationId = null) {
     return {accepted: false, uncertain: true, reason: pendingMessage,
             rejected_text: text, run_id: state.runId};
   }
+  const batchKind=!state.busy&&!requestKind&&!clarificationId&&!state.feedbackTarget&&
+    typeof StudioProduction!=='undefined'&&
+    !(typeof StudioComposer!=='undefined'&&StudioComposer.files(state.runId).length)
+    &&typeof productionBatchCommand==='function'?productionBatchCommand(text,{
+      generate:StudioProduction.batchGenerationDrafts(state.productionData,state.runId).length,
+      approve:StudioProduction.batchApprovalImages(state.productionData,state.runId).length,
+    }):null;
+  if(batchKind&&typeof openProductionBatch==='function')
+    return openProductionBatch(batchKind)?{accepted:true}:{accepted:false,reason:'整组画面暂不能执行。'};
   state.atBottom = true;
   setConversationOpen(true);
   const runId=state.runId;
@@ -1907,14 +1934,17 @@ async function send(text, requestKind = null, clarificationId = null) {
         if (current?.version !== target.version || current?.artifact_sha256 !== target.artifact_sha256)
           throw Error('稿件版本已变化。意见已保留，请重新选择当前版本中的句子。');
       }
-      if (state.busy) throw Error('当前任务结束后再发送这条定点反馈；现在可取消目标选择，直接调整运行目标。');
     }
     if (state.busy && canSteerJob(currentJob)) {
       if (typeof StudioComposer !== 'undefined' && StudioComposer.files(runId).length)
         throw Error('调整运行中的任务时请先移除待上传附件，或等本轮结束后发送。');
       const adjusted = await submitSteer(runId, currentJob.job_id, {text, request_id:crypto.randomUUID(),
-        expected_goal_revision:currentJob.goal_revision || 0});
-      if (!adjusted || adjusted.ok !== false) return {accepted: true};
+        expected_goal_revision:currentJob.goal_revision || 0,
+        ...(target ? {feedback_target:target} : {})});
+      if (!adjusted || adjusted.ok !== false) {
+        if (target && JSON.stringify(state.feedbackTarget) === JSON.stringify(target)) clearFeedbackTarget();
+        return {accepted: true};
+      }
       if (adjusted.reason === 'job_not_active') {
         // Previous job already ended: keep this prompt and open a fresh turn.
       } else if (adjusted.reason === 'unknown' || adjusted.reason === 'pending_unknown') {
@@ -1941,10 +1971,11 @@ async function send(text, requestKind = null, clarificationId = null) {
       state.busy = false;
     }
     if(typeof StudioComposer!=='undefined' && StudioComposer.files(runId).length){
+      if(StudioComposer.missingVideoUse(runId))throw Error('请先为每段视频选择用途：补全商品信息或拆解参考表达。');
       state.busy=true;$('send').disabled=true;StudioComposer.render();
       const names=await StudioComposer.upload(runId,fetch);
       if(state.runId!==runId)throw Error('项目已切换，未发送对话。');
-      text += '\n本次附上的素材：'+names.join('、');
+      text += '\n本次附上的素材：'+StudioComposer.describe(runId,names);
       StudioComposer.clear(runId);state.busy=false;StudioComposer.render();
     }
     const payload = target
@@ -1974,7 +2005,9 @@ async function send(text, requestKind = null, clarificationId = null) {
       state.clarificationChoices.delete(runId);
     return result === undefined ? {accepted: true} : {...result, run_id: runId};
   } catch(error){
-    state.busy=false;$('send').disabled=false;
+    state.busy=Boolean(currentJob && JOB_ACTIVE.has(currentJob.status));
+    if (typeof syncComposerAction === 'function') syncComposerAction();
+    else $('send').disabled=false;
     // The composer is *not* written here. Whether these words can go back into
     // the box depends on which project is on screen and whether that box still
     // holds what the user meant to send — questions only `submit`, which took
@@ -2014,9 +2047,9 @@ async function send(text, requestKind = null, clarificationId = null) {
  */
 async function submit(requestKind = null) {
   const input = $("chat-input");
-  if (currentJob && JOB_ACTIVE.has(currentJob.status))
-    return {accepted: false, reason: '本轮仍在执行。可先停止，或等它完成后发送。'};
-  const value = input.value.trim() || (typeof StudioComposer!=='undefined' && StudioComposer.files(state.runId).length ? '我附上了素材，请先确认我想如何使用。' : '');
+  if (currentJob && JOB_ACTIVE.has(currentJob.status) && !canSteerJob(currentJob))
+    return {accepted: false, reason: '当前调用正在停止，请等待本轮结算后再发送。'};
+  const value = input.value.trim() || (typeof StudioComposer!=='undefined' && StudioComposer.files(state.runId).length ? '我附上了素材，请按标注用途处理。' : '');
   if (!value || !state.runId || steerPosting ||
       state.decisionBusy || state.recoveryBlocked) return {accepted: false, reason: '现在不能发送。'};
   // One request in flight per project. While a submission's outcome is unknown,
@@ -2068,9 +2101,9 @@ function pendingSubmission(runId) {
 function updatesComposerVersion() { state.composerVersion = (state.composerVersion || 0) + 1; }
 
 $("send").onclick = () => {
-  if (currentJob && JOB_ACTIVE.has(currentJob.status)) void stopCurrentJob();
-  else void submit();
+  void submit();
 };
+if ($("job-stop")) $("job-stop").onclick = () => { void stopCurrentJob(); };
 $("chat-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();

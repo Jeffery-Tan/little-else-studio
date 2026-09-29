@@ -4,7 +4,7 @@ from studio.pipeline import Pipeline
 from studio.store import Store
 
 
-def test_unreviewed_direction_discards_false_adoption_and_internal_ids(tmp_path):
+def test_incomplete_direction_discards_false_adoption_and_internal_ids(tmp_path):
     store = Store(tmp_path)
     store.create_run('reply-test', 'Fixture', 'Make a video')
     pipeline = Pipeline(store)
@@ -16,8 +16,7 @@ def test_unreviewed_direction_discards_false_adoption_and_internal_ids(tmp_path)
     text = creator_reply('direction-v1 已好。现在采用 A。',
                          {'goal': 'direction', 'status': 'incomplete'},
                          pipeline.state('reply-test'))
-    assert '独立审核尚未完成' in text
-    assert '审核完成后' in text
+    assert '创意方向已保存' in text
     assert '现在采用' not in text
     assert 'direction-v1' not in text
 

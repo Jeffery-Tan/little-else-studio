@@ -205,13 +205,8 @@ def test_his_own_return_also_closes_the_gate(pipe):
         pipe.issue_nonce(RUN, "direction")
 
 
-def test_a_reviewer_return_still_offers_him_the_named_override(pipe):
-    """The other meaning of "returned": the reviewer's, which he may overrule.
-
-    A reviewer's ``return`` leaves ``approval`` empty on purpose, so this path
-    must survive the rule above — otherwise the override becomes unreachable
-    from the screen and the only way past a return would be to rewrite the work.
-    """
+def test_historical_reviewer_return_allows_plain_user_approval(pipe):
+    """A retired reviewer verdict does not add an override decision type."""
     submit(pipe, "intake", content="facts")
     submit(pipe, "direction", structured=OPTIONS)
     pipe.record_review(RUN, "direction", verdict="return",
@@ -222,9 +217,9 @@ def test_a_reviewer_return_still_offers_him_the_named_override(pipe):
 
     approval = pipe.record_approval(
         RUN, "direction", nonce=pipe.issue_nonce(RUN, "direction"),
-        decision="approved", selected_option_id="A", override_reason="证据下周补齐，先按这条推进",
+        decision="approved", selected_option_id="A", override_reason="",
     )
-    assert approval.decision == "approved_override"
+    assert approval.decision == "approved"
 
 
 def test_concurrent_same_nonce_records_one_decision_across_pipeline_instances(pipe):

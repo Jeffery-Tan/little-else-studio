@@ -234,6 +234,7 @@ def test_a_failed_turn_is_visible_after_a_reload(env):
     text = " ".join(i["text"] for i in items if i["kind"] == "note")
     assert "没能做完" in text
     assert "provider said no" in text, "the real error is kept verbatim"
+    assert any(i.get('failure') is True for i in items)
 
 
 def test_a_rejected_attempt_survives_as_a_note_because_no_card_exists(env):
@@ -273,8 +274,8 @@ def test_the_pending_decision_names_the_stage_and_rides_the_last_turn(env):
     assert pending["kind"] == "decision_request"
     assert pending["stage"] == "direction"
     assert pending["passed"] is True
-    assert "注意" in pending["headline"], "a pass with findings says so in the headline"
-    assert len(pending["findings"]) == 1
+    assert "等你决定" in pending["headline"]
+    assert pending["findings"] == []
     assert out["turns"][-1]["items"][-1] is pending
 
 
@@ -298,19 +299,15 @@ def test_his_own_return_does_not_leave_a_decision_card_behind(env):
     historical_decision = next(item for turn in out["turns"] for item in turn["items"]
                                if item["kind"] == "approval")
     assert historical_decision["version"] == 1
-    assert out["progress"]["action"] == "draft"
+    assert out["progress"]["action"] == "stage_command"
+    assert out['next_action']['kind'] == 'resume_direction'
     assert out["progress"]["title"] == "「创意方向」已退回，等团队出新版"
-    assert "新版" in out["progress"]["prompt"]
+    assert out["progress"]["prompt"] == ""
     assert not next(s for s in out["rail"] if s["stage"] == "direction")["needs_you"]
 
 
-def test_a_returned_stage_asks_him_in_its_own_words(env):
-    """A return reaches him as a decision, worded so the override is not free.
-
-    The card must not read like the pass card with a different first line: what
-    he is being offered here is *going against the reviewer*, and the body has to
-    say that a reason will be demanded.
-    """
+def test_historical_reviewer_return_does_not_change_decision_card(env):
+    """A retired reviewer verdict stays in history and cannot demand an override."""
     store, pipeline, ledger = env
     store.append_chat(RUN, "user", "出个方向。")
     write_intake(pipeline)
@@ -321,15 +318,14 @@ def test_a_returned_stage_asks_him_in_its_own_words(env):
 
     state = pipeline.state(RUN).to_dict()
     direction = next(s for s in state["stages"] if s["stage"] == "direction")
-    assert direction["status"] == "returned"
+    assert direction["status"] == "awaiting_decision"
 
     pending = timeline(store, pipeline, ledger)["pending"]
     assert pending is not None
-    assert pending["passed"] is False
-    assert "没有通过" in pending["headline"]
-    assert "仍然通过" in pending["body"]
-    assert "理由" in pending["body"], "the cost of the override is stated up front"
-    assert [f["issue"] for f in pending["findings"]] == ["主推 SKU 没定"]
+    assert pending["passed"] is True
+    assert "等你决定" in pending["headline"]
+    assert "仍然通过" not in pending["body"]
+    assert pending["findings"] == []
 
 
 #: Three options with a readable recommendation but **no** ActiveBrief mapping.
@@ -444,11 +440,8 @@ def test_a_button_that_is_not_the_recommendation_says_what_it_will_record(env):
     assert "return_note" not in keep
 
 
-def test_a_rejected_document_offers_no_options(env):
-    """Offering 「改用 A」 on a document the reviewer just rejected would be the
-    screen routing around the review. The question there is whether the document
-    stands at all, and that answer stays 退回重做 or an explicit override.
-    """
+def test_historical_reviewer_return_preserves_readable_options(env):
+    """Retired reviewer state does not suppress the author's valid options."""
     store, pipeline, ledger = env
     store.append_chat(RUN, "user", "出个方向。")
     write_intake(pipeline)
@@ -458,10 +451,10 @@ def test_a_rejected_document_offers_no_options(env):
     )
 
     pending = timeline(store, pipeline, ledger)["pending"]
-    assert pending["passed"] is False
+    assert pending["passed"] is True
     assert len(pending["options"]) == 3
     assert pending["options_hint"]
-    assert pending["passed"] is False
+    assert pending["passed"] is True
 
 
 def test_a_document_with_no_readable_recommendation_offers_no_options(env):

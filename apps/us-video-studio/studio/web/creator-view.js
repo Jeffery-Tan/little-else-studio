@@ -81,15 +81,15 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
     {kind: 'brief-redo', label: '继续重做方向'}, 'plan', 'direction');
   if (interaction) return result(interaction.question || '有一项需要你确认',
     {kind: 'question', label: '回答这个问题'}, 'plan');
-  if (timeline.brief?.questions?.length) return result('有个细节想和你确认',
-    {kind: 'question', label: '回答这个问题'}, 'plan', timeline.brief.questions[0].stage,
-    '说出现有条件或还不确定的地方，团队会调整表达与素材安排。');
   if (pending?.stage === 'direction') return pending.passed === false
     ? nav('查看方向与审核', 'plan', '创意方向已保存，但审核提出修改意见', 'direction')
     : nav('选择创意方向', 'plan', '正在选择创意方向；采用后会继续准备脚本', 'direction');
   if (pending?.stage === 'writing') return pending.passed === false
     ? nav('查看脚本与审核', 'plan', '脚本新版已保存，但审核提出修改意见', 'writing')
     : nav('阅读并决定脚本', 'plan', '脚本已准备好，等待你阅读和决定', 'writing');
+  if (timeline.brief?.questions?.length) return result('有个细节想和你确认',
+    {kind: 'question', label: '回答这个问题'}, 'plan', timeline.brief.questions[0].stage,
+    '说出现有条件或还不确定的地方，团队会调整表达与素材安排。');
   if (timeline.brief?.action?.kind === 'review_stage') {
     const review = timeline.brief.action;
     const name = review.stage === 'direction' ? '创意方向' : review.stage === 'writing' ? '脚本' : '当前作品';
@@ -143,6 +143,9 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
       work.kind === 'image' ? '脚本已确认，下一步准备画面' : '参考图已确认，下一步准备视频',
       {kind:'prepare',label:work.kind === 'image' ? '准备画面输入' : '准备这张图的视频输入',tab}, tab);
   }
+  if (timeline.next_action?.kind === 'resume_direction') return result(
+    '当前创意方向需要更新', timeline.next_action, 'plan', 'direction',
+    '按当前有效需求和已选参考直接重做，完成后交你点选。');
   if (writing) {
     if (writing.stale || writing.integrity_ok === false) return nav('核对稿件变化', 'plan',
       '当前脚本的来源或文件已变化', 'writing');

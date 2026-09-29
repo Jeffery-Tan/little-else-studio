@@ -18,11 +18,20 @@ async function loadMaterialWorkspace() {
       referenceList.innerHTML=references?StudioReferenceVideo.tasks({...references,runId}):'';
       for(const button of referenceList.querySelectorAll('[data-reference-resume]')) button.onclick=()=>
         openReferenceVideo(runId,references.tasks.find(t=>t.reference_id===button.dataset.referenceResume),button).catch(err=>toast(err.message,true));
+      for(const button of referenceList.querySelectorAll('[data-reference-view]')) button.onclick=()=>{
+        state.referenceSelectedId=button.dataset.referenceView;
+        toggleMaterials(false);
+        setProjectFocus('canvas');
+        if(state.runs.find(run=>run.run_id===runId)?.kind==='learning'){
+          renderPane();$('stage').querySelector('[data-reference-breakdown="'+button.dataset.referenceView+'"]')?.scrollIntoView({block:'start'});
+        }else if(state.creatorView?.analysisOnly){renderReferenceAnalysis();}
+        else showJourneyTab('reference');
+      };
     }
     const referenceButton=$('reference-video-open');
     if(referenceButton){
       const learning=state.runs.find(run=>run.run_id===runId)?.kind==='learning';
-      referenceButton.textContent=learning?'分析参考视频':'在对话中提供参考';
+      referenceButton.textContent=learning?'分析参考视频':'拆解参考视频';
       referenceButton.onclick=()=>learning
         ? StudioLearningSession.openAnalysisDialog().catch(err=>toast(err.message,true))
         : openReferenceVideo(runId,null,referenceButton).catch(err=>toast(err.message,true));

@@ -74,14 +74,50 @@ def test_local_analysis_stops_at_report_without_adopting_creation_evidence(nativ
     assert p['instruction'] in json.dumps(native[2].calls[0]['messages'], ensure_ascii=False)
 
 
+def test_reference_breakdown_and_prompt_edits_keep_source_and_versions(native):
+    p, _ = request(native)
+    assert submit(native, p)['status'] == 'succeeded'
+    url = f'/api/runs/{RUN}/reference-videos'
+    task = native[0].get(url).json()['tasks'][0]
+    candidate = task['candidate']
+    assert candidate['timeline'] and candidate['audiovisual']['audio_sent']
+    assert candidate['reference_methods']
+    edit = dict(request_id='prompt-edit-001', analysis_id=candidate['analysis_id'],
+                candidate_sha256=candidate['candidate_sha256'], expected_prompt_sha256=None,
+                expected_prompt_revision=None,
+                prompt='  分镜一：展示当前商品可核对的外观。  ')
+    endpoint = f'{url}/{p["reference_id"]}/prompt'
+    first = native[0].post(endpoint, json=edit)
+    assert first.status_code == 200, first.text
+    assert first.json()['prompt']['text'] == edit['prompt'].strip()
+    assert native[0].post(endpoint, json=edit).json() == first.json()
+    saved = native[0].get(url).json()['tasks'][0]['prompt']
+    assert saved['sha256'] == first.json()['prompt']['sha256']
+    assert saved['analysis_id'] == candidate['analysis_id']
+    conflict = native[0].post(endpoint, json={**edit, 'request_id': 'prompt-edit-002',
+        'prompt': '另一版', 'expected_prompt_sha256': None})
+    assert conflict.status_code == 409
+    updated = native[0].post(endpoint, json={**edit, 'request_id': 'prompt-edit-003',
+        'prompt': '第二版', 'expected_prompt_sha256': saved['sha256'],
+        'expected_prompt_revision': saved['revision']})
+    assert updated.status_code == 200
+    assert native[0].get(url).json()['tasks'][0]['prompt']['text'] == '第二版'
+    stale_revision = native[0].post(endpoint, json={**edit, 'request_id': 'prompt-edit-004',
+        'prompt': '第三版', 'expected_prompt_sha256': updated.json()['prompt']['sha256'],
+        'expected_prompt_revision': saved['revision']})
+    assert stale_revision.status_code == 409
+
+
 def test_remote_analysis_failure_resumes_without_download(native, monkeypatch):
     p, raw = request(native, remote=True)
     downloads = downloader(monkeypatch, raw)
     native[2].turn = Turn(text='bad json', stop_reason='end_turn', model=MODEL, usage=Usage(10, 2))
     assert submit(native, p)['status'] == 'failed'
-    assert task_state(native[1], RUN)[0]['status'] == 'downloaded'
+    failed = task_state(native[1], RUN)[0]
+    assert failed['status'] == 'downloaded' and failed['execution_status'] == 'failed'
     native[2].turn = Turn(text=json.dumps(RESULT), stop_reason='end_turn', model=MODEL, usage=Usage(10, 2))
     assert submit(native, {**p, 'request_id': 'request-0002'})['status'] == 'succeeded'
+    assert task_state(native[1], RUN)[0]['execution_status'] == 'succeeded'
     assert downloads == [URL] and len(native[2].calls) == 2
 
 
@@ -112,12 +148,16 @@ def test_link_failure_can_continue_with_file_and_preserve_intent(native, monkeyp
     monkeypatch.setattr('studio.reference_video.fetch_reference', fail)
     assert submit(native, p)['status'] == 'failed'
     assert not native[2].calls
+    failed = task_state(native[1], RUN)[0]
+    assert failed['status'] == 'started' and failed['execution_status'] == 'failed'
+    assert '请上传原视频继续' in failed['failure_reason']
     accept_upload(native[1], RUN, 'fallback.mp4', raw)
     retry = {**p, 'request_id': 'request-0002', 'source_url': None, 'name': 'fallback.mp4',
              'expected_sha256': hashlib.sha256(raw).hexdigest()}
     assert submit(native, retry)['status'] == 'succeeded'
     task = task_state(native[1], RUN)[0]
     assert task['source_url'] == URL and task['origin'] == 'user_upload'
+    assert task['execution_status'] == 'succeeded' and 'failure_reason' not in task
 
 
 @pytest.mark.parametrize('raw', [b'not a video', video_bytes()])

@@ -33,8 +33,8 @@ def project_progress(state):
                    detail='文件与保存时的记录不一致，暂不能继续采用。请查看原文与版本记录。')
     elif artifact and artifact.get('digest_algorithm', 'body-v1') != 'artifact-v2':
         out.update(title=f'从历史「{label}」继续', label='准备新版本',
-                   detail='旧稿保留作参考，新稿会重新审核；历史采用记录不转移。',
-                   prompt=f'请以「{label}」历史版本 {artifact["version"]}（指纹 {artifact["sha256"]}）为参考，结合当前资料重新整理这一阶段，保存为新版本并重新审核。保留旧稿，不继承历史批准，不继续后续阶段。')
+                   detail='旧稿保留作参考，新稿需由你重新确认；历史采用记录不转移。',
+                   prompt=f'请以「{label}」历史版本 {artifact["version"]}（指纹 {artifact["sha256"]}）为参考，结合当前资料重新整理这一阶段，保存为新版本供我确认。保留旧稿，不继承历史批准，不继续后续阶段。')
     elif target['stale']:
         out.update(title=f'「{label}」需要更新', label='准备更新',
                    detail='资料或上游决定已变化，旧稿保留，更新后再确认。')
@@ -43,7 +43,7 @@ def project_progress(state):
                    detail='关键画面还无法落实，先调整画面或补足依据，再写完整脚本。',
                    prompt='请先检查素材方案中标为阻塞的画面和缺口。能替代的由团队调整素材方案；只有我能提供的事实或素材才问我。关键缺口解决后再写完整脚本，不要假设它已经解决。')
     elif target['can_approve']:
-        out.update(title=f'「{label}」等你决定', detail='阅读这一版和审核意见，再选择采用或退回修改。',
+        out.update(title=f'「{label}」等你决定', detail='阅读这一版，选择采用或退回修改。',
                    action='review', label='阅读并决定')
     elif (target.get('approval') or {}).get('decision') == 'returned':
         # His own return already stands on this version, and one version takes
@@ -52,11 +52,7 @@ def project_progress(state):
         out.update(title=f'「{label}」已退回，等团队出新版', label='准备继续',
                    detail='你退回了这一版；旧稿保留，团队按你的意见整理新版后再由你确认。',
                    prompt=(f'我退回了「{label}」的当前版本，请按我的意见整理新版本；保留未受影响的内容，'
-                           '完成后重新内部审核再让我看，不改写其他阶段，也不代替我批准。'))
-    elif target['can_review']:
-        out.update(title=f'「{label}」等待审核', label='准备审核',
-                   detail='内容已保存，还需要独立审核后再由你决定。',
-                   prompt=f'请独立审核当前「{label}」版本 {artifact["version"]}（指纹 {artifact["sha256"]}），保存审核意见后停止，等待我在界面决定。不要重写或自动批准。')
+                           '完成后让我看，不改写其他阶段，也不代替我批准。'))
     elif target['last_rejection']:
         out.update(title=f'「{label}」上次未完成', detail='已保存内容仍可查看。先说明本次如何调整，再发起新一轮。')
     return out

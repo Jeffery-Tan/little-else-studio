@@ -4,14 +4,16 @@ Independence here is structural, not a matter of instruction:
 
 * It runs in a **fresh message list**. The producer's conversation never enters
   it, and there is no code path that could add it.
-* Its seed contains **artifact files and the user's brief** — evidence and
-  standard — and nothing else. Prior reviews are deliberately withheld so a
-  verdict is not anchored by the last one.
-* Its tool list is ``read_artifact`` and ``finish_review``. It has no dispatch,
+* Its seed contains the pinned artifact, upstream facts, selected direction
+  when applicable, and material observation records. Its system includes the
+  active brief and reviewer standard. Producer methods are read only on demand;
+  prior reviews are withheld so they cannot anchor the verdict.
+* It has read-only evidence tools and ``finish_review``. It has no dispatch,
   no submit, and no approval. There is nothing for it to overwrite.
 
 What it can do is *fail to produce a verdict*. If it never calls
-``finish_review``, no review is recorded and the stage stays ``awaiting_review``.
+``finish_review``, no review is recorded and the stage remains ready for the
+user's decision.
 That is the honest outcome: a review that did not happen must not look like one
 that passed.
 """
@@ -264,6 +266,10 @@ def _seed(workspace: Workspace, stage: str, run, *, versions: dict[str, int] | N
     upstream = [s for s in workspace.pipeline.upstream_stages(stage)
                 if s in workspace.readable and s != "intake"]
     for up in upstream:
+        if up == "direction" and stage in ("material_plan", "writing"):
+            # The approved option and its relevant dependencies are in the
+            # pinned common context below; unselected options are not evidence.
+            continue
         parts += [
             f"# 上游产物 {up}（用于核对依据，不是判定对象）",
             "",

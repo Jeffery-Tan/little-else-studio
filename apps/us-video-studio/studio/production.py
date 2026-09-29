@@ -61,8 +61,26 @@ class ActionIn(Input):
     nonce: str = ''
 
 
+class BatchDraftIn(Input):
+    draft_id: str = Field(min_length=1, max_length=160)
+    expected_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+class BatchGenerateIn(Input):
+    request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
+    drafts: list[BatchDraftIn] = Field(min_length=1, max_length=12)
+    consent: bool = Field(strict=True)
+    nonce: str
+
+
 class ApprovalIn(Reference):
     approved: bool = Field(strict=True)
+    nonce: str
+
+
+class BatchApprovalIn(Input):
+    request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
+    images: list[Reference] = Field(min_length=1, max_length=12)
     nonce: str
 
 
@@ -82,6 +100,7 @@ class RecoverIn(Input):
     evidence_note: str = Field(min_length=1, max_length=2000)
     task_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{1,128}$')
     not_submitted: bool = False
+    retry_with_unknown_cost: bool = False
     quantity: float | None = Field(default=None, ge=0, le=10000, strict=True, allow_inf_nan=False)
 
 
@@ -388,7 +407,7 @@ class Production:
                 d['reference_approved'] = bool(ref and approvals.get((ref['name'], ref['sha256']))
                     and material_hashes.get(ref['name']) == ref['sha256'])
                 d['attempts'] = [a for a in attempts.values() if a['draft_id'] == d['draft_id']]
-                d['can_generate'] = d['source_ready'] and d['review'] is not None and d['review']['verdict'] == 'ready' and (
+                d['can_generate'] = d['source_ready'] and (
                     d['kind'] == 'image' or d['reference_approved'])
                 if ref:
                     d['reference'] = {**ref, 'url': material_url(run_id, ref['name'])}
@@ -396,7 +415,8 @@ class Production:
         if not for_agent:
             result.update(capabilities=self.capabilities(), nonce=self.nonce(run_id),
                           active=bool(self.jobs.active), unresolved_calls=self.jobs.ledger.totals().unknown_calls,
-                          latest_approved_image=latest_approved_image)
+                          latest_approved_image=latest_approved_image,
+                          recovery_modes=['retry_with_unknown_cost'])
         return result
 
     def prepare_review(self, run_id, draft_id, payload, *, frozen=None):
@@ -458,8 +478,6 @@ class Production:
                 'downloading', 'unknown', 'submission_unknown', 'recovering'}
                for a in self.attempts(run_id).values()):
             raise ValueError('已有制作任务未确认结束，请查询原任务结果，不要重复提交。')
-        if not d['review'] or d['review']['verdict'] != 'ready':
-            raise ValueError('先完成这份准确方案的制作检查，再提交生成。')
         if d['kind'] == 'video' and not self.approvals(run_id).get((d['reference']['name'], d['reference']['sha256'])):
             raise ValueError('请打开并确认这一版参考图，之后才能提交视频。')
         cap = self.capabilities()[d['kind']]
@@ -500,6 +518,49 @@ class Production:
             return outcome(attempt, '本次制作状态已保存，请在制作页查看结果与用量。')
         return run, {'provider': 'dashscope' if d['kind'] == 'video' else 'codex_cli',
                      'model': d['model'], 'draft_id': draft_id, 'draft_sha256': d['draft_sha256'], 'estimate': d['estimate']}
+
+    def prepare_batch_generation(self, run_id, payload: BatchGenerateIn):
+        """One user decision starts pinned image drafts in order, stopping on uncertainty."""
+        self.require_nonce(run_id, payload.nonce)
+        if not payload.consent:
+            raise ValueError('请先核对整组首帧的描述、参考和费用。')
+        unresolved = {'queued', 'running', 'preparing', 'submitting', 'submitted',
+                      'downloading', 'unknown', 'submission_unknown', 'recovering'}
+        for draft in self.workspace(run_id, for_agent=True)['drafts']:
+            if (draft['kind'] == 'image' and draft['source_ready']
+                    and any(attempt['status'] in unresolved for attempt in draft['attempts'])):
+                raise ValueError('整组仍有首帧任务未核实；先处理原任务，不能跳过它生成其余首帧。')
+        ids = [item.draft_id for item in payload.drafts]
+        if len(ids) != len(set(ids)):
+            raise ValueError('同一首帧不能在一次任务中重复生成。')
+        prepared = []
+        for index, item in enumerate(payload.drafts):
+            draft = self.get_draft(run_id, item.draft_id, item.expected_sha256, True)
+            if draft['kind'] != 'image':
+                raise ValueError('整组出图只接收图片方案；视频仍需核对准确参考与时长。')
+            attempt_id = 'batch.' + digest({'request_id': payload.request_id,
+                                            'index': index, 'draft_id': item.draft_id})
+            action = ActionIn(request_id=attempt_id, expected_sha256=item.expected_sha256,
+                              consent=True, nonce=payload.nonce)
+            runner, _ = self.prepare_generation(run_id, item.draft_id, action)
+            prepared.append((item.draft_id, runner))
+
+        def run(_text, emit, check_cancel):
+            completed = 0
+            for index, (draft_id, runner) in enumerate(prepared, 1):
+                check_cancel()
+                emit({'type': 'status', 'message': f'正在生成第 {index}/{len(prepared)} 张首帧。'})
+                result = runner('', emit, check_cancel)
+                if result.stopped_because != 'done':
+                    return SimpleNamespace(stopped_because='incomplete', rounds=index,
+                        used_tools=[], text=(f'已完成 {completed}/{len(prepared)} 张；'
+                        f'第 {index} 张未完成：{result.text}。其余首帧没有提交。'))
+                completed += 1
+            return done(f'{completed} 张首帧已生成并保存。请在画面区查看，确认准确图片后再继续视频制作。')
+
+        return run, {'provider': 'codex_cli', 'kind': 'image_batch',
+                     'drafts': [{'draft_id': item.draft_id, 'draft_sha256': item.expected_sha256}
+                                for item in payload.drafts]}
 
     def save_output(self, run_id, attempt_id, raw, suffix):
         name = f'production-{hashlib.sha256(attempt_id.encode()).hexdigest()[:24]}{suffix}'
@@ -594,22 +655,29 @@ class Production:
                     refs = (path,)
                 result = client.generate(ImageRequest(prompt=d['prompt'], reference_paths=refs,
                     reference_root=root, output_dir=root / 'output', model=''))
-                if not result.provider_invoked:
+                no_image_call = (result.provider_invoked and result.status == 'failed'
+                                 and result.observed_image_calls == 0)
+                if not result.provider_invoked or no_image_call:
                     self.jobs.ledger.settle_media_call(run_id, attempt_id, quantity=0, ok=False,
-                                                      note='Codex 在发送前停止，没有发起模型请求。')
+                        note=('Codex 文字轮已完整结束，没有调用图片工具。'
+                              if no_image_call else 'Codex 在发送前停止，没有发起模型请求。'))
                 else:
                     self.jobs.ledger.settle_media_call(run_id, attempt_id, quantity=None, ok=result.status == 'completed',
                         request_id=result.turn_id, note='Codex 图片事件未提供计费用量；文字 Tokens 单独保留。',
                         input_tokens=result.usage.input_tokens, output_tokens=result.usage.output_tokens, actual_model=result.model)
                 self.status(run_id, attempt_id, observed_image_calls=result.observed_image_calls,
                     actual_model=result.model, provider_thread_id=result.thread_id, provider_turn_id=result.turn_id,
-                    text_input_tokens=result.usage.input_tokens, text_output_tokens=result.usage.output_tokens)
+                    text_input_tokens=result.usage.input_tokens, text_output_tokens=result.usage.output_tokens,
+                    provider_outcome=result.status)
                 if result.images:
                     image = result.images[0]
                     self.save_output(run_id, attempt_id, image.path.read_bytes(), '.png' if image.mime == 'image/png' else '.webp' if image.mime == 'image/webp' else '.jpg')
                 if result.status == 'completed' and len(result.images) == 1:
                     self.status(run_id, attempt_id, status='succeeded',
                         message='图片已保存，等待你的图审。')
+                elif no_image_call:
+                    self.status(run_id, attempt_id, status='failed',
+                        message='Codex 已结束这轮文字回复，但没有调用图片工具；没有生成图片，可修改输入后重新提交。')
                 else:
                     self.status(run_id, attempt_id, status='unknown' if result.provider_invoked else 'failed',
                         message='图片任务未完整结束，已保留可验证的结果，没有自动重试。'
@@ -675,8 +743,7 @@ def install_production_routes(app, jobs, require_run, connections, settings, lea
                 existing = next((draft for draft in reversed(list(draft_records(jobs.store, run_id).values()))
                                  if draft['kind'] == 'video' and draft['source_sha256'] == source.sha256
                                  and draft['source_snapshot'] == baseline
-                                 and draft['reference'] == {'name': name, 'sha256': sha256}
-                                 and draft['review'] and draft['review'].get('verdict') == 'ready'), None)
+                                 and draft['reference'] == {'name': name, 'sha256': sha256}), None)
                 if existing:
                     return {'status': 'existing', 'draft_id': existing['draft_id']}
                 fingerprint = hashlib.sha256(json.dumps([name, sha256, source.sha256],
@@ -690,7 +757,7 @@ def install_production_routes(app, jobs, require_run, connections, settings, lea
                           str(event.get('request_id', '')).startswith(base_request_id + ':retry:'))]
                 text = (f'我已在界面确认参考图 {json.dumps(name, ensure_ascii=False)}，图片 SHA256 为 {sha256}。'
                         f'请仅针对当前已确认脚本第 {source.version} 版（SHA256 {source.sha256}）'
-                        '准备这张图对应的视频制作输入，并完成独立文字制作检查。'
+                        '准备这张图对应的视频制作输入，并完成主制片自检。'
                         '将准确参考图、画面描述、时长和费用展示在成片视图，等我核对后决定是否生成。'
                         '不要批准图片、不要提交图片或视频生成。')
 
@@ -777,15 +844,50 @@ def install_production_routes(app, jobs, require_run, connections, settings, lea
         except (ValueError, PipelineError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    @app.post('/api/runs/{run_id}/production/material-approvals/batch')
+    def approve_batch(run_id: str, payload: BatchApprovalIn):
+        require_run(run_id)
+        try:
+            pairs = [(image.name, image.sha256) for image in payload.images]
+            if len(pairs) != len(set(pairs)):
+                raise ValueError('同一张图片不能重复确认。')
+            with jobs.lock, jobs.store.run_lock(run_id):
+                receipts = [event for event in jobs.store.read_events(run_id)
+                            if event.get('kind') == 'production_batch_approval'
+                            and event.get('request_id') == payload.request_id]
+                if receipts:
+                    if receipts[-1].get('images') != [image.model_dump() for image in payload.images]:
+                        raise ValueError('相同请求标识对应不同图片，请重新核对。')
+                    return {'approved': len(pairs), 'already_saved': True}
+                idle()
+                service.require_nonce(run_id, payload.nonce)
+                attempts = service.attempts(run_id)
+                current = {draft['draft_id']: draft for draft in service.workspace(run_id)['drafts']
+                           if draft['kind'] == 'image' and draft['source_ready']}
+                generated = {(attempt['output']['name'], attempt['output']['sha256'])
+                             for attempt in attempts.values()
+                             if attempt.get('media_kind') == 'image'
+                             and attempt.get('status') == 'succeeded' and attempt.get('output')
+                             and attempt.get('draft_id') in current
+                             and attempt.get('draft_sha256') == current[attempt['draft_id']]['draft_sha256']}
+                for name, sha256 in pairs:
+                    if (name, sha256) not in generated:
+                        raise ValueError('这张图片不是当前首帧方案的生成结果，请刷新后重新核对。')
+                    read_image(jobs.store, run_id, name, sha256)
+                nonce_sha256 = hashlib.sha256(payload.nonce.encode()).hexdigest()
+                for name, sha256 in pairs:
+                    service.event(run_id, 'production_material_approval', name=name, sha256=sha256,
+                                  approved=True, actor='user', nonce_sha256=nonce_sha256)
+                service.event(run_id, 'production_batch_approval', request_id=payload.request_id,
+                              images=[image.model_dump() for image in payload.images], actor='user')
+            return {'approved': len(pairs)}
+        except (ValueError, PipelineError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @app.post('/api/runs/{run_id}/production/{draft_id}/review')
     def review(run_id: str, draft_id: str, payload: ActionIn):
         require_run(run_id)
-        try:
-            return jobs.submit(run_id, '检查制作方案：' + draft_id, payload.request_id, kind='production_review',
-                payload=payload.model_dump(exclude={'request_id', 'nonce'}),
-                prepare=lambda _: service.prepare_review(run_id, draft_id, payload))
-        except (ValueError, PipelineError) as exc:
-            raise HTTPException(409, str(exc)) from exc
+        raise HTTPException(410, '独立审核 Agent 已停用；请核对实际制作输入与费用后决定是否生成。')
 
     @app.post('/api/runs/{run_id}/production/{draft_id}/generate')
     def generate(run_id: str, draft_id: str, payload: ActionIn):
@@ -794,6 +896,16 @@ def install_production_routes(app, jobs, require_run, connections, settings, lea
             return jobs.submit(run_id, '生成媒体：' + draft_id, payload.request_id, kind='production_generation',
                 payload=payload.model_dump(exclude={'request_id', 'nonce'}),
                 prepare=lambda _: service.prepare_generation(run_id, draft_id, payload))
+        except (ValueError, PipelineError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post('/api/runs/{run_id}/production/batch-generate')
+    def generate_batch(run_id: str, payload: BatchGenerateIn):
+        require_run(run_id)
+        try:
+            return jobs.submit(run_id, '生成整组首帧', payload.request_id,
+                kind='production_batch_generation', payload=payload.model_dump(exclude={'request_id', 'nonce'}),
+                prepare=lambda _: service.prepare_batch_generation(run_id, payload))
         except (ValueError, PipelineError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -816,9 +928,18 @@ def install_production_routes(app, jobs, require_run, connections, settings, lea
                 a = service.attempts(run_id).get(attempt_id)
                 if not a or not payload.evidence_note.strip():
                     raise ValueError('请选择真实制作记录，并填写提供方证据。')
-                choices = int(payload.task_id is not None) + int(payload.not_submitted) + int(payload.quantity is not None)
+                choices = (int(payload.task_id is not None) + int(payload.not_submitted)
+                           + int(payload.quantity is not None) + int(payload.retry_with_unknown_cost))
                 if choices != 1:
-                    raise ValueError('请选择一种有提供方证据的恢复方式。')
+                    raise ValueError('请选择一种明确的恢复方式。')
+                if payload.retry_with_unknown_cost:
+                    if (a['media_kind'] != 'image' or a['status'] not in {'unknown', 'submission_unknown'}
+                            or a.get('output') or a.get('task_id')):
+                        raise ValueError('只有结果未知且无可核对输出的图片任务可选择承担未知费用后重试。')
+                    service.status(run_id, attempt_id, status='retry_authorized',
+                        message='用户决定保留旧请求结果与费用未知的记录，并允许另行确认新一轮生成；此操作没有提交新图片任务。',
+                        recovery_evidence=payload.evidence_note, recovery_actor='user')
+                    return {'recovered': True, 'new_generation': False, 'usage_still_unknown': True}
                 if payload.task_id:
                     if a['media_kind'] != 'video' or a.get('task_id') or a.get('output'):
                         raise ValueError('此任务不能重新绑定提供方任务。')

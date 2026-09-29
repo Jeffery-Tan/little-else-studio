@@ -50,8 +50,42 @@ def test_connect_uses_numeric_ip_and_original_tls_hostname(monkeypatch):
     with pytest.raises(OSError): connection.connect()
 
 
+@pytest.mark.parametrize(('value', 'expected'), [
+    ('http://127.0.0.1:10808', ('127.0.0.1', 10808)),
+    ('http://[::1]:10808', ('::1', 10808)),
+    ('http://127.0.0.1', ('127.0.0.1', 80)),
+    ('http://localhost:10808', None),
+    ('http://192.168.1.2:10808', None),
+    ('https://127.0.0.1:10808', None),
+    ('socks5://127.0.0.1:10808', None),
+    ('http://user:pass@127.0.0.1:10808', None),
+    ('http://@127.0.0.1:10808', None),
+    ('http://127.0.0.1:0', None),
+    ('http://127.0.0.1:10808/other', None),
+])
+def test_only_credential_free_loopback_http_proxy_is_eligible(monkeypatch, value, expected):
+    monkeypatch.setattr(tk, 'getproxies', lambda: {'https': value})
+    assert tk.local_https_proxy() == expected
+
+
+def test_proxy_connects_validated_ip_but_verifies_original_hostname(monkeypatch):
+    calls = []
+    raw = SimpleNamespace(getpeername=lambda: ('127.0.0.1', 10808), close=lambda: calls.append('close'))
+    monkeypatch.setattr(tk.socket, 'create_connection', lambda address, timeout: calls.append(address) or raw)
+    connection = tk.PinnedProxyHTTPS('www.tiktok.com', '8.8.8.8', 5, ('127.0.0.1', 10808))
+    connection._context = SimpleNamespace(wrap_socket=lambda sock, server_hostname: calls.append(server_hostname) or raw)
+    connection._tunnel = lambda: calls.append(connection._tunnel_host)
+    connection.connect()
+    assert calls == [('127.0.0.1', 10808), '8.8.8.8', 'www.tiktok.com']
+    assert connection._tunnel_headers['Host'] == '8.8.8.8:443'
+    raw.getpeername = lambda: ('192.168.1.2', 10808)
+    with pytest.raises(OSError): connection.connect()
+    assert calls[-1] == 'close'
+
+
 def fake_network(monkeypatch, responses):
     calls = []
+    monkeypatch.setattr(tk, 'local_https_proxy', lambda: None)
     monkeypatch.setattr(tk, 'public_addresses', lambda host: ['8.8.8.8'])
     class Connection:
         sock = None
@@ -59,16 +93,85 @@ def fake_network(monkeypatch, responses):
         def request(self, *_a, **_kw): pass
         def getresponse(self):
             status, headers, raw = responses.pop(0)
-            return SimpleNamespace(status=status, getheader=headers.get, read=io.BytesIO(raw).read)
+            return SimpleNamespace(status=status, getheader=headers.get, getheaders=lambda: list(headers.items()),
+                                   read=io.BytesIO(raw).read)
         def close(self): pass
     monkeypatch.setattr(tk, 'PinnedHTTPS', Connection)
     return calls
+
+
+def test_safe_download_uses_pinned_proxy_and_original_host_header(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tk, 'local_https_proxy', lambda: ('127.0.0.1', 10808))
+    monkeypatch.setattr(tk, 'public_addresses', lambda host: ['8.8.8.8'])
+    class Connection:
+        sock = None
+        def __init__(self, host, address, timeout, proxy):
+            calls.append((host, address, proxy))
+        def request(self, method, path, headers):
+            calls.append((method, path, headers['Host']))
+        def getresponse(self):
+            return SimpleNamespace(status=200, getheader=lambda key: None, getheaders=lambda: [],
+                                   read=io.BytesIO(b'page').read)
+        def close(self): pass
+    monkeypatch.setattr(tk, 'PinnedProxyHTTPS', Connection)
+    raw, _ = tk.SafeDownload().get(URL)
+    assert raw == b'page'
+    assert calls == [('www.tiktok.com', '8.8.8.8', ('127.0.0.1', 10808)),
+                     ('GET', f'/@fixture/video/{VID}', 'www.tiktok.com')]
+
+
+@pytest.mark.parametrize(('header', 'expected'), [
+    ('tt_chain_token=abc123==; Domain=.tiktok.com; Secure; HttpOnly', 'abc123=='),
+    ('tt_chain_token=abc; Domain=.tiktok.com', None),
+    ('tt_chain_token=abc; Domain=.example.com; Secure', None),
+    ('tt_chain_token="abc;bad"; Domain=.tiktok.com; Secure', None),
+])
+def test_only_safe_public_page_chain_cookie_is_retained(header, expected):
+    response = SimpleNamespace(getheaders=lambda: [('Set-Cookie', header)])
+    assert tk.page_chain_token(response) == expected
+
+
+def test_page_chain_cookie_is_sent_only_to_tiktok_media_in_same_fetch(monkeypatch):
+    requests = []
+    responses = [
+        (200, {'Set-Cookie': 'tt_chain_token=abc123==; Domain=.tiktok.com; Secure'}, b'page'),
+        (200, {}, b'video'),
+        (200, {}, b'other'),
+    ]
+    monkeypatch.setattr(tk, 'local_https_proxy', lambda: None)
+    monkeypatch.setattr(tk, 'public_addresses', lambda host: ['8.8.8.8'])
+    class Connection:
+        sock = None
+        def __init__(self, host, address, timeout): pass
+        def request(self, method, path, headers): requests.append(dict(headers))
+        def getresponse(self):
+            status, headers, raw = responses.pop(0)
+            return SimpleNamespace(status=status, getheader=headers.get, getheaders=lambda: list(headers.items()),
+                                   read=io.BytesIO(raw).read)
+        def close(self): pass
+    monkeypatch.setattr(tk, 'PinnedHTTPS', Connection)
+    download = tk.SafeDownload()
+    download.get(URL)
+    download.get('https://v16-webapp-prime.us.tiktok.com/video/tos/id', media=True, referer=URL)
+    download.get(CDN, media=True, referer=URL)
+    assert 'Cookie' not in requests[0]
+    assert requests[1]['Cookie'] == 'tt_chain_token=abc123=='
+    assert requests[1]['Referer'] == URL
+    assert 'Cookie' not in requests[2]
 
 
 def test_redirect_revalidated_before_another_connection(monkeypatch):
     calls = fake_network(monkeypatch, [(302, {'Location': 'https://127.0.0.1/private'}, b'')])
     with pytest.raises(tk.ReferenceFetchError): tk.SafeDownload().get(URL)
     assert calls == ['www.tiktok.com']
+
+
+@pytest.mark.parametrize(('url', 'media', 'target'), [(URL, False, '页面'), (CDN, True, '视频文件')])
+def test_http_failure_names_the_failed_stage(monkeypatch, url, media, target):
+    fake_network(monkeypatch, [(403, {}, b'')])
+    with pytest.raises(tk.ReferenceFetchError, match=f'TikTok{target}获取失败（HTTP 403）'):
+        tk.SafeDownload().get(url, media=media)
 
 
 @pytest.mark.parametrize('headers,raw', [({'Content-Length': '100'}, b'a'),
@@ -108,8 +211,9 @@ def test_unavailable_or_unsupported_page_fails(raw):
 
 
 def test_fetch_does_not_persist_signed_playback_url(monkeypatch):
-    responses = [(200, {}, page()), (200, {}, b'video fixture')]
+    responses = [(200, {'Set-Cookie': 'tt_chain_token=transient==; Domain=.tiktok.com; Secure'}, page()),
+                 (200, {}, b'video fixture')]
     fake_network(monkeypatch, responses)
     raw, source = tk.fetch_reference(URL+'?tracking=hidden')
     assert raw == b'video fixture' and source['source_url'] == URL
-    assert 'secret' not in json.dumps(source) and 'url' not in source
+    assert 'secret' not in json.dumps(source) and 'transient' not in json.dumps(source) and 'url' not in source

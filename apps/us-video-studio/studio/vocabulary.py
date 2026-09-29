@@ -50,6 +50,7 @@ STATUS_LABEL: dict[str, str] = {
     "done": "已写完",
     "needs_resolution": "关键缺口待处理",
     "awaiting_review": "审核中",
+    "awaiting_decision": "等你决定",
     "reviewed": "审核完了",
     "returned": "被打回",
     "approved": "你已通过",
@@ -278,8 +279,8 @@ def stage_blank(stage: str, st: dict[str, Any]) -> dict[str, str]:
     if st.get("open_attempt"):
         who = role_label(st["open_attempt"].get("actor", "").split(":")[0] or owner_role(stage))
         return {"state": "running", "text": f"{who}正在写新的一版「{label}」，还没交回来。"}
-    if st.get("review") is None and st.get("status") == "awaiting_review":
-        return {"state": "reviewing", "text": f"「{label}」写完了，正在等审核。"}
+    if st.get("review") is None and st.get("status") == "awaiting_decision":
+        return {"state": "waiting", "text": f"「{label}」写完了，等你决定。"}
     return {"state": "todo", "text": f"「{label}」已经写好了。"}
 
 
@@ -394,6 +395,12 @@ def failure_note(text: str) -> str:
     """
     if 'unknown, partial or pending usage' in text or 'reconcile provider evidence' in text:
         return '这一轮当时因用量记录缺失而暂停，已有内容已保留。现已取消核账限制，可以继续。'
+    if '模型输出达到单次上限' in text:
+        return '这轮受托角色的模型输出达到单次上限，结果不完整，新版未保存。系统已停止自动重试，避免重复计费；请从当前阶段继续。'
+    if '角色模型返回了无法读取的结果' in text:
+        return '这轮受托角色的模型回复格式不完整，新版未保存。系统已停止自动重试，避免重复计费；请从当前阶段继续。'
+    if '模型连接超时或中断' in text:
+        return '这轮受托角色的模型连接超时或中断，新版未保存。用量无法确认，系统已停止自动重试；请检查连接后从当前阶段继续。'
     if re.fullmatch(
         r'BudgetExceeded: \[budget\] (?:\d+ tokens reached the soft cap of \d+'
         r'|estimated known spend reached the soft cap of \d+(?:\.\d+)? USD)'
@@ -530,7 +537,7 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None,
         # signpost to a stage that is waiting on him. A returned document is
         # mid-flight, not finished — the status `pipeline.stage_state` derives
         # for it is the same "not settled" the other two mean.
-        elif has_doc and st.get("status") in ("reviewed", "awaiting_review", "returned", "needs_resolution"):
+        elif has_doc and st.get("status") in ("reviewed", "awaiting_decision", "returned", "needs_resolution"):
             mark, state = "●", "active"
         elif has_doc:
             mark, state = "✓", "done"
@@ -570,7 +577,7 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None,
                 # this is the sentence that says so where he is actually reading.
                 "integrity_ok": bool(st.get("integrity_ok", True)),
                 "integrity_sentence": (integrity_sentence(stage) if not st.get("integrity_ok", True) else
-                    "历史版本仅供查看；继续工作需重新生成并审核新版本。" if latest and latest.get("digest_algorithm", "body-v1") != "artifact-v2" else ""),
+                    "历史版本仅供查看；继续工作需重新生成并由你决定新版本。" if latest and latest.get("digest_algorithm", "body-v1") != "artifact-v2" else ""),
                 "stale": bool(st.get("stale")),
                 "stale_sentence": stale_sentence(stage, st.get("stale_reason", ""))
                 if st.get("stale")

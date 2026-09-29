@@ -63,21 +63,21 @@ def skill_text(learning, name):
 
 
 @pytest.mark.parametrize("format,skill", [("video", "us-creator-video"), ("photo", "us-photo-copy")])
-def test_full_applicable_skills_reach_role_and_snapshot_binds_artifact(runtime, format, skill):
+def test_director_gets_strategy_without_downstream_output_skill(runtime, format, skill):
     store, pipeline, settings, ledger, learning = runtime
     route(store, format)
     submit(pipeline, "intake")
     model = ScriptedModel([tool_turn("submit", "submit_stage", {"content": "方案正文", "summary": "s"}), final_turn("done")])
     outcome = Dispatcher(store, pipeline, settings, model, ledger, RUN, learning_service=learning).dispatch("direction", "比较方向")
     assert outcome.submitted == "direction-v1"
-    assert skill_text(learning, skill) in model.calls[0]["system"]
+    assert skill_text(learning, skill) not in model.calls[0]["system"]
     assert skill_text(learning, "us-commerce-strategy") in model.calls[0]["system"]
     artifact = store.latest_artifact(RUN, "direction")
     snapshot = json.loads((store.run_dir(RUN) / artifact.evidence[-1]).read_text(encoding="utf-8"))
     assert snapshot["role"] == "director"
     assert snapshot["format"] == format
     assert snapshot["library_sha256"] == hashlib.sha256(learning.library_path.read_bytes()).hexdigest()
-    assert {s["id"] for s in snapshot["skills"]} == {skill, "us-commerce-strategy"}
+    assert {s["id"] for s in snapshot["skills"]} == {"us-commerce-strategy"}
 
 
 def test_photo_writer_delivers_pages_and_caption_without_video_duration(runtime):
@@ -94,6 +94,7 @@ def test_photo_writer_delivers_pages_and_caption_without_video_duration(runtime)
     assert result.submitted == "writing-v1"
     system = model.calls[0]["system"]
     assert skill_text(learning, "us-photo-copy") in system
+    assert skill_text(learning, "us-commerce-strategy") not in system
     assert "写**带时码的完整脚本**" not in system
     assert "不要填 duration 或 total_duration" in system
     assert "Caption" in store.read_artifact_text(RUN, "writing", 1)
@@ -159,7 +160,8 @@ def test_feedback_is_pending_then_applied_feedback_enters_next_job_but_not_revie
                         run_id=RUN, stage="direction", learning_service=learning)
     assert review.verdict == "pass"
     assert quote not in review_model.requests_text()
-    assert skill_text(learning, "us-creator-video") in review_model.calls[0]["system"]
+    assert "前三秒能否识别商品和购买处境" in review_model.calls[0]["system"]
+    assert skill_text(learning, "us-creator-video") not in review_model.calls[0]["system"]
     assert "propose_learning_feedback" not in review_model.calls[0]["tool_names"]
 
 

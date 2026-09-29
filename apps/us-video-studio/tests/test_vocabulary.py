@@ -148,6 +148,15 @@ def test_an_unrecognised_reason_is_still_quoted_rather_than_dropped():
     assert "503" in sentence
 
 
+def test_failed_model_turn_explains_the_stop_without_private_protocol_text():
+    old = v.failure_note('NonRetryableStageError: 角色模型返回了无法读取的结果，本轮已停止自动重试')
+    new = v.failure_note('NonRetryableStageError: 受托角色的模型输出达到单次上限，结果不完整')
+    timeout = v.failure_note('NonRetryableStageError: 受托角色的模型连接超时或中断，用量无法确认')
+    for sentence in (old, new, timeout):
+        assert '新版未保存' in sentence and '停止自动重试' in sentence
+        assert 'NonRetryableStageError' not in sentence
+
+
 def test_an_override_approval_keeps_the_reason_he_gave():
     sentence = v.approval_sentence("approved_override", "这一版赶时间，先拍")
     assert "没通过" in sentence
@@ -258,7 +267,7 @@ def test_a_step_that_needs_him_is_never_drawn_as_one_of_the_settled_states():
     ``approved``). Feeding those in would be asserting about a state the server
     cannot produce.
     """
-    for status in ("returned", "reviewed", "awaiting_review"):
+    for status in ("returned", "reviewed", "awaiting_decision"):
         rail = v.build_rail(
             [
                 _stage(

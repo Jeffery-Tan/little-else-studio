@@ -57,7 +57,7 @@ function stageHtml(step, ctx) {
 
   return (
     `<div class="pane${pending ? " has-gate" : ""}" data-stage="${escapeHtml(step.stage)}">` +
-    (pending && !inlineDirection ? `<a class="decision-jump" href="#stage-decision">查看审核意见与决定 ↓</a>` : "") +
+    (pending && !inlineDirection ? `<a class="decision-jump" href="#stage-decision">查看方案并决定 ↓</a>` : "") +
     titleHtml(step) +
     warnHtml(step) +
     (ctx.readOnly ? '' : headHtml(step)) +
@@ -208,7 +208,7 @@ function writingWorkHtml(step, ctx) {
   }).join('');
   const pending = ctx?.pending;
   const reviewState = pending && pending.stage === step.stage && pending.version === step.version
-    ? `<p class="creator-script-review-state">${pending.passed ? '审核已通过，仍待你决定' : '审核未通过，建议先看修改意见'}${pending.findings?.length ? ` · ${pending.findings.length} 点` : ''}</p>` : '';
+    ? `<p class="creator-script-review-state">${pending.reviewed === false ? '脚本已保存，等你决定' : pending.passed ? '审核已通过，仍待你决定' : '审核未通过，建议先看修改意见'}${pending.findings?.length ? ` · ${pending.findings.length} 点` : ''}</p>` : '';
   const overview = `<nav class="creator-script-overview" aria-label="${isPhoto ? '图文稿页码' : '脚本段落'}"><div class="creator-script-overview-head"><strong>${cards.length} ${isPhoto ? '页' : '段'}内容</strong><span>点一段直接阅读</span></div>${reviewState}<ol>${outline}</ol></nav>`;
   const segments = cards.map((card, index) => {
     const number = index + 1;
@@ -253,9 +253,6 @@ function teamIssuesHtml(issues) {
  */
 function gateApproveLabel(pending, surface) {
   const journey = surface === "journey";
-  if (!pending.passed) {
-    return journey ? "填写理由，仍按此方案继续" : "明确覆盖审核并通过";
-  }
   if (journey) {
     return pending.stage === "direction" ? "按此方向完善方案" : "确认方案，准备分镜";
   }
@@ -273,13 +270,11 @@ function gateRejectLabel(surface) {
  * `.reason` (what he wrote) and `.gate-feedback` (what just happened) — plus
  * `.gate-actions`. That is not cosmetic: `wireGate` binds those two by selector
  * before it binds any button, and the brief-amendment card used to ship without
- * them, so the card threw on open and its buttons were never wired. The note box
- * is genuinely needed on both: approving past a failing review needs a reason,
- * and returning always does.
+ * them, so the card threw on open and its buttons were never wired. Returning
+ * a version needs a concrete reason; adopting it does not.
  *
  * The data contract is declared, not inferred — `data-gate-act` on the action
- * row, `data-passed` for whether a note is mandatory. A test can assert the
- * markup and the binder agree without a browser.
+ * row. A test can assert the markup and the binder agree without a browser.
  */
 function gateHtml(pending, step) {
   const amend = pending.kind === "brief_amendment";
@@ -305,12 +300,7 @@ function revisionNoteHtml(placeholder) {
 
 function decisionActionsHtml(pending, direction = false) {
   const revise = `<button type="button" class="good small" data-act="reject">按意见修改，先出新版</button>`;
-  const adopt = pending.passed
-    ? `<button type="button" class="ghost small" data-act="approve">${direction ? '按所选方向继续' : pending.stage === 'direction' ? '确认当前方向并继续' : '确认当前脚本并继续'}</button>`
-    : `<details class="gate-override"><summary>仍要采用未通过审核的当前版？</summary>` +
-      `<p>这会跳过当前审核意见并继续。请单独说明原因。</p>` +
-      `<label class="gate-note-label">覆盖审核的理由<textarea class="override-reason" rows="3" maxlength="8000" aria-label="覆盖审核的理由"></textarea></label>` +
-      `<button type="button" class="bad small" data-act="approve">明确覆盖审核并采用当前版</button></details>`;
+  const adopt = `<button type="button" class="ghost small" data-act="approve">${direction ? '按所选方向继续' : pending.stage === 'direction' ? '确认当前方向并继续' : '确认当前脚本并继续'}</button>`;
   return gateActionsHtml(['approve', 'reject'], '选择和填写意见都不会立即提交。',
     `<div class="gate-decision-buttons">${revise}${adopt}</div>`);
 }

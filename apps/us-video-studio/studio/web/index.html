@@ -10,12 +10,13 @@
 <link rel="stylesheet" href="/static/style.css?v=ux-audit-20260927">
 <link rel="stylesheet" href="/static/history.css?v=migration-20260919">
 <link rel="stylesheet" href="/static/cinema.css?v=chat-refactor-20260925">
-<link rel="stylesheet" href="/static/conversation.css?v=composer-stop-20260927-r2">
+<link rel="stylesheet" href="/static/conversation.css?v=midflight-20260929">
 <link rel="stylesheet" href="/static/connections.css?v=codex-login-20260920">
 <link rel="stylesheet" href="/static/learning.css?v=creative-20260919">
 <link rel="stylesheet" href="/static/learning-session.css?v=learning-20260924-r1">
+<link rel="stylesheet" href="/static/reference-breakdown.css?v=reference-breakdown-20260928">
 <link rel="stylesheet" href="/static/revisions.css?v=revision-20260919">
-<link rel="stylesheet" href="/static/product-cards.css?v=reuse-20260919-final"><link rel="stylesheet" href="/static/inline-feedback.css?v=reuse-20260919-final"><link rel="stylesheet" href="/static/outcomes.css?v=production-20260919"><link rel="stylesheet" href="/static/project-costs.css?v=production-20260919"><link rel="stylesheet" href="/static/production.css?v=conversation-decisions-20260927"><link rel="stylesheet" href="/static/journey.css?v=conversation-decisions-20260927"><link rel="stylesheet" href="/static/creator-workspace.css?v=direction-choice-20260927"><link rel="stylesheet" href="/static/canvas-workspace.css?v=top-controls-20260927"></head>
+<link rel="stylesheet" href="/static/product-cards.css?v=reuse-20260919-final"><link rel="stylesheet" href="/static/inline-feedback.css?v=reuse-20260919-final"><link rel="stylesheet" href="/static/outcomes.css?v=production-20260919"><link rel="stylesheet" href="/static/project-costs.css?v=production-20260919"><link rel="stylesheet" href="/static/production.css?v=image-recovery-20260929"><link rel="stylesheet" href="/static/journey.css?v=conversation-decisions-20260927"><link rel="stylesheet" href="/static/creator-workspace.css?v=direction-choice-20260927"><link rel="stylesheet" href="/static/canvas-workspace.css?v=top-controls-20260927"></head>
 <body data-view="home">
 <a class="skip-link" href="#workspace">跳到内容</a>
 <aside class="sidebar" aria-label="主导航">
@@ -41,15 +42,16 @@
     <section class="conversation-start" aria-labelledby="hero-title">
       <img src="/static/studio-mark.svg" width="52" height="52" alt="">
       <h1 id="hero-title">这次，想让什么变成画面？</h1>
-      <p>说一句你想做什么，也可以附上图片、视频或 TK 链接。</p>
+      <p>说一句你想做什么；商品素材和参考视频可以分开添加。粘贴 TK 链接时，说清是补全商品信息还是拆解参考。</p>
       <form id="start-conversation" class="start-composer">
         <textarea id="start-prompt" rows="4" maxlength="8000" aria-label="描述你想创作的内容" placeholder="比如：用这些商品图，做一条自然、有生活感的美国 TikTok 带货视频…"></textarea>
         <div id="start-attachments" class="start-attachments"></div>
-        <div class="start-actions"><button id="start-attach" type="button" class="ghost">＋ 添加图片或视频</button><span>细节可以边聊边定</span><button type="submit" class="primary" aria-label="发送给制片团队">发送 ↑</button></div>
+        <div class="start-actions"><button id="start-attach" type="button" class="ghost">＋ 商品图片/视频</button><button id="start-reference-attach" type="button" class="ghost">＋ 参考视频</button><span>视频用途选错了，可以在附件上改</span><button type="submit" class="primary" aria-label="发送给制片团队">发送 ↑</button></div>
         <input id="start-files" type="file" accept="image/*,video/*" multiple hidden>
+        <input id="start-reference-files" type="file" accept="video/*,.mp4,.mov,.m4v,.webm" multiple hidden>
         <p id="start-status" role="status"></p>
       </form>
-      <div class="learning-start-action"><button id="start-learning" type="button" class="ghost">研究一条参考视频 ↗</button></div>
+      <div class="learning-start-action"><button id="start-learning" type="button" class="ghost">单独研究并沉淀方法 ↗</button></div>
       <div id="hero-visual" hidden></div>
     </section>
     <section class="projects-section" aria-labelledby="projects-heading">
@@ -67,11 +69,13 @@
       <nav class="journey-tabs" role="tablist" aria-label="作品内容">
         <button id="journey-tab-plan" role="tab" data-journey-tab="plan" data-plan-stage="direction" aria-controls="stage" aria-selected="true" tabindex="0">创意方向</button>
         <button id="journey-tab-assets" role="tab" data-journey-tab="assets" aria-controls="journey-assets" aria-selected="false" tabindex="-1">素材</button>
+        <button id="journey-tab-reference" role="tab" data-journey-tab="reference" aria-controls="journey-reference" aria-selected="false" tabindex="-1" hidden>参考拆解</button>
         <button id="journey-tab-script" role="tab" data-journey-tab="plan" data-plan-stage="writing" aria-controls="stage" aria-selected="false" tabindex="-1">脚本</button>
         <button id="journey-tab-storyboard" role="tab" data-journey-tab="storyboard" aria-controls="journey-storyboard" aria-selected="false" tabindex="-1">画面</button>
         <button id="journey-tab-video" role="tab" data-journey-tab="video" aria-controls="journey-video" aria-selected="false" tabindex="-1">成片与文案</button>
       </nav>
       <section id="journey-assets" class="canvas-assets" role="tabpanel" aria-labelledby="journey-tab-assets" tabindex="0" hidden></section>
+      <section id="journey-reference" role="tabpanel" aria-labelledby="journey-tab-reference" tabindex="0" hidden></section>
       <div id="journey-storyboard" role="tabpanel" aria-labelledby="journey-tab-storyboard" tabindex="0" hidden></div>
       <div id="journey-video" role="tabpanel" aria-labelledby="journey-tab-video" tabindex="0" hidden></div>
       <nav class="rail" id="rail" aria-label="创作内容阶段" hidden></nav>
@@ -82,7 +86,8 @@
       <div id="job-status" class="job-status" role="status" hidden></div>
       <div id="conversation" class="conversation"><button id="conversation-toggle" class="conversation-bar" aria-expanded="true" aria-controls="conversation-body"><span>项目对话</span><span id="conversation-count" class="conversation-count">还没有对话</span><span id="conversation-caret" class="conversation-caret">收起</span></button><div id="conversation-body" class="conversation-body" aria-live="polite"></div></div>
       <div id="draft" class="draft" hidden></div><div id="feedback-target" class="feedback-target" hidden></div>
-      <div id="chat-attachments" aria-live="polite"></div><input id="chat-files" type="file" accept="image/*,video/*" multiple hidden><div class="composer-inner"><button type="button" id="chat-attach" class="ghost" aria-label="添加图片或视频">＋</button><textarea id="chat-input" rows="2" aria-label="与制片团队对话" placeholder="说说想做什么，也可直接粘贴 TK 链接…"></textarea><button id="send" class="primary" aria-label="发送消息">发送 <span aria-hidden="true">↑</span></button></div>
+      <div class="composer-upload-actions"><button type="button" id="chat-attach" class="ghost small">＋ 商品图片/视频</button><button type="button" id="chat-reference-attach" class="ghost small">＋ 参考视频</button></div>
+      <div id="chat-attachments" aria-live="polite"></div><input id="chat-files" type="file" accept="image/*,video/*" multiple hidden><input id="chat-reference-files" type="file" accept="video/*,.mp4,.mov,.m4v,.webm" multiple hidden><div class="composer-inner"><textarea id="chat-input" rows="2" aria-label="与制片团队对话" placeholder="例如：用这条商品视频补全商品信息 + TK 链接…"></textarea><button id="job-stop" class="ghost small" type="button" hidden>停止</button><button id="send" class="primary" aria-label="发送消息">发送 <span aria-hidden="true">↑</span></button></div>
       <div class="composer-hint"><span id="composer-key-hint">Enter 发送 · Shift + Enter 换行</span><button id="detail-toggle" class="ghost small" aria-pressed="false">技术记录</button></div>
     </aside>
   </section>
@@ -90,15 +95,15 @@
 <section id="materials" class="materials" aria-label="项目素材" hidden>
   <div class="materials-head"><div><h2>项目素材</h2><p id="materials-project-name"></p><span id="materials-count" class="materials-count">还没有素材</span></div><button id="materials-close" class="ghost small">关闭</button></div>
   <label class="upload-area" for="material-upload"><span data-icon="upload"></span><strong>添加图片或视频</strong><span>点击选择，或拖入文件 · 单个文件最多 64 MB</span><input id="material-upload" type="file" accept="image/*,video/*" multiple></label>
-  <button id="reference-video-open" type="button" class="primary">在对话中提供参考</button>
-  <p class="muted">附上视频或粘贴 TK 链接，告诉制片团队想分析、复刻，或借鉴哪一部分。</p>
+  <button id="reference-video-open" type="button" class="primary">拆解参考视频</button>
+  <p class="muted">上传商品视频可在这里分析；商品视频 TK 链接可贴进对话并说明要补全商品信息。参考视频用于拆解表达。</p>
   <div id="reference-video-results"></div>
   <div id="materials-grid" class="materials-grid"></div>
 </section>
 <div id="reader" class="reader" hidden><div class="reader-box" role="dialog" aria-modal="true" aria-labelledby="reader-title"><div class="reader-head"><div><h2 id="reader-title">方案详情</h2><div class="reader-sub" id="reader-sub"></div></div><div class="reader-actions"><div class="versions" id="reader-versions" hidden></div><button id="reader-close" class="ghost">关闭</button></div></div><div class="reader-body" id="reader-body"></div></div></div>
 <div id="viewer" class="viewer" hidden><div class="viewer-box" role="dialog" aria-modal="true" aria-label="素材预览"><div class="viewer-head"><span id="viewer-name"></span><button id="viewer-close" class="ghost small">关闭</button></div><div id="viewer-body" class="viewer-body"></div></div></div>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/learning-session.js?v=learning-integration-20260924"></script>
-<script src="/static/md.js?v=creative-20260919"></script><script src="/static/blocks.js?v=project-trash-20260921"></script><script src="/static/stage.js?v=conversation-decisions-20260927"></script><script src="/static/project-management.js?v=project-trash-20260921"></script><script src="/static/workspace.js?v=project-identity-20260927"></script><script src="/static/progress.js?v=top-controls-20260927"></script><script src="/static/materials.js?v=migration-20260919"></script><script src="/static/image-analysis.js?v=reference-video-20260921"></script><script src="/static/image-workspace.js?v=reference-video-20260921"></script><script src="/static/conversation-input.js?v=natural-reference-20260921"></script><script src="/static/reference-video.js?v=natural-reference-20260921"></script><script src="/static/material-workspace.js?v=project-title-20260924"></script><script src="/static/team-progress.js?v=failed-detail-20260927"></script><script src="/static/runtime.js?v=direction-choice-20260927-r2"></script><script src="/static/revisions.js?v=revision-20260919"></script><script src="/static/revision-workspace.js?v=studio-20260923-r3"></script><script src="/static/product-cards.js?v=reuse-20260919-final"></script><script src="/static/outcomes.js?v=production-20260919"></script><script src="/static/project-costs.js?v=budget-20260924-r1"></script><script src="/static/history.js?v=migration-20260919"></script><script src="/static/production.js?v=conversation-decisions-20260927"></script><script src="/static/creator-view.js?v=conversation-decisions-20260927"></script><script src="/static/journey.js?v=conversation-decisions-20260927"></script><script src="/static/app.js?v=conversation-decisions-20260927"></script><script src="/static/codex-login.js?v=codex-login-20260920-final"></script><script src="/static/connections.js?v=studio-20260923-r2"></script><script src="/static/learning.js?v=learning-integration-20260924"></script><script src="/static/inline-feedback.js?v=reuse-20260919-final"></script>
+<script src="/static/learning-session.js?v=reference-link-retry-20260928"></script>
+<script src="/static/md.js?v=creative-20260919"></script><script src="/static/blocks.js?v=project-trash-20260921"></script><script src="/static/stage.js?v=conversation-decisions-20260927"></script><script src="/static/project-management.js?v=project-trash-20260921"></script><script src="/static/workspace.js?v=project-identity-20260927"></script><script src="/static/progress.js?v=direction-command-20260928"></script><script src="/static/materials.js?v=migration-20260919"></script><script src="/static/image-analysis.js?v=reference-video-20260921"></script><script src="/static/image-workspace.js?v=reference-video-20260921"></script><script src="/static/conversation-input.js?v=natural-reference-20260921"></script><script src="/static/reference-video.js?v=reference-link-retry-20260928"></script><script src="/static/material-workspace.js?v=project-title-20260924"></script><script src="/static/team-progress.js?v=failed-detail-20260927"></script><script src="/static/runtime.js?v=midflight-20260929"></script><script src="/static/revisions.js?v=revision-20260919"></script><script src="/static/revision-workspace.js?v=studio-20260923-r3"></script><script src="/static/product-cards.js?v=reuse-20260919-final"></script><script src="/static/outcomes.js?v=production-20260919"></script><script src="/static/project-costs.js?v=budget-20260924-r1"></script><script src="/static/history.js?v=migration-20260919"></script><script src="/static/production.js?v=image-recovery-20260929"></script><script src="/static/creator-view.js?v=direction-command-20260928"></script><script src="/static/journey.js?v=image-recovery-20260929"></script><script src="/static/app.js?v=midflight-20260929"></script><script src="/static/codex-login.js?v=codex-login-20260920-final"></script><script src="/static/connections.js?v=studio-20260923-r2"></script><script src="/static/learning.js?v=learning-integration-20260924"></script><script src="/static/inline-feedback.js?v=reuse-20260919-final"></script>
 </body>
 </html>

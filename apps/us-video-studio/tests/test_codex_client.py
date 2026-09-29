@@ -18,6 +18,26 @@ TOOLS = [{"name": "dispatch", "description": "Delegate a Studio role",
           "input_schema": {"type": "object", "properties": {"role": {"type": "string"}}}}]
 
 
+def test_codex_child_uses_only_the_existing_local_windows_https_proxy():
+    parent = {"PATH": "test-path", "OPENAI_API_KEY": "private", "CODEX_THREAD_ID": "private"}
+    child = codex._codex_child_env(parent, "127.0.0.1:10808")
+    assert child["HTTPS_PROXY"] == "http://127.0.0.1:10808"
+    assert child["NO_PROXY"] == "localhost,127.0.0.1,::1"
+    assert child["PATH"] == "test-path"
+    assert "OPENAI_API_KEY" not in child and "CODEX_THREAD_ID" not in child
+
+
+@pytest.mark.parametrize("proxy", ["proxy.example:10808", "https://127.0.0.1:10808",
+                                     "http://user:pass@127.0.0.1:10808", "127.0.0.1:not-a-port"])
+def test_codex_child_rejects_nonlocal_or_invalid_system_proxy(proxy):
+    assert "HTTPS_PROXY" not in codex._codex_child_env({"PATH": "test-path"}, proxy)
+
+
+def test_codex_child_preserves_explicit_proxy_settings():
+    parent = {"https_proxy": "http://127.0.0.1:9000", "NO_PROXY": "local.test"}
+    assert codex._codex_child_env(parent, "127.0.0.1:10808") == parent
+
+
 def policy(names=()):
     return {"mcp_enabled": dict.fromkeys(names, False),
             "features": dict.fromkeys(codex.DISABLED_FEATURES, False),

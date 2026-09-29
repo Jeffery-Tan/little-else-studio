@@ -8,7 +8,9 @@ import re
 import socket
 import ssl
 import time
+from http.cookies import CookieError, SimpleCookie
 from urllib.parse import urlsplit, urlunsplit, urljoin
+from urllib.request import getproxies
 
 from .models import PipelineError
 from .materials import MAX_UPLOAD_BYTES
@@ -61,6 +63,45 @@ def public_addresses(host):
         raise ReferenceFetchError('无法解析为允许的公开网络地址。') from None
 
 
+def page_chain_token(response):
+    """Keep only the anonymous TikTok cookie that accompanies public media URLs."""
+    for name, header in response.getheaders():
+        if name.lower() != 'set-cookie':
+            continue
+        cookies = SimpleCookie()
+        try:
+            cookies.load(header)
+        except CookieError:
+            continue
+        token = cookies.get('tt_chain_token')
+        if not token or token['domain'].lower().lstrip('.') != 'tiktok.com' or not token['secure']:
+            continue
+        value = token.value
+        if 0 < len(value) <= 4096 and all(33 <= ord(c) <= 126 and c not in (';', ',', '\\', '"') for c in value):
+            return value
+    return None
+
+
+def local_https_proxy():
+    """Only a credential-free loopback HTTP proxy may carry pinned CONNECTs."""
+    value = getproxies().get('https')
+    if not value:
+        return None
+    try:
+        parsed = urlsplit(value)
+        address = ipaddress.ip_address(parsed.hostname or '')
+        if (parsed.scheme != 'http' or not address.is_loopback
+                or parsed.username is not None or parsed.password is not None
+                or parsed.path not in ('', '/') or parsed.query or parsed.fragment):
+            return None
+        port = parsed.port if parsed.port is not None else 80
+        if not 1 <= port <= 65535:
+            return None
+        return str(address), port
+    except ValueError:
+        return None
+
+
 class PinnedHTTPS(http.client.HTTPSConnection):
     def __init__(self, host, address, timeout):
         super().__init__(host, timeout=timeout, context=ssl.create_default_context())
@@ -78,11 +119,34 @@ class PinnedHTTPS(http.client.HTTPSConnection):
             raise
 
 
+class PinnedProxyHTTPS(PinnedHTTPS):
+    def __init__(self, host, address, timeout, proxy):
+        super().__init__(host, address, timeout)
+        self.proxy = proxy
+        authority = f'[{address}]:443' if ':' in address else f'{address}:443'
+        self.set_tunnel(address, 443, headers={'Host': authority})
+
+    def connect(self):
+        raw = socket.create_connection(self.proxy, self.timeout)
+        try:
+            if ipaddress.ip_address(raw.getpeername()[0]) != ipaddress.ip_address(self.proxy[0]):
+                raise OSError('proxy peer mismatch')
+            self.sock = raw
+            self._tunnel()
+            self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+        except BaseException:
+            self.sock = None
+            raw.close()
+            raise
+
+
 class SafeDownload:
     def __init__(self, check_cancel=lambda: None):
         self.check_cancel = check_cancel
         self.deadline = time.monotonic() + 120
         self.requests = 0
+        self.proxy = local_https_proxy()
+        self.chain_token = None
 
     def check(self):
         self.check_cancel()
@@ -90,6 +154,8 @@ class SafeDownload:
             raise ReferenceFetchError('获取视频超时，请上传原视频继续。')
 
     def get(self, url, *, media=False, referer=None):
+        if not media:
+            self.chain_token = None
         limit = MAX_UPLOAD_BYTES if media else 4 * 1024 * 1024
         for _ in range(6):
             self.check()
@@ -98,12 +164,17 @@ class SafeDownload:
             addresses = public_addresses(p.hostname)
             self.check()
             self.requests += 1
-            connection = PinnedHTTPS(p.hostname, addresses[0], min(15, max(1, self.deadline - time.monotonic())))
+            timeout = min(15, max(1, self.deadline - time.monotonic()))
+            address = next((ip for ip in addresses if ':' not in ip), addresses[0])
+            connection = (PinnedProxyHTTPS(p.hostname, address, timeout, self.proxy) if self.proxy
+                          else PinnedHTTPS(p.hostname, address, timeout))
             try:
                 headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
-                           'Accept-Encoding': 'identity', 'Accept': '*/*'}
+                           'Accept-Encoding': 'identity', 'Accept': '*/*', 'Host': p.hostname}
                 if referer:
                     headers['Referer'] = checked_url(referer)
+                if media and self.chain_token and p.hostname.endswith('.tiktok.com'):
+                    headers['Cookie'] = f'tt_chain_token={self.chain_token}'
                 connection.request('GET', urlunsplit(('', '', p.path or '/', p.query, '')), headers=headers)
                 response = connection.getresponse()
                 if response.status in (301, 302, 303, 307, 308):
@@ -113,7 +184,8 @@ class SafeDownload:
                     url = urljoin(url, location)
                     continue
                 if response.status != 200:
-                    raise ReferenceFetchError(f'TikTok获取失败（HTTP {response.status}），可以上传原视频继续。')
+                    target = '视频文件' if media else '页面'
+                    raise ReferenceFetchError(f'TikTok{target}获取失败（HTTP {response.status}），可以上传原视频继续。')
                 size = response.getheader('Content-Length')
                 if size and (not size.isdigit() or int(size) > limit):
                     raise ReferenceFetchError('参考视频或页面超过当前大小上限。')
@@ -133,6 +205,8 @@ class SafeDownload:
                         raise ReferenceFetchError('参考视频超过64 MiB，请上传较小原视频继续。')
                 if not total or (size and total != int(size)):
                     raise ReferenceFetchError('下载文件不完整，请上传原视频继续。')
+                if not media and p.hostname in {'www.tiktok.com', 'tiktok.com'}:
+                    self.chain_token = page_chain_token(response)
                 return b''.join(chunks), url
             except (OSError, http.client.HTTPException):
                 raise ReferenceFetchError('无法连接TikTok或视频下载中断，请上传原视频继续。') from None

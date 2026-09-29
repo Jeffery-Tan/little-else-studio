@@ -120,20 +120,24 @@ test('an unknown adjustment cannot be resent under a new identity', async () => 
   assert.doesNotMatch(p.toastText, /没有被接受/, 'unknown must not be downgraded to refused');
 });
 
-test('the composer button stops a running task without sending its draft', async () => {
-  const steer = steerTransport(networkLost);
+test('the composer sends a midflight instruction while a separate stop control remains available', async () => {
+  const steer = steerTransport(() => ({...RUNNING,status:'cancelling',steer_status:'received',goal_revision:1}));
   const cancels = [];
   const p = page({routes: {'/steer': steer, '/cancel': ({body}) => {cancels.push(body); return {...RUNNING,status:'cancelling'};}, 'jobs/latest': () => RUNNING}});
   openRun(p);
 
   const input = el(p, 'chat-input');
-  input.value = '留待下一轮发送';
+  input.value = '现在把第 3 张改成室内';
   await el(p, 'send').onclick();
   await settle();
-  assert.equal(cancels.length, 1);
-  assert.equal(steer.calls.length, 0);
-  assert.equal(input.value, '留待下一轮发送');
+  assert.equal(cancels.length, 0);
+  assert.equal(steer.calls.length, 1);
+  assert.equal(steer.calls[0].text, '现在把第 3 张改成室内');
+  assert.equal(input.value, '');
   assert.equal(read(p, 'currentJob.status'), 'cancelling');
+  await el(p, 'job-stop').onclick();
+  await settle();
+  assert.equal(cancels.length, 1);
 });
 
 test('an unknown adjustment still blocks a new conversation job once the old turn is over', async () => {
@@ -504,12 +508,7 @@ test('the original identity still verifies through either entry', async () => {
   assert.equal(q.storage.getItem('studio-steer-pending:run-1'), null);
 });
 
-test('the journey review button opens no task while an adjustment is unresolved', async () => {
-  /* The reachable bypass: the old job has ended (so the composer is idle and
-   * `renderJourneyStatus` offers the real review action) while the lost
-   * adjustment is still unresolved. That button posts a stage_review job
-   * directly — it must hit the same admission, send nothing, and leave the
-   * original adjustment's verification entry on screen. */
+test('retired journey review action stays hidden while an adjustment is unresolved', async () => {
   const jobs = jobsTransport((n) => ({job_id: `job-${n}`, job_kind: 'stage_review',
                                       status: 'succeeded', events: []}));
   const p = page({routes: {'jobs/latest': () => ENDED, '/jobs': jobs}});
@@ -524,16 +523,10 @@ test('the journey review button opens no task while an adjustment is unresolved'
     null;
   `, p.ctx);
   const button = el(p, 'project-progress').querySelector('[data-creator-next]');
-  assert.ok(button, 'the idle page offers the real review action');
-  assert.equal(button.textContent, '重试本版审核');
-
-  await button.onclick();          // the shipped handler: submitJob, fire-and-forget
+  assert.equal(button,null, 'retired review action is not offered');
   await settle();
 
-  assert.equal(jobs.calls.length, 0, 'the review button opened no new task');
+  assert.equal(jobs.calls.length, 0, 'no review task was opened');
   assert.equal(JSON.parse(p.storage.getItem('studio-steer-pending:run-1')).request_id,
     'req-1', 'the unresolved adjustment record survives untouched');
-  const entry = descendants(el(p, 'job-status'),
-    n => n.textContent === '确认调整状态')[0];
-  assert.ok(entry, 'the original request keeps its own verification entry');
 });

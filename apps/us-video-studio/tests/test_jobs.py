@@ -5,6 +5,7 @@ import threading
 import time
 import hashlib
 import io
+from types import SimpleNamespace
 
 import pytest
 from local_http import TestClient
@@ -38,6 +39,57 @@ def post_job(http, request_id='one', text='本次测试'):
     result = http.post(f'/api/runs/{RUN}/jobs', json={'text': text, 'request_id': request_id})
     assert result.status_code == 200, result.text
     return result.json()
+
+
+def test_midflight_message_pauses_an_atomic_job_then_reaches_producer(tmp_path):
+    with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: pytest.fail('no model call'))) as http:
+        make_run(http)
+        jobs = http.app.state.jobs
+        entered, release = threading.Event(), threading.Event()
+        def atomic(_run_id):
+            def run(_text, _emit, check_cancel):
+                entered.set()
+                assert release.wait(2)
+                check_cancel()
+                return SimpleNamespace(stopped_because='done', text='old step', rounds=1, used_tools=[])
+            return run, {'source': 'synthetic-atomic'}
+        jobs.prepare = lambda _run_id: (
+            lambda _text, _emit, _check: SimpleNamespace(
+                stopped_because='done', text='producer considered the change', rounds=1, used_tools=[]),
+            {'source': 'synthetic-producer'})
+        original = jobs.submit(RUN, '生成整组首帧', 'atomic-1',
+                               kind='production_batch_generation', prepare=atomic)
+        assert entered.wait(2)
+        draft = {'draft_id': 'shot-3', 'kind': 'image', 'prompt': '室外商品图'}
+        draft['draft_sha256'] = digest(draft)
+        Store(tmp_path).append_event(RUN, 'production_draft', draft=draft)
+        target = {'kind': 'production_draft', 'run_id': RUN,
+                  'draft_id': draft['draft_id'], 'draft_sha256': draft['draft_sha256']}
+        url = f'/api/runs/{RUN}/jobs/{original["job_id"]}/steer'
+        payload = {'text': '第 3 张先改成室内，再决定后续',
+                   'request_id': 'insert-1', 'expected_goal_revision': 0,
+                   'feedback_target': target}
+        stale = http.post(url, json={**payload, 'feedback_target': {
+            **target, 'draft_sha256': 'b' * 64}})
+        assert stale.status_code == 409
+        received = http.post(url, json=payload)
+        assert received.status_code == 200, received.text
+        assert received.json()['status'] == 'cancelling'
+        assert received.json()['steer_status'] == 'received'
+        assert http.post(url, json=payload).status_code == 200
+        release.set()
+        stopped = wait_job(http, original['job_id'])
+        assert stopped['status'] == 'cancelled'
+        deadline = time.monotonic() + 2
+        while not (child := http.get(f'/api/runs/{RUN}/jobs/{original["job_id"]}').json().get('successor_job_id')):
+            assert time.monotonic() < deadline
+            time.sleep(.01)
+        successor = wait_job(http, child)
+        assert successor['status'] == 'succeeded'
+        assert successor['job_kind'] == 'conversation'
+        assert '第 3 张先改成室内' in successor['text']
+        assert draft['draft_sha256'] in successor['text']
+        assert '不自动重复媒体提交' in successor['text']
 
 
 def test_inline_script_feedback_rejects_changed_version_before_model_call(tmp_path):

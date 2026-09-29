@@ -345,10 +345,11 @@ class RoutedClient:
             try:
                 if not valid_deepseek_key(token):
                     raise ValueError('Invalid local DeepSeek key')
-                # A direction is a short decision document. Bound its combined
-                # reasoning and answer to the configured per-call limit; other
-                # roles retain their existing provider default.
-                return DeepSeekClient(token, max_tokens=self.max_tokens if role == 'director' else None,
+                # DeepSeek's thinking-mode default has more room than the
+                # generic compatibility client's 16K completion limit.
+                # Keep the director's reasoning available for creative tradeoffs;
+                # the stage brief and context assembly bound the actual task.
+                return DeepSeekClient(token, max_tokens=None, reasoning_effort='high',
                                       check_cancel=self.check_cancel,
                                       cancel_event=self.cancel_event)
             except (ValueError, TypeError):

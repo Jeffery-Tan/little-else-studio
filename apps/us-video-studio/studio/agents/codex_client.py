@@ -23,6 +23,8 @@ import tempfile
 import threading
 import time
 from typing import Any, Callable
+import urllib.request
+from urllib.parse import urlsplit
 
 from .client import JobCancelled, ModelError, SafePreflightError, ToolCall, Turn, Usage
 
@@ -151,6 +153,32 @@ def _verify_policy(metadata: dict[str, Any]) -> None:
         raise CodexUnavailable("Codex effective policy differs from Studio's restricted policy; no model request sent")
 
 
+def _codex_child_env(parent: dict[str, str], system_https_proxy: str | None) -> dict[str, str]:
+    env = {k: v for k, v in parent.items()
+           if not ((k.upper().startswith("CODEX_") and k.upper() != "CODEX_HOME")
+                   or k.upper() in {"OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID"})}
+    # On Windows the HTTPS client may use the user system proxy while Codex's
+    # WebSocket transport goes direct. Give only this child the already enabled
+    # local HTTP proxy; never replace an explicit proxy or use a remote one.
+    if {k.upper() for k in env} & {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "WS_PROXY", "WSS_PROXY"}:
+        return env
+    if not system_https_proxy:
+        return env
+    raw = system_https_proxy if "://" in system_https_proxy else f"http://{system_https_proxy}"
+    try:
+        parsed = urlsplit(raw)
+        if (parsed.scheme.lower() != "http" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+                or not parsed.port or parsed.username or parsed.password
+                or parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
+            return env
+    except ValueError:
+        return env
+    env["HTTPS_PROXY"] = f"http://{parsed.netloc}"
+    if not any(k.upper() == "NO_PROXY" for k in env):
+        env["NO_PROXY"] = "localhost,127.0.0.1,::1"
+    return env
+
+
 class _StdioSession:
     """Bounded JSON-RPC pipe; errors never expose server bodies or stderr."""
 
@@ -160,9 +188,13 @@ class _StdioSession:
             argv += ["-c", f"{key}={_toml(value)}"]
         # Do not forward development-thread identities or API-key credentials.
         # CLI authentication stays in its own supported login mechanism.
-        env = {k: v for k, v in os.environ.items()
-               if not ((k.upper().startswith("CODEX_") and k.upper() != "CODEX_HOME")
-                       or k.upper() in {"OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID"})}
+        system_proxy = None
+        if sys.platform == "win32":
+            try:
+                system_proxy = urllib.request.getproxies_registry().get("https")
+            except (OSError, ValueError):
+                pass
+        env = _codex_child_env(os.environ, system_proxy)
         self.process = subprocess.Popen(
             argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, encoding="utf-8", bufsize=1,

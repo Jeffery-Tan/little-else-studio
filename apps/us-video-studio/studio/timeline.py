@@ -82,11 +82,21 @@ def build_timeline(
             # park it on the last user turn so the UI has exactly one home.
             if turns and turns[-1].get("user"):
                 turns[-1]["pending_clarification_id"] = interaction["id"]
+    from .direction_command import available as direction_command
+    direction_action = (direction_command(store, pipeline, run_id)
+                        if not pending and not interaction
+                        and (not job or job.get('status') not in {'queued', 'running', 'cancelling'})
+                        else None)
+    progress = project_progress(state)
+    if (direction_action and progress['stage'] == 'direction'
+            and progress['action'] == 'draft'):
+        progress.update(action='stage_command', label=direction_action['label'], prompt='')
     return {
         "run": state.get("run"),
         "interaction": interaction,
-        "progress": project_progress(state),
-        "brief": project_brief(state, job, chat),
+        "progress": progress,
+        "brief": project_brief(state, job, chat, direction_action=direction_action),
+        "next_action": direction_action,
         "turns": turns,
         "rail": v.build_rail(state["stages"], state.get("next_stage"), chat),
         # The standing list of what the run is waiting on him for. Separate from
@@ -144,7 +154,7 @@ def _collect_items(
     card_shas = {a.sha256 for a in artifacts}
     conversation_jobs = {ev.get("job_id") for ev in events
                          if ev.get("kind") == "job_created"
-                         and ev.get("job_kind") in {"conversation", "stage_review"}}
+                         and ev.get("job_kind") in {"conversation", "stage_review", "direction_resume"}}
 
     items: list[dict[str, Any]] = []
 
@@ -172,6 +182,7 @@ def _collect_items(
                     "kind": "note",
                     "at": record.get("at", ""),
                     "text": v.failure_note(record["text"]),
+                    "failure": True,
                 }
             )
 
@@ -390,18 +401,8 @@ def _pending_action(state: dict[str, Any], ledger: Any,
                     store: Store) -> dict[str, Any] | None:
     """The one thing waiting on him, or None.
 
-    Only approvals wait on him. Reviews are the orchestrator's to request; a
-    stage being ready to start is the orchestrator's to start. The single action
-    that no agent can take is this one, so it is the single thing the screen
-    should ask for.
-
-    Both review outcomes reach this card. ``Pipeline.stage_state`` sets
-    ``can_approve`` for a returned stage as well as a passed one, because the
-    reviewer is an agent on the producing side of the table and its ``return``
-    must not be a veto he cannot lift. Approving past one goes through
-    ``record_approval``, which demands an explicit reason and records
-    ``approved_override`` — so the card that offers it must also say what it
-    costs him, which is why the wording differs between the two branches.
+    Only the current, intact version waits for Jeffery's decision. Retired
+    reviewer verdicts remain in history, outside this decision card.
     """
     from .models import STAGES, STAGE_SPEC, utcnow
 
@@ -410,9 +411,9 @@ def _pending_action(state: dict[str, Any], ledger: Any,
             continue
         stage = st["stage"]
         latest = st.get("latest") or {}
-        review = st.get("review") or {}
-        passed = review.get("verdict") == "pass"
-        findings = review.get("findings") or []
+        reviewed = False
+        passed = True
+        findings = []
         gate = st.get("brief_gate") or {}
 
         # ---------------------------------------------------------- direction --
@@ -493,6 +494,7 @@ def _pending_action(state: dict[str, Any], ledger: Any,
                 "version": latest.get("version"),
                 "artifact_sha256": latest.get("sha256"),
                 "passed": passed,
+                "reviewed": reviewed,
                 "headline": "这份方向稿没有可以采用的选择。",
                 "body": (
                     "每个方向都还和当前有效简报对不上，逐条原因见下。"
@@ -520,14 +522,8 @@ def _pending_action(state: dict[str, Any], ledger: Any,
                 "options_hint": "",
             }
 
-        if passed:
-            head = f"「{v.stage_label(stage)}」写好了，审核也通过了。"
-            if findings:
-                head += f"但审核提了 {len(findings)} 点要注意。"
-            body = "你看一遍，觉得可以就通过；要改就退回重做。"
-        else:
-            head = f"「{v.stage_label(stage)}」写好了，但审核没有通过它。"
-            body = "你可以退回重做，或者看完之后明知有问题仍然通过——那样要写明理由。"
+        head = f"「{v.stage_label(stage)}」写好了，等你决定。"
+        body = "你看一遍，觉得可以就采用；要改就退回重做。"
         if stage == "direction" and any(not row["admissible"] for row in option_rows):
             body += " 有方向和当前有效简报对不上，那些选项不能采用；原因写在各自选项旁。"
 
@@ -554,6 +550,7 @@ def _pending_action(state: dict[str, Any], ledger: Any,
             "version": latest.get("version"),
             "artifact_sha256": latest.get("sha256"),
             "passed": passed,
+            "reviewed": reviewed,
             "headline": head,
             "body": body,
             "findings": [

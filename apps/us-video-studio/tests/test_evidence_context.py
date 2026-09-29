@@ -57,7 +57,45 @@ def test_writer_actual_request_contains_intake_and_selected_b(env, tmp_path):
     assert "shipping remains UNKNOWN" in seed
     assert "selected_option_id=B" in seed
     assert '"claim": "quiet"' in seed
+    assert '"claim": "speaks"' not in seed
+    assert "A speaks. B stays quiet." not in seed
     assert "intake" in readable_stages("writer")
+
+
+def test_director_receives_effective_goal_without_full_chat(env):
+    store, pipeline = env
+    submit(pipeline, "intake", "Only product facts")
+    model = ScriptedModel([final_turn("offline complete")])
+    settings = Settings(data_root=store.root, base_url="https://example.invalid")
+    Dispatcher(store, pipeline, settings, model, Ledger(store, settings), RUN).dispatch(
+        "direction", "propose options")
+    seed = model.calls[0]["messages"][0]["content"]
+    assert "goal.primary" in seed
+    assert "Synthetic only" in seed
+    assert "每个可供采用的方向都要在 satisfies 中标明" in seed
+
+
+def test_material_planner_gets_selected_direction_without_other_options(env):
+    store, pipeline = env
+    submit(pipeline, "intake", "Product facts")
+    submit(pipeline, "direction", "A unselected. B selected.", {
+        "options": [{"key": "A", "claim": "unselected-claim", "satisfies": "goal.primary"},
+                    {"key": "B", "claim": "selected-claim", "satisfies": "goal.primary"}],
+        "prerequisites": ["shared-condition"],
+        "dependency_matrix": [{"need": "only-A", "options": {"A": True, "B": False}},
+                              {"need": "only-B", "options": {"A": False, "B": True}}],
+    })
+    pipeline.record_review(RUN, "direction", verdict="pass", findings=[])
+    pipeline.record_approval(RUN, "direction", nonce=pipeline.issue_nonce(RUN, "direction"),
+                             decision="approved", selected_option_id="B")
+    model = ScriptedModel([final_turn("offline complete")])
+    settings = Settings(data_root=store.root, base_url="https://example.invalid")
+    Dispatcher(store, pipeline, settings, model, Ledger(store, settings), RUN).dispatch(
+        "material_plan", "plan the selected direction")
+    seed = model.calls[0]["messages"][0]["content"]
+    assert "selected-claim" in seed and "shared-condition" in seed and "only-B" in seed
+    assert "unselected-claim" not in seed and "only-A" not in seed
+    assert "A unselected. B selected." not in seed
 
 
 def test_reviewer_actual_request_has_same_facts_and_choice(env):
@@ -71,6 +109,21 @@ def test_reviewer_actual_request_has_same_facts_and_choice(env):
     seed = model.calls[0]["messages"][0]["content"]
     assert "intake-only-marker" in seed
     assert "selected_option_id=B" in seed
+    assert '"claim": "speaks"' not in seed
+
+
+def test_direction_reviewer_retains_product_observation_evidence(env):
+    store, pipeline = env
+    material(store, "only-on-demand.jpg")
+    submit(pipeline, "intake", "Product facts")
+    submit(pipeline, "direction", "Two directions")
+    model = ScriptedModel([final_turn("no verdict")])
+    settings = Settings(data_root=store.root, base_url="https://example.invalid")
+    run_review(store=store, pipeline=pipeline, settings=settings, client=model,
+               ledger=Ledger(store, settings), run_id=RUN, stage="direction")
+    seed = model.calls[0]["messages"][0]["content"]
+    assert "only-on-demand.jpg" in seed
+    assert "本次请求未发送图片像素" in seed
 
 
 def test_director_stops_at_comparable_directions_before_selection():

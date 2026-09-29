@@ -57,6 +57,7 @@ def _messages(system, messages):
 
 def _parse(data, model):
     usage = Usage(None, None)
+    choice = None
     try:
         raw = data.get('usage') or {}
         for wire, attr in (('prompt_tokens', 'input_tokens'), ('completion_tokens', 'output_tokens')):
@@ -94,7 +95,13 @@ def _parse(data, model):
             raise ValueError
         return turn
     except (ValueError, KeyError, TypeError, AttributeError, IndexError):
-        raise ModelError(200, 'invalid Chat Completions response; received usage retained',
+        # A length stop with incomplete function JSON is an output cap, not a
+        # mysterious schema failure. Tool-free length stops can still be
+        # continued by run_agent_loop above.
+        message = ('output truncated at max_tokens; received usage retained'
+                   if isinstance(choice, dict) and choice.get('finish_reason') == 'length'
+                   else 'invalid Chat Completions response; received usage retained')
+        raise ModelError(200, message,
                          usage=usage, usage_final=True) from None
 
 

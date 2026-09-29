@@ -102,7 +102,7 @@ for (const runId of RUNS) {
 
     // `renderPane` ran for real; whatever it drew is in the stage host.
     const stage = app.document.getElementById('stage');
-    const gate = stage.querySelector('.gate');
+    const gate = stage.querySelector('.gate') || app.document.getElementById('journey-decision').querySelector('.gate');
     const pending = tl.pending;
     if (pending && pending.kind === 'brief_amendment') {
       // The card that used to throw on open (F1) — it must carry the contract.

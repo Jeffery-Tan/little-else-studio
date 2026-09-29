@@ -8,7 +8,16 @@ globalThis.escapeHtml=require('../../studio/web/md.js').escapeHtml;
 const stageMod=require('../../studio/web/stage.js');
 globalThis.gateApproveLabel=stageMod.gateApproveLabel;
 globalThis.gateRejectLabel=stageMod.gateRejectLabel;
-const {questionCardHtml,artifactQuestionHtml,journeyStatus,bindJourneyTabs,shouldShowQuestionInTurn}=require('../../studio/web/journey.js');
+const {questionCardHtml,artifactQuestionHtml,journeyStatus,bindJourneyTabs,shouldShowQuestionInTurn,productionBatchCommand}=require('../../studio/web/journey.js');
+
+test('direct batch instructions open the right decision without treating revisions as consent',()=>{
+  assert.equal(productionBatchCommand('生成全部首帧'),'generate');
+  assert.equal(productionBatchCommand('确认这批生成图'),'approve');
+  assert.equal(productionBatchCommand('好，批准全部',{generate:5,approve:0}),'generate');
+  assert.equal(productionBatchCommand('批准全部',{generate:2,approve:1}),null);
+  assert.equal(productionBatchCommand('这五张图的描述都要调整'),null);
+  assert.equal(productionBatchCommand('先不要生成这些图'),null);
+});
 
 test('clarification supports recommendation and free text without implicit selection',()=>{
   const html=questionCardHtml({id:'abc',question:'<script>?</script>',options:[{label:'A',description:'one'},{label:'B'}],recommended:0});
@@ -29,6 +38,7 @@ test('artifact questions are asked in the conversation with room for an uncertai
 });
 test('execution completion cannot replace an unresolved user decision',()=>{
   assert.equal(journeyStatus({execution:{active:false}},{stage:'direction'},null),'选一个你想继续的方向');
+  assert.equal(journeyStatus({execution:{active:false},questions:[{}]},{stage:'direction'},null),'选一个你想继续的方向');
   assert.equal(journeyStatus({execution:{active:true}},null,null),'团队正在处理');
 });
 test('only the conversation exposes a version-bound choice and submit action',()=>{
@@ -51,17 +61,17 @@ test('only the conversation exposes a version-bound choice and submit action',()
 });
 test('canvas tabs keep one selected work surface as arrow keys move through available artifacts',()=>{
   const html=fs.readFileSync(new URL('../../studio/web/index.html',import.meta.url),'utf8');
-  for(const [tab,panel] of [['plan','stage'],['assets','journey-assets'],['storyboard','journey-storyboard'],['video','journey-video']]){
+  for(const [tab,panel] of [['plan','stage'],['assets','journey-assets'],['reference','journey-reference'],['storyboard','journey-storyboard'],['video','journey-video']]){
     assert.match(html,new RegExp(`id="journey-tab-${tab}"[^>]*aria-controls="${panel}"`));
     assert.match(html,new RegExp(`id="${panel}"[^>]*role="tabpanel"[^>]*aria-labelledby="journey-tab-${tab}"`));
   }
   assert.match(html,/id="journey-tab-script"[^>]*data-plan-stage="writing"[^>]*aria-controls="stage"/);
-  const panels=Object.fromEntries(['stage','journey-assets','journey-storyboard','journey-video','project-stages']
+  const panels=Object.fromEntries(['stage','journey-assets','journey-reference','journey-storyboard','journey-video','project-stages']
     .map(id=>[id,{hidden:id!=='stage',attrs:{},setAttribute(name,value){this.attrs[name]=value;}}]));
   let focused='';
-  const tabs=['plan','assets','script','storyboard','video'].map(id=>({id:`journey-tab-${id}`,
+  const tabs=['plan','assets','reference','script','storyboard','video'].map(id=>({id:`journey-tab-${id}`,
     dataset:{journeyTab:id==='script'?'plan':id,...(id==='script'?{planStage:'writing'}:id==='plan'?{planStage:'direction'}:{})},
-    attrs:{},tabIndex:id==='plan'?0:-1,
+    attrs:{},hidden:id==='reference',tabIndex:id==='plan'?0:-1,
     setAttribute(name,value){this.attrs[name]=value;},focus(){focused=id;}}));
   globalThis.document={querySelectorAll:()=>tabs,querySelector:()=>null};
   globalThis.state={canvasTab:'plan',timeline:null,rail:[{stage:'direction'},{stage:'writing'}],activeStage:'direction',productionData:{drafts:[]}};
@@ -79,7 +89,7 @@ test('canvas tabs keep one selected work surface as arrow keys move through avai
   tabs[1].onkeydown({key:'ArrowRight',preventDefault(){}});
   assert.equal(focused,'script');assert.equal(panels.stage.hidden,false);
   assert.equal(state.activeStage,'writing');assert.equal(panels.stage.attrs['aria-labelledby'],'journey-tab-script');
-  tabs[2].onkeydown({key:'End',preventDefault(){}});
+  tabs[3].onkeydown({key:'End',preventDefault(){}});
   assert.equal(focused,'video');assert.equal(panels['journey-video'].hidden,false);
   assert.equal(panels['journey-video'].innerHTML,'<article>当前成果</article>');
 });

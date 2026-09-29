@@ -37,7 +37,10 @@ from ..task_context import assemble_role_task
 class DispatchOutcome:
     stage: str
     role: str
+    task_id: str = ""
     submitted: str | None = None
+    artifact_version: int | None = None
+    artifact_sha256: str = ""
     summary: str = ""
     limitations: list[str] = field(default_factory=list)
     text: str = ""
@@ -45,6 +48,29 @@ class DispatchOutcome:
     rounds: int = 0
     error: str = ""
     impact: dict = field(default_factory=dict)
+
+    def receipt(self) -> str:
+        """A compact, machine-readable handoff for the parent Agent."""
+        status = "failed" if self.error else "submitted" if self.submitted else "incomplete"
+        return json.dumps({
+            "ok": status == "submitted",
+            "status": status,
+            "stage": self.stage,
+            "role": self.role,
+            "task_id": self.task_id or None,
+            "artifact": ({"key": self.submitted, "version": self.artifact_version,
+                          "sha256": self.artifact_sha256}
+                         if self.submitted else None),
+            "summary": self.summary[:800],
+            "summary_truncated": len(self.summary) > 800,
+            "limitations": self.limitations[:5],
+            "limitations_truncated": len(self.limitations) > 5,
+            "stop_reason": self.stopped_because or ("error" if self.error else ""),
+            "error": self.error or None,
+            "next": self.impact,
+            "read_more": (f"read_artifact(stage={self.stage}, version={self.artifact_version})"
+                          if self.submitted else None),
+        }, ensure_ascii=False)
 
     def render(self) -> str:
         if self.error:
@@ -139,6 +165,7 @@ class Dispatcher:
             # judgement, so the message is the real reason and is passed through.
             outcome.error = str(exc)
             return outcome
+        outcome.task_id = attempt.key
 
         workspace = Workspace(self.store, self.pipeline, self.run_id, role, target_stage=stage)
         previous = self.store.latest_artifact(self.run_id, stage)
@@ -193,6 +220,8 @@ class Dispatcher:
                     if revision_scope:
                         outcome.impact = record_applied(self.store, self.pipeline, self.run_id, revision_scope, artifact, changes)
                 submitted["key"] = f"{stage}-v{artifact.version}"
+                submitted["version"] = artifact.version
+                submitted["sha256"] = artifact.sha256
                 submitted["summary"] = artifact.summary
                 submitted["limitations"] = artifact.limitations
                 return ToolResult(
@@ -222,12 +251,15 @@ class Dispatcher:
                      if revision_scope else None,
                 inputs=attempt.inputs,
                 allowed_tools=sorted(allowed_tools),
-                expected_result={'artifact_stage': stage, 'review_required': STAGE_SPEC[stage].gated},
+                expected_result={'artifact_stage': stage, 'user_decision_required': STAGE_SPEC[stage].gated},
                 context={'sources': task_context.sources,
                          'method_ref': context['evidence_ref'],
                          'method_sha256': context['snapshot_sha256'],
                          'seed_sha256': task_context.seed_sha256,
-                         'system_sha256': hashlib.sha256(system.encode('utf-8')).hexdigest()})
+                         'system_sha256': hashlib.sha256(system.encode('utf-8')).hexdigest(),
+                         'seed_chars': len(task_context.seed),
+                         'system_chars': len(system),
+                         'tool_schema_chars': len(json.dumps(task_tools, ensure_ascii=False))})
             result = run_agent_loop(
                 budgeted,
                 model=model,
@@ -264,6 +296,14 @@ class Dispatcher:
             raise
         except ModelError as exc:
             self._close_attempt(attempt, f"派工失败：{type(exc).__name__}")
+            if exc.status == 0 and 'usage unconfirmed' in exc.message:
+                raise NonRetryableStageError(
+                    '受托角色的模型连接超时或中断，本阶段新版未保存；本次调用用量无法确认，'
+                    '本轮已停止自动重试以避免重复计费。请检查连接后从当前阶段继续。') from None
+            if exc.status == 200 and exc.message.startswith('output truncated at max_tokens'):
+                raise NonRetryableStageError(
+                    '受托角色的模型输出达到单次上限，结果不完整，未保存为新版；'
+                    '本轮已停止自动重试以避免重复计费，请从当前阶段继续。') from None
             if exc.status == 200 and exc.message.startswith('invalid'):
                 # The provider was invoked, and usage may already be owed.
                 # The orchestrator cannot repair malformed wire structure by
@@ -289,6 +329,8 @@ class Dispatcher:
             if not outcome.impact:
                 outcome.impact = work_plan(self.pipeline, self.run_id)
             outcome.submitted = submitted["key"]
+            outcome.artifact_version = submitted["version"]
+            outcome.artifact_sha256 = submitted["sha256"]
             outcome.summary = submitted["summary"]
             outcome.limitations = submitted["limitations"]
             self.store.append_event(
@@ -298,6 +340,7 @@ class Dispatcher:
                 stage=stage,
                 role=role,
                 artifact=outcome.submitted,
+                artifact_sha256=outcome.artifact_sha256,
                 rounds=result.rounds,
             )
         else:

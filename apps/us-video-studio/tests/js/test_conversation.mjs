@@ -14,7 +14,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import {loadApp, makeDom} from './dom-fixture.mjs';
+import {loadApp, makeDom, webSource} from './dom-fixture.mjs';
 
 const PAGE_BODY = '<nav class="journey-tabs" role="tablist" aria-label="作品内容">'
   + '<button id="journey-tab-plan" role="tab" data-journey-tab="plan" aria-selected="true">创意与脚本</button>'
@@ -59,6 +59,46 @@ const CLARIFICATION = {
   ],
   recommended: 0,
 };
+
+test('direction choice remains in the conversation when its draft also asks a question', () => {
+  const p = page();
+  vm.runInContext(webSource('stage.js'), p.ctx, {filename:'stage.js'});
+  const sha = 'a'.repeat(64);
+  p.ctx.__tl = {turns:[turn()],interaction:null,progress:{},
+    pending:{stage:'direction',version:1,artifact_sha256:sha,passed:true,
+      stage_label:'创意方向',headline:'选一个方向',options:[
+        {key:'A',recommended:false,admissible:true},
+        {key:'B',recommended:true,admissible:true},
+        {key:'C',recommended:false,admissible:true}],findings:[]},
+    questions:[{stage:'direction',version:1,question:'有实物吗？',reason:'影响镜头安排'}],
+    rail:[{stage:'direction',version:1,blocks:[]}]};
+  p.read('state.busy=false; state.timeline=globalThis.__tl; renderJourneyDecision()');
+  const host = p.el('journey-decision');
+  assert.equal(host.querySelectorAll('input[name="direction-choice"]').length,3);
+  assert.ok(host.querySelector('[data-act="approve"]'));
+  assert.ok(host.querySelector('[data-send-artifact-answer]'));
+});
+
+test('stale direction exposes one typed resume command instead of a copied prompt', async () => {
+  const p = page();
+  const hash = 'c'.repeat(64);
+  p.ctx.__tl = {turns:[turn()],interaction:null,progress:{},pending:null,
+    questions:[],rail:[],next_action:{kind:'resume_direction',stage:'direction',
+      label:'重做创意方向',expected_context_sha256:hash}};
+  p.read('state.busy=false; state.timeline=globalThis.__tl; globalThis.__calls=[]; '+
+    'submitJob=async (run,payload)=>{globalThis.__calls.push({run,payload});return {accepted:true}};'+
+    'renderJourneyDecision()');
+  const host = p.el('journey-decision');
+  const button = host.querySelector('[data-resume-direction]');
+  assert.ok(button);
+  assert.match(host.textContent, /会发起一次文字模型任务/);
+  await button.onclick();
+  const [call] = p.ctx.__calls;
+  assert.equal(call.run, 'run-1');
+  assert.equal(call.payload.request_kind, 'direction_resume');
+  assert.equal(call.payload.expected_context_sha256, hash);
+  assert.equal(p.ctx.__calls.length, 1);
+});
 
 test('a pending clarification is an extra card after the conclusion, not a replacement', () => {
   const p = page();
@@ -119,6 +159,33 @@ test('a finished round with no reply says so instead of leaving the assistant si
     'pointing at the work journal right above it');
   assert.ok(host.querySelector('.turn-work'),
     'the work journal still holds the details');
+});
+
+test('a failed round shows its saved cause in the answer bubble', () => {
+  const p = page();
+  p.ctx.__tl = {turns:[turn({reply:null,items:[
+    {kind:'note',failure:true,text:'这轮受托角色的模型回复格式不完整，新版未保存。系统已停止自动重试。'},
+  ]})],rail:[],questions:[],progress:{},pending:null};
+  p.read('state.busy = false; state.machineDetail = false; state.timeline = globalThis.__tl; renderConversation(globalThis.__tl)');
+  const bubble = p.el('conversation-body').querySelector('.msg.assistant');
+  assert.match(bubble.textContent,/模型回复格式不完整.*停止自动重试/);
+  assert.doesNotMatch(bubble.textContent,/本轮没有留下结论回复/);
+  assert.equal(bubble.querySelector('[role="alert"]').textContent.includes('新版未保存'),true);
+});
+
+test('latest failed round offers a draft without sending another model request', () => {
+  const p = page();
+  p.ctx.prepareProjectDraft = text => { p.el('chat-input').value = text; };
+  p.ctx.__tl = {turns:[turn({reply:null,items:[
+    {kind:'note',failure:true,text:'模型回复格式不完整，新版未保存。'},
+  ]})],rail:[],questions:[],progress:{},pending:null};
+  p.read(`state.busy = false; state.timeline = globalThis.__tl;
+    state.projectBrief = {action:{kind:'draft',stage:'direction',label:'准备更新',prompt:'请更新创意方向'}};
+    renderConversation(globalThis.__tl)`);
+  const button=p.el('conversation-body').querySelector('.msg.assistant button');
+  assert.equal(button.textContent,'准备更新');
+  button.onclick();
+  assert.match(p.el('chat-input').value,/请更新创意方向/);
 });
 
 test('while a round is still running the fallback stays out of the way', () => {
@@ -208,9 +275,8 @@ test('the title bar keeps only the next action without repeating current progres
     state.runs = [];
     state.timeline = null;
     state.creatorView = {
-      goal: '交付一部短片', current: '等待重试审核', detail: '',
-      action: {kind: 'review_stage', label: '重试本版审核', stage: 'direction',
-               version: 1, sha256: 'a'.repeat(64)},
+      goal: '交付一部短片', current: '等待用户决定', detail: '',
+      action: {kind: 'chat', label: '继续讨论', stage: 'direction'},
       tab: 'plan',
     };
     renderJourneyStatus();
@@ -222,7 +288,7 @@ test('the title bar keeps only the next action without repeating current progres
   assert.equal(slot.hidden, false);
   const button = slot.querySelector('[data-creator-next]');
   assert.ok(button, 'the next action stays in the chrome as a plain slot button');
-  assert.equal(button.textContent, '重试本版审核');
+  assert.equal(button.textContent, '继续讨论');
   assert.ok(button.onclick, 'and its handler is bound');
   assert.match(button.className, /ghost/,
     'a neutral toolbar control, not a banner call-to-action');

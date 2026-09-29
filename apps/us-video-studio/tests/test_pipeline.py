@@ -219,17 +219,16 @@ def test_plaintext_nonce_is_never_written_to_disk(pipe, tmp_path):
     assert "nonce_sha256" in blob
 
 
-def test_approving_without_a_pass_review_needs_a_named_override(pipe):
+def test_unreviewed_draft_can_be_approved_without_an_override(pipe):
     submit_intake(pipe)
     submit_direction(pipe)
-
-    with pytest.raises(PipelineError) as err:
-        approve(pipe, "direction")
-    assert "override" in str(err.value)
-
-    approval = approve(pipe, "direction", override_reason="reviewer unavailable, I read it myself")
-    assert approval.decision == "approved_override"
-    assert "reviewer unavailable" in approval.note
+    assert pipe.stage_state(RUN, "direction").can_approve
+    approval = approve(pipe, "direction")
+    assert approval.decision == "approved"
+    assert pipe.is_complete(RUN, "direction")
+    assert not pipe.stage_state(RUN, "direction").can_review
+    with pytest.raises(PipelineError, match="already has a user decision"):
+        review_pass(pipe, "direction")
 
 
 def test_returning_a_stage_needs_a_note_the_writer_can_act_on(pipe):
@@ -292,7 +291,7 @@ def test_approval_cannot_carry_unresolved_changes(pipe, continue_after):
     assert approval.decision == "returned"
 
 
-def test_a_returning_review_does_not_open_the_gate(pipe):
+def test_historical_reviewer_return_does_not_block_user_decision(pipe):
     submit_intake(pipe)
     submit_direction(pipe)
     pipe.record_review(
@@ -301,10 +300,13 @@ def test_a_returning_review_does_not_open_the_gate(pipe):
         verdict="return",
         findings=[{"stage": "direction", "issue": "no evidence for the hook claim"}],
     )
-    with pytest.raises(PipelineError):
-        approve(pipe, "direction")
-    with pytest.raises(PipelineError):
-        pipe.start_attempt(RUN, "material_plan")
+    state = pipe.stage_state(RUN, "direction")
+    assert state.can_approve
+    assert not state.can_review
+    assert state.status == "awaiting_decision"
+    assert state.review.verdict == "return"
+    assert approve(pipe, "direction").decision == "approved"
+    pipe.start_attempt(RUN, "material_plan")
 
 
 def test_a_return_needs_at_least_one_finding(pipe):
@@ -331,7 +333,7 @@ def test_revising_a_gated_stage_voids_its_own_approval_and_closes_the_next(pipe)
     revised = submit_direction(pipe, "direction body v2")
 
     state = pipe.state(RUN)
-    assert state.stages["direction"].status == "awaiting_review"
+    assert state.stages["direction"].status == "awaiting_decision"
     assert state.stages["direction"].approval is None
     assert revised.version == 2
 

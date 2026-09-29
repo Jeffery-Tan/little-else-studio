@@ -54,7 +54,8 @@ def stage_issues(stage: dict, chat: list[dict] | None = None) -> list[dict]:
     return issues
 
 
-def project_brief(state: dict, job: dict | None = None, chat: list[dict] | None = None) -> dict:
+def project_brief(state: dict, job: dict | None = None, chat: list[dict] | None = None,
+                  *, direction_action: dict | None = None) -> dict:
     defaults = {"latest": None, "stale": False, "integrity_ok": True, "status": "empty",
                 "open_attempt": None, "can_approve": False, "can_review": False, "last_rejection": ""}
     state = {**state, "stages": [{**defaults, **s} for s in state["stages"]]}
@@ -76,32 +77,15 @@ def project_brief(state: dict, job: dict | None = None, chat: list[dict] | None 
               "prompt": progress["prompt"], "version": artifact.get("version"), "sha256": artifact.get("sha256")}
     title, detail = progress["title"], progress["detail"]
     phase = "ready" if not target else target["status"]
-    review_failure = False
-    if target and target.get("can_review") and not target.get("open_attempt"):
-        # Failure is scoped to this version, not all historical unknown usage.
-        for event in (job or {}).get("events", []):
-            args = event.get("args") or {}
-            review_step = event.get("tool") == "request_review" and args.get("stage") == target["stage"]
-            if review_step and event.get("type") == "agent_tool" and not event.get("ok", True):
-                # Newer versions created after this event don't inherit its failure.
-                review_failure = event.get("at", "") >= artifact.get("created_at", "")
-        payload = (job or {}).get("job_payload") or {}
-        review_failure |= bool((job or {}).get("job_kind") == "stage_review"
-                               and (job or {}).get("status") in {"failed", "blocked", "interrupted", "cancelled"}
-                               and payload.get("expected_artifact_sha256") == artifact.get("sha256"))
-        action.update(kind="review_stage", label="重新审核当前方案" if review_failure else "审核当前方案")
-        title = f"{stage_label(target['stage'])}" + (" · 审核未完成" if review_failure else "已保存")
-        detail = "审核未完成，方案已保留。可先查看方案，或只重试这一版的审核。" if review_failure else "下一步由独立审核检查；审核后再由你选择采用。"
-        phase = "review_failed" if review_failure else "awaiting_review"
-    # Resolve user-owned facts before another review/model call. The draft stays
-    # saved; the answer may lead the team to revise its current way of shooting.
-    if questions and target and not target.get("open_attempt"):
+    # A complete direction is a real choice. A related question stays visible
+    # beside it, but must not replace the option decision in the project status.
+    if questions and target and not target.get("open_attempt") and not target.get("can_approve"):
         title = f"有 {len(questions)} 项需要你确认"
         detail = "可以说明现有条件、不确定处或可接受的替代拍法；团队会据此调整方案。"
         action.update(kind="questions", label="查看待确认事项")
         action["stage"] = question_stage
         phase = "needs_input"
-    if job and job.get("status") in {"failed", "interrupted", "cancelled", "blocked"} and not review_failure and not questions:
+    if job and job.get("status") in {"failed", "interrupted", "cancelled", "blocked"} and not questions and not (target and target.get("can_approve")):
         historical_accounting = "reconcile provider evidence" in job.get("reason", "")
         if not historical_accounting and job.get("job_kind", "conversation") == "conversation":
             title = "本轮已停止" if job["status"] == "cancelled" else "本轮未完成，已有内容已保留"
@@ -113,6 +97,11 @@ def project_brief(state: dict, job: dict | None = None, chat: list[dict] | None 
         detail = "新成果会自动显示；当前已保存的方案仍可阅读。"
         action.update(kind="activity", label="查看团队进展")
         phase = "working"
+    elif (direction_action and not questions and action['kind'] == 'draft'
+          and action['stage'] == 'direction'):
+        action = dict(direction_action)
+        title = '创意方向等待生成' if not artifact else '创意方向需要重做'
+        detail = '按当前有效资料直接派导演；完成后停下来供你点选。'
     return {"schema_version": 1, "phase": phase, "title": title, "detail": detail,
             "stage": progress["stage"], "completed": progress["completed"], "total": progress["total"],
             "action": action, "questions": questions, "issues": issues,

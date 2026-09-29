@@ -82,9 +82,15 @@ class JobIn(MessageIn):
     feedback_target: FeedbackTarget | MediaFeedbackTarget | ProductionDraftFeedbackTarget | None = None
 
 
+class DirectionResumeIn(BaseModel):
+    request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
+    expected_context_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
 class SteerIn(MessageIn):
     request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
     expected_goal_revision: int = Field(ge=0, strict=True)
+    feedback_target: FeedbackTarget | MediaFeedbackTarget | ProductionDraftFeedbackTarget | None = None
 
 
 class ReviewActionIn(BaseModel):

@@ -6,13 +6,95 @@
     if(!data.connection) return '<p>请先配置现有百炼北京连接，再开始参考视频任务。</p>';
     if(!task)return '<p>在对话里说想做什么，附上视频或 TK 链接即可。</p>';
     const pinned=task.sha256;
-    return `<form class="material-observation-editor" data-reference-form><p>继续${task.intent==='recreate'?'参考复刻':'视频分析'}。${pinned?'已完成的分析会复用。':'选择原视频继续，已保存的目标无需重填。'}</p>${pinned?`<p>使用：${esc(task.name)}</p>`:''}<label>原视频<input name="file" type="file" accept=".mp4,.mov,.m4v,.webm" ${pinned?'disabled':''}></label><p class="muted">继续会按需进行百炼声画分析；已完成分析不重复调用。复刻的后续文字策划按当前团队连接计费。</p><p role="alert" data-reference-error></p><button type="submit" class="primary">继续处理</button></form>`;
+    return `<form class="material-observation-editor" data-reference-form><p>继续${task.intent==='recreate'?'参考复刻':'视频分析'}。${pinned?'已完成的分析会复用。':task.source_url?'不选文件会重新获取原链接；也可以选择原视频上传，已保存的目标无需重填。':'选择原视频继续，已保存的目标无需重填。'}</p>${pinned?`<p>使用：${esc(task.name)}</p>`:''}<label>原视频${task.source_url&&!pinned?'（可选）':''}<input name="file" type="file" accept=".mp4,.mov,.m4v,.webm" ${pinned?'disabled':''}></label><p class="muted">继续会按需进行百炼声画分析；已完成分析不重复调用。复刻的后续文字策划按当前团队连接计费。</p><p role="alert" data-reference-error></p><button type="submit" class="primary">继续处理</button></form>`;
   }
 
   function tasks(data){
-    return (data.tasks||[]).slice().reverse().map(t=>`<article class="analysis-candidate"><strong>${t.intent==='recreate'?'参考复刻':'视频分析'}</strong><p>${esc(t.title||t.name||t.source_url)}</p>${t.report?`<details><summary>查看声画拆解报告</summary><pre style="white-space:pre-wrap;font:inherit">${esc(t.report)}</pre></details><p class="muted">模型观察未经人工核对。</p>`:''}${t.name?`<video controls preload="none" style="max-width:100%;max-height:240px" src="${esc('/api/runs/'+encodeURIComponent(data.runId)+'/materials/'+encodeURIComponent(t.name))}"></video>`:''}${!['completed','stale'].includes(t.status)?`<button class="ghost small" data-reference-resume="${esc(t.reference_id)}">继续 / 上传原视频</button>`:''}</article>`).join('');
+    return (data.tasks||[]).slice().reverse().map(t=>`<article class="analysis-candidate"><strong>${t.intent==='recreate'?'参考复刻':'视频分析'}</strong><p>${esc(t.title||t.name||t.source_url)}</p>`+
+      (t.name?`<video controls preload="none" style="max-width:100%;max-height:240px" src="${esc('/api/runs/'+encodeURIComponent(data.runId)+'/materials/'+encodeURIComponent(t.name))}"></video>`:'')+
+      (t.candidate?`<button type="button" class="ghost small" data-reference-view="${esc(t.reference_id)}">查看逐段拆解 ↗</button>`:
+        t.report?`<details><summary>查看分析报告</summary><pre style="white-space:pre-wrap;font:inherit">${esc(t.report)}</pre></details>`:'')+
+      (t.report?'<p class="muted">模型观察未经人工核对。</p>':'')+
+      (!['completed','stale'].includes(t.status)?`<button class="ghost small" data-reference-resume="${esc(t.reference_id)}">继续 / 上传原视频</button>`:'')+`</article>`).join('');
   }
-  root.StudioReferenceVideo={form,tasks};
+
+  const stamp=value=>Number.isFinite(Number(value))?`${Number(value).toFixed(1)}s`:'时间未定';
+  function breakdownHtml(task,runId,{adaptation=true}={}){
+    if(!task)return '<section class="reference-breakdown"><h2>参考拆解</h2><p>分析尚未完成，可在素材与参考中查看任务状态。</p><button type="button" class="ghost" data-reference-open-materials>查看参考任务</button></section>';
+    const c=task.candidate, rows=Array.isArray(c?.timeline)?c.timeline:[];
+    const methods=Array.isArray(c?.reference_methods)?c.reference_methods:[];
+    const video=task.name?`<video controls preload="metadata" src="${esc('/api/runs/'+encodeURIComponent(runId)+'/materials/'+encodeURIComponent(task.name))}" aria-label="参考原视频"></video>`:'<p>原视频尚未保存，请从参考任务继续。</p>';
+    const segments=rows.map((row,index)=>{
+      const timed=Number.isFinite(Number(row.start_seconds));
+      const start=timed?Number(row.start_seconds):Number(row.time_seconds?.[0]);
+      const range=timed?`${stamp(row.start_seconds)}–${stamp(row.end_seconds)}`:
+        Array.isArray(row.time_seconds)?row.time_seconds.map(stamp).join(' / '):'时间未定';
+      return `<article class="reference-segment"><div class="reference-segment-head"><span>片段 ${index+1} · ${esc(range)}</span>`+
+        (task.name&&Number.isFinite(start)?`<button type="button" class="ghost small" data-reference-seek="${start}">播放此处 ▶</button>`:'')+`</div>`+
+        `<p><strong>画面</strong>${esc(row.visible||'未记录')}</p>`+
+        (timed?`<p><strong>声音</strong>${esc(row.audible||'未能确认')}</p><p><strong>声画关系</strong>${esc(row.relationship||'未能确认')}</p>`:
+          '<p class="muted">仅抽帧观察；未听取原片声音，也未核对帧间动作。</p>')+
+        `</article>`;
+    }).join('');
+    const methodCards=methods.map((method,index)=>`<article class="reference-method"><span>方法假设 ${index+1} · 对应片段 ${esc((method.supports||[]).map(i=>i+1).join('、'))}</span>`+
+      `<p>${esc(method.mechanism)}</p><dl><dt>不能直接照搬</dt><dd>${esc(method.non_transferable)}</dd><dt>可尝试改变</dt><dd>${esc(method.test_change)}</dd></dl></article>`).join('');
+    const prompt=task.prompt?.text||'';
+    const promptPanel=adaptation&&c?`<section class="reference-prompt"><div class="reference-section-head"><h3>本品提示词</h3><span>${task.prompt?`已保存 · ${task.prompt.actor==='user'?'手动修改':'模型生成'}`:'尚未保存'}</span></div>`+
+      `<p class="muted">依据当前参考观察改写；请核对本款商品事实、市场语言和促销条件。保存文字不会生成媒体。</p>`+
+      `<textarea data-reference-prompt rows="12" maxlength="20000" aria-label="本品提示词" ${task.status==='stale'?'disabled':''}>${esc(prompt)}</textarea>`+
+      `<div class="reference-prompt-actions"><button type="button" class="primary" data-reference-save ${task.status==='stale'?'disabled':''}>保存修改</button><button type="button" class="ghost" data-reference-copy>复制提示词</button><button type="button" class="ghost" data-reference-compose>请主制片适配 ↗</button></div><p role="status" data-reference-feedback></p></section>`:'';
+    return `<section class="reference-breakdown" data-reference-breakdown="${esc(task.reference_id)}"><header class="reference-intro"><span class="creator-kicker">参考视频 · ${task.status==='stale'?'来源已变化':'模型观察'}</span><h2>${esc(task.title||task.name||'参考视频拆解')}</h2><p>逐段时间由模型估计，点击可回看原片；观察未经人工核对，不证明销量或本款商品性能。</p></header>`+
+      `<div class="reference-layout"><div class="reference-source">${video}<p class="muted">${esc(task.name||task.source_url||'原片待提供')}</p>`+
+      (c?.limitations?.length?`<details><summary>观察范围与限制</summary><ul>${c.limitations.map(v=>`<li>${esc(v)}</li>`).join('')}</ul></details>`:'')+`</div>`+
+      `<div class="reference-timeline"><div class="reference-section-head"><h3>逐段观察</h3><span>${rows.length} 段</span></div>${segments||'<p>还没有可定位的观察；请查看原始报告或继续参考任务。</p>'}`+
+      (!rows.length&&task.report?`<details><summary>原始分析报告</summary><p>${esc(task.report)}</p></details>`:'')+
+      (methodCards?`<div class="reference-section-head"><h3>可借鉴的表达</h3></div>${methodCards}`:'')+`</div></div>${promptPanel}</section>`;
+  }
+
+  function mountBreakdowns(host,{runId,tasks,request,reload,compose,notify}={}){
+    for(const panel of host.querySelectorAll('[data-reference-breakdown]')){
+      const task=(tasks||[]).find(item=>item.reference_id===panel.dataset.referenceBreakdown);
+      if(!task)continue;
+      const video=panel.querySelector('video');
+      for(const button of panel.querySelectorAll('[data-reference-seek]'))button.onclick=()=>{
+        if(!video)return;
+        video.currentTime=Number(button.dataset.referenceSeek);
+        video.play?.().catch(()=>{});
+      };
+      const field=panel.querySelector('[data-reference-prompt]');
+      if(!field)continue;
+      const feedback=panel.querySelector('[data-reference-feedback]');
+      panel.querySelector('[data-reference-compose]').onclick=()=>compose?.(task);
+      panel.querySelector('[data-reference-copy]').onclick=async()=>{
+        if(!field.value.trim()){feedback.textContent='还没有可复制的提示词。';return;}
+        try{await navigator.clipboard.writeText(field.value);feedback.textContent='提示词已复制。';}
+        catch{feedback.textContent='复制失败，请选中文字后手动复制。';}
+      };
+      const save=panel.querySelector('[data-reference-save]');
+      let pending=null;
+      save.onclick=async()=>{
+        const prompt=field.value.trim();
+        if(!prompt){feedback.textContent='请先填写提示词。';return;}
+        if(!task.candidate||task.status==='stale'){feedback.textContent='参考分析已变化，请刷新后重新核对。';return;}
+        save.disabled=true;
+        if(!pending||pending.prompt!==prompt)pending={requestId:crypto.randomUUID(),prompt,
+          expectedPromptSha:task.prompt?.sha256||null,expectedPromptRevision:task.prompt?.revision||null};
+        let result;
+        try{
+          result=await request(`/api/runs/${encodeURIComponent(runId)}/reference-videos/${encodeURIComponent(task.reference_id)}/prompt`,{
+            method:'POST',body:JSON.stringify({request_id:pending.requestId,analysis_id:task.candidate.analysis_id,
+              candidate_sha256:task.candidate.candidate_sha256,expected_prompt_sha256:pending.expectedPromptSha,
+              expected_prompt_revision:pending.expectedPromptRevision,prompt})});
+        }catch(error){
+          if(error.status===409)pending=null;
+          feedback.textContent=error.message;save.disabled=false;return;
+        }
+        pending=null;task.prompt=result.prompt;feedback.textContent='修改已保存到当前项目。';save.disabled=false;
+        try{await reload?.();}catch{feedback.textContent='修改已保存；页面暂时无法刷新，请重新打开当前项目查看。';}
+      };
+    }
+  }
+  root.StudioReferenceVideo={form,tasks,breakdownHtml,mountBreakdowns};
   if(typeof module!=='undefined') module.exports=root.StudioReferenceVideo;
 })(typeof window!=='undefined'?window:globalThis);
 

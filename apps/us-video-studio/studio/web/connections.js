@@ -1,7 +1,7 @@
 "use strict";
 
-const ROLE_NAMES = { orchestrator: "主制片", director: "创意导演", material: "视觉策划", writer: "编剧", reviewer: "独立审片" };
-const ROLE_DESCRIPTIONS = { orchestrator: "理解需求，统筹每一步", director: "找到切入点与表达方向", material: "安排画面、动作与素材", writer: "把创意写成可拍的脚本", reviewer: "独立检查内容与证据" };
+const ROLE_NAMES = { orchestrator: "主制片", director: "创意导演", material: "视觉策划", writer: "编剧", reviewer: "独立审片（已停用）" };
+const ROLE_DESCRIPTIONS = { orchestrator: "理解需求，统筹每一步", director: "找到切入点与表达方向", material: "安排画面、动作与素材", writer: "把创意写成可拍的脚本", reviewer: "保留历史配置；当前工作流不会调用" };
 const PROVIDER_NAMES = { codex_cli: "Codex · 本机登录", deepseek: "DeepSeek", openai_compat: "其他服务 · OpenAI 兼容", anthropic_compat: "其他服务 · Anthropic 兼容" };
 const DEEPSEEK_MODELS = ["deepseek-flash", "deepseek-v4-pro"];
 const DEEPSEEK_URL = "https://api.deepseek.com/v1";
@@ -48,7 +48,7 @@ function openConnectionDialog(config) {
     ? `${config.capabilities.image_analysis.ui_summary} ${config.capabilities.video_understanding.ui_summary} ${config.capabilities.production.ui_summary}`
     : "能力说明暂时不可用，请重新打开模型设置。";
   capabilities.append(box("strong", "", "这支团队现在能做什么"),
-    box("p", "", "需求梳理、创意方向、画面规划、脚本与独立审阅。这里分配的是文字策划模型。"),
+    box("p", "", "需求梳理、创意方向、画面规划与脚本。主制片负责自检；独立审阅已停用。这里分配的是文字策划模型。"),
     box("p", "muted", mediaBoundaries));
   form.append(capabilities);
   const runtime = box("details", "connection-runtime");

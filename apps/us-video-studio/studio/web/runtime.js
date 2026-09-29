@@ -20,10 +20,16 @@ function jobGuidance(job) {
   // Why the round stopped outranks what it was missing — the failure explains
   // the missing part (and is the thing to fix).
   if (/连续失败/.test(reason)) return "本轮因同一问题反复失败已停止。具体错误见「团队工作记录」，改掉原因后再发新的指令。";
+  if (job.job_kind === 'writing_revision' && job.revision_result?.change_status === 'saved')
+    return "脚本新版已保存，请查看准确版本并决定采用或退回。";
   if (job.deliverable?.status === 'incomplete') {
     const stageNames = {intake:'创作需求',direction:'创意方向',material_plan:'素材计划',writing:'脚本'};
     const missing = (job.deliverable.missing || []).map(item => String(item).replace(
       /^(intake|direction|material_plan|writing)\s+(?=当前)/u, (_, stage) => stageNames[stage]));
+    if (missing.some(item => /独立审核|审核通过|reviewer|review pass/i.test(item)))
+      return state.timeline?.pending
+        ? '历史任务的审核要求已停用。请阅读当前作品，按现在的决定卡操作。'
+        : '历史任务的审核要求已停用。请查看当前准确版本与任务状态。';
     return `本轮交付还缺：${missing.join('、')}。已完成的内容已保留，请查看准确版本后继续。`;
   }
   // Missing accounting data is diagnostic, never a creative workflow warning.
@@ -32,24 +38,21 @@ function jobGuidance(job) {
     : "这轮调用被当时的预算设置挡住。已保存内容仍可阅读；请核对当前设置后再决定下一步。";
   if (/Codex CLI is not installed or not on PATH/i.test(reason)) return "服务没有找到 Codex CLI。请确认本机已安装 Codex，重启工作台服务后再发送消息；已保存的内容不受影响。";
   if (/连接准备未通过|ConnectionUnavailable|CodexUnavailable/i.test(reason)) return "模型连接尚未准备好。请检查制作团队中的对应服务设置，再发送继续指令。";
+  if (/模型连接超时或中断/.test(reason))
+    return "受托角色的模型连接超时或中断，新版未保存；本次用量无法确认，系统已停止自动重试。请检查连接后从当前阶段继续。";
+  if (/模型输出达到单次上限/.test(reason))
+    return "受托角色的模型输出达到单次上限，新版没有保存；系统已停止自动重试以避免重复计费。请从当前阶段重新发起。";
+  if (/角色模型返回了无法读取的结果/.test(reason))
+    return "受托角色的模型回复格式不完整，新版没有保存；系统已停止自动重试以避免重复计费。请从当前阶段重新发起。";
+  if (job.job_kind === 'reference_video' && /视频文件获取失败（HTTP 403）/.test(reason))
+    return "TikTok 页面已读取，但视频文件地址返回 HTTP 403。可重试原链接或上传原视频继续；不会自动重试或调用声画模型。";
+  if (job.job_kind === 'reference_video' && /reference_fetch|无法连接TikTok|视频下载中断/i.test(reason))
+    return "TikTok 原片获取失败，未开始声画分析。可在原参考任务中重试链接或上传原视频；不会自动重试。";
   if (job.open_attempts?.length) return "有尚未结束的制作阶段。请先按下方恢复步骤处理遗留任务，再继续创作。";
   if (job.status === "failed") return "本轮未完成，已有内容已保留。打开「团队工作记录」查看原因，处理后再说明下一步。";
   if (job.status === "blocked") return "本轮已暂停。先查看保存的内容和下方提示，再说明下一步要求。";
   if (job.status === "interrupted") return "服务曾中断，已有内容已保留。确认进度后，再发送新的继续指令。";
   return "";
-}
-function writingRevisionReviewReturned(job) {
-  if (job?.job_kind !== 'writing_revision' || job.status !== 'blocked') return false;
-  if (job.revision_result) return job.revision_result.change_status === 'saved'
-    && job.revision_result.review_status === 'return';
-  // Older jobs have no separate result; their revision deliverable was only
-  // evaluated after a submitted artifact and a recorded reviewer verdict.
-  return job.deliverable?.goal === 'revision' && job.deliverable.status === 'incomplete';
-}
-function writingRevisionReviewPending(job) {
-  return job?.job_kind === 'writing_revision' && !JOB_ACTIVE.has(job.status)
-    && job.revision_result?.change_status === 'saved'
-    && job.revision_result.review_status === 'pending';
 }
 function jobPresentation(job, recovery = null) {
   if (!job) return { active: false, label: "", detail: "" };
@@ -70,19 +73,19 @@ function jobPresentation(job, recovery = null) {
   if ((job.job_kind || '').startsWith('production_')) return {active, label:JOB_LABELS[job.status] || '状态待确认',
     detail:active?'正在处理制作任务；媒体生成进度与结果保存在制作页。':'本次制作状态已保存，请在制作页查看结果与用量。',guidance:jobGuidance(job)};
   if (job.job_kind === 'artifact_revision') return {active,label:JOB_LABELS[job.status] || '状态待确认',
-    detail:active ? '正在将局部修改同步到新版本。' : job.status==='succeeded' ? '新版本已保存，请比较改动后重新审核。' : '',guidance:jobGuidance(job)};
+    detail:active ? '正在将局部修改同步到新版本。' : job.status==='succeeded' ? '新版本已保存，请比较改动后决定是否采用。' : '',guidance:jobGuidance(job)};
   if (job.job_kind === 'writing_revision') return {active,
-    label:writingRevisionReviewReturned(job) ? '脚本新版已保存 · 审核退回'
-      : writingRevisionReviewPending(job) ? '脚本新版已保存 · 审核未完成'
-      : JOB_LABELS[job.status] || '状态待确认',
-    detail:active ? '编剧正在修改选中字段，随后由独立审核检查新版。'
-      : job.status==='succeeded' ? '脚本新版已完成独立审核，请阅读结论并决定是否采用。'
-      : writingRevisionReviewReturned(job) ? '选中的内容已修改并保存；独立审核认为整稿仍需修改。'
-      : writingRevisionReviewPending(job) ? '选中的内容已修改并保存；独立审核没有完成判定。' : '',
-    guidance:writingRevisionReviewReturned(job)
-      ? '请查看新版脚本和审核意见，再选择需要修改的内容。'
-      : writingRevisionReviewPending(job)
-      ? '请查看新版脚本和本次任务原因，再决定如何完成审核。' : jobGuidance(job)};
+    label:job.revision_result?.change_status === 'saved' && !active
+      ? '脚本新版已保存' : JOB_LABELS[job.status] || '状态待确认',
+    detail:active ? '编剧正在修改选中字段，完成后交你决定。'
+      : job.revision_result?.change_status === 'saved' || job.status==='succeeded'
+      ? '脚本新版已保存，请阅读并决定是否采用。' : '',
+    guidance:jobGuidance(job)};
+  if (job.job_kind === 'direction_resume') return {active,
+    label:active ? '正在重做创意方向' : job.status==='succeeded' ? '新版创意方向已保存' : JOB_LABELS[job.status] || '状态待确认',
+    detail:active ? '导演正在按当前有效资料准备 A/B/C。' : job.status==='succeeded'
+      ? '请阅读三个方向，在对话区点选或提出修改意见。' : '旧稿已保留；请查看本次停止原因。',
+    guidance:jobGuidance(job)};
   if (['image_analysis','video_analysis'].includes(job.job_kind)) return {active, label:JOB_LABELS[job.status] || '状态待确认',
     detail:active ? '视觉策划正在分析素材。可以离开页面，任务会继续；不会自动重试。'
       :job.status==='succeeded' ? '素材分析已保存，请核对并选择要采用的观察。' : '',guidance:jobGuidance(job)};
@@ -97,6 +100,51 @@ function jobPresentation(job, recovery = null) {
     detail, guidance: jobGuidance(job) };
 }
 
+function liveJobStatus(job, view) {
+  const events = job.events || [];
+  const last = events.at(-1);
+  const recordedAt = teamTime(last?.at);
+  if (job.steer_status === 'received') return {
+    label: '调整已收到', detail: '正在等待当前模型调用结束，再按你的调整接续。', recordedAt};
+  if (job.status === 'queued') return {
+    label: view.label, detail: '任务已排队，尚未开始处理。', recordedAt};
+  if (job.status === 'cancelling') return {
+    label: '正在停止', detail: '等待当前调用结束；不会启动下一步。', recordedAt};
+  if (job.job_kind === 'direction_resume') {
+    const director = events.filter(e => e.role === 'director');
+    const saved = director.some(e => e.type === 'agent_tool' && e.tool === 'submit_stage' && e.ok === true);
+    const submitting = director.some(e => e.type === 'agent_activity' && e.tool === 'submit_stage') && !saved;
+    const checked = [
+      ['read_artifact', 'direction', '旧方向'],
+      ['list_materials', null, '素材清单'],
+      ['read_capabilities', null, '制作能力'],
+    ].filter(([tool, stage]) => director.some(e => e.type === 'agent_tool' && e.tool === tool
+      && e.ok === true && (!stage || (e.args?.stage || e.stage) === stage)))
+      .map(([, , label]) => label);
+    const prefix = checked.length ? `已核对${checked.join('、')}；` : '';
+    return {label: view.label, recordedAt,
+      detail: saved ? '新版 A/B/C 已保存，正在收尾。'
+        : submitting ? `${prefix}正在保存新版 A/B/C。`
+        : `${prefix}导演正在准备 A/B/C，新版尚未保存。`};
+  }
+  const latestActivity = [...events].reverse().find(e => e.type === 'agent_activity' && JOB_ROLE_NAMES[e.role]);
+  const role = JOB_ROLE_NAMES[latestActivity?.role] || '制片团队';
+  const saved = [...events].reverse().find(e => e.type === 'agent_tool' && e.ok === true
+    && ['write_stage','submit_stage'].includes(e.tool));
+  const stage = TEAM_STAGES[saved?.args?.stage || saved?.stage] || '阶段内容';
+  const checkedNames = {read_project_state:'项目进度',read_project_history:'历史资料',
+    read_artifact:'当前方案',list_materials:'素材清单',read_capabilities:'制作能力',
+    read_production:'制作方案'};
+  const checked = [...new Set(events.filter(e => e.type === 'agent_tool' && e.ok === true
+    && checkedNames[e.tool]).map(e => e.tool === 'read_artifact'
+      ? TEAM_STAGES[e.args?.stage || e.stage] || checkedNames[e.tool] : checkedNames[e.tool]))];
+  const milestone = saved ? `已保存${stage}` : checked.length ? `已核对${checked.slice(-3).join('、')}` : '';
+  const working = latestActivity?.phase === 'tool' && latestActivity.tool
+    ? `${role}正在${teamAction(latestActivity)}` : `正在等待${role}的模型回复`;
+  return {label: view.label, recordedAt,
+    detail: `${milestone ? `${milestone}；` : ''}${working}；${saved ? '正在继续处理本轮工作。' : '本轮结果尚未提交。'}`};
+}
+
 let jobWatch = 0;
 let jobTimer = null;
 let jobSource = null;
@@ -107,23 +155,26 @@ let jobRenderKey = "";
 let steerPosting = false;
 let cancelPosting = false;
 function canSteerJob(job) {
-  return Boolean(job && job.job_kind === 'conversation' &&
+  return Boolean(job &&
     (job.status === 'running' || (job.status === 'cancelling' && job.steer_status === 'received')));
 }
 function syncComposerAction(job = currentJob) {
   const active = Boolean(job && JOB_ACTIVE.has(job.status));
+  const canInsert = canSteerJob(job);
   const unresolved = readPendingJob(state.runId) || readPendingSteer(state.runId);
   const button = $('send');
+  const stop = $('job-stop');
   const stopping = active && job.status === 'cancelling' && job.steer_status !== 'received';
-  button.setAttribute?.('data-mode', active ? 'stop' : 'send');
-  button.textContent = active ? (stopping || cancelPosting ? '停止中…' : '停止 ■') : '发送 ↑';
-  button.setAttribute?.('aria-label', active ? '停止当前任务' : '发送消息');
+  button.setAttribute?.('data-mode', canInsert ? 'insert' : 'send');
+  button.textContent = canInsert ? '插入调整 ↑' : '发送 ↑';
+  button.setAttribute?.('aria-label', canInsert ? '插入当前任务的调整' : '发送消息');
   const hint = $('composer-key-hint');
   if (hint) hint.textContent = active
-    ? '任务进行中，输入内容会留作草稿 · Shift + Enter 换行'
+    ? '中途补充会先保存，当前调用结束后由主制片处理 · Shift + Enter 换行'
     : 'Enter 发送 · Shift + Enter 换行';
   button.disabled = Boolean(unresolved) || cancelPosting || steerPosting || state.decisionBusy
-    || state.recoveryBlocked || stopping || (!active && state.busy);
+    || state.recoveryBlocked || (active && !canInsert) || (!active && state.busy);
+  if(stop){stop.hidden=!active;stop.disabled=Boolean(unresolved)||cancelPosting||steerPosting||stopping;}
 }
 async function stopCurrentJob() {
   const job = currentJob;
@@ -174,7 +225,19 @@ function followJobEvents(runId, job, generation) {
     if (jobSource !== source) return;
     closeJobSource();
     clearTimeout(jobTimer);
-    jobTimer = setTimeout(() => watchJob(runId, job, generation), 1000);
+    // SSE often closes as the job settles. Read the authoritative snapshot
+    // before reconnecting; replaying the old running snapshot can keep
+    // cancelling the safety poll forever when each new stream closes quickly.
+    jobTimer = setTimeout(async () => {
+      if (generation !== jobWatch || runId !== state.runId) return;
+      try {
+        const updated = await api(`/api/runs/${runId}/jobs/${job.job_id}`);
+        await watchJob(runId, updated, generation);
+      } catch (_) {
+        if (generation === jobWatch && runId === state.runId)
+          jobTimer = setTimeout(() => restoreJob(runId), 2500);
+      }
+    }, 1000);
   };
 }
 function pendingSteerKey(runId) { return `studio-steer-pending:${runId}`; }
@@ -229,7 +292,9 @@ function showJob(job, notice = "") {
   const view = jobPresentation(job, currentRecovery);
   const unresolved = readPendingJob(state.runId) || readPendingSteer(state.runId);
   state.busy = view.active || Boolean(unresolved);
-  state.recoveryBlocked = Boolean((currentRecovery && !currentRecovery.can_continue)
+  // An open stage attempt belongs to a running role. It becomes a recovery
+  // concern only after that job has ended without closing the attempt.
+  state.recoveryBlocked = !view.active && Boolean((currentRecovery && !currentRecovery.can_continue)
     || (!currentRecovery && (job?.open_attempts?.length)));
   syncComposerAction(job);
   if (typeof renderProjectProgress === 'function') renderProjectProgress();
@@ -247,13 +312,19 @@ function showJob(job, notice = "") {
   host.hidden = !job && !notice && !state.recoveryBlocked;
   if (host.hidden) return;
   host.setAttribute?.('data-active', String(view.active));
-  host.setAttribute?.('data-chat-job', String(Boolean(job && ['conversation','stage_review'].includes(job.job_kind))));
+  host.setAttribute?.('data-chat-job', String(Boolean(job && ['conversation','stage_review','direction_resume'].includes(job.job_kind))));
   const copy = box("div", "job-copy");
   // Project status is above both views. This strip is only the live execution
   // observer; historical usage cannot turn it back into a second status panel.
-  if (job && !notice && !state.recoveryBlocked && ['conversation','stage_review'].includes(job.job_kind)) {
-    if (view.active) copy.append(box('span','job-live',job.steer_status === 'received'
-      ? '调整已收到 · 等待接续' : '制片团队正在工作 · 进展见下方对话'));
+  if (job && !notice && !state.recoveryBlocked && ['conversation','stage_review','direction_resume'].includes(job.job_kind)) {
+    if (view.active) {
+      const live = liveJobStatus(job, view);
+      const summary = box('div','job-live-summary');
+      summary.append(box('strong','job-live-title',live.label),
+        box('span','job-live-detail',live.detail));
+      if (live.recordedAt) summary.append(box('span','job-live-time',`最近记录 ${live.recordedAt}`));
+      copy.append(summary);
+    }
     if (!view.active && view.guidance) {
       const warning = box('strong','job-warning',view.guidance);
       warning.setAttribute?.('role','alert');
@@ -313,9 +384,8 @@ function showJob(job, notice = "") {
     copy.append(review);
   }
   if (!view.active && job?.job_kind === 'writing_revision'
-      && (job.status === 'succeeded' || writingRevisionReviewReturned(job)
-          || writingRevisionReviewPending(job))) {
-    const writing = box('button', 'primary small', '查看脚本与审核');
+      && (job.status === 'succeeded' || job.revision_result?.change_status === 'saved')) {
+    const writing = box('button', 'primary small', '查看脚本并决定');
     writing.onclick = () => { showJourneyTab('plan'); selectStage('writing'); setProjectFocus('canvas'); };
     copy.append(writing);
   }
@@ -586,7 +656,7 @@ async function submitJob(runId, payload, options = {}) {
   showJob(null, "正在提交…");
   let job;
   try {
-    const route = payload.request_kind === 'reference_video' ? 'reference-videos' : payload.request_kind === 'stage_review' ? 'actions/review' : payload.request_kind === 'writing_revision' ? 'actions/revise-writing' : payload.request_kind === 'video_analysis' ? 'video-analysis' : payload.request_kind === 'image_analysis' ? 'image-analysis' : payload.request_kind === 'artifact_revision'
+    const route = payload.request_kind === 'reference_video' ? 'reference-videos' : payload.request_kind === 'stage_review' ? 'actions/review' : payload.request_kind === 'writing_revision' ? 'actions/revise-writing' : payload.request_kind === 'direction_resume' ? 'actions/resume-direction' : payload.request_kind === 'video_analysis' ? 'video-analysis' : payload.request_kind === 'image_analysis' ? 'image-analysis' : payload.request_kind === 'artifact_revision'
       ? `edits/${encodeURIComponent(payload.stage)}/${encodeURIComponent(payload.draft_id)}/generate` : 'jobs';
     job = await api(`/api/runs/${runId}/${route}`, { method: "POST", body: JSON.stringify(payload) });
   } catch (err) {

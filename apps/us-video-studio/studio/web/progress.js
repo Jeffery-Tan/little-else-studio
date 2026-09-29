@@ -57,6 +57,7 @@ function renderProjectProgress() {
   if (typeof renderJourneyStatus === 'function') { renderJourneyStatus(); return; }
   const runId = state.runId, timeline = state.timeline;
   const brief = state.projectBrief || timeline?.brief;
+  if (brief?.action?.kind === 'review_stage') { host.replaceChildren(); host.hidden=true; return; }
   if (brief) {
     host.hidden=false;
     host.innerHTML = projectBriefHtml(brief);
@@ -68,13 +69,9 @@ function renderProjectProgress() {
       if (state.runId !== runId || (state.projectBrief || state.timeline?.brief) !== brief || state.decisionBusy) return;
       if (action.kind === 'activity') return openTeamProgress();
       if (state.busy) return;
-      if (action.kind === 'review_stage') {
-        button.disabled = true;
-        return submitJob(runId, {request_kind:'stage_review',request_id:crypto.randomUUID(),
-          stage:action.stage,expected_version:action.version,expected_artifact_sha256:action.sha256});
-      }
       if (action.kind === 'delivery') return openDelivery();
       if (action.kind === 'recovery') {setProjectFocus('chat');$('job-status').scrollIntoView({block:'nearest'});return;}
+      if (action.kind === 'resume_direction') return resumeDirection(action);
       if (action.stage) selectStage(action.stage);
       if (action.kind === 'draft') return prepareProjectDraft(action.prompt);
       setProjectFocus('canvas');
@@ -100,7 +97,8 @@ function renderProjectProgress() {
     if (progress.action === 'delivery') return openDelivery();
     if (progress.action === 'recovery') { setProjectFocus('chat'); $('job-status').scrollIntoView({block:'nearest'}); return; }
     if (progress.stage) selectStage(progress.stage);
-    if (progress.action === 'draft') prepareProjectDraft(progress.prompt);
+    if (progress.action === 'stage_command') resumeDirection(timeline.next_action);
+    else if (progress.action === 'draft') prepareProjectDraft(progress.prompt);
     else {
       setProjectFocus('canvas');
       const target = progress.action === 'review' ? document.getElementById('stage-decision') : $('stage');

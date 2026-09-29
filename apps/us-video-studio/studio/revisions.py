@@ -232,7 +232,7 @@ def prepare_revision(store, pipeline, connections, settings, learning, run_id, s
 保留未修改方向/镜头的内容及顺序、原稿中的有效说明、证据与限制，完整正文须与提供的更新后卡片一致。
 不要暗改其他卡片，不新增事实、删除未知项或宣称审核/采用通过。若修改与证据冲突，保留为待核实，说明冲突。
 只返回 JSON：{"content":"完整的新版本 Markdown 正文","summary":"新版摘要"}。
-不要返回 structured，不要调用 submit_stage；工作台会绑定提供的卡片，并等待独立审核。'''
+不要返回 structured，不要调用 submit_stage；工作台会绑定提供的卡片，并等待用户决定。'''
         system = ROLES[role].system(store.read_run(run_id), extra=context['text'] + '\n\n' + extra,
                                    format=selection['format'])
         message = json.dumps({'original_content': original, 'updated_cards': structured,
@@ -273,7 +273,7 @@ def prepare_revision(store, pipeline, connections, settings, learning, run_id, s
                                    version=artifact.version, sha256=artifact.sha256,
                                    base_version=base.version, base_sha256=base.sha256)
             emit({'type': 'revision_ready', 'stage': stage, 'version': artifact.version,
-                  'message': '新版本已保存，请先比较修改，再进行独立审核。'})
+                  'message': '新版本已保存，请先比较修改，再决定是否采用。'})
             return SimpleNamespace(stopped_because='done', text='新版本已保存，尚未审核或采用。', rounds=1, used_tools=[])
         except Exception:
             current = pipeline.stage_state(run_id, stage)

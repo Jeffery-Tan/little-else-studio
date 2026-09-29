@@ -44,8 +44,6 @@ def work_plan(pipeline, run_id, target=None):
             action = 'update'
         elif responsible[stage]:
             action = 'revise'
-        elif state.can_review:
-            action = 'review'
         elif state.can_approve:
             action = 'user_decision'
         else:

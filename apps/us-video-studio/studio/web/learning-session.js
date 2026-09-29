@@ -24,9 +24,14 @@
       url&&kind==='image'?`<img loading="lazy" src="${esc(url)}" alt="${esc(name)}">`:'';
     const external=safeLink(source.source_url||source.url);
     const title=source.title||name||source.source_url||'参考来源';
+    const failed=['failed','blocked','cancelled','interrupted'].includes(source.execution_status);
+    const status=source.status==='completed'?'已有分析记录':source.status==='stale'?'来源已变化，请重新核对':
+      failed?(name?'原片已保存，但本轮分析未完成。':'TikTok 原片获取失败，尚未进行声画分析。'):
+      source.status==='started'?'正在获取原片；尚无声画观察。':'来源已保存；观察覆盖以记录为准';
     return `<article class="learning-room-card learning-room-source">${preview}<div><h3>${esc(title)}</h3>`+
-      `<p>${esc(source.status==='completed'?'已有分析记录':source.status==='stale'?'来源已变化，请重新核对':'来源已保存；观察覆盖以记录为准')}</p>`+
+      `<p>${esc(status)}</p>`+
       (external?`<a href="${esc(external)}" target="_blank" rel="noopener noreferrer">打开来源 ↗</a>`:'')+
+      (failed&&source.reference_id?`<button type="button" class="ghost small" data-learning-resume-reference="${esc(source.reference_id)}">${name?'继续分析原片':'重试链接或上传原视频'}</button>`:'')+
       (source.report?`<details><summary>阅读声画观察报告</summary><p class="learning-room-pre">${esc(source.report)}</p></details>`:'')+
       (source.coverage?`<p class="learning-room-muted">覆盖：${esc(text(source.coverage))}</p>`:'')+`</div></article>`;
   }
@@ -73,7 +78,10 @@
     for(const task of tasks){
       const matching=sources.find(s=>s.reference_id&&s.reference_id===task.reference_id)
         ||sources.find(s=>s.kind==='reference_analysis'&&task.name&&s.name===task.name);
-      if(matching){matching.report=task.report;matching.title=task.title||matching.title;}
+      if(matching){matching.report=task.report;matching.title=task.title||matching.title;
+        matching.candidate=task.candidate;matching.reference_id=task.reference_id;matching.status=task.status;
+        matching.name=task.name||matching.name;matching.execution_status=task.execution_status;
+        matching.failure_reason=task.failure_reason;}
       else sources.push(task);
     }
     const observations=list(session?.observations);
@@ -88,7 +96,8 @@
       (mayClose?'<button type="button" class="ghost small" data-learning-close>结束本次学习</button>':'')+`</header>`+
       (session?.load_error?`<p class="learning-room-empty" role="alert">学习记录暂时无法读取：${esc(session.load_error)}</p>`:'')+
       `<section class="learning-room-section"><div class="learning-room-section-head"><div><span>01 / 来源</span><h2>原片与观察范围</h2></div><div><button type="button" class="ghost small" data-learning-materials>添加素材</button> <button type="button" class="ghost small" data-learning-analyze>分析参考视频</button></div></div>`+
-      `<div class="learning-room-list">${sources.length?sources.map(s=>sourceCard(s,run.run_id)).join(''):'<p class="learning-room-empty">还没有参考视频。可以先上传原片；上传不会自动调用模型。</p>'}</div>`+
+      `<div class="learning-room-list">${sources.length?sources.map(s=>s.candidate&&root.StudioReferenceVideo?.breakdownHtml?
+        root.StudioReferenceVideo.breakdownHtml(s,run.run_id,{adaptation:false}):sourceCard(s,run.run_id)).join(''):'<p class="learning-room-empty">还没有参考视频。可以先上传原片；上传不会自动调用模型。</p>'}</div>`+
       `<h3>已保存的观察</h3><div class="learning-room-list">${observations.length?observations.map(observationCard).join(''):'<p class="learning-room-empty">暂无可引用的观察。文件已上传不代表已经完整看听。</p>'}</div></section>`+
       `<section class="learning-room-section"><div class="learning-room-section-head"><div><span>02 / 讨论</span><h2>研究对话</h2></div><button type="button" class="ghost small" data-learning-chat>继续讨论</button></div>`+
       (latestReply?`<p class="learning-room-observation">${esc(latestReply.text)}</p>`:'<p class="learning-room-empty">指出你关心的表达、同意或不同意的解释；只分析也可以结束。</p>')+`</section>`+
@@ -98,11 +107,16 @@
   }
 
   const applyIds=new Map();
-  function mount({host,session,run,materials,referenceTasks,library,request,reload,notify,openMaterials,openChat,openAnalysis}){
+  function mount({host,session,run,materials,referenceTasks,library,request,reload,notify,openMaterials,openChat,openAnalysis,openResumeReference}){
     host.innerHTML=roomHtml(session,run,materials,referenceTasks,library);
+    root.StudioReferenceVideo?.mountBreakdowns(host,{runId:run.run_id,tasks:referenceTasks});
     host.querySelector('[data-learning-materials]')?.addEventListener('click',openMaterials);
     host.querySelector('[data-learning-chat]')?.addEventListener('click',openChat);
     host.querySelector('[data-learning-analyze]')?.addEventListener('click',openAnalysis);
+    for(const button of host.querySelectorAll('[data-learning-resume-reference]')){
+      const task=list(referenceTasks).find(item=>item.reference_id===button.dataset.learningResumeReference);
+      if(task)button.addEventListener('click',()=>openResumeReference?.(task));
+    }
     host.querySelector('[data-learning-migration]')?.addEventListener('click',()=>openMigrationPreview(run.run_id,request,reload,notify));
     host.querySelector('[data-learning-close]')?.addEventListener('click',async event=>{
       const button=event.currentTarget;button.disabled=true;

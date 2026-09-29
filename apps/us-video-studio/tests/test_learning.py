@@ -106,7 +106,7 @@ def test_context_persists_actual_text_and_dependency_purpose_without_holdout(env
     assert context["seed_case_ids"] == ["seed-case"]
     assert set(context["case_ids"]) == {"seed-case", "dependency-case"}
     assert "不具备该用途资格" in context["text"]
-    assert "FULL us-commerce-strategy" in context["text"] and "FULL us-creator-video" in context["text"]
+    assert "FULL us-commerce-strategy" not in context["text"] and "FULL us-creator-video" in context["text"]
     assert "hidden-case" not in _json(context) and "pending-case" not in _json(context)
     assert json.loads((store.run_dir("run-one") / context["evidence_ref"]).read_text(encoding="utf-8")) == context
     assert service.contexts("run-one")[-1]["snapshot_sha256"] == context["snapshot_sha256"]
@@ -114,6 +114,14 @@ def test_context_persists_actual_text_and_dependency_purpose_without_holdout(env
         service.context("run-one", "writer", case_ids=["hidden-case"])
     with pytest.raises(ValueError):
         service.context("run-one", "writer", case_ids=["dependency-case"], purpose="storyboard")
+
+
+def test_material_role_uses_upstream_decision_without_full_creative_skills(env):
+    service, _, _ = env
+    context = service.context("run-one", "material", purpose="storyboard")
+    assert context["skills"] == []
+    assert "FULL us-commerce-strategy" not in context["text"]
+    assert "FULL us-creator-video" not in context["text"]
 
 
 def test_review_removes_feedback_anchors_and_own_output(env):
@@ -125,6 +133,9 @@ def test_review_removes_feedback_anchors_and_own_output(env):
     assert "preference-case" not in _json(review)
     assert review["run_feedback"] == []
     assert "人物说话" not in _json(review)
+    assert review["skills"] == review["case_ids"] == []
+    assert review["method_directory"] is None
+    assert "FULL us-creator-video" not in review["text"]
 
 
 @pytest.mark.parametrize("intent", ["pause", "status"])
@@ -136,7 +147,7 @@ def test_noncreative_intent_does_not_load_cases_or_skills(env, intent):
 
 def test_edit_loads_skills_and_feedback_only_strategy(env):
     service, _, _ = env
-    assert len(service.context("run-one", "writer", intent="edit")["skills"]) == 2
+    assert [s["id"] for s in service.context("run-one", "writer", intent="edit")["skills"]] == [SKILLS[1]]
     assert [s["id"] for s in service.context("run-one", "orchestrator", intent="feedback")["skills"]] == [SKILLS[0]]
 
 

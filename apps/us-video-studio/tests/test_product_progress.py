@@ -11,7 +11,7 @@ from studio.pipeline import Pipeline
 from test_server import settings_for
 
 
-def test_next_action_follows_real_prerequisites_and_review(tmp_path):
+def test_next_action_follows_real_prerequisites_and_user_decision(tmp_path):
     store = Store(tmp_path)
     store.create_run('fixture', 'Fixture', 'Offline fixture')
     pipeline = Pipeline(store)
@@ -24,8 +24,8 @@ def test_next_action_follows_real_prerequisites_and_review(tmp_path):
     assert project_progress(pipeline.state('fixture').to_dict())['action'] == 'recovery'
     pipeline.submit('fixture', 'direction', attempt.token, content='Direction', summary='Direction')
     out = project_progress(pipeline.state('fixture').to_dict())
-    assert out['label'] == '准备审核' and out['action'] == 'draft'
-    assert '不要重写或自动批准' in out['prompt']
+    assert out['label'] == '阅读并决定' and out['action'] == 'review'
+    assert '采用或退回' in out['detail']
 
 
 def test_old_approval_does_not_mark_legacy_artifact_ready(tmp_path):

@@ -60,6 +60,16 @@ def test_provider_presets_and_frozen_role_route(tmp_path, fake_protection):
     assert snapshot.public()['roles']['writer']['model'] == 'deepseek-flash'
 
 
+def test_deepseek_director_retains_thinking_without_generic_completion_cap(tmp_path, fake_protection):
+    store = ConnectionStore(tmp_path)
+    config = payload(store)
+    config['roles']['director'] = {'connection': 'deepseek-fixture', 'model': 'deepseek-flash'}
+    store.save(config)
+    client = store.snapshot().client().for_role('director', 'fixture-run')
+    assert client.max_tokens is None
+    assert client.reasoning_effort == 'high'
+
+
 def test_new_draft_check_authenticates_without_saving_or_generating(tmp_path, monkeypatch):
     store = ConnectionStore(tmp_path)
     requests = []

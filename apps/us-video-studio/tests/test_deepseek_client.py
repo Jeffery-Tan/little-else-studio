@@ -58,6 +58,43 @@ def test_fixed_official_endpoint_enabled_high_and_provider_output_default(monkey
     assert turn.raw_blocks[0] == {"type": REASONING_BLOCK, "reasoning_content": "private reasoning"}
 
 
+def test_explicit_low_reasoning_effort_is_sent_when_requested(monkeypatch):
+    seen = transport(monkeypatch, [response()])
+    request(DeepSeekClient('synthetic-only', max_tokens=16384, reasoning_effort='low'))
+    payload = json.loads(seen[0].content)
+    assert payload['reasoning_effort'] == 'low'
+    assert payload['max_tokens'] == 16384
+
+
+def test_non_thinking_tool_call_uses_public_completion_budget_and_standard_replay():
+    client = DeepSeekClient('synthetic-only', max_tokens=24576, reasoning_effort='none')
+    payload = client._payload('deepseek-flash', 'System',
+        [{'role': 'user', 'content': 'Create three concise directions'}], TOOLS)
+    assert payload['thinking'] == {'type': 'disabled'}
+    assert payload['max_tokens'] == 24576
+    assert 'reasoning_effort' not in payload
+    assert payload['tools'][0]['function']['name'] == TOOLS[0]['name']
+
+
+def test_non_thinking_tool_round_replays_without_private_reasoning(monkeypatch):
+    seen = transport(monkeypatch, [
+        response('', None, [('read-one', 'intake')]),
+        response('三个方向已完成。', None),
+    ])
+    executed = []
+    result = run_agent_loop(DeepSeekClient('synthetic-only', max_tokens=24576,
+        reasoning_effort='none'), model='deepseek-flash', system='director scope',
+        messages=[{'role': 'user', 'content': 'Draft directions'}], tools=TOOLS,
+        execute_tool=lambda name, args: executed.append((name, args)) or 'Saved intake')
+    assert result.text == '三个方向已完成。'
+    assert executed == [('read_artifact', {'stage': 'intake'})]
+    replay = json.loads(seen[1].content)['messages']
+    assistant = next(row for row in replay if row['role'] == 'assistant')
+    assert assistant['tool_calls'][0]['id'] == 'read-one'
+    assert 'reasoning_content' not in assistant
+    assert next(row for row in replay if row['role'] == 'tool')['tool_call_id'] == 'read-one'
+
+
 def test_streamed_public_progress_never_exposes_reasoning_or_partial_tool_args(monkeypatch):
     def chunk(delta, finish=None, usage=None):
         return 'data: ' + json.dumps({'model': 'deepseek-flash',

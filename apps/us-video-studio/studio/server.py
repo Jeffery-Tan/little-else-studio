@@ -90,7 +90,7 @@ def build_app(
             raise PipelineError('review', '这一版当前不能发起审核，请刷新项目状态。')
 
     def prepare_job(run_id, review=None, reference_consent=False, feedback_target=None,
-                    writing_revision=None):
+                    writing_revision=None, direction_resume=None):
         if review is not None:
             require_review_version(run_id, review)
         if writing_revision is not None:
@@ -118,14 +118,6 @@ def build_app(
             job_client = client if client_factory is not None else snapshot.client(
                 check_cancel=check_cancel, max_tokens=job_settings.max_tokens,
                 cancel_event=jobs.cancelled)
-            def production_review(args):
-                from .production import ActionIn
-                service = app.state.production
-                payload = ActionIn(request_id=uuid.uuid4().hex, expected_sha256=args['expected_sha256'], consent=True)
-                runner, _ = service.prepare_review(run_id, args['draft_id'], payload,
-                    frozen=(job_settings, job_client, summary))
-                runner('检查制作输入', emit, check_cancel)
-                return next(d for d in service.workspace(run_id, for_agent=True)['drafts'] if d['draft_id'] == args['draft_id'])
             if review is not None:
                 # A typed command bypasses the producer loop, not review checks.
                 require_review_version(run_id, review)
@@ -175,29 +167,59 @@ def build_app(
                     raise PipelineError('revision', '编剧提交的新版本与当前脚本不一致，请检查任务记录。')
                 revision_result = {'stage': 'writing', 'version': revised.version,
                                    'artifact_sha256': revised.sha256,
-                                   'change_status': 'saved', 'review_status': 'pending'}
+                                   'change_status': 'saved', 'review_status': 'not_requested'}
                 emit({'type': 'writing_revision_result', 'result': revision_result})
-                check_cancel()
-                review_result = run_review(store=store, pipeline=pipeline, settings=job_settings,
-                    client=job_client, ledger=ledger_for_task, run_id=run_id, stage='writing',
-                    on_event=emit, check_cancel=check_cancel, learning_service=learning,
-                    explicit_request=True)
-                if review_result.verdict is None:
-                    raise PipelineError('review', review_result.error or '新版已保存，但独立审核尚未完成。')
-                emit({'type': 'writing_revision_result', 'result': {
-                    **revision_result, 'review_status': review_result.verdict}})
                 delivery = evaluate_deliverable(store, pipeline, run_id, 'revision', revision_scope=scope)
-                reply = (f'脚本新版 {outcome.submitted} 已保存并通过独立审核。请阅读准确版本后决定是否采用。'
-                         if review_result.verdict == 'pass' else
-                         f'脚本新版 {outcome.submitted} 已保存；独立审核提出修改意见，请在创作板查看。')
+                reply = f'脚本新版 {outcome.submitted} 已保存。请阅读准确版本后决定是否采用。'
                 store.append_chat(run_id, 'assistant', reply)
-                return OrchestratorTurn(reply, 'done', outcome.rounds + review_result.rounds,
+                return OrchestratorTurn(reply, 'done', outcome.rounds,
+                                        deliverable=delivery)
+            if direction_resume is not None:
+                from .agents.roles import creative_selection
+                from .direction_command import require_current, task_brief
+                from .task_contract import evaluate as evaluate_deliverable
+                from .tools.dispatch import Dispatcher
+
+                # The button authorizes exactly this stage. The producer does
+                # not get another chance to select a source, revision tool or
+                # destination; Pipeline still freezes all current inputs.
+                check_cancel()
+                require_current(store, pipeline, run_id,
+                                direction_resume.expected_context_sha256)
+                store.append_chat(run_id, 'user', text)
+                previous = creative_selection(store, run_id)
+                selection = {**previous, 'intent': 'continue'}
+                store.append_event(run_id, 'creative_context_selected', selection=selection,
+                                   turn_id=direction_resume.request_id, deliverable='direction',
+                                   source='explicit_direction_resume')
+                brief = task_brief(store, pipeline, run_id)
+                outcome = Dispatcher(store, pipeline, job_settings, job_client,
+                    Ledger(store, job_settings), run_id, on_event=emit,
+                    check_cancel=check_cancel, learning_service=learning).dispatch(
+                        'direction', brief)
+                if not outcome.submitted:
+                    raise PipelineError('direction_resume',
+                        outcome.error or '导演没有保存新版方向；旧稿已保留。')
+                delivery = evaluate_deliverable(store, pipeline, run_id, 'direction')
+                reply = ('新版创意方向已保存。请阅读 A/B/C 的差异，在对话区点选或提出修改意见。'
+                         if delivery['status'] == 'complete' else
+                         '新版方向已保存，但当前依据已变化；请查看项目状态后再决定。')
+                store.append_chat(run_id, 'assistant', reply)
+                return OrchestratorTurn(reply, 'done', outcome.rounds,
+                                        tool_log=[{'tool': 'dispatch', 'ok': True}],
                                         deliverable=delivery)
             def observe_reference(source, instruction, reference_emit, reference_cancel):
                 if not reference_connection:
                     raise PipelineError('reference_connection', '参考观察连接未就绪，请检查当前百炼连接。')
                 return app.state.observe_reference(run_id, source, instruction, reference_emit, reference_cancel,
                     endpoint=reference_connection['base_url'], revision=reference_revision)
+            def observe_product_video(source, product_emit, product_cancel):
+                if not reference_connection:
+                    raise PipelineError('product_video_connection', '商品视频观察连接未就绪，请检查当前百炼连接。')
+                from .product_video import observe
+                return observe(store, pipeline, connections, settings, run_id, source,
+                    product_emit, product_cancel, endpoint=reference_connection['base_url'],
+                    revision=reference_revision, client_factory=client_factory)
             def observe_images(items, image_emit, image_cancel):
                 if not reference_connection:
                     raise PipelineError('image_connection', '图片观察连接未就绪，请检查当前百炼连接。')
@@ -206,8 +228,9 @@ def build_app(
                     emit=image_emit, check_cancel=image_cancel, client_factory=client_factory)
             return Orchestrator(store, pipeline, job_settings, job_client,
                 Ledger(store, job_settings), run_id, on_event=emit, check_cancel=check_cancel,
-                learning_service=learning, production_review=production_review,
-                reference_observer=observe_reference, image_observer=observe_images).send(
+                learning_service=learning,
+                reference_observer=observe_reference, product_video_observer=observe_product_video,
+                image_observer=observe_images).send(
                     text, feedback_context=feedback_target)
         return run, summary
 

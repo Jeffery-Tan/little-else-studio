@@ -70,7 +70,7 @@ async function openRevisionWorkspace(runId,stage,version=0) {
       if(stage==='writing'&&d.changes.some(e=>['tc','duration'].includes(e.field)))node.append(box('p','material-warning','镜头时码或时长已修改；新版总时长将标为待复核，需要重新检查全片节奏。'));
       const role=stage==='direction'?'director':'writer',binding=config.roles[role],connection=config.connections.find(c=>c.id===binding.connection);
       const local=data.revision_mode==='local';
-      const explanation=box('p','muted',local ? '保存后，正文与创作板会同步更新。此次保存不调用模型，新版本仍需审核与采用。' : `由${connection?.name || '所选服务'} · ${binding.model || 'Codex 默认模型'}同步完整正文。会调用一次模型并计入费用；新版本仍需独立审核与采用，依赖旧稿的内容需重新检查。`);
+      const explanation=box('p','muted',local ? '保存后，正文与创作板会同步更新。此次保存不调用模型，新版本仍需你决定是否采用。' : `由${connection?.name || '所选服务'} · ${binding.model || 'Codex 默认模型'}同步完整正文。会调用一次模型并计入费用；新版本仍需你决定是否采用，依赖旧稿的内容需重新检查。`);
       node.append(explanation);
       const label=box('label','analysis-check'),consent=document.createElement('input');consent.type='checkbox';
       label.append(consent,box('span','','确认使用上述模型整理这一份修改，可能产生费用。'));if(!local)node.append(label);

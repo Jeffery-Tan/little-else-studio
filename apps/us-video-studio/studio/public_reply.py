@@ -12,7 +12,8 @@ INTERNAL_REF = re.compile(
     r'(?:\#[0-9a-f]{64})?', re.I)
 
 
-def creator_reply(text: str, delivery: dict, state, *, technical_requested=False) -> str:
+def creator_reply(text: str, delivery: dict, state, *, technical_requested=False,
+                  review_timed_out=False) -> str:
     """Use the actual gate when an unfinished draft makes model advice unsafe.
 
     The model can describe its own work, but cannot make an unavailable approval
@@ -24,13 +25,8 @@ def creator_reply(text: str, delivery: dict, state, *, technical_requested=False
     if delivery.get('status') == 'incomplete' and goal in STAGE_NAMES:
         stage = state.stages[goal]
         name = STAGE_NAMES[goal]
-        if stage.latest and not stage.stale and stage.integrity_ok:
-            if stage.can_review:
-                return (f'{name}草稿已保存，可以先在创作板阅读。独立审核尚未完成；'
-                        '下一步是审核这一版，审核完成后你才能决定采用或退回。')
-            if stage.can_approve and stage.review:
-                return (f'{name}已保存，独立审核提出了需要核对的问题。'
-                        '请在创作板阅读方案和审核意见，再决定退回或说明理由采用。')
+        if stage.latest and not stage.stale and stage.integrity_ok and stage.can_approve:
+            return f'{name}已保存，等你阅读后决定采用或退回。'
         return f'{name}本轮尚未完成。已有内容已保存，请查看本轮记录后继续。'
 
     if technical_requested:

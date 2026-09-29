@@ -75,7 +75,7 @@ def test_new_video_request_does_not_inherit_old_photo_system_constraint(env):
     assert '"format": "video"' in model.calls[1]["messages"][-1]["content"][0]["content"]
 
 
-def test_revision_receives_exact_previous_work_and_only_bound_findings(env):
+def test_revision_receives_exact_previous_work_without_retired_review_findings(env):
     store, pipeline, settings, ledger = env
     submit(pipeline, "intake", "Known fixture facts")
     previous = submit(pipeline, "direction", "Preserve this unique prior direction")
@@ -92,9 +92,10 @@ def test_revision_receives_exact_previous_work_and_only_bound_findings(env):
     assert result.submitted == "direction-v2"
     seed = model.calls[0]["messages"][0]["content"]
     assert "Preserve this unique prior direction" in seed
-    assert "Repair this specific relationship" in seed
+    assert "Repair this specific relationship" not in seed
     assert "UNRELATED_WRITER_ISSUE" not in seed
-    assert previous.sha256 in seed
+    prepared = next(e for e in store.read_events(RUN) if e['kind'] == 'agent_task_prepared')
+    assert previous.sha256 in [source['sha256'] for source in prepared['context']['sources']]
     assert model.calls[2]["messages"][-1]["content"][0]["is_error"] is True
     assert model.calls[4]["messages"][-1]["content"][0]["is_error"] is True
     artifact = store.latest_artifact(RUN, "direction")
@@ -137,7 +138,7 @@ def test_stale_review_is_not_revision_evidence(env):
     assert "STALE_REVIEW_SENTINEL" not in model.requests_text()
 
 
-def test_downstream_review_reaches_responsible_role_only_for_matching_input(env):
+def test_historical_review_is_not_sent_to_specialist_as_instruction(env):
     store, pipeline, settings, ledger = env
     submit(pipeline, "intake", "Facts")
     direction = submit(pipeline, "direction", "Chosen direction")
@@ -153,10 +154,10 @@ def test_downstream_review_reaches_responsible_role_only_for_matching_input(env)
     model = ScriptedModel([tool_turn("save", "submit_stage", {"content": "Repaired plan", "summary": "fixed"})])
     result = Dispatcher(store, pipeline, settings, model, ledger, RUN).dispatch("material_plan", "Repair missing shot")
     assert result.submitted == "material_plan-v2"
-    assert "MISSING_SHOT_FOR_THIS_PLAN" in model.requests_text()
+    assert "MISSING_SHOT_FOR_THIS_PLAN" not in model.requests_text()
     assert "WRITER_ONLY_LINE" not in model.requests_text()
     event = next(e for e in store.read_events(RUN) if e["kind"] == "role_revision_context")
-    assert event["findings"][0]["source_sha256"] == writing.sha256
+    assert event["artifact_sha256"] == previous.sha256
 
 
 def test_tampered_revision_never_reaches_model_or_strands_attempt(env):

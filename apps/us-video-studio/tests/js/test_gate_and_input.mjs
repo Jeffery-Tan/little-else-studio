@@ -586,8 +586,8 @@ test('a blocked direction can guide revision but cannot be adopted', async () =>
   assert.match(gate.querySelector('.gate-feedback').textContent, /不能采用/);
 });
 
-test('failed review requires a separate override reason and no pending edits', async () => {
-  const app = wire({routes: {nonce: {nonce: 'n-override'}, decision: {decision: 'approved_override', continuation: {status: 'started'}}}});
+test('historical reviewer return requires no override but pending edits still block adoption', async () => {
+  const app = wire({routes: {nonce: {nonce: 'n-approve'}, decision: {decision: 'approved', continuation: {status: 'started'}}}});
   const gate = bind(app, mountGate({stage:'writing', label:'脚本'}, decisionPending({
     stage:'writing', stage_label:'脚本', options:[], passed:false,
   })));
@@ -598,13 +598,11 @@ test('failed review requires a separate override reason and no pending edits', a
   assert.equal(app.observed.length, 0);
   gate.querySelector('.reason').value = '';
   gate.querySelector('.reason').oninput();
-  gate.querySelector('.override-reason').value = '此处由我承担取舍';
-  gate.querySelector('.override-reason').oninput();
   gate.querySelector('[data-act="approve"]').click();
   await settle();
   const post = app.observed.find(call => call.path.endsWith('/decision'));
   assert.equal(post.body.note, '');
-  assert.equal(post.body.override_reason, '此处由我承担取舍');
+  assert.equal(post.body.override_reason, '');
   assert.equal(post.body.selected_option_id, null);
 });
 
@@ -650,15 +648,33 @@ test('a refusal from the same project with no newer input puts the words back', 
   assert.equal(input.value, '换了模型再试');
 });
 
-test('the composer keeps a running task draft for the next turn', async () => {
+test('the composer submits a running task adjustment through the producer', async () => {
   const app = composer({busy: true, steer: {ok: true},
     currentJob: {job_id: 'j9', job_kind: 'conversation', status: 'running', goal_revision: 0}});
   const input = app.ctx.document.getElementById('chat-input');
   input.value = '改成 12 秒';
   const result = await app.ctx.submit();
-  assert.equal(result.accepted, false);
-  assert.equal(input.value, '改成 12 秒');
-  assert.equal(app.steers.length, 0);
+  assert.equal(result.accepted, true);
+  assert.equal(input.value, '');
+  assert.equal(app.steers.length, 1);
+  assert.equal(app.steers[0].payload.text, '改成 12 秒');
+});
+
+test('a selected production draft remains bound in a midflight adjustment', async () => {
+  const app = composer({busy: true,
+    currentJob: {job_id: 'media-1', job_kind: 'production_batch_generation',
+      status: 'running', goal_revision: 1}});
+  const target = {kind:'production_draft',run_id:'run-1',draft_id:'shot-3',
+    draft_sha256:SHA};
+  app.ctx.__target = target;
+  vm.runInContext('state.feedbackTarget = globalThis.__target', app.ctx);
+  const input = app.ctx.document.getElementById('chat-input');
+  input.value = '第 3 张改成室内';
+  const result = await app.ctx.submit();
+  assert.equal(result.accepted, true);
+  assert.equal(app.steers.length, 1);
+  assert.equal(app.steers[0].payload.feedback_target.draft_sha256, SHA);
+  assert.equal(input.value, '');
 });
 
 test('an unknown result keeps its request identity instead of becoming a draft', async () => {
@@ -894,8 +910,8 @@ function composer({busy = false, currentJob = null, recoveryBlocked = false, acc
         if (steerError) throw steerError;
         return steer;
       },
-      __canSteerJob: (job) => Boolean(job && job.job_kind === 'conversation'
-        && (job.status === 'running' || job.status === 'cancelling')),
+      __canSteerJob: (job) => Boolean(job &&
+        (job.status === 'running' || (job.status === 'cancelling' && job.steer_status === 'received'))),
     },
   });
   app.ctx.__job = currentJob;
@@ -952,19 +968,20 @@ test('Enter during a queued task keeps the message instead of eating it', async 
   assert.equal(result.accepted, false);
   assert.equal(input.value, '把开场改成手部特写', 'the unsent text must survive the refusal');
   assert.equal(app.jobs.length, 0);
-  assert.match(result.reason, /本轮仍在执行/);
+  assert.match(result.reason, /正在停止|正在排队|正在执行/);
 });
 
-test('Enter during a video analysis keeps the message and opens no turn', async () => {
+test('Enter during a video analysis saves a midflight message for the producer', async () => {
   const app = composer({busy: true,
     currentJob: {job_id: 'j2', job_kind: 'video_analysis', status: 'running'}});
   const input = app.ctx.document.getElementById('chat-input');
   input.value = '这条也分析一下';
   const result = await app.ctx.submit();
-  assert.equal(result.accepted, false);
-  assert.equal(input.value, '这条也分析一下');
+  assert.equal(result.accepted, true);
+  assert.equal(input.value, '');
   assert.equal(app.jobs.length, 0);
-  assert.equal(app.steers.length, 0);
+  assert.equal(app.steers.length, 1);
+  assert.equal(app.steers[0].payload.text, '这条也分析一下');
 });
 
 test('a cancelling task also keeps the message rather than dropping it', async () => {
@@ -987,16 +1004,16 @@ test('a task that is actually over still starts a new round', async () => {
   assert.equal(input.value, '', 'an accepted send clears the box');
 });
 
-test('a running conversation keeps the composer draft for after the task', async () => {
+test('a running conversation accepts an adjustment through the composer', async () => {
   const app = composer({busy: true, steer: {ok: true},
     currentJob: {job_id: 'j4', job_kind: 'conversation', status: 'running', goal_revision: 2}});
   const input = app.ctx.document.getElementById('chat-input');
   input.value = '改成 12 秒';
   const result = await app.ctx.submit();
-  assert.equal(result.accepted, false);
-  assert.equal(app.steers.length, 0);
+  assert.equal(result.accepted, true);
+  assert.equal(app.steers.length, 1);
   assert.equal(app.jobs.length, 0);
-  assert.equal(input.value, '改成 12 秒');
+  assert.equal(input.value, '');
 });
 
 test('a direct adjustment whose old turn ended opens a fresh turn with the same text', async () => {
@@ -1041,15 +1058,14 @@ test('a blocked recovery state refuses before clearing anything', async () => {
   assert.equal(app.jobs.length, 0);
 });
 
-test('Enter only submits while the composer button switches between send and stop', () => {
+test('Enter and send submit while stop has a separate button', () => {
   const source = webSource('app.js');
   const keydown = source.slice(source.indexOf('$("chat-input").addEventListener("keydown"'),
                                source.indexOf('$("chat-input").addEventListener("input"'));
   assert.match(keydown, /submit\(\)/, 'Enter goes through submit, not a second path');
   assert.match(keydown, /!e\.shiftKey/, 'Shift+Enter still inserts a newline');
   assert.match(source, /\$\("send"\)\.onclick = \(\) => \{/);
-  assert.match(source, /JOB_ACTIVE\.has\(currentJob\.status\)\) void stopCurrentJob\(\)/);
-  assert.match(source, /else void submit\(\)/);
+  assert.match(source, /\$\("job-stop"\)\.onclick = \(\) => \{ void stopCurrentJob\(\); \}/);
 });
 
 test('the composer draft tray also clears only after the request is accepted', async () => {

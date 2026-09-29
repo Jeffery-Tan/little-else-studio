@@ -173,6 +173,23 @@ def test_team_questions_are_not_pending_user_work(store):
     assert brief["pending_questions"] == []
 
 
+def test_answer_to_previous_direction_version_remains_confirmed(store):
+    _seed_intake(store)
+    question = "这三种背法是同一条肩带完成的吗？"
+    store.write_artifact(RUN, "direction", 1, "first direction", summary="first",
+                         author_role="director", attempt="direction#1",
+                         structured={"open_questions": [{"question": question,
+                             "owner": "user", "timing": "now", "reason": "商品事实",
+                             "blocks": "方向拍法"}]})
+    store.append_chat(RUN, "user", f"回答「{question}」：是，同一条肩带。")
+    store.write_artifact(RUN, "direction", 2, "revised direction", summary="revised",
+                         author_role="director", attempt="direction#2",
+                         structured={"open_questions": []})
+    brief = ab.compile_active_brief(store, RUN)
+    assert any(c.get("answer") == "是，同一条肩带。" and c.get("authority") == "user"
+               for c in brief["clauses"])
+
+
 # ------------------------------------------------------------ fingerprint --
 
 

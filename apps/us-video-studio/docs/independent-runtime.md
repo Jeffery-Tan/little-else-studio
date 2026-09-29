@@ -15,7 +15,7 @@
       → jobs.py：任务持久化、单 writer、取消、重启中断、幂等
       → connections.py：DPAPI 凭据、角色路由、每轮配置快照
       → agents/orchestrator.py → tools/dispatch.py → 独立角色上下文
-      → pipeline.py / store.py：尝试、不可变产物、审核、用户批准、依赖失效
+      → pipeline.py / store.py：尝试、不可变产物、历史审核、用户批准、依赖失效
       → ledger.py：调用 intent → settlement，未知用量留作诊断，不阻止新调用
       → image_analysis.py / revisions.py：分析候选及采用、局部修改新版本
       → learning.py / references.py：唯一学习库、实际输入快照、差异入库
@@ -35,7 +35,7 @@
 | `config.json` / `connections.json` | 循环限制与可选的旧额度字段 / 站内角色路由、价格及 Windows DPAPI 加密凭据 |
 | `.studio-root.json` | 显式新建空工作台时留下的初始化标识；不能用 writer 锁文件代替项目身份 |
 | `runs/<id>/run.json`、`events.jsonl` | 初始项目及追加事件；任务、修订、制作、反馈等状态从事件推导 |
-| `runs/<id>/artifacts/`、`reviews/`、`approvals.jsonl` | 不可变正文与 sidecar、独立审核、用户决定 |
+| `runs/<id>/artifacts/`、`reviews/`、`approvals.jsonl` | 不可变正文与 sidecar、历史审核记录、用户决定 |
 | `runs/<id>/ledger.jsonl` | intent 与 settlement；按 call_id 合并，不能删历史清除未知用量 |
 | `runs/<id>/materials/`、`evidence/observations.json` | 原字节素材与准确 hash 绑定的观察；生成来源单独标记 |
 | `runs/<id>/learning/`、`creative-packages/` | 输入和提案快照 / 确定性编译的本地审阅包 |
@@ -50,10 +50,10 @@
 1. **浏览器不拥有任务生命周期。** 服务先保存任务事件，再执行；相同 request_id 与相同参数重试不重复提交。刷新、关闭窗口或切换页面不取消已接受任务，页面用 jobs API 重连。
 2. **中断不自动重发。** 服务启动将遗留任务标为 interrupted。用户查看已保存产物后明确继续，开放阶段尝试仍需处理；未知用量不要求手工核账。停止是协作取消，在途模型或远端视频仍可能完成和计费。媒体提交结果不明须找回原任务，不能将其与用量未知混为一谈。
 3. **输入与批准固定版本。** artifact-v2 绑定正文、结构、证据、限制及依赖。审批针对页面实际展示的版本/hash/方向；body-v1 只回放，不继承旧批准。上游、图片、观察或参考变化使受影响产物失效。
-4. **角色和凭据隔离。** 每轮冻结连接/模型/价格，审核不读生产者完整对话。Codex 每次使用独立临时线程，不注入开发对话；仍可能加载用户全局 AGENTS.md，不宣称 OS 级完全隔离。API Key 只在服务端按用途解密，不进模型、日志或浏览器存储；地址变化不转交旧 Key。
+4. **角色和凭据隔离。** 每轮冻结连接/模型/价格；专业角色只收到本任务的必要上下文。Codex 每次使用独立临时线程，不注入开发对话；仍可能加载用户全局 AGENTS.md，不宣称 OS 级完全隔离。API Key 只在服务端按用途解密，不进模型、日志或浏览器存储；地址变化不转交旧 Key。
 5. **费用不虚构。** 文字 token 与媒体 images/video_seconds 共享台账；美元与人民币估算分列，未知金额不补零。未知用量仅作诊断，个人工作台没有手工核账待办；实际账单在提供方平台查看。报价不等于账单，也不代表硬性支出上限。
-6. **制作单独授权。** 主控准备方案并调用独立文字制作检查，用户在同一工作台核对输入、准确图审和费用后明确生成。百炼保存原 endpoint/task_id，恢复只查询原任务；Codex 图片可能没有可靠的原生计费量，保持未知也不阻止继续。协议和能力限制见 [Codex](codex-image-capability.md)、[Wan](wan-video-provider.md)。
-7. **迁移不恢复执行。** history_import 只读来源，在隔离目录复制/校验后创建新 intake 与 pause；不复制有效审批或费用台账，不运行旧脚本。用户在站内明确继续，新一轮重新经过版本、审核与费用边界。
+6. **制作单独授权。** 主控准备并自检方案，用户在同一工作台核对输入、准确图审和费用后明确生成。百炼保存原 endpoint/task_id，恢复只查询原任务；Codex 图片可能没有可靠的原生计费量，保持未知也不阻止继续。协议和能力限制见 [Codex](codex-image-capability.md)、[Wan](wan-video-provider.md)。
+7. **迁移不恢复执行。** history_import 只读来源，在隔离目录复制/校验后创建新 intake 与 pause；不复制有效审批或费用台账，不运行旧脚本。用户在站内明确继续，新一轮重新经过版本、用户决定与费用边界。
 8. **删除可恢复。** 项目删除/恢复追加到原事件流，不移动或清除目录。删除项目从列表隐藏、禁止新任务，原台账仍计入汇总；活动任务未结束时不能删除。回收站恢复原身份和内容，不启动模型。
 
 ## 接口与集成入口

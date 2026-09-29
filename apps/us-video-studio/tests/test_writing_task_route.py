@@ -1,4 +1,4 @@
-"""Explicit selected-field edits use writer and reviewer, not the producer loop."""
+"""Explicit selected-field edits use the writer and return to the user."""
 from __future__ import annotations
 
 import time
@@ -53,13 +53,12 @@ def target(artifact, **changes):
             'path': ['segments', 0, 'line'], **changes}
 
 
-def test_explicit_writing_field_uses_only_writer_and_reviewer(tmp_path, monkeypatch):
+def test_explicit_writing_field_uses_only_writer(tmp_path, monkeypatch):
     monkeypatch.setattr('studio.learning.LearningService.prepare_context', lambda *a, **k: {
         'text': 'FIXTURE_METHOD', 'snapshot_sha256': 'f' * 64, 'evidence_ref': 'fixture-method'})
     model = ScriptedModel([
         tool_turn('patch', 'submit_patch', {'changes': [
-            {'path': ['segments', 0, 'line'], 'value': 'Try this line'}], 'summary': 'Changed opening'}),
-        tool_turn('review', 'finish_review', {'verdict': 'pass', 'findings': []})])
+            {'path': ['segments', 0, 'line'], 'value': 'Try this line'}], 'summary': 'Changed opening'})])
     with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: model)) as http:
         make_run(http)
         store = Store(tmp_path)
@@ -78,21 +77,20 @@ def test_explicit_writing_field_uses_only_writer_and_reviewer(tmp_path, monkeypa
         assert accepted.status_code == 200, accepted.text
         job = wait_job(http, accepted.json()['job_id'])
         assert job['status'] == 'succeeded' and job['deliverable']['status'] == 'complete'
-        assert len(model.calls) == 2
+        assert len(model.calls) == 1
         assert 'submit_patch' in model.calls[0]['tool_names']
         assert 'dispatch' not in model.calls[0]['tool_names']
-        assert 'finish_review' in model.calls[1]['tool_names']
         assert not any('prepare_creative_context' in c['tool_names'] for c in model.calls)
         revised = store.latest_artifact(RUN, 'writing')
         assert revised.version == 2
         assert job['revision_result'] == {
             'stage': 'writing', 'version': 2, 'artifact_sha256': revised.sha256,
-            'change_status': 'saved', 'review_status': 'pass'}
+            'change_status': 'saved', 'review_status': 'not_requested'}
         assert http.get(f'/api/runs/{RUN}/jobs/{job["job_id"]}',
                         params={'after_seq': job['cursor']}).json()['revision_result'] == job['revision_result']
         assert revised.structured['segments'][0]['line'] == 'Try this line'
         assert revised.structured['segments'][1]['line'] == 'Keep second line'
-        assert pipe.stage_state(RUN, 'writing').review.verdict == 'pass'
+        assert pipe.stage_state(RUN, 'writing').review is None
         assert pipe.stage_state(RUN, 'writing').approval is None
         assert pipe.stage_state(RUN, 'direction').approval.selected_option_id == 'A'
         tasks = [e for e in store.read_events(RUN) if e['kind'] == 'agent_task_prepared']
@@ -102,23 +100,16 @@ def test_explicit_writing_field_uses_only_writer_and_reviewer(tmp_path, monkeypa
                       if e['kind'] == 'creative_context_selected']
         assert selections[-1]['intent'] == 'edit' and selections[-1]['tags'] == ['fixture-tag']
         assert http.post(url, json=payload).json()['job_id'] == job['job_id']
-        assert len(model.calls) == 2
+        assert len(model.calls) == 1
 
 
-@pytest.mark.parametrize('review_turn, expected_status, expected_review', [
-    (tool_turn('review', 'finish_review', {'verdict': 'return', 'findings': [
-        {'stage': 'writing', 'kind': 'content', 'issue': 'The second line remains a placeholder.'}]}),
-     'blocked', 'return'),
-    (final_turn('I cannot complete this review.'), 'failed', 'pending'),
-])
-def test_saved_writing_revision_keeps_review_outcome_separate(
-        tmp_path, monkeypatch, review_turn, expected_status, expected_review):
+def test_saved_writing_revision_needs_no_second_model_call(tmp_path, monkeypatch):
     monkeypatch.setattr('studio.learning.LearningService.prepare_context', lambda *a, **k: {
         'text': 'FIXTURE_METHOD', 'snapshot_sha256': 'f' * 64, 'evidence_ref': 'fixture-method'})
     model = ScriptedModel([
         tool_turn('patch', 'submit_patch', {'changes': [
             {'path': ['segments', 0, 'line'], 'value': 'A new opening'}],
-            'summary': 'Changed opening'}), review_turn])
+            'summary': 'Changed opening'})])
     with TestClient(build_app(settings_for(tmp_path, max_tool_rounds=1), client_factory=lambda: model)) as http:
         make_run(http)
         store = Store(tmp_path)
@@ -133,20 +124,16 @@ def test_saved_writing_revision_keeps_review_outcome_separate(
         assert revised.version == 2
         assert revised.structured['segments'][0]['line'] == 'A new opening'
         assert revised.structured['segments'][1]['line'] == 'Keep second line'
-        assert job['status'] == expected_status
+        assert job['status'] == 'succeeded'
         assert job['revision_result'] == {
             'stage': 'writing', 'version': 2, 'artifact_sha256': revised.sha256,
-            'change_status': 'saved', 'review_status': expected_review}
+            'change_status': 'saved', 'review_status': 'not_requested'}
         assert http.get(f'/api/runs/{RUN}/jobs/{job["job_id"]}',
                         params={'after_seq': job['cursor']}).json()['revision_result'] == job['revision_result']
         assert pipe.stage_state(RUN, 'writing').approval is None
-        assert len(model.calls) == 2
-        if expected_review == 'return':
-            assert job['deliverable']['status'] == 'incomplete'
-            assert pipe.stage_state(RUN, 'writing').review.verdict == 'return'
-        else:
-            assert job['deliverable'] is None
-            assert pipe.stage_state(RUN, 'writing').review is None
+        assert len(model.calls) == 1
+        assert job['deliverable']['status'] == 'complete'
+        assert pipe.stage_state(RUN, 'writing').review is None
 
 
 def test_writing_revision_without_patch_never_reports_saved(tmp_path, monkeypatch):

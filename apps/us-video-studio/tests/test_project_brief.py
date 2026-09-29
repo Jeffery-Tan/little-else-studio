@@ -42,35 +42,48 @@ def test_succeeded_execution_does_not_mean_direction_approved(tmp_path):
         {'type': 'agent_tool', 'tool': 'request_review', 'args': {'stage': 'direction'},
          'ok': False, 'at': '9999-01-01T00:00:00Z'}]}
     out = project_brief(pipeline.state(RUN).to_dict(), job)
-    assert out['phase'] == 'review_failed'
-    assert out['action']['kind'] == 'review_stage'
+    assert out['phase'] == 'awaiting_decision'
+    assert out['action']['kind'] == 'review'
     assert out['action']['sha256'] == artifact.sha256
     assert out['completed'] == 1
     assert not store.list_approvals(RUN)
 
 
-def test_unreviewed_direction_asks_for_user_fact_before_another_review(tmp_path):
+def test_review_timeout_explains_the_wait_without_exposing_exception(tmp_path):
+    store, pipeline = project(tmp_path)
+    direction(pipeline)
+    job = {'status': 'blocked', 'job_kind': 'conversation', 'events': [
+        {'type': 'agent_tool', 'tool': 'request_review', 'args': {'stage': 'direction'},
+         'ok': False, 'at': '9999-01-01T00:00:00Z',
+         'result': 'ModelError: Codex request timed out; usage unconfirmed'}]}
+    out = project_brief(pipeline.state(RUN).to_dict(), job)
+    assert out['phase'] == 'awaiting_decision'
+    assert out['action']['kind'] == 'review'
+    assert 'ModelError' not in out['detail']
+
+
+def test_direction_choice_remains_primary_when_it_has_a_user_question(tmp_path):
     _, pipeline = project(tmp_path)
     direction(pipeline, [question()])
     out = project_brief(pipeline.state(RUN).to_dict())
-    assert out['phase'] == 'needs_input'
-    assert out['action']['kind'] == 'questions'
+    assert out['phase'] == 'awaiting_decision'
+    assert out['action']['kind'] == 'review'
     assert len(out['questions']) == 1
 
 
-def test_failed_review_asks_for_user_fact_before_retrying(tmp_path):
+def test_direction_choice_remains_primary_after_a_failed_background_job(tmp_path):
     _, pipeline = project(tmp_path)
     direction(pipeline, [question()])
     job = {'status': 'blocked', 'job_kind': 'conversation', 'events': [
         {'type': 'agent_tool', 'tool': 'request_review', 'args': {'stage': 'direction'},
          'ok': False, 'at': '9999-01-01T00:00:00Z'}]}
     out = project_brief(pipeline.state(RUN).to_dict(), job)
-    assert out['phase'] == 'needs_input'
-    assert out['action']['kind'] == 'questions'
+    assert out['phase'] == 'awaiting_decision'
+    assert out['action']['kind'] == 'review'
     assert len(out['questions']) == 1
 
 
-def test_answer_closes_the_current_question_but_keeps_review_pending(tmp_path):
+def test_answer_closes_the_question_and_invalidates_the_old_direction(tmp_path):
     store, pipeline = project(tmp_path)
     direction(pipeline, [question()])
     store.append_chat(RUN, 'user', '回答「Which tablet?」：目前没有，改拍不需要平板的画面')
@@ -78,7 +91,7 @@ def test_answer_closes_the_current_question_but_keeps_review_pending(tmp_path):
     out = project_brief(pipeline.state(RUN).to_dict(), chat=chat)
     assert out['questions'] == []
     assert out['issues'][0]['answered'] is True
-    assert out['action']['kind'] == 'review_stage'
+    assert out['action']['kind'] == 'draft'
 
 
 @pytest.mark.parametrize('row,expected', [
@@ -142,7 +155,7 @@ def test_new_document_has_one_source_and_immutable_old_versions(tmp_path):
     text = store.read_artifact_text(RUN, 'direction', new.version)
     assert 'studio:structured-document-v1' in text and '开场→动作→回报' in text
     assert store.verify_artifact(RUN, 'direction', new.version)
-    assert pipeline.stage_state(RUN, 'direction').status == 'awaiting_review'
+    assert pipeline.stage_state(RUN, 'direction').status == 'awaiting_decision'
 
 
 def test_incomplete_canonical_payload_keeps_attempt_and_old_content(tmp_path):
@@ -206,7 +219,7 @@ def test_narration_is_journaled_separately_and_final_continuations_survive():
     assert any(e.get('text') == tool.text for e in activity)
 
 
-def test_review_command_is_bound_idempotent_and_uses_only_reviewer(tmp_path):
+def test_review_command_is_retired_without_model_call(tmp_path):
     store, pipeline = project(tmp_path)
     artifact = direction(pipeline)
     model = ScriptedModel([tool_turn('review', 'finish_review', {'verdict': 'pass', 'findings': []}), final_turn('Pass')])
@@ -215,24 +228,16 @@ def test_review_command_is_bound_idempotent_and_uses_only_reviewer(tmp_path):
                'expected_artifact_sha256': artifact.sha256}
     with TestClient(app) as http:
         invalid = {**payload, 'expected_artifact_sha256': 'f' * 64}
-        assert http.post(f'/api/runs/{RUN}/actions/review', json=invalid).status_code == 409
+        assert http.post(f'/api/runs/{RUN}/actions/review', json=invalid).status_code == 410
         assert model.calls == []
-        started = http.post(f'/api/runs/{RUN}/actions/review', json=payload)
-        assert started.status_code == 200, started.text
-        job = wait_job(http, started.json()['job_id'])
-        assert job['status'] == 'succeeded', job
-        assert job['brief']['phase'] == 'reviewed'
-        assert http.post(f'/api/runs/{RUN}/actions/review', json=payload).json()['job_id'] == job['job_id']
-        assert len(model.calls) == 1  # Recording the verdict completes the command.
-        assert all('dispatch' not in call['tool_names'] for call in model.calls)
-        assert http.get(f'/api/runs/{RUN}/timeline').json()['brief'] == job['brief']
-        # Cursor-based polling cannot lose the authoritative project status.
-        assert http.get(f'/api/runs/{RUN}/jobs/{job["job_id"]}?after_seq={job["cursor"]}').json()['brief'] == job['brief']
+        assert http.post(f'/api/runs/{RUN}/actions/review', json=payload).status_code == 410
+        assert model.calls == []
+        assert http.get(f'/api/runs/{RUN}/timeline').json()['brief']['phase'] == 'awaiting_decision'
     assert len(store.list_artifacts(RUN)) == 2
     assert store.list_approvals(RUN) == []
 
 
-def test_failed_review_keeps_exact_artifact_and_exposes_scoped_retry(tmp_path):
+def test_retired_review_keeps_exact_artifact_without_spending(tmp_path):
     store, pipeline = project(tmp_path)
     artifact = direction(pipeline)
     class Timeout:
@@ -241,13 +246,10 @@ def test_failed_review_keeps_exact_artifact_and_exposes_scoped_retry(tmp_path):
     with TestClient(build_app(settings_for(tmp_path), client_factory=Timeout)) as http:
         payload = {'request_id': 'timeout', 'stage': 'direction', 'expected_version': artifact.version,
                    'expected_artifact_sha256': artifact.sha256}
-        started = http.post(f'/api/runs/{RUN}/actions/review', json=payload)
-        assert started.status_code == 200, started.text
-        job = wait_job(http, started.json()['job_id'])
-        assert job['status'] == 'failed'
-        assert job['brief']['phase'] == 'review_failed'
-        assert job['brief']['action']['sha256'] == artifact.sha256
-        assert http.get(f'/api/runs/{RUN}/timeline').json()['brief'] == job['brief']
+        assert http.post(f'/api/runs/{RUN}/actions/review', json=payload).status_code == 410
+        brief = http.get(f'/api/runs/{RUN}/timeline').json()['brief']
+        assert brief['phase'] == 'awaiting_decision'
+        assert brief['action']['sha256'] == artifact.sha256
     assert store.latest_artifact(RUN, 'direction').sha256 == artifact.sha256
     assert store.list_reviews(RUN) == []
 
@@ -259,5 +261,5 @@ def test_project_list_keeps_original_brief_for_creation_recovery(tmp_path):
     with TestClient(build_app(settings_for(tmp_path))) as http:
         row = next(row for row in http.get('/api/runs').json() if row['run_id'] == RUN)
         assert row['brief'] == original
-        assert row['project_brief']['phase'] == 'awaiting_review'
+        assert row['project_brief']['phase'] == 'awaiting_decision'
         assert row['progress']['title'] == row['project_brief']['title']

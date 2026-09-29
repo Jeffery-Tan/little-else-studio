@@ -79,12 +79,12 @@ def test_the_reviewer_cannot_produce_or_dispatch_work():
     assert "reviewer" in REGISTRY["list_materials"].roles
 
 
-def test_only_the_orchestrator_can_dispatch_or_review():
+def test_creative_agents_cannot_trigger_an_independent_review():
     assert "dispatch" in tool_names_for("orchestrator")
-    assert "request_review" in tool_names_for("orchestrator")
+    for role in ("orchestrator", "director", "material", "writer"):
+        assert "request_review" not in tool_names_for(role)
     for role in ("director", "material", "writer"):
         assert "dispatch" not in tool_names_for(role)
-        assert "request_review" not in tool_names_for(role)
 
 
 def test_reviewer_reads_the_target_and_its_upstream_only():
@@ -118,6 +118,15 @@ def test_dispatch_runs_the_role_in_its_own_context(env, tmp_path):
 
     assert outcome.submitted == "direction-v1"
     artifact = pipeline.stage_state(RUN, "direction").latest
+    receipt = json.loads(outcome.receipt())
+    assert receipt["status"] == "submitted" and receipt["ok"] is True
+    assert receipt["task_id"] == outcome.task_id
+    assert receipt["artifact"] == {"key": "direction-v1", "version": 1,
+                                  "sha256": artifact.sha256}
+    prepared = next(e for e in store.read_events(RUN) if e["kind"] == "agent_task_prepared")
+    assert prepared["context"]["seed_chars"] == len(model.calls[0]["messages"][0]["content"])
+    assert prepared["context"]["system_chars"] > 0
+    assert prepared["context"]["tool_schema_chars"] > 0
     assert artifact.author_role == "director"
     context_event = [e for e in store.read_events(RUN) if e["kind"] == "learning_context_loaded"][-1]
     assert artifact.evidence == ["intake 里说到上班族", context_event["evidence_ref"]]
@@ -148,6 +157,7 @@ def test_a_role_agent_that_never_submits_leaves_no_artifact_and_closes_its_attem
     ).dispatch("direction", "出两个方向。")
 
     assert outcome.submitted is None
+    assert json.loads(outcome.receipt())["status"] == "incomplete"
     assert pipeline.stage_state(RUN, "direction").latest is None
 
     # The attempt is closed, not left dangling to block the next dispatch.
@@ -173,6 +183,26 @@ def test_invalid_paid_stage_response_stops_before_another_dispatch(env, tmp_path
     assert pipeline.stage_state(RUN, 'direction').open_attempt is None
     rows = ledger.entries(RUN)
     assert len(rows) == 1 and rows[0].output_tokens == 900
+
+
+def test_unknown_usage_transport_timeout_stops_delegated_stage(env, tmp_path):
+    store, pipeline, ledger = env
+    seed_intake(pipeline)
+
+    class TimedOutResponse:
+        calls = 0
+
+        def complete(self, **_):
+            self.calls += 1
+            raise ModelError(0, 'Codex request timed out; usage unconfirmed')
+
+    model = TimedOutResponse()
+    dispatcher = Dispatcher(store, pipeline, settings_for(tmp_path), model, ledger, RUN)
+    with pytest.raises(NonRetryableStageError, match='停止自动重试'):
+        dispatcher.dispatch('direction', 'Propose short concepts')
+    assert model.calls == 1
+    assert pipeline.stage_state(RUN, 'direction').open_attempt is None
+    assert pipeline.stage_state(RUN, 'direction').latest is None
 
 
 def test_dispatch_refuses_a_stage_the_orchestrator_owns(env, tmp_path):
@@ -339,6 +369,20 @@ def test_the_reviewer_is_shown_the_document_jeffery_is_shown(env, tmp_path):
     assert "Jeffery 看到的是这个" in seed
 
 
+def test_canonical_review_document_is_sent_once(env, tmp_path):
+    store, pipeline, ledger = env
+    seed_intake(pipeline)
+    attempt = pipeline.start_attempt(RUN, "direction")
+    pipeline.submit(RUN, "direction", attempt.token, content="", summary="s",
+                    structured={"options": [{"key": "A", "claim": "canonical-only-claim"}]})
+    model = ScriptedModel([final_turn("no verdict")])
+    run_review(store=store, pipeline=pipeline, settings=settings_for(tmp_path),
+               client=model, ledger=ledger, run_id=RUN, stage="direction")
+    seed = model.calls[0]["messages"][0]["content"]
+    assert seed.count("canonical-only-claim") == 1
+    assert "排好版之后的样子" not in seed
+
+
 def test_a_stage_with_no_layout_reads_exactly_as_before(env, tmp_path):
     """The reviewer is not told to look for a table that was never produced."""
     store, pipeline, ledger = env
@@ -372,20 +416,12 @@ def test_reviewer_that_never_decides_records_nothing(env, tmp_path):
     assert outcome.verdict is None
     assert store.list_reviews(RUN, "direction") == []
     state = pipeline.stage_state(RUN, "direction")
-    assert state.status == "awaiting_review"
-    assert state.can_approve is False
+    assert state.status == "awaiting_decision"
+    assert state.can_approve is True
 
 
-def test_a_returned_review_still_leaves_him_the_last_word(env, tmp_path):
-    """A ``return`` blocks progress and offers him the override — both.
-
-    The gate this replaces kept ``can_approve`` false on a return, which made the
-    reviewer's verdict final: a same-model agent, running on the producers' side
-    of the table, holding a veto Jeffery could only lift by hand-crafting an HTTP
-    request. It now offers him the decision, and ``record_approval`` still refuses
-    to record it without an explicit override reason — so the teeth are in the
-    reason, not in the absence of a button.
-    """
+def test_a_historical_return_still_leaves_him_the_last_word(env, tmp_path):
+    """A retired reviewer return is visible but has no veto over his decision."""
     store, pipeline, ledger = env
     seed_intake(pipeline)
     attempt = pipeline.start_attempt(RUN, "direction")
@@ -405,27 +441,18 @@ def test_a_returned_review_still_leaves_him_the_last_word(env, tmp_path):
 
     assert outcome.verdict == "return"
     state = pipeline.stage_state(RUN, "direction")
-    assert state.status == "returned"
+    assert state.status == "awaiting_decision"
     assert state.can_approve is True
 
-    # Still shut for everything that is not his click: a return does not open
-    # the next stage, and no agent can approve around it.
+    # The next stage still requires his decision.
     with pytest.raises(PipelineError):
         pipeline.start_attempt(RUN, "material_plan")
 
-    # And the override he would be offered is not free.
-    nonce = pipeline.issue_nonce(RUN, "direction")
-    with pytest.raises(PipelineError, match="override reason"):
-        pipeline.record_approval(
-            RUN, "direction", nonce=nonce, decision="approved", override_reason=""
-        )
     nonce = pipeline.issue_nonce(RUN, "direction")
     approval = pipeline.record_approval(
-        RUN, "direction", nonce=nonce, decision="approved",
-        override_reason="两个方案确实像，但我要先拿它去测素材。",
+        RUN, "direction", nonce=nonce, decision="approved", override_reason="",
     )
-    assert approval.decision == "approved_override"
-    assert "override" in approval.note
+    assert approval.decision == "approved"
     pipeline.start_attempt(RUN, "material_plan")  # now it opens
 
 
@@ -446,29 +473,8 @@ def test_review_is_not_repeated_for_the_same_fingerprint(env, tmp_path):
     assert model.calls == []
 
 
-def test_review_timeout_does_not_trigger_another_call_in_the_same_turn(env, tmp_path):
-    store, pipeline, ledger = env
-    seed_intake(pipeline)
-    attempt = pipeline.start_attempt(RUN, "direction")
-    pipeline.submit(RUN, "direction", attempt.token, content="方向", summary="s")
-
-    class TimeoutReviewer:
-        calls = 0
-
-        def complete(self, **kwargs):
-            self.calls += 1
-            raise ModelError(0, "Codex request timed out; usage unconfirmed")
-
-    model = TimeoutReviewer()
-    orchestrator = make_orchestrator(store, pipeline, ledger, model, tmp_path)
-    first = orchestrator._request_review("direction")
-    second = orchestrator._request_review("direction")
-
-    assert first.is_error and second.is_error
-    assert "本轮不重复调用" in second.content
-    assert model.calls == 1
-    assert ledger.totals().unknown_calls == 1
-    assert pipeline.stage_state(RUN, "direction").review is None
+def test_reviewer_tool_is_not_available_to_orchestrator():
+    assert "request_review" not in tool_names_for("orchestrator")
 
 
 def test_a_stale_version_is_not_sent_for_review(env, tmp_path):
@@ -516,7 +522,7 @@ def test_orchestrator_turn_dispatches_writes_and_reports(env, tmp_path):
     state = pipeline.state(RUN)
     assert state.stages["intake"].latest.version == 1
     assert state.stages["direction"].latest.version == 1
-    assert state.stages["direction"].status == "awaiting_review"
+    assert state.stages["direction"].status == "awaiting_decision"
 
     # The conversation was logged for the UI.
     chat = store.read_chat(RUN)
@@ -863,7 +869,29 @@ def test_completion_check_tells_orchestrator_to_continue_without_user_decision(e
     # follow-up request (calls[2]), not the incomplete turn itself (calls[1]).
     reminder = model.requests_text()
     assert "不需要用户提供新事实" in reminder
-    assert "request_review" in reminder
+    assert "dispatch" in reminder
     assert "ask_user" in reminder
     assert len(model.calls) == 3
     assert turn.stopped_because == "incomplete"
+
+
+def test_ready_direction_is_dispatched_by_program_after_producer_saves_intake(env, tmp_path):
+    store, pipeline, ledger = env
+    model = ScriptedModel([
+        tool_turn('route', 'prepare_creative_context',
+                  {'intent': 'new', 'format': 'video', 'deliverable': 'direction'}),
+        tool_turn('intake', 'write_stage',
+                  {'stage': 'intake', 'content': '当前商品与目标已核对。', 'summary': '需求整理'}),
+        final_turn('需求已保存，下面等待方向。'),
+        tool_turn('direction', 'submit_stage',
+                  {'content': 'A/B/C 三个方向。', 'summary': '三个不同创意方向'}),
+        final_turn('方向已提交。'),
+    ])
+    turn = make_orchestrator(store, pipeline, ledger, model, tmp_path).send('请做商品视频并给出方向')
+    assert turn.stopped_because == 'done'
+    assert turn.deliverable['status'] == 'complete'
+    assert pipeline.stage_state(RUN, 'direction').latest.version == 1
+    assert len(model.calls) == 4
+    assert 'submit_stage' in model.calls[3]['tool_names']
+    assert 'prepare_creative_context' not in model.calls[3]['tool_names']
+    assert any(row.get('tool') == 'dispatch' and row.get('ok') for row in turn.tool_log)

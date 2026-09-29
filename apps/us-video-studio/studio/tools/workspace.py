@@ -14,7 +14,7 @@ from ..models import STAGES, STAGE_SPEC, Artifact
 from ..pipeline import Pipeline
 from ..store import Store
 from ..agents.roles import readable_stages
-from ..structured import view
+from ..structured import is_canonical_document, view
 
 
 def _size(count: int) -> str:
@@ -97,6 +97,7 @@ STATUS_LABEL = {
     "needs_resolution": "关键缺口待处理",
     "stale": "已过期",
     "awaiting_review": "待审核",
+    "awaiting_decision": "待你决定",
     "reviewed": "已审核",
     "returned": "被退回",
     "approved": "已通过",
@@ -164,19 +165,14 @@ class Workspace:
             if s.latest:
                 line += f"，最新 {stage}-v{s.latest.version}"
             if spec.gated:
-                line += "，有审核关"
+                line += "，需 Jeffery 决定"
             lines.append(line)
             if s.stale and s.stale_reason:
                 lines.append(f"    过期原因：{s.stale_reason}")
             if not s.integrity_ok:
                 lines.append("    指纹校验失败：文件在写入后被改动过")
             if s.review:
-                line_r = f"    审核：{s.review.verdict}"
-                if s.review.verdict == "return":
-                    line_r += "（" + "；".join(
-                        f.get("issue", "") for f in s.review.findings[:3]
-                    ) + "）"
-                lines.append(line_r)
+                lines.append("    历史审核记录已停用，不影响当前采用决定")
             if s.approval:
                 lines.append(
                     f"    Jeffery 的决定：{s.approval.decision}"
@@ -199,11 +195,8 @@ class Workspace:
             if s.can_start:
                 lines.append(f"- 开始 {stage}（dispatch 给 {STAGE_SPEC[stage].owner_role}）")
                 any_action = True
-            if s.can_review:
-                lines.append(f"- 送审 {stage}")
-                any_action = True
             if s.can_approve:
-                lines.append(f"- {stage} 已通过审核，等 Jeffery 在界面上点通过")
+                lines.append(f"- {stage} 已保存，等 Jeffery 在界面上决定采用或退回")
                 any_action = True
         if not any_action:
             lines.append("- （没有可自动推进的动作）")
@@ -249,7 +242,11 @@ class Workspace:
                         f"是在更早的版本上写的，已失效"
                     )
 
-        layout = render_structure(stage, artifact.structured) if include_layout else None
+        # Canonical prose is generated from this same structure. Showing both
+        # copies adds no evidence; legacy prose can differ and still needs both.
+        layout = (render_structure(stage, artifact.structured)
+                  if include_layout and not is_canonical_document(stage, artifact.structured, body)
+                  else None)
         if layout:
             head += [
                 "",
@@ -303,16 +300,32 @@ class Workspace:
                 option = next((o for o in artifact.structured.get("options", []) if o.get("key") == selected), None)
                 if option is None:
                     raise ToolError("approved option is absent from its direction version")
+                selected_dependencies = [
+                    row.get("need") for row in artifact.structured.get("dependency_matrix", [])
+                    if isinstance(row, dict) and isinstance(row.get("options"), dict)
+                    and row["options"].get(selected) is True
+                ]
                 parts += [
                     "## Jeffery 实际选中的方向",
                     f"direction-v{artifact.version} · sha256={artifact.sha256}",
                     f"selected_option_id={selected}（推荐项不是选择依据）",
                     json.dumps(option, ensure_ascii=False, sort_keys=True),
+                    "该方向的共用前提、相关依赖与未决事项：",
+                    json.dumps({
+                        "prerequisites": artifact.structured.get("prerequisites") or [],
+                        "dependencies": selected_dependencies,
+                        "open_questions": artifact.structured.get("open_questions") or [],
+                        "limitations": artifact.limitations,
+                        "evidence_refs": artifact.evidence,
+                    }, ensure_ascii=False, sort_keys=True),
                 ]
             elif valid and not artifact.structured.get("options"):
-                parts.append("方向正文已批准；该历史稿没有结构化选项，不能猜测选项 ID。")
+                parts += ["方向正文已批准；该历史稿没有结构化选项，不能猜测选项 ID。",
+                          self.render_artifact("direction", artifact.version, include_layout=False)]
             else:
-                parts.append("尚无与此版本匹配的明确选项选择；不得沿用推荐项或自行选择。")
+                parts += ["尚无与此版本匹配的明确选项选择；不得沿用推荐项或自行选择。",
+                          self.render_artifact("direction", artifact.version, include_layout=False)
+                          if artifact else ""]
         parts += ["# 素材证据与能力边界", self.render_materials(organize=True)]
         return "\n\n".join(parts)
 

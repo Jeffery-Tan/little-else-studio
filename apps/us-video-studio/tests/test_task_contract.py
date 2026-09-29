@@ -30,16 +30,14 @@ class FakeStore:
         return self.events
 
 
-def test_reviewed_writing_is_a_deliverable_but_unreviewed_writing_is_not():
+def test_saved_writing_is_a_deliverable_without_independent_review():
     pipeline = FakePipeline(writing=stage())
-    missing = evaluate(FakeStore(), pipeline, 'fixture', 'writing')
-    assert missing['status'] == 'incomplete'
-    assert '独立审核' in missing['missing'][0]
+    assert evaluate(FakeStore(), pipeline, 'fixture', 'writing')['status'] == 'complete'
     pipeline.states['writing'] = stage(verdict='pass')
     assert evaluate(FakeStore(), pipeline, 'fixture', 'writing')['status'] == 'complete'
 
 
-def test_revision_requires_this_turns_applied_plan_and_review():
+def test_revision_requires_this_turns_applied_plan():
     scope = {'plan_id': 'plan-1', 'stage': 'writing', 'version': 1, 'sha256': 'old'}
     pipeline = FakePipeline(writing=stage(version=2, sha='new', verdict='pass'))
     assert evaluate(FakeStore(), pipeline, 'fixture', 'revision', revision_scope=scope)['status'] == 'incomplete'
@@ -47,7 +45,7 @@ def test_revision_requires_this_turns_applied_plan_and_review():
     assert evaluate(FakeStore(events), pipeline, 'fixture', 'revision', revision_scope=scope)['status'] == 'complete'
 
 
-def test_production_input_must_match_current_source_and_be_checked(monkeypatch):
+def test_production_input_must_match_current_source_and_user_approval(monkeypatch):
     from studio import production
     pipeline = FakePipeline(writing=stage(verdict='pass'))
     monkeypatch.setattr(production, 'source_snapshot', lambda store, run: 'current-snapshot')
@@ -56,8 +54,6 @@ def test_production_input_must_match_current_source_and_be_checked(monkeypatch):
     assert evaluate(FakeStore(), pipeline, 'fixture', 'production_input', production_kind='video')['status'] == 'incomplete'
     drafts['first']['source_snapshot'] = 'current-snapshot'
     drafts['first']['review'] = {'verdict': 'revise'}
-    assert '独立文字检查' in evaluate(FakeStore(), pipeline, 'fixture', 'production_input', production_kind='video')['missing'][0]
-    drafts['first']['review'] = {'verdict': 'ready'}
     assert evaluate(FakeStore(), pipeline, 'fixture', 'production_input', production_kind='video')['status'] == 'complete'
     pipeline.approved = False
     assert '已确认' in evaluate(FakeStore(), pipeline, 'fixture', 'production_input', production_kind='video')['missing'][0]

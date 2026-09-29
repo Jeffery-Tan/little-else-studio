@@ -173,18 +173,18 @@ test("both structured and prose-only gates require an explicit submit action", (
   }
 });
 
-test("a document the reviewer did not pass asks the override question differently", () => {
+test("a historical reviewer return does not demand an override", () => {
   const html = stageHtml(step(), {
     pending: pending({ passed: false, options: [], headline: "「创意方向」写好了，但审核没有通过它。",
       findings: [{kind:"content",issue:"开场没有商品作用"}] }),
   });
-  assert.ok(html.includes("明确覆盖审核并采用当前版"));
+  assert.ok(html.includes("确认当前方向并继续"));
   assert.ok(html.includes('data-passed="0"'));
   assert.ok(html.includes('<details class="gate-findings" open>'));
   assert.ok(html.indexOf('data-act="reject"') < html.indexOf('data-act="approve"'));
   assert.ok(html.includes('class="good small" data-act="reject"'));
-  assert.ok(html.includes('class="bad small" data-act="approve"'));
-  assert.ok(html.includes('class="override-reason"'));
+  assert.ok(html.includes('data-act="approve"'));
+  assert.ok(!html.includes('class="override-reason"'));
 });
 
 test("the findings and the price of the click are reachable but folded", () => {
@@ -198,6 +198,18 @@ test("the findings and the price of the click are reachable but folded", () => {
   assert.ok(html.includes("容量只有一条实测支撑"));
   assert.ok(html.includes('<details class="gate-findings">'));
   assert.ok(html.includes("上一次这一步花了 $0.02。"));
+});
+
+test("an unreviewed direction offers the ordinary user decision", () => {
+  const html = stageHtml(step(), {pending: pending({
+    reviewed: false,
+    headline: "创意方向已保存，等你决定。",
+    findings: [],
+  })});
+  assert.ok(html.includes("创意方向已保存，等你决定"));
+  assert.ok(html.includes('data-passed="1"'));
+  assert.ok(html.includes('data-act="approve"'));
+  assert.ok(!html.includes("覆盖审核的理由"));
 });
 
 /* ------------------------------------------------------------- empty stages -- */
@@ -441,7 +453,7 @@ test("reading comes before approval without changing the exact gate binding", ()
   });
   assert.ok(html.indexOf('class="artifact-prose"') < html.indexOf('id="stage-decision"'));
   assert.match(html, new RegExp(`data-stage="direction" data-version="2" data-sha="${hash}" data-passed="0"`));
-  assert.ok(html.includes('明确覆盖审核并采用当前版'));
+  assert.ok(html.includes('按所选方向继续'));
   assert.equal((html.match(/type="radio"/g)||[]).length,3);
   assert.ok(!/\bchecked\b/.test(html));
 });

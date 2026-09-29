@@ -47,6 +47,20 @@ def select(store, run_id, mode, reference_id=None, scope=''):
     return selection
 
 
+def select_for_turn(store, run_id, *, intent, mode, reference_id=None, scope=''):
+    """Keep an established reference scope on an ordinary continuation.
+
+    A fresh model paraphrase of the same scope is not a new source decision.
+    An edit or a different mode/reference still goes through ``select`` and
+    advances the evidence generation when it actually changes the source.
+    """
+    previous = current(store, run_id)
+    if (intent == 'continue' and previous and previous['mode'] == mode
+            and previous.get('reference_id') == (reference_id if mode != 'autonomous' else None)):
+        return previous
+    return select(store, run_id, mode, reference_id, scope)
+
+
 def context(store, run_id):
     selection = current(store, run_id)
     if not selection:

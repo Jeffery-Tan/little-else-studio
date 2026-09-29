@@ -196,7 +196,7 @@ def test_approval_requires_a_nonce_issued_for_that_stage(client_factory):
     assert http.get(f"/api/runs/{RUN}/state").json()["stages"][1]["approval"] is None
 
 
-def test_approval_requires_a_passing_review_or_a_named_override(client_factory):
+def test_approval_without_optional_review_is_an_ordinary_user_decision(client_factory):
     box = client_factory
     drive_intake_and_direction(box)
     http = box["http"]
@@ -205,16 +205,8 @@ def test_approval_requires_a_passing_review_or_a_named_override(client_factory):
     res = http.post(f"/api/runs/{RUN}/decision", json={
         **shown(http), "stage": "direction", "nonce": nonce, "decision": "approved",
     })
-    assert res.status_code == 409
-    assert "override" in res.json()["detail"]
-
-    nonce = nonce_for(http)
-    res = http.post(f"/api/runs/{RUN}/decision", json={
-        **shown(http), "stage": "direction", "nonce": nonce, "decision": "approved",
-        "override_reason": "我自己读过，可以上",
-    })
     assert res.status_code == 200
-    assert res.json()["decision"] == "approved_override"
+    assert res.json()["decision"] == "approved"
 
     # And the gate is now open.
     state = http.get(f"/api/runs/{RUN}/state").json()

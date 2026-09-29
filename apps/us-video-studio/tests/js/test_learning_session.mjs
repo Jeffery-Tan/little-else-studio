@@ -65,6 +65,22 @@ test('v1 library shows a reviewed upgrade path and the saved reference analysis'
   assert.match(html,/<video controls/);
 });
 
+test('failed link acquisition is not presented as a saved video and can resume with upload',()=>{
+  const task={reference_id:'ref-failed',source_url:'https://www.tiktok.com/@seller/video/1234567890',
+    status:'started',execution_status:'failed'};
+  const html=LearningSession.roomHtml({sources:[{reference_id:'ref-failed',source_url:task.source_url}]},run,[],[task]);
+  assert.match(html,/TikTok 原片获取失败，尚未进行声画分析/);
+  assert.match(html,/重试链接或上传原视频/);
+  assert.doesNotMatch(html,/来源已保存；观察覆盖以记录为准/);
+  const button={dataset:{learningResumeReference:'ref-failed'},addEventListener:(_type,handler)=>{button.click=handler;}};
+  const host={innerHTML:'',querySelector:()=>null,querySelectorAll:selector=>
+    selector==='[data-learning-resume-reference]'?[button]:[]};
+  let opened=null;
+  LearningSession.mount({host,session:{},run,referenceTasks:[task],openResumeReference:value=>{opened=value;}});
+  button.click();
+  assert.equal(opened,task);
+});
+
 test('analysis-only learning may end without inventing a method',()=>{
   const open=LearningSession.roomHtml({status:'discussing',proposals:[]},run);
   assert.match(open,/data-learning-close/);

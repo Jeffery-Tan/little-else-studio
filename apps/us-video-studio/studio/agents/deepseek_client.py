@@ -1,4 +1,4 @@
-"""DeepSeek thinking transport; private reasoning stays in this role's wire history.
+"""DeepSeek transport; thinking stays private when a role enables it.
 
 Protocol checked against official thinking_mode and create-chat-completion docs
 on 2026-09-19. Never retries a request or presents reasoning as assistant text.
@@ -153,22 +153,28 @@ def _stream_turn(lines, model, *, require_reasoning, on_progress=None, check_can
         raise ModelError(0, 'DeepSeek stream ended before a complete response; usage unconfirmed')
     if calls and sorted(calls) != list(range(len(calls))):
         raise ModelError(200, 'invalid DeepSeek tool stream; usage unconfirmed')
+    message = {'content': ''.join(content),
+               'tool_calls': [calls[i] for i in sorted(calls)]}
+    if reasoning:
+        message['reasoning_content'] = ''.join(reasoning)
     return _parse({'model': actual_model, 'choices': [{'finish_reason': finish,
-        'message': {'content': ''.join(content), 'reasoning_content': ''.join(reasoning),
-                    'tool_calls': [calls[i] for i in sorted(calls)]}}], 'usage': usage or {}},
+        'message': message}], 'usage': usage or {}},
         model, require_reasoning=require_reasoning)
 
 
 class DeepSeekClient:
     def __init__(self, token, *, max_tokens=None, timeout=180.0, check_cancel=None,
-                 cancel_event=None):
+                 cancel_event=None, reasoning_effort='high'):
         if (not isinstance(token, str) or not token or not token.isascii()
                 or any(character.isspace() or ord(character) < 33 or ord(character) == 127 for character in token)):
             raise ValueError("DeepSeek API key must contain ASCII characters without whitespace or control characters")
         if max_tokens is not None and (type(max_tokens) is not int or not 1 <= max_tokens <= 393216):
             raise ValueError("DeepSeek max_tokens must be an integer between 1 and 393216")
+        if reasoning_effort not in ('none', 'low', 'high'):
+            raise ValueError('DeepSeek reasoning_effort must be none, low or high')
         self._token = token
         self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
         self.timeout = timeout
         self.check_cancel = check_cancel
         self.cancel_event = cancel_event
@@ -198,7 +204,8 @@ class DeepSeekClient:
                     if monitor:
                         monitor.start()
                     try:
-                        turn = _stream_turn(response.iter_lines(), model, require_reasoning=bool(tools),
+                        turn = _stream_turn(response.iter_lines(), model,
+                                            require_reasoning=bool(tools) and self.reasoning_effort != 'none',
                                             on_progress=on_progress, check_cancel=self.check_cancel)
                         if self.check_cancel:
                             try:
@@ -227,9 +234,14 @@ class DeepSeekClient:
         if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", model):
             raise ModelError(0, "DeepSeek model must be a valid identifier of 1 to 200 characters", provider_invoked=False)
         try:
-            payload = {"model": model, "messages": _messages(system, messages, with_tools=bool(tools)),
-                       "thinking": {"type": "enabled"}, "reasoning_effort": "high",
+            thinking = self.reasoning_effort != 'none'
+            payload = {"model": model,
+                       "messages": (_messages(system, messages, with_tools=bool(tools)) if thinking
+                                    else openai_messages(system, messages)),
+                       "thinking": {"type": "enabled" if thinking else "disabled"},
                        "stream": False}
+            if thinking:
+                payload['reasoning_effort'] = self.reasoning_effort
             # Omit the optional limit to use the provider's thinking-mode default.
             if self.max_tokens is not None:
                 payload["max_tokens"] = self.max_tokens
@@ -252,6 +264,7 @@ class DeepSeekClient:
                     data = response.json()
                 except ValueError:
                     raise ModelError(200, "invalid JSON response; usage unconfirmed") from None
-                return _parse(data, model, require_reasoning=bool(tools))
+                return _parse(data, model,
+                              require_reasoning=bool(tools) and self.reasoning_effort != 'none')
         except httpx.TransportError as exc:
             raise ModelError(0, f"transport failed ({type(exc).__name__}); usage unconfirmed") from None

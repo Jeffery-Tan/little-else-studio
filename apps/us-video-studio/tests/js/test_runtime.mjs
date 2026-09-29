@@ -29,16 +29,97 @@ test('project brief outranks successful job status and historical missing usage'
   assert.equal(h.context.state.busy,false);
 });
 
-test('running conversation keeps the top strip compact while progress belongs to chat',()=>{
+test('running conversation says what is actually pending while progress belongs to chat',()=>{
   const h=harness(async()=>{});
   h.context.showJob({job_id:'active',job_kind:'conversation',status:'running',
     brief:{title:'方向处理中',detail:'已保存旧方案'},
     events:[{type:'agent_activity',role:'director',phase:'thinking',at:'2026-09-26T12:00:00Z'}]});
   const strip=visibleText(h.nodes.get('job-status'));
-  assert.match(strip,/进展见下方对话/);
+  assert.match(strip,/正在等待创意导演的模型回复/);
+  assert.match(strip,/本轮结果尚未提交/);
   assert.doesNotMatch(strip,/停止本轮/);
-  assert.match(h.nodes.get('send').textContent,/停止/);
-  assert.doesNotMatch(strip,/最近操作|最近进展|构思创意方向/);
+  assert.match(h.nodes.get('send').textContent,/插入调整/);
+  assert.equal(h.nodes.get('job-stop').hidden,false);
+  assert.doesNotMatch(strip,/最近操作|构思创意方向/);
+});
+
+test('running conversation names checked evidence and the unsaved result',()=>{
+  const h=harness(async()=>{});
+  h.context.showJob({job_id:'active-research',job_kind:'conversation',status:'running',events:[
+    {type:'agent_tool',role:'orchestrator',tool:'read_artifact',args:{stage:'direction'},ok:true,at:'2026-09-28T16:16:29Z'},
+    {type:'agent_tool',role:'orchestrator',tool:'list_materials',ok:true,at:'2026-09-28T16:16:30Z'},
+    {type:'agent_activity',role:'orchestrator',phase:'thinking',at:'2026-09-28T16:16:31Z'},
+  ]});
+  const strip=visibleText(h.nodes.get('job-status'));
+  assert.match(strip,/已核对创意方向、素材清单/);
+  assert.match(strip,/本轮结果尚未提交/);
+  assert.doesNotMatch(strip,/已阅读方案|项目操作已返回/);
+});
+
+test('running direction attempt is progress, not recovery, with checked sources named',()=>{
+  const h=harness(async()=>{});
+  h.context.showJob({job_id:'direction-active',job_kind:'direction_resume',status:'running',
+    open_attempts:[{stage:'direction',attempt:'internal-attempt'}],
+    events:[
+      {type:'agent_tool',role:'director',tool:'read_capabilities',ok:true,at:'2026-09-28T16:16:29Z'},
+      {type:'agent_tool',role:'director',tool:'list_materials',ok:true,at:'2026-09-28T16:16:30Z'},
+      {type:'agent_tool',role:'director',tool:'read_artifact',args:{stage:'direction'},ok:true,at:'2026-09-28T16:16:31Z'},
+      {type:'agent_activity',role:'director',phase:'thinking',at:'2026-09-28T16:16:31Z'},
+    ]});
+  const strip=visibleText(h.nodes.get('job-status'));
+  assert.equal(h.context.state.recoveryBlocked,false);
+  assert.match(strip,/已核对旧方向、素材清单、制作能力/);
+  assert.match(strip,/新版尚未保存/);
+  assert.match(strip,/最近记录/);
+  assert.doesNotMatch(strip,/尚未结束的制作阶段|internal-attempt/);
+  assert.equal(h.nodes.get('send').disabled,false);
+  assert.match(h.nodes.get('send').textContent,/插入调整/);
+  assert.equal(h.nodes.get('job-stop').hidden,false);
+});
+
+test('closed reference event stream checks the job before reconnecting',async()=>{
+  const calls=[];
+  const failed={job_id:'reference-job',job_kind:'reference_video',status:'failed',
+    reason:'ReferenceFetchError: [reference_fetch] 无法连接TikTok或视频下载中断',events:[],cursor:3};
+  const h=harness(async url=>{
+    calls.push(url);
+    return url.endsWith('/recovery')?{can_continue:true,revision:'r'}:failed;
+  });
+  const streams=[];
+  h.context.EventSource=class {
+    constructor(url){this.url=url;streams.push(this);}
+    close(){}
+  };
+  await h.context.watchJob('run-a',{...failed,status:'running',reason:'',cursor:1},0);
+  assert.equal(h.context.state.busy,true);
+  streams[0].onerror();
+  await h.timers.at(-1)();
+  assert.equal(calls[0],'/api/runs/run-a/jobs/reference-job');
+  assert.equal(h.context.state.busy,false);
+  assert.match(visibleText(h.nodes.get('job-status')),/重试链接或上传原视频/);
+});
+
+test('reference media refusal is distinct from page retrieval and model analysis',()=>{
+  const h=harness(async()=>{});
+  const message=h.context.jobGuidance({job_kind:'reference_video',status:'failed',
+    reason:'ReferenceFetchError: [reference_fetch] TikTok视频文件获取失败（HTTP 403），可以上传原视频继续。'});
+  assert.match(message,/页面已读取.*视频文件地址返回 HTTP 403/);
+  assert.match(message,/不会自动重试或调用声画模型/);
+});
+
+test('blocked malformed role output explains why work stopped and how to continue',()=>{
+  const h=harness(async()=>{});
+  const message=h.context.jobGuidance({job_kind:'conversation',status:'blocked',
+    reason:'NonRetryableStageError: 角色模型返回了无法读取的结果，本轮已停止自动重试'});
+  assert.match(message,/模型回复格式不完整/);
+  assert.match(message,/没有保存.*重新发起/);
+});
+
+test('unknown-usage model timeout says the role will not retry automatically',()=>{
+  const h=harness(async()=>{});
+  const message=h.context.jobGuidance({job_kind:'conversation',status:'blocked',
+    reason:'NonRetryableStageError: 受托角色的模型连接超时或中断，本次调用用量无法确认'});
+  assert.match(message,/新版未保存.*用量无法确认.*停止自动重试/);
 });
 
 test('composer stop cancels only the viewed job once and keeps the draft', async()=>{
@@ -56,7 +137,7 @@ test('composer stop cancels only the viewed job once and keeps the draft', async
   assert.equal(calls.length,1);
   assert.equal(calls[0].url,'/api/runs/run-a/jobs/active/cancel');
   assert.equal(h.nodes.get('send').disabled,true);
-  assert.match(h.nodes.get('send').textContent,/停止中/);
+  assert.equal(h.nodes.get('job-stop').disabled,true);
   release({...job,status:'cancelling'});
   await first;
   assert.equal(h.nodes.get('chat-input').value,'下轮再说');
@@ -151,32 +232,43 @@ test('an ended model turn surfaces the concrete missing deliverable', () => {
   assert.doesNotMatch(h.context.jobGuidance(job), /已完成本轮/);
 });
 
-test('returned direct writing edit separates saved revision from whole-script review', () => {
+test('historical job no longer tells the user to finish retired review', () => {
+  const h = harness(async () => ({}));
+  h.context.state.timeline = {pending:{kind:'brief_amendment',stage:'direction'}};
+  const guidance = h.context.jobGuidance({job_kind:'conversation',status:'blocked',
+    deliverable:{goal:'direction',status:'incomplete',missing:['direction 当前版本的独立审核通过记录']}});
+  assert.match(guidance, /历史任务的审核要求已停用/);
+  assert.match(guidance, /当前作品/);
+  assert.doesNotMatch(guidance, /交付还缺|审核通过记录/);
+});
+
+test('historical reviewer outcome does not block a saved writing revision', () => {
   const h = harness(async () => { throw new Error('viewing a saved script must not post a job'); });
   const job = {job_id:'edit-1',job_kind:'writing_revision',status:'blocked',events:[],
     revision_result:{stage:'writing',version:2,artifact_sha256:'sha',change_status:'saved',review_status:'return'},
     deliverable:{goal:'revision',status:'incomplete',missing:['修订新版的独立审核通过记录']}};
   h.context.showJob(job);
   const status = visibleText(h.nodes.get('job-status'));
-  assert.match(status, /脚本新版已保存 · 审核退回/);
-  assert.match(status, /选中的内容已修改并保存；独立审核认为整稿仍需修改/);
+  assert.match(status, /脚本新版已保存/);
+  assert.doesNotMatch(status, /审核退回|审核未完成/);
+  assert.match(status, /请阅读并决定是否采用/);
   const nav=[];
   h.context.showJourneyTab = tab => nav.push(`tab:${tab}`);
   h.context.selectStage = stage => nav.push(`stage:${stage}`);
   h.context.setProjectFocus = focus => nav.push(`focus:${focus}`);
-  descendants(h.nodes.get('job-status'), node => node.text === '查看脚本与审核')[0].onclick();
+  descendants(h.nodes.get('job-status'), node => node.text === '查看脚本并决定')[0].onclick();
   assert.deepEqual(nav, ['tab:plan','stage:writing','focus:canvas']);
   h.context.showJob({...job,job_id:'edit-2',revision_result:{...job.revision_result,review_status:'pending'},
     status:'failed',deliverable:null,reason:'独立审核调用失败'});
   const pending = visibleText(h.nodes.get('job-status'));
-  assert.match(pending, /脚本新版已保存 · 审核未完成/);
+  assert.match(pending, /脚本新版已保存/);
   assert.doesNotMatch(pending, /审核退回/);
-  assert.equal(descendants(h.nodes.get('job-status'), node => node.text === '查看脚本与审核').length, 1);
+  assert.equal(descendants(h.nodes.get('job-status'), node => node.text === '查看脚本并决定').length, 1);
   h.context.showJob({...job,job_id:'edit-3',revision_result:null});
-  assert.match(visibleText(h.nodes.get('job-status')), /脚本新版已保存 · 审核退回/);
+  assert.doesNotMatch(visibleText(h.nodes.get('job-status')), /脚本新版已保存/);
   h.context.showJob({...job,job_id:'edit-4',revision_result:null,deliverable:null,reason:'模型调用失败'});
-  assert.doesNotMatch(visibleText(h.nodes.get('job-status')), /脚本新版已保存 · 审核退回/);
-  assert.equal(descendants(h.nodes.get('job-status'), node => node.text === '查看脚本与审核').length, 0);
+  assert.doesNotMatch(visibleText(h.nodes.get('job-status')), /脚本新版已保存/);
+  assert.equal(descendants(h.nodes.get('job-status'), node => node.text === '查看脚本并决定').length, 0);
 });
 
 test('uncertain video observation retries acceptance identity without becoming a conversation job',async()=>{
@@ -317,10 +409,10 @@ test('unchanged polling preserves the composer stop button and keyboard focus ta
   const h = harness(async () => {});
   const job = { job_id: 'j1', status: 'running', events: [] };
   h.context.showJob(job);
-  const stopButton = h.nodes.get('send');
+  const stopButton = h.nodes.get('job-stop');
   h.context.showJob({ ...job, cursor: 12 });
-  assert.equal(h.nodes.get('send'), stopButton);
-  assert.match(stopButton.textContent,/停止/);
+  assert.equal(h.nodes.get('job-stop'), stopButton);
+  assert.equal(stopButton.hidden,false);
 });
 
 test('bounded diagnosis failure preserves an unsent composer draft', async () => {
@@ -384,7 +476,8 @@ test('conversation shows stop while running and old poll cannot undo cancellatio
   const job = {job_id:'j1', job_kind:'conversation', status:'running', cursor:10, events:[]};
   h.context.showJob(job);
   assert.equal(h.nodes.get('send').disabled, false);
-  assert.match(h.nodes.get('send').textContent, /停止/);
+  assert.match(h.nodes.get('send').textContent, /插入调整/);
+  assert.equal(h.nodes.get('job-stop').hidden,false);
   h.context.showJob({...job, status:'cancelling', cursor:12, goal_revision:1, steer_status:'received'});
   h.context.showJob({...job, cursor:11});
   assert.equal(vm.runInContext('currentJob.status', h.context), 'cancelling');
@@ -398,7 +491,8 @@ test('a stopping task disables stop unless a saved adjustment is settling', () =
   h.context.showJob({job_id:'j1', job_kind:'conversation', status:'cancelling', cursor:13,
     steer_status:'received', events:[]});
   assert.equal(h.nodes.get('send').disabled, false);
-  assert.match(h.nodes.get('send').textContent, /停止/);
+  assert.match(h.nodes.get('send').textContent, /插入调整/);
+  assert.equal(h.nodes.get('job-stop').disabled,false);
 });
 
 test('steering uses one stable request receipt and does not start a concurrent job', async () => {
@@ -445,7 +539,8 @@ test('timeline failure after acceptance keeps the running job and composer stop'
   await h.context.submitJob('run-a', { request_id: 'r1', text: 'test' });
   assert.equal(h.context.state.busy, true);
   assert.equal(h.nodes.get('send').disabled, false);
-  assert.match(h.nodes.get('send').textContent, /停止/);
+  assert.match(h.nodes.get('send').textContent, /插入调整/);
+  assert.equal(h.nodes.get('job-stop').hidden,false);
   assert.equal(h.storage.size, 0);
   assert.equal(h.timers.length, 1);
   assert.equal(h.nodes.get('job-status').children[0].children[0].text, '正在执行');

@@ -39,6 +39,15 @@ class ReferenceIn(BaseModel):
         return self
 
 
+class PromptEditIn(BaseModel):
+    request_id: str = Field(pattern=r'^[A-Za-z0-9_-]{8,100}$')
+    analysis_id: str = Field(min_length=1, max_length=100)
+    candidate_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    expected_prompt_sha256: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
+    expected_prompt_revision: int | None = Field(default=None, ge=1, strict=True)
+    prompt: str = Field(min_length=1, max_length=20000)
+
+
 def task_state(store, run_id):
     items = {}
     events = store.read_events(run_id)
@@ -60,6 +69,20 @@ def task_state(store, run_id):
             items[rid].update(analysis_id=event['analysis_id'], report=event['report'], status='analyzed')
         elif rid in items and event['kind'] == 'reference_video_completed':
             items[rid]['status'] = 'completed'
+    job_references = {}
+    for event in events:
+        if event['kind'] == 'job_created' and event.get('job_kind') == 'reference_video':
+            rid = event.get('job_payload', {}).get('reference_id')
+            job_references[event['job_id']] = rid
+            if rid in items:
+                items[rid]['execution_status'] = 'queued'
+                items[rid].pop('failure_reason', None)
+        elif event['kind'] == 'job_status':
+            rid = job_references.get(event.get('job_id'))
+            if rid in items:
+                items[rid]['execution_status'] = event['status']
+                if event['status'] in {'failed', 'blocked', 'cancelled', 'interrupted'}:
+                    items[rid]['failure_reason'] = event.get('reason', '')
     all_candidates = {c['analysis_id']: c for c in candidates(store, run_id)}
     for item in items.values():
         c = all_candidates.get(item.get('analysis_id'))
@@ -67,6 +90,15 @@ def task_state(store, run_id):
             item['candidate'] = c
             if c['status'] == 'stale':
                 item['status'] = 'stale'
+    for event in events:
+        if event['kind'] != 'reference_prompt_saved':
+            continue
+        item = items.get(event.get('reference_id'))
+        if item and isinstance(event.get('prompt'), str):
+            item['prompt'] = {'text': event['prompt'], 'sha256': event['sha256'],
+                              'revision': event['seq'], 'saved_at': event['at'],
+                              'actor': event.get('actor', 'model'),
+                              'analysis_id': event.get('analysis_id')}
     return list(items.values())
 
 
@@ -87,6 +119,44 @@ def install_reference_video_routes(app, jobs, require_run, connections, settings
         require_run(run_id)
         return {'tasks': task_state(store, run_id), 'connection': bailian_omni.connection_info(),
                 'revision': connections.public()['revision']}
+
+    @app.post('/api/runs/{run_id}/reference-videos/{reference_id}/prompt')
+    def save_prompt_edit(run_id: str, reference_id: str, payload: PromptEditIn):
+        require_run(run_id)
+        if store.read_run(run_id).kind == 'learning':
+            raise HTTPException(409, '学习记录不保存商品适配提示词。')
+        prompt = payload.prompt.strip()
+        if not prompt:
+            raise HTTPException(422, '提示词不能为空。')
+        request_sha = hashlib.sha256(payload.model_dump_json().encode('utf-8')).hexdigest()
+        with store.run_lock(run_id):
+            for event in store.read_events(run_id):
+                if event['kind'] == 'reference_prompt_saved' and event.get('request_id') == payload.request_id:
+                    if event.get('request_sha256') != request_sha or event.get('reference_id') != reference_id:
+                        raise HTTPException(409, '请求标识已用于另一份提示词。')
+                    return {'prompt': {'text': event['prompt'], 'sha256': event['sha256'],
+                                       'revision': event['seq'], 'saved_at': event['at'], 'actor': 'user',
+                                       'analysis_id': event.get('analysis_id')}}
+            task = next((t for t in task_state(store, run_id) if t['reference_id'] == reference_id), None)
+            if not task or task['status'] == 'stale' or not task.get('candidate'):
+                raise HTTPException(409, '参考分析已变化，请重新打开后再修改提示词。')
+            candidate = task['candidate']
+            if (candidate['analysis_id'] != payload.analysis_id or
+                    candidate['candidate_sha256'] != payload.candidate_sha256):
+                raise HTTPException(409, '参考分析版本已变化，请重新打开后再修改提示词。')
+            current_sha = task.get('prompt', {}).get('sha256')
+            current_revision = task.get('prompt', {}).get('revision')
+            if (current_sha != payload.expected_prompt_sha256 or
+                    current_revision != payload.expected_prompt_revision):
+                raise HTTPException(409, '提示词已有更新，请重新打开后比较新版本。')
+            digest = hashlib.sha256(prompt.encode('utf-8')).hexdigest()
+            event = store.append_event(run_id, 'reference_prompt_saved', reference_id=reference_id,
+                analysis_id=payload.analysis_id, source_sha256=candidate['sha256'],
+                prompt=prompt, sha256=digest, actor='user', request_id=payload.request_id,
+                request_sha256=request_sha)
+            return {'prompt': {'text': prompt, 'sha256': digest, 'saved_at': event['at'],
+                               'revision': event['seq'], 'actor': 'user',
+                               'analysis_id': payload.analysis_id}}
 
     def prepare(run_id, payload, *, observe_only=False):
         if not payload.consent:

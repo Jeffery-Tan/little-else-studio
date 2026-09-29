@@ -34,8 +34,10 @@ def test_invalid_content_records_final_usage_without_dispatching_tools(tmp_path,
                 'deepseek-flash')
 
     client = BudgetedClient(InvalidContent(), ledger, run_id='usage-test', role='director', stage='direction')
-    with pytest.raises(ModelError):
+    with pytest.raises(ModelError) as failure:
         client.complete(model='deepseek-flash', system='', messages=[], tools=[])
+    if known:
+        assert 'output truncated at max_tokens' in str(failure.value)
     row, = ledger.entries('usage-test')
     assert row.ok is False
     assert store.list_artifacts('usage-test') == []

@@ -22,6 +22,21 @@ test('direction choice and adopted direction keep a creative destination',()=>{
   assert.equal(adopted.action.kind,'chat');
 });
 
+test('a direction question does not hide the option selection action',()=>{
+  const view=creatorProjectView({...base,timeline:{rail:[direction],pending:{stage:'direction'},
+    brief:{execution:{active:false},questions:[{stage:'direction',question:'有实物吗？'}]}}});
+  assert.equal(view.action.label,'选择创意方向');
+});
+
+test('a stale direction uses the server stage command as its next action',()=>{
+  const action={kind:'resume_direction',stage:'direction',label:'重做创意方向',
+    expected_context_sha256:'a'.repeat(64)};
+  const view=creatorProjectView({...base,timeline:{rail:[{...direction,stale:true}],
+    next_action:action,brief:{phase:'interrupted',execution:{active:false}}}});
+  assert.equal(view.action,action);
+  assert.equal(view.stage,'direction');
+});
+
 test('script is the current work until media work exists',()=>{
   const pending=creatorProjectView({...base,timeline:{...base.timeline,pending:{stage:'writing'}}});
   assert.equal(pending.action.label,'阅读并决定脚本');

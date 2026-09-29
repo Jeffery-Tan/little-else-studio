@@ -15,20 +15,16 @@ test('shared brief exposes the bound next step without claiming execution means 
   assert.doesNotMatch(projectBriefHtml({title:'<img onerror=x>',detail:'<script>',action:{label:'<svg>'}}),/<img|<script|<svg/);
 });
 
-test('review action submits only the displayed version and ignores detached stale actions',async()=>{
+test('retired review action is hidden and cannot submit a new task',()=>{
   const button={}, view={}, calls=[];
-  const host={querySelector:s=>s==='[data-brief-action]'?button:view};
+  const host={hidden:false,replaceChildren(){this.children=[];},querySelector:s=>s==='[data-brief-action]'?button:view};
   const brief={stage:'direction',title:'Saved',detail:'Waiting',action:{kind:'review_stage',label:'Review',stage:'direction',version:3,sha256:'a'.repeat(64)}};
   const state={runId:'fixture',projectBrief:brief,rail:[],timeline:{brief}};
   const ctx=vm.createContext({state,$:()=>host,escapeHtml:global.escapeHtml,crypto:{randomUUID:()=> 'review-id'},
     submitJob:async(run,payload)=>calls.push({run,payload})});
   vm.runInContext(fs.readFileSync(new URL('../../studio/web/progress.js',import.meta.url),'utf8'),ctx);
-  ctx.renderProjectProgress();assert.equal(calls.length,0);
-  const click=button.onclick;
-  await click();assert.equal(calls[0].payload.expected_version,3);
-  assert.equal(calls[0].payload.expected_artifact_sha256,'a'.repeat(64));
-  assert.equal(calls[0].payload.request_kind,'stage_review');
-  state.projectBrief={...brief};await click();assert.equal(calls.length,1);
+  ctx.renderProjectProgress();assert.equal(host.hidden,true);
+  assert.equal(button.onclick,undefined);assert.equal(calls.length,0);
 });
 
 test('waiting downstream points to actual prerequisite without submitting a model request', () => {

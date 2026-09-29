@@ -98,7 +98,7 @@ def test_writer_receives_patch_only_and_preserves_chosen_direction_and_other_sho
         assert not pipe.stage_state(RUN, stage).stale
     assert pipe.stage_state(RUN, 'direction').approval.selected_option_id == 'A'
     assert outcome.impact['next_step']['stage'] == 'writing'
-    assert outcome.impact['next_step']['action'] == 'review'
+    assert outcome.impact['next_step']['action'] == 'user_decision'
 
 
 def test_writing_revision_task_records_exact_role_tools_and_context_sources(env):
@@ -116,7 +116,7 @@ def test_writing_revision_task_records_exact_role_tools_and_context_sources(env)
     assert (task['plan_id'], task['mode']) == (scope['plan_id'], 'local')
     assert task['base'] == {'version': scope['version'], 'sha256': scope['sha256']}
     assert task['inputs'] == scope['inputs']
-    assert task['expected_result'] == {'artifact_stage': 'writing', 'review_required': True}
+    assert task['expected_result'] == {'artifact_stage': 'writing', 'user_decision_required': True}
     assert 'submit_patch' in task['allowed_tools'] and 'submit_stage' not in task['allowed_tools']
     sources = {row['stage']: row for row in task['context']['sources']}
     for stage in ('intake', 'direction', 'material_plan', 'writing'):
@@ -261,14 +261,12 @@ def test_chat_routes_one_line_to_writer_and_blocks_whole_pipeline_rewrite(env):
         tool_turn('other', 'write_stage', {'stage': 'intake', 'content': 'Rewrite facts', 'summary': 'bad'}),
         lambda: tool_turn('dispatch', 'dispatch', {'stage': 'writing', 'brief': QUOTE, 'plan_id': latest_plan(store)}),
         tool_turn('patch', 'submit_patch', patch()),
-        tool_turn('review', 'request_review', {'stage': 'writing'}),
-        tool_turn('verdict', 'finish_review', {'verdict': 'pass', 'findings': []}),
         final_turn('已修改一句，等待查看新版')])
     result = Orchestrator(store, pipe, settings, model, ledger, RUN).send(QUOTE)
     assert [t['tool'] for t in result.failed_tools] == ['dispatch', 'write_stage']
     assert store.latest_artifact(RUN, 'writing').version == 2
     assert store.latest_artifact(RUN, 'intake').version == 1
-    assert pipe.stage_state(RUN, 'writing').review.verdict == 'pass'
+    assert pipe.stage_state(RUN, 'writing').review is None
     assert pipe.stage_state(RUN, 'writing').approval is None
     assert work_plan(pipe, RUN)['next_step']['action'] == 'user_decision'
     assert sum('submit_patch' in c['tool_names'] and 'dispatch' not in c['tool_names'] for c in model.calls) == 1
@@ -288,6 +286,19 @@ def test_next_turn_cannot_reuse_old_plan_but_can_choose_new_scope(env):
     result = main.send(QUOTE)
     assert [t['tool'] for t in result.failed_tools] == ['dispatch']
     assert main._revision_scope['mode'] == 'rework'
+
+
+def test_continue_stale_direction_skips_revision_quote_binding(env):
+    store, pipe, settings, ledger = env
+    write(pipe, 'intake', {'facts': [{'label': 'Product', 'value': 'Updated bag', 'source': 'fixture'}]})
+    assert pipe.stage_state(RUN, 'direction').stale
+    model = ScriptedModel([route('continue'),
+        tool_turn('unnecessary-plan', 'plan_revision', plan_args(store, stage='direction', mode='rework')),
+        final_turn('按有效需求重新准备创意方向')])
+    result = Orchestrator(store, pipe, settings, model, ledger, RUN).send('继续创意方向')
+    assert not result.failed_tools
+    assert '直接按当前有效需求 dispatch' in model.requests_text()
+    assert not any(event['kind'] == 'agent_revision_planned' for event in store.read_events(RUN))
 
 
 def test_intake_patch_uses_no_worker_and_preserves_other_facts(env):
@@ -327,7 +338,7 @@ def test_rework_receives_input_changes_and_updates_only_responsible_stage(env):
     assert not pipe.stage_state(RUN, 'direction').stale
     assert store.latest_artifact(RUN, 'material_plan').version == 1
     assert pipe.stage_state(RUN, 'material_plan').stale
-    assert result.impact['next_step']['action'] == 'review'
+    assert result.impact['next_step']['action'] == 'user_decision'
 
 
 def test_cancelled_patch_closes_attempt_without_new_artifact(env):

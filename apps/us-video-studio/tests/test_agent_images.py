@@ -33,7 +33,7 @@ def call(native, items):
 
 
 @pytest.mark.parametrize('scene', [12], indirect=True)
-def test_seven_images_in_one_job_reach_direction_and_review_without_manual_analysis(native,monkeypatch):
+def test_seven_images_in_one_job_reach_direction_without_manual_analysis(native,monkeypatch):
     for i in range(6): accept_upload(native[1],RUN,f'other-{i}.png',native[4])
     names=['fixture.png']+[f'other-{i}.png' for i in range(6)]
     scripted(native,monkeypatch,[
@@ -42,27 +42,23 @@ def test_seven_images_in_one_job_reach_direction_and_review_without_manual_analy
         result(7),
         tool_turn('intake','write_stage',dict(stage='intake',content='Observed fixture panels',summary='Observed')),
         final_turn('建议下一步派导演'),
-        tool_turn('director','dispatch',dict(stage='direction',brief='Create concrete directions')),
         tool_turn('save','submit_stage',dict(content='Two concrete fixture directions',summary='Compare')),
-        tool_turn('review','request_review',dict(stage='direction')),
-        tool_turn('verdict','finish_review',dict(verdict='pass',findings=[])),
-        final_turn('两个具体方向，推荐第一种开场。'),
     ])
     job=chat(native,'用这些图片给商品做创意')
     assert job['status']=='succeeded',job
-    assert len(native[2].calls)==10
+    assert len(native[2].calls)==6
     blocks=native[2].calls[2]['messages'][0]['content']
     assert sum(b['type']=='image' for b in blocks)==7
     assert all(base64.b64decode(b['source']['data'])==native[4] for b in blocks if b['type']=='image')
-    assert '本轮约定交付具体创意方向' in native[2].calls[5]['messages'][-1]['content']
-    for index in (6,8):
-        assert 'visible panel 6' in json.dumps(native[2].calls[index],ensure_ascii=False)
+    # Once intake and observation are ready, code dispatches the director
+    # without another producer reminder or tool-selection round.
+    assert 'visible panel 6' in json.dumps(native[2].calls[5],ensure_ascii=False)
     state=Pipeline(native[1]).stage_state(RUN,'direction')
-    assert state.review.verdict=='pass' and state.approval is None
-    assert native[1].read_chat(RUN)[-1]['text']=='两个具体方向，推荐第一种开场。'
+    assert state.review is None and state.can_approve and state.approval is None
+    assert '方向已保存' in native[1].read_chat(RUN)[-1]['text']
     assert not native[1].list_approvals(RUN)
     assert chat(native,'用这些图片给商品做创意')['job_id']==job['job_id']
-    assert len(native[2].calls)==10
+    assert len(native[2].calls)==6
 
 
 def test_reuse_is_bound_to_bytes_and_purpose_and_not_human_confirmed(native):

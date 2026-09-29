@@ -337,43 +337,9 @@ class Pipeline:
             can_submit = False
             blocked = "; ".join(reasons)
 
-        can_review = (
-            spec.gated
-            and latest is not None
-            and not stale
-            and integrity_ok
-            and latest.digest_algorithm == "artifact-v2"
-            and (review is None or review.artifact_sha256 != latest.sha256)
-        )
-        # Both verdicts reach him, not only ``pass``.
-        #
-        # The gate exists so that approval is *his click* rather than an agent's;
-        # it does not exist to give the reviewer a veto he cannot lift. The
-        # reviewer is a same-model agent sitting on the same side of the table as
-        # the producers, and on the first real run it returned a direction that
-        # carried four substantive findings — a decision worth seeing, not a
-        # dead end. Requiring ``pass`` here made ``record_approval``'s override
-        # branch unreachable from the interface: the card that would have offered
-        # it was never drawn, so the only way to override was to hand-craft an
-        # HTTP request.
-        #
-        # Approving past a ``return`` is *not* free — ``record_approval`` refuses
-        # it without an explicit ``override_reason`` and records
-        # ``approved_override`` instead of ``approved``, so it stays legible in
-        # the history as the deliberate decision it is.
-        #
-        # ``review is not None`` still holds: with no review recorded there is
-        # nothing on screen to weigh, and approving the unreviewed thing is a
-        # different feature.
-        # ``approval is None`` is the difference between "the gate is waiting on
-        # him" and "this version has already been decided". ``issue_nonce`` and
-        # ``record_approval`` refuse a second decision on one version (red line
-        # 8), so a projection that still offered the button would be advertising
-        # a click the server rejects — and after his own ``returned`` the card
-        # went on saying he could approve or send it back again.
-        #
-        # A *reviewer's* ``return`` deliberately leaves ``approval`` empty, so
-        # that path is untouched: the named override below stays reachable.
+        # Historical reviews remain readable but cannot start a new review or
+        # affect a current user decision.
+        can_review = False
         can_approve = (
             spec.gated
             and latest is not None
@@ -382,7 +348,6 @@ class Pipeline:
             and latest.digest_algorithm == "artifact-v2"
             and not approved
             and approval is None
-            and review is not None
         )
 
         if not spec.gated:
@@ -396,12 +361,10 @@ class Pipeline:
                 status = "stale"
             elif approved:
                 status = "approved"
-            elif review is not None and review.verdict == "return":
+            elif approval is not None and approval.decision == "returned":
                 status = "returned"
-            elif review is not None:
-                status = "reviewed"
             else:
-                status = "awaiting_review"
+                status = "awaiting_decision"
 
         state = StageState(
             stage=stage,
@@ -653,6 +616,8 @@ class Pipeline:
         state = self.stage_state(run_id, stage)
         if state.latest is None:
             raise PipelineError("review", f"{stage} has nothing to review")
+        if state.approval is not None:
+            raise PipelineError("review", f"{stage}-v{state.latest.version} already has a user decision")
         if state.latest.digest_algorithm != "artifact-v2":
             raise PipelineError("review", "legacy body-only history cannot receive a new full-content review; produce a new version")
         self._expect_version(state, expected_artifact_sha256, expected_version)
@@ -790,16 +755,9 @@ class Pipeline:
     ) -> Approval:
         """Record a user decision. Only the server calls this, only after a click.
 
-        A pass review on the current fingerprint is required. If Jeffery wants to
-        go against a reviewer's ``return``, that is allowed but must be *named* —
-        the override is recorded in the approval row and shows up in the history.
-
-        Both decisions that send something onward have to carry the content that
-        makes them actionable, and the two rules sit next to each other because
-        they are one rule: ``approved`` against a failing review needs an
-        ``override_reason``, and ``returned`` needs a ``note``. The plain path —
-        approving a version the reviewer passed — needs neither, so nothing is
-        demanded of him for doing the normal thing.
+        Historical independent reviews are read-only evidence. A current,
+        intact version needs Jeffery's decision, not a review verdict. Returning
+        a version still requires a concrete note; approval does not.
         """
         spec = STAGE_SPEC[stage]
         if not spec.gated:
@@ -871,16 +829,6 @@ class Pipeline:
                 raise PipelineError("approval", "choose one valid direction option explicitly before approving")
             if selected_option_id is not None and (stage != "direction" or not options):
                 raise PipelineError("approval", "this artifact has no selectable direction options")
-            passed = state.review is not None and state.review.verdict == "pass"
-            if not passed:
-                if not override_reason.strip():
-                    raise PipelineError(
-                        "approval",
-                        "no passing review on the current version. Approving anyway requires "
-                        "an explicit override reason, which is recorded.",
-                    )
-                recorded = "approved_override"
-                note = (note + f"\n[override] {override_reason.strip()}").strip()
             # Brief gate (P2): a selected option that still violates / needs an
             # amendment / declares nothing / cites an unknown clause cannot be
             # adopted — not even with override_reason. The product goal only

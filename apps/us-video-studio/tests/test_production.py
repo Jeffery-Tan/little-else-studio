@@ -137,19 +137,14 @@ def workspace(scene):
     return response.json()
 
 
-def test_team_input_review_uses_frozen_client_without_media_authority(scene, monkeypatch):
-    from studio.production import ActionIn
+def test_team_input_review_endpoint_is_retired_without_model_or_media_call(scene):
     http, store, pipe, reviewer, images, videos, settings = scene
     item = draft(scene, kind='image').json()
-    service = http.app.state.production
-    monkeypatch.setattr(service.connections, 'snapshot', lambda: pytest.fail('must reuse the current turn connection'))
     before = list(store.list_approvals(RUN))
-    runner, _ = service.prepare_review(RUN, item['draft_id'], ActionIn(
-        request_id='team-check', expected_sha256=item['draft_sha256'], consent=True),
-        frozen=(settings, reviewer, {'source': 'offline-frozen'}))
-    runner('check', lambda event: None, lambda: None)
-    checked = service.workspace(RUN, for_agent=True)['drafts'][-1]
-    assert checked['review']['verdict'] == 'ready'
+    assert action(scene, item, 'review').status_code == 410
+    checked = http.app.state.production.workspace(RUN, for_agent=True)['drafts'][-1]
+    assert checked['review'] is None
+    assert not reviewer.calls
     assert not images.calls and not videos.calls
     assert store.list_approvals(RUN) == before
 
@@ -191,12 +186,6 @@ def capture_continuation(scene, *, finish_input=False):
                     reference={'name': reference['name'], 'sha256': reference['sha256']},
                     model='wan3.0-video', duration=5, resolution='720P')
                 item = prepare_draft(scene[1], scene[2], run_id, payload, actor='agent')
-                from studio.production import ActionIn
-                reviewer, settings = scene[3], scene[-1]
-                review, _ = service.prepare_review(run_id, item['draft_id'], ActionIn(
-                    request_id='agent-review', expected_sha256=item['draft_sha256'], consent=True),
-                    frozen=(settings, reviewer, {'source': 'offline-frozen'}))
-                review('check', emit, check_cancel)
             return OrchestratorTurn('Prepared offline.', 'done', 0)
         return run, {'source': 'offline-continuation'}
     scene[0].app.state.jobs.prepare = prepare
@@ -220,7 +209,7 @@ def test_approved_image_continues_exact_video_work_once_without_generation(scene
     assert calls == [RUN]
     assert not scene[4].calls and not scene[5].calls
     prepared = workspace(scene)['drafts'][-1]
-    assert prepared['actor'] == 'agent' and prepared['review']['verdict'] == 'ready'
+    assert prepared['actor'] == 'agent' and prepared['review'] is None
     assert prepared['reference']['sha256'] == ref['sha256']
     assert prepared['source_sha256'] == source['artifact_sha256']
     assert prepared['can_generate'] is True
@@ -318,7 +307,6 @@ def test_image_approval_skips_video_continuation_for_photo_and_existing_input(sc
     video_goal(scene)
     existing = draft(scene)
     assert existing.status_code == 200, existing.text
-    assert wait(scene, action(scene, existing.json()))['status'] == 'succeeded'
     approved = approve(scene)
     assert approved.status_code == 200, approved.text
     assert approved.json()['continuation'] == {'status': 'existing', 'draft_id': existing.json()['draft_id']}
@@ -342,10 +330,91 @@ def action(scene, d, kind='review', request_id=None, **over):
         'consent': True, 'nonce': workspace(scene)['nonce'], **over})
 
 
+def batch_payload(scene, drafts, request_id='batch-1'):
+    return {'request_id': request_id, 'nonce': workspace(scene)['nonce'], 'consent': True,
+            'drafts': [{'draft_id': item['draft_id'], 'expected_sha256': item['draft_sha256']}
+                       for item in drafts]}
+
+
+def test_one_batch_decision_generates_pinned_images_once_and_approves_exact_outputs(scene):
+    http, store, _, _, images, videos, _ = scene
+    first = draft(scene, kind='image', request_id='shot-1').json()
+    second = draft(scene, kind='image', request_id='shot-2', prompt='A different synthetic shot.').json()
+    payload = batch_payload(scene, [first, second])
+    assert http.post(BASE + '/batch-generate', json={**payload, 'consent': False}).status_code == 409
+    assert http.post(BASE + '/batch-generate', json={**payload, 'drafts': [
+        payload['drafts'][0], {**payload['drafts'][1], 'expected_sha256': '0' * 64}]}).status_code == 409
+    assert not images.calls
+    job = wait(scene, http.post(BASE + '/batch-generate', json=payload))
+    assert job['status'] == 'succeeded'
+    assert len(images.calls) == 2 and not videos.calls
+    repeated = http.post(BASE + '/batch-generate', json=payload)
+    assert repeated.status_code == 200 and repeated.json()['job_id'] == job['job_id']
+    assert len(images.calls) == 2
+    outputs = [next(item for item in workspace(scene)['drafts'] if item['draft_id'] == shot['draft_id'])
+               ['attempts'][0]['output'] for shot in (first, second)]
+    approval = {'request_id': 'approve-batch-1', 'nonce': workspace(scene)['nonce'],
+                'images': [{'name': output['name'], 'sha256': output['sha256']} for output in outputs]}
+    assert http.post(BASE + '/material-approvals/batch', json={**approval, 'images': [
+        approval['images'][0], {'name': 'reference.png', 'sha256': workspace(scene)['materials'][0]['sha256']}]}).status_code == 409
+    assert not any(item['approved'] for item in workspace(scene)['materials'] if item['name'] in {o['name'] for o in outputs})
+    saved = http.post(BASE + '/material-approvals/batch', json=approval)
+    assert saved.status_code == 200 and saved.json()['approved'] == 2
+    assert all(item['approved'] for item in workspace(scene)['materials'] if item['name'] in {o['name'] for o in outputs})
+    assert http.post(BASE + '/material-approvals/batch', json=approval).json()['already_saved'] is True
+    assert len([event for event in store.read_events(RUN) if event.get('kind') == 'production_batch_approval']) == 1
+
+
+def test_unknown_first_image_blocks_the_remaining_batch_until_user_accepts_uncertainty(scene, monkeypatch):
+    http, store, _, _, images, _, settings = scene
+    assert 'retry_with_unknown_cost' in workspace(scene)['recovery_modes']
+    first = draft(scene, kind='image', request_id='shot-1').json()
+    second = draft(scene, kind='image', request_id='shot-2', prompt='Second synthetic shot.').json()
+    original = images.generate
+    def unknown_once(request):
+        if not images.calls:
+            images.calls.append(request)
+            return ImageResult(status='unknown', images=(), usage=Usage(100, 20),
+                observed_image_calls=0, provider_invoked=True, thread_id='fixture-thread',
+                turn_id='fixture-turn', model='fixture-codex')
+        return original(request)
+    monkeypatch.setattr(images, 'generate', unknown_once)
+    job = wait(scene, http.post(BASE + '/batch-generate', json=batch_payload(scene, [first, second])))
+    assert job['status'] == 'blocked' and len(images.calls) == 1
+    attempt = workspace(scene)['drafts'][0]['attempts'][0]
+    assert attempt['status'] == 'unknown' and attempt['provider_outcome'] == 'unknown'
+    assert http.post(BASE + '/batch-generate', json=batch_payload(scene, [second], 'skip-first')).status_code == 409
+    assert len(images.calls) == 1
+    assert http.post(BASE + f'/attempts/{attempt["attempt_id"]}/recover', json={
+        'nonce': workspace(scene)['nonce'], 'retry_with_unknown_cost': True,
+        'evidence_note': 'Synthetic user accepts old result and cost as unknown.'}).status_code == 200
+    assert workspace(scene)['drafts'][0]['attempts'][0]['status'] == 'retry_authorized'
+    assert Ledger(store, settings).entries()[-1].usage_status == 'unknown'
+    assert len(images.calls) == 1, 'the recovery decision itself does not generate'
+    resumed = wait(scene, http.post(BASE + '/batch-generate', json=batch_payload(scene, [first, second], 'new-batch')))
+    assert resumed['status'] == 'succeeded' and len(images.calls) == 3
+
+
+def test_completed_codex_turn_without_image_call_is_a_definite_failed_attempt(scene, monkeypatch):
+    images = scene[4]
+    def no_image(request):
+        images.calls.append(request)
+        return ImageResult(status='failed', images=(), usage=Usage(100, 20),
+            observed_image_calls=0, provider_invoked=True, thread_id='fixture-thread',
+            turn_id='fixture-turn', model='fixture-codex')
+    monkeypatch.setattr(images, 'generate', no_image)
+    shot = draft(scene, kind='image', request_id='no-image').json()
+    job = wait(scene, action(scene, shot, 'generate'))
+    assert job['status'] == 'blocked'
+    attempt = workspace(scene)['drafts'][0]['attempts'][0]
+    assert attempt['status'] == 'failed' and attempt['observed_image_calls'] == 0
+    row = Ledger(scene[1], scene[-1]).entries()[-1]
+    assert row.usage_status == 'known' and row.usage_quantity == 0
+
+
 def ready(scene, kind='video'):
     d = draft(scene, kind).json()
     assert approve(scene).status_code == 200
-    assert wait(scene, action(scene, d))['status'] == 'succeeded'
     return d
 
 
@@ -357,11 +426,10 @@ def test_preparation_is_free_immutable_and_retry_safe(scene):
     assert not Ledger(scene[1], scene[-1]).entries()
 
 
-def test_generation_requires_exact_review_source_and_human_picture_approval(scene):
+def test_generation_requires_exact_source_and_human_picture_approval(scene):
     d = draft(scene).json()
     assert action(scene, d, 'generate').status_code == 409
-    wait(scene, action(scene, d))
-    assert action(scene, d, 'generate').status_code == 409
+    assert action(scene, d, 'review').status_code == 410
     approve(scene)
     assert action(scene, d, 'generate', nonce='forged').status_code == 409
     assert action(scene, d, 'generate', consent=False).status_code == 409
@@ -534,13 +602,12 @@ def test_source_or_picture_change_blocks_generation(scene, change):
     assert not scene[5].calls
 
 
-def test_review_is_independent_and_bad_verdict_never_authorizes(scene):
+def test_retired_review_does_not_invoke_model_or_block_generation(scene):
     scene[1].append_chat(RUN, 'assistant', 'PRIVATE_PRODUCER_SELF_PRAISE')
     scene[3].verdict = 'revise'
-    d = draft(scene).json(); wait(scene, action(scene, d)); approve(scene)
-    assert 'PRIVATE_PRODUCER_SELF_PRAISE' not in json.dumps(scene[3].calls)
-    assert 'OFFLINE_METHOD' in json.dumps(scene[3].calls)
-    assert action(scene, d, 'generate').status_code == 409
+    d = draft(scene).json(); assert action(scene, d, 'review').status_code == 410; approve(scene)
+    assert not scene[3].calls
+    assert wait(scene, action(scene, d, 'generate'))['status'] == 'succeeded'
 
 
 def test_failed_provider_does_not_fabricate_zero_usage(scene):
@@ -685,9 +752,9 @@ def test_provider_duration_alias_is_accounted(scene):
     assert row.usage_quantity == 5.5 and row.estimated_cny == 3.3
 
 
-def test_frozen_video_parameters_match_review_and_submission(scene):
+def test_frozen_video_parameters_match_submission(scene):
     d = ready(scene); wait(scene, action(scene, d, 'generate'))
     assert d['parameters'] == {'audio': True, 'ratio': 'adaptive', 'prompt_extend': False}
-    assert '"prompt_extend": false' in scene[3].calls[0]['messages'][0]['content']
+    assert not scene[3].calls
     request = scene[5].calls[0]
     assert request.audio is True and request.ratio == 'adaptive' and request.prompt_extend is False

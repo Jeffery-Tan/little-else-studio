@@ -86,7 +86,7 @@ def test_director_commit_is_success_even_when_no_further_response_is_available(p
     assert result.submitted == "direction-v1" and result.error == ""
     assert result.summary == "Two options"
     assert len(model.calls) == len(ledger.entries("harness-test")) == 1
-    assert pipeline.stage_state("harness-test", "direction").status == "awaiting_review"
+    assert pipeline.stage_state("harness-test", "direction").status == "awaiting_decision"
     assert store.list_approvals("harness-test") == []
 
 
@@ -106,7 +106,7 @@ def test_review_commit_ends_role_and_reuses_same_verdict_without_charge(project,
     assert store.list_approvals("harness-test") == []
 
 
-@pytest.mark.parametrize("tool_name", ["dispatch", "request_review"])
+@pytest.mark.parametrize("tool_name", ["dispatch"])
 def test_incomplete_work_is_visible_as_failed_tool_to_main_agent(project, tool_name):
     store, pipeline, settings, ledger = project
     if tool_name == "request_review":

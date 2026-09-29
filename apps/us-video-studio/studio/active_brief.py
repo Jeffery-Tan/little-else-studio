@@ -22,8 +22,8 @@ id across replacements so the gate can keep pointing at the same product goal.
 ``brief_gate`` is the projection that keeps "not declared" from reading as
 "符合约束": for an artifact written against the current brief it requires the
 options that can be adopted to declare known clause ids. It is deliberately not
-semantic verification — a self-reported ``satisfies`` still needs the
-independent review and the user.
+semantic verification — a self-reported ``satisfies`` still needs producer
+self-check and the user's decision.
 """
 from __future__ import annotations
 
@@ -314,6 +314,40 @@ def _split_questions(structured: dict[str, Any], replies: list[tuple[str, str, s
             "answer": answer,
         })
     return decisions, pending
+
+
+def _answered_direction_questions(store: Store, run_id: str,
+                                  chat: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Carry explicit user answers forward without rewriting the intake.
+
+    Direction questions can be answered after that version was saved. Looking
+    only at the latest direction loses the answer when its author removes the
+    now-resolved question in the next version. Only exact quoted replies to
+    user-owned questions count; producer prose is never promoted to authority.
+    """
+    from .structured import is_ask_user_question, question_answers
+
+    questions: dict[str, dict[str, str]] = {}
+    for artifact in store.list_artifacts(run_id, "direction"):
+        for row in artifact.structured.get("open_questions") or []:
+            if not is_ask_user_question(row):
+                continue
+            question = row["question"]
+            first = questions.get(question)
+            if first is None or artifact.created_at < first["created_at"]:
+                questions[question] = {"created_at": artifact.created_at, "artifact": artifact.key}
+    resolved: dict[str, dict[str, str]] = {}
+    for question, origin in questions.items():
+        answers = question_answers(chat, question, origin["created_at"])
+        if answers:
+            resolved[question] = {**answers[-1], "artifact": origin["artifact"]}
+    return [{
+        "id": _stable_clause_id("decision", f"{question} → {reply['answer']}"),
+        "kind": "decision", "text": f"{question} → {reply['answer']}",
+        "check": "choice", "source": f"chat user_answer to {reply['artifact']}",
+        "scope": "global", "status": "confirmed", "authority": "user",
+        "question": question, "answer": reply["answer"],
+    } for question, reply in resolved.items()]
 
 
 def amendments_path(store: Store, run_id: str) -> Path:
@@ -757,6 +791,7 @@ def compile_active_brief(store: Store, run_id: str, *, version: int | None = Non
     clauses.extend(_asset_facts(structured, source))
     decisions, pending = _split_questions(structured, replies, source)
     clauses.extend(decisions)
+    clauses.extend(_answered_direction_questions(store, run_id, chat))
 
     clauses.sort(key=lambda c: (c["kind"], c["text"], c["id"]))
     pending.sort(key=lambda q: q["question"])

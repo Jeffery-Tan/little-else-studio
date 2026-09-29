@@ -31,13 +31,14 @@ def api_payload(store):
     return payload
 
 
-def test_deepseek_direction_uses_configured_output_limit_other_roles_keep_default(tmp_path):
+def test_deepseek_roles_use_provider_thinking_default_not_generic_output_limit(tmp_path):
     public = {'connections': [{'id': 'ds', 'provider': 'deepseek'}], 'roles': {
         'director': {'connection': 'ds', 'model': 'deepseek-flash'},
         'writer': {'connection': 'ds', 'model': 'deepseek-flash'}}}
     snapshot = ConnectionSnapshot(json.dumps(public), {'ds': 'synthetic-only'}, tmp_path)
     routed = snapshot.client(max_tokens=12000)
-    assert routed.for_role('director', 'fixture').max_tokens == 12000
+    assert routed.for_role('director', 'fixture').max_tokens is None
+    assert routed.for_role('director', 'fixture').reasoning_effort == 'high'
     assert routed.for_role('writer', 'fixture').max_tokens is None
 
 
@@ -241,7 +242,7 @@ def test_proven_uninvoked_setup_failure_is_failed_zero_usage_but_sent_failure_st
     ledger.ensure_within_budget()
 
 
-@pytest.mark.parametrize('tool', ['dispatch', 'request_review'])
+@pytest.mark.parametrize('tool', ['dispatch'])
 def test_subrole_connection_preflight_stops_orchestrator_without_retry_or_open_attempt(tmp_path, tool):
     from fakes import ScriptedModel, tool_turn
     from studio.agents.orchestrator import Orchestrator
