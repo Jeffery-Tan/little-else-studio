@@ -45,6 +45,100 @@ function selectLine(app) {
   return app.document.getElementById('feedback-target');
 }
 
+function retainedLine(app) {
+  const host=app.document.getElementById('stage');
+  const node=host.querySelectorAll('[data-creator-path]')
+    .find(item=>item.dataset.creatorTarget==='第 1 段台词');
+  assert.ok(node);
+  // The shared minimal fixture keeps one listener per event. This retained DOM
+  // node needs browser semantics: multiple distinct listeners all fire until
+  // explicitly removed, so duplicates cannot hide behind fixture overwrites.
+  const listeners=new Map(Object.entries(node.listeners).map(([type,handler])=>[type,new Set([handler])]));
+  node.addEventListener=(type,handler)=>{
+    if(!listeners.has(type))listeners.set(type,new Set());
+    listeners.get(type).add(handler);
+  };
+  node.removeEventListener=(type,handler)=>listeners.get(type)?.delete(handler);
+  const counts={targets:0,chips:0,focus:0,toasts:[]};
+  const state=vm.runInContext('state',app.ctx);
+  let target=state.feedbackTarget;
+  Object.defineProperty(state,'feedbackTarget',{
+    configurable:true,get:()=>target,set:value=>{target=value;counts.targets++;},
+  });
+  const chip=app.document.getElementById('feedback-target');
+  const replace=chip.replaceChildren.bind(chip);
+  chip.replaceChildren=(...children)=>{counts.chips++;replace(...children);};
+  app.ctx.setProjectFocus=()=>{counts.focus++;};
+  const toast=app.ctx.toast;
+  app.ctx.toast=(...args)=>{counts.toasts.push(args);toast(...args);};
+  return {host,node,listeners,counts,state,chip,
+    dispatch:(type,event={})=>{
+      for(const handler of [...(listeners.get(type)||[])])handler({target:node,...event});
+    }};
+}
+
+test('rebinding the retained script node after polling selects one target and renders one chip per input',async()=>{
+  const app=await page({}), held=retainedLine(app);
+  const before=app.observed.length;
+  app.document.getElementById('chat-input').value='Unsent feedback stays here';
+  for(let i=0;i<5;i++)app.ctx.wireCreatorFeedback(held.host,held.state.rail[0]);
+  held.dispatch('click');
+  assert.equal(held.listeners.get('click').size,1);
+  assert.equal(held.listeners.get('keydown').size,1);
+  assert.equal(held.counts.targets,1);
+  assert.equal(held.counts.chips,1);
+  assert.equal(held.counts.focus,1);
+  assert.equal(held.counts.toasts.length,0);
+  assert.equal(held.state.feedbackTarget.version,1);
+  assert.equal(held.state.feedbackTarget.artifact_sha256,SHA);
+  assert.equal(held.chip.children.length,3);
+  let prevented=0;
+  held.dispatch('keydown',{key:'Enter',preventDefault(){prevented++;}});
+  assert.equal(prevented,1);
+  assert.equal(held.counts.targets,2);
+  assert.equal(held.counts.chips,2);
+  assert.equal(held.counts.focus,2);
+  assert.equal(held.chip.children.length,3);
+  assert.equal(app.document.getElementById('chat-input').value,'Unsent feedback stays here');
+  assert.equal(app.observed.length,before);
+});
+
+for(const change of ['version','hash'])test(`retained node replaces the old ${change} binding without a stale listener toast`,async()=>{
+  const app=await page({}), held=retainedLine(app);
+  const oldClick=[...held.listeners.get('click')][0];
+  const oldKeydown=[...held.listeners.get('keydown')][0];
+  const before=app.observed.length;
+  const step=held.state.rail[0];
+  if(change==='version')step.version=2;
+  step.artifact_sha256='b'.repeat(64);
+  held.dispatch('click'); // Until rebound, old displayed identity must refuse.
+  assert.equal(held.counts.toasts.length,1);
+  assert.match(held.counts.toasts[0][0],/版本已变化/);
+  assert.equal(held.counts.targets,0);
+  assert.equal(held.counts.chips,0);
+  held.node.textContent='New exact displayed line';
+  app.ctx.wireCreatorFeedback(held.host,step);
+  app.ctx.wireCreatorFeedback(held.host,step);
+  assert.equal(held.listeners.get('click').has(oldClick),false);
+  assert.equal(held.listeners.get('keydown').has(oldKeydown),false);
+  assert.equal(held.listeners.get('click').size,1);
+  assert.equal(held.listeners.get('keydown').size,1);
+  held.dispatch('click');
+  assert.equal(held.counts.toasts.length,1); // Removed old handler cannot add a false conflict.
+  assert.equal(held.counts.targets,1);
+  assert.equal(held.counts.chips,1);
+  assert.equal(held.state.feedbackTarget.version,step.version);
+  assert.equal(held.state.feedbackTarget.artifact_sha256,step.artifact_sha256);
+  assert.equal(held.state.feedbackTarget.quote,'New exact displayed line');
+  assert.deepEqual(Array.from(held.state.feedbackTarget.path),['segments',0,'line']);
+  held.dispatch('keydown',{key:' ',preventDefault(){}});
+  assert.equal(held.counts.toasts.length,1);
+  assert.equal(held.counts.targets,2);
+  assert.equal(held.counts.chips,2);
+  assert.equal(held.chip.children.length,3);
+  assert.equal(app.observed.length,before);
+});
+
 test('selected script line offers an explicit edit action bound to its current field',async()=>{
   const accepted={job_id:'edit-1',job_kind:'writing_revision',status:'succeeded',events:[]};
   const app=await page({'actions/revise-writing':accepted});
@@ -100,8 +194,13 @@ test('server version conflict explains the rejection and leaves the text for a f
   for(let i=0;i<4;i++) await new Promise(resolve=>setImmediate(resolve));
   assert.equal(app.observed.filter(row=>row.path.endsWith('/actions/revise-writing')).length,1);
   assert.equal(app.document.getElementById('chat-input').value,'只改第一句');
-  assert.equal(chip.hidden,true);
+  assert.equal(chip.hidden,false);
+  assert.equal(vm.runInContext('state.composerRequestKind',app.ctx),'writing_revision');
+  assert.equal(vm.runInContext('state.feedbackTarget.artifact_sha256',app.ctx),SHA);
   assert.match(app.document.getElementById('toast').textContent,/版本已变化.*重新选择/);
+  await app.ctx.submit();
+  assert.equal(app.observed.filter(row=>row.path.endsWith('/actions/revise-writing')).length,2);
+  assert.equal(app.observed.filter(row=>row.path.endsWith('/jobs')&&row.method==='POST').length,0);
 });
 
 test('an older approval in the conversation names its version beside a newer script',async()=>{

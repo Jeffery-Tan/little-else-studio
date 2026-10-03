@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from .http_contracts import RunIn, JobIn, redact_http_event, redact_http_events
 from .models import PipelineError, STAGE_SPEC
 from .product_cards import create_with_card
-from .project_brief import project_brief, latest_execution
+from .project_brief import project_brief, latest_execution, content_format
 from .project_title import derive_project_title
 from .progress import project_progress
 from .structured import open_questions, view
@@ -41,14 +41,11 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
             rows = store.read_events(run.run_id)
             brief = project_brief(state, latest_execution(store, run.run_id, rows),
                                   store.read_chat(run.run_id), store=store, run_id=run.run_id)
-            selection = next((row['selection'] for row in reversed(rows)
-                              if row.get('kind') == 'creative_context_selected'
-                              and row.get('selection', {}).get('format') in ('video', 'photo')), None)
             out.append({**run.to_dict(), "spend": totals.to_dict(),
                         "progress": {**project_progress(state),
                                      'title': brief['title'], 'detail': brief['detail']}, 'project_brief': brief,
                         'updated_at': rows[-1]['at'] if rows else run.created_at,
-                        'content_format': selection['format'] if selection else None})
+                        'content_format': content_format(rows)})
         return sorted(out, key=lambda r: r['updated_at'], reverse=True)
 
     @app.get('/api/trash')
@@ -218,4 +215,6 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
             result['pending_continuation'] = pending_continuation(run_id, job_busy=job_busy)
             if pending_brief_redo is not None:
                 result['pending_brief_redo'] = pending_brief_redo(run_id)
+            from .conversation_input import display_context
+            result['display_context_id'] = display_context(store, pipeline, run_id, result)
             return result

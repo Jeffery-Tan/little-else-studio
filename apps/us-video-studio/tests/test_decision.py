@@ -182,6 +182,19 @@ def seeded(tmp_path, *, approve_direction=False):
     return store, pipeline
 
 
+def received_message(store, pipeline, run_id, text):
+    """The same persisted view+ingress used by HTTP, in an isolated fixture."""
+    import uuid
+    from studio.conversation_input import display_context, receive
+    from studio.ledger import Ledger
+    from studio.timeline import build_timeline
+    from test_server import settings_for
+    ledger = Ledger(store, settings_for(store.root))
+    timeline = build_timeline(store, pipeline, ledger, run_id, None)
+    context = display_context(store, pipeline, run_id, timeline)
+    return receive(store, run_id, text, uuid.uuid4().hex, context)
+
+
 def test_a_waiting_direction_offers_every_admissible_option(tmp_path):
     store, pipeline = seeded(tmp_path)
     decisions = candidates(store, pipeline, RUN)
@@ -228,8 +241,11 @@ def test_a_decision_records_its_source_and_opens_the_follow_up_work(tmp_path):
 
     question = candidates(store, pipeline, RUN)[0]
     selecting = next(a for a in question["answers"] if a["action"] == "select_direction")
+    words = "采用 B，继续出分镜；开头别那么像家庭广告，生活化一点"
+    receipt = received_message(store, pipeline, RUN, words)
     result = commit(store, pipeline, RUN,
-                    {**selecting, "target": dict(question["target"]), "option_id": "B"},
+                    {**selecting, "target": dict(question["target"]), "option_id": "B",
+                     "message_id": receipt['message_id']},
                     source="conversation",
                     user_message="采用 B，继续出分镜；开头别那么像家庭广告，生活化一点",
                     note="开头别那么像家庭广告，生活化一点")
@@ -318,6 +334,7 @@ def test_an_execution_authorisation_can_only_be_prepared_not_submitted(tmp_path)
     """
     from studio.decision import EXECUTION, prepare_generation_candidate
     from studio.production import DraftIn, prepare_draft, target_shots
+    from visual_fixtures import stage_structure
 
     store, pipeline = seeded(tmp_path)
     pipeline.record_approval(RUN, "direction", nonce=pipeline.issue_nonce(RUN, "direction"),
@@ -326,9 +343,11 @@ def test_an_execution_authorisation_can_only_be_prepared_not_submitted(tmp_path)
         attempt = pipeline.start_attempt(RUN, stage)
         pipeline.submit(RUN, stage, attempt.token, content=f"doc {stage}", summary=stage,
                         structured={"segments": [
-                            {"tc": "0-2s", "picture": "one", "line": "a", "sound": "s", "duration": 2},
-                            {"tc": "2-4s", "picture": "two", "line": "b", "sound": "s", "duration": 2},
-                        ], "total_duration": 4} if stage == "writing" else {})
+                            {"tc": "0-2s", "picture": "one", "line": "a", "sound": "s", "duration": 2,
+                             "character_ids": "", "scene_id": "table"},
+                            {"tc": "2-4s", "picture": "two", "line": "b", "sound": "s", "duration": 2,
+                             "character_ids": "", "scene_id": "table"},
+                        ], "total_duration": 4} if stage == "writing" else stage_structure(stage))
     pipeline.record_approval(RUN, "writing", nonce=pipeline.issue_nonce(RUN, "writing"),
                              decision="approved")
 
@@ -362,8 +381,10 @@ def test_the_conversation_channel_uses_a_nonce_no_agent_ever_sees(tmp_path):
     store, pipeline = seeded(tmp_path)
     question = candidates(store, pipeline, RUN)[0]
     selecting = next(a for a in question["answers"] if a["action"] == "select_direction")
+    receipt = received_message(store, pipeline, RUN, "用 B")
     commit(store, pipeline, RUN,
-           {**selecting, "target": dict(question["target"]), "option_id": "B"},
+           {**selecting, "target": dict(question["target"]), "option_id": "B",
+            "message_id": receipt['message_id']},
            source="conversation", user_message="用 B")
 
     approval = store.list_approvals(RUN, "direction")[-1]

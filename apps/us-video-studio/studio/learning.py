@@ -27,6 +27,14 @@ _spec.loader.exec_module(core)
 SKILLS = ("us-commerce-strategy", "us-creator-video", "us-photo-copy")
 LEARNING_SKILL = "us-creative-learning"
 METHOD_CARDS = {
+    "visual-design": {
+        "title": "US 人物、场景与共同视觉设计", "file": "apps/us-video-studio/docs/methods/visual-design.md",
+        "source": ".agents/skills/us-commerce-strategy/SKILL.md",
+        "skills": ("us-commerce-strategy", "us-creator-video", "us-photo-copy"),
+        "roles": ("orchestrator", "director", "material", "writer"),
+        "tools": ("read_artifact", "read_method_document"),
+        "default_formats": ("video", "photo"),
+    },
     "video-recovery": {
         "title": "视频缺陷诊断与补救方法", "file": "apps/us-video-studio/docs/methods/video-recovery.md",
         "source": "tracks/us/docs/ai-video-recovery-policy.md", "skills": ("us-creator-video",),
@@ -89,6 +97,8 @@ def validate_method_packages(repository_root=REPOSITORY):
                 links_exist(path, ident)
         if not set(spec['skills']) <= set(SKILLS):
             errors.append(f'{ident}: unknown skill')
+        if not set(spec.get('default_formats', ())) <= {'video', 'photo'}:
+            errors.append(f'{ident}: unknown default format')
         for role in spec['roles']:
             if role not in ('orchestrator', 'director', 'material', 'writer', 'reviewer'):
                 errors.append(f'{ident}: unknown role {role}')
@@ -521,8 +531,8 @@ class LearningService:
         subset = core.creator_library(doc, {c["id"] for c in seeds})
         output_skill = "us-creator-video" if format == "video" else "us-photo-copy"
         # The orchestrator owns the complete creative decision. Specialists
-        # receive their stage's method and pinned upstream decision, with the
-        # other registered Skills still available through read_method_document.
+        # receive their stage's method and pinned upstream decision. Stable
+        # role-scoped method cards can be injected without loading every Skill.
         skills_by_role = {"orchestrator": {"us-commerce-strategy", output_skill},
                           "director": {"us-commerce-strategy"},
                           "material": set(),
@@ -531,6 +541,13 @@ class LearningService:
         if intent == "feedback" and active:
             wanted = {"us-commerce-strategy"} if role == "orchestrator" else set()
         skills = [s for s in self._skills() if s["id"] in wanted]
+        method_cards = []
+        if active:
+            for ident, spec in METHOD_CARDS.items():
+                if role in spec['roles'] and format in spec.get('default_formats', ()):
+                    card = self._text(ident, spec['title'], self.repository_root / spec['file'])
+                    card['source'] = spec['source']
+                    method_cards.append(card)
         from .creation_mode import context as creation_context
         creation = creation_context(self.store, run_id) if active else None
         if creation and creation['mode'] in ('recreate', 'inspiration') and format == 'video':
@@ -545,7 +562,7 @@ class LearningService:
                 for event in case.get("feedback_history", []):
                     if event["run"] == run_id:
                         run_feedback.append(dict(event, case_id=case["id"]))
-        text = "\n\n".join(s["text"] for s in skills)
+        text = "\n\n".join(s["text"] for s in (*skills, *method_cards))
         if creation:
             text += '\n\n本次作品方式与指定参考（不授予本轮执行权限）：\n' + _json(creation)
         if not reviewer:
@@ -576,7 +593,8 @@ class LearningService:
                          '独立审核结论或执行授权，任务不适合时可以不用）：\n' + _json(preferences))
         result = {"role": role, "intent": intent, "format": format, "purpose": purpose, "tags": list(tags),
                   "library_sha256": _sha(raw), "library_version": original.get("library_version", 1),
-                  "skills": skills, "seed_case_ids": [c["id"] for c in seeds], "case_ids": [c["id"] for c in subset["cases"]],
+                  "skills": skills, "method_cards": method_cards,
+                  "seed_case_ids": [c["id"] for c in seeds], "case_ids": [c["id"] for c in subset["cases"]],
                   "library": subset, "method_directory": method_directory,
                   "run_feedback": run_feedback, "selected_references": selected_references,
                   "preferences": preferences, "text": text,
@@ -590,7 +608,8 @@ class LearningService:
             self.store.append_event(run_id, "learning_context_loaded", role=role, intent=intent, format=format,
                                     purpose=purpose, snapshot_sha256=digest, evidence_ref=result["evidence_ref"],
                                     library_sha256=result["library_sha256"], seed_case_ids=result["seed_case_ids"],
-                                    case_ids=result["case_ids"], skills=[{"id": s["id"], "sha256": s["sha256"]} for s in skills])
+                                    case_ids=result["case_ids"], skills=[{"id": s["id"], "sha256": s["sha256"]} for s in skills],
+                                    method_cards=[{"id": card['id'], "sha256": card['sha256']} for card in method_cards])
         return result
 
     prepare_context = context

@@ -533,7 +533,38 @@ class Pipeline:
         # Coerced here rather than in the store: the shape is stage semantics,
         # and normalising is what makes a bad payload cost a rendering instead
         # of an attempt. `normalize` never raises; see `studio/structured.py`.
+        if stage == 'writing' and isinstance(structured, dict) and 'images' in structured:
+            if 'segments' in structured and structured['segments'] != structured['images']:
+                raise PipelineError('structure', 'images 与 segments 不能提供两份不同的页面清单。')
+            structured = {key: value for key, value in structured.items() if key != 'images'} | {'segments': structured['images']}
         shape = normalize(stage, structured or {})
+        # Visual design is production content, not optional layout. When it is
+        # supplied, malformed design or unknown shot identities must never be
+        # dropped behind a successfully saved prose document.
+        from .visual_design import normalize_visual_design, validate_segments
+        try:
+            if stage == 'material_plan' and isinstance(structured, dict) and 'visual_design' in structured:
+                normalize_visual_design(structured['visual_design'])
+            if stage == 'writing':
+                from .shot_identity import bind_rows, validate_claims
+                from .project_brief import content_format
+                prior = self.store.latest_artifact(run_id, 'writing')
+                previous = (prior.structured or {}).get('segments', []) if prior else []
+                photo = content_format(self.store.read_events(run_id)) == 'photo'
+                raw_rows = (structured or {}).get('segments', [])
+                if isinstance(raw_rows, list):
+                    validate_claims(raw_rows, previous, photo=photo)
+                material = self.store.latest_artifact(run_id, 'material_plan')
+                design = (material.structured or {}).get('visual_design') if material else None
+                if design:
+                    validate_segments(normalize_visual_design(design), (structured or {}).get('segments'))
+                if shape.data.get('segments'):
+                    history = [(item.structured or {}).get('segments', [])
+                               for item in self.store.list_artifacts(run_id, 'writing')]
+                    shape.data['segments'] = bind_rows(shape.data['segments'],
+                        previous, history, photo=photo)
+        except ValueError as exc:
+            raise PipelineError('structure', str(exc)) from exc
         if not content.strip():
             if shape.dropped:
                 raise PipelineError("structure", "结构化内容存在无法保存的字段，请修正后提交；原尝试仍保留。")

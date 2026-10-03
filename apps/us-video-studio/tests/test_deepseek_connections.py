@@ -197,7 +197,7 @@ def test_routed_orchestrator_two_jobs_preserves_only_current_private_protocol(tm
     settings = snapshot.settings(Settings(tmp_path, ''))
     store = Store(tmp_path)
     store.create_run('deepseek-integration', 'Offline fixture', '仅检查工具往返和跨轮聊天。')
-    real_client = httpx.Client
+    real_client = httpx.AsyncClient
     seen = []
     def handler(request):
         incoming = json.loads(request.content)
@@ -219,7 +219,7 @@ def test_routed_orchestrator_two_jobs_preserves_only_current_private_protocol(tm
                                   headers={'content-type':'text/event-stream'})
         return httpx.Response(200, json={'model':'deepseek-flash','choices':[{'finish_reason':reason,'message':msg}],
                                          'usage':{'prompt_tokens':50,'completion_tokens':20}})
-    monkeypatch.setattr(httpx, 'Client', lambda **kw: real_client(**kw, transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kw: real_client(**kw, transport=httpx.MockTransport(handler)))
     events = []
     def run(message):
         return Orchestrator(store, Pipeline(store), settings, snapshot.client(), Ledger(store, settings),
@@ -241,7 +241,7 @@ def test_routed_orchestrator_two_jobs_preserves_only_current_private_protocol(tm
 @pytest.mark.parametrize('character', ['\x00', '\x01', '\x1f', '\x7f', ' ', '\n', '密'])
 def test_invalid_key_is_rejected_consistently_before_save_check_or_http(tmp_path, monkeypatch, character):
     token = 'synthetic' + character + 'key'
-    monkeypatch.setattr(httpx, 'Client', lambda **_: pytest.fail('Invalid key must never create HTTP client'))
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **_: pytest.fail('Invalid key must never create HTTP client'))
     monkeypatch.setattr('studio.connections._dpapi', lambda *_, **kw: pytest.fail('Invalid key must never be encrypted'))
     store = ConnectionStore(tmp_path)
     with pytest.raises(ValueError) as saved:
@@ -263,7 +263,7 @@ def test_local_deepseek_construction_failure_stops_subrole_without_retry_or_ledg
     from studio.ledger import Ledger
     from studio.store import Store
 
-    monkeypatch.setattr(httpx, 'Client', lambda **_: pytest.fail('Local setup failure must never create HTTP client'))
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **_: pytest.fail('Local setup failure must never create HTTP client'))
     connections = ConnectionStore(tmp_path)
     connections.save(payload(connections))
     snapshot = connections.snapshot()
@@ -298,7 +298,7 @@ def test_routed_deepseek_request_does_not_inherit_shared_output_cap(
     connections.save(payload(connections))
     snapshot = connections.snapshot()
     settings = snapshot.settings(Settings(tmp_path, '', max_tokens=legacy_limit))
-    real_client = httpx.Client
+    real_client = httpx.AsyncClient
     seen = []
 
     def handler(request):
@@ -309,7 +309,7 @@ def test_routed_deepseek_request_does_not_inherit_shared_output_cap(
                 'content': 'Complete', 'reasoning_content': 'private fixture'}}],
             'usage': {'prompt_tokens': 50, 'completion_tokens': 20000}})
 
-    monkeypatch.setattr(httpx, 'Client', lambda **kw: real_client(**kw, transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kw: real_client(**kw, transport=httpx.MockTransport(handler)))
     client = snapshot.client(max_tokens=settings.max_tokens).for_role('writer', 'fixture-run')
     turn = client.complete(model='deepseek-flash', system='writer',
                            messages=[{'role': 'user', 'content': 'Synthetic task'}], tools=[])

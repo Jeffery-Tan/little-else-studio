@@ -46,7 +46,7 @@ def _shot_label(ordinals):
     return '第 ' + '、'.join(str(n) for n in ordinals) + ' 镜'
 
 
-def _shot_coverage(store, pipeline, run_id, kind, require_media):
+def _shot_coverage(store, pipeline, run_id, kind, require_media, *, state=None):
     """Per-shot readiness for the shots this project actually asks for.
 
     Returns ``(missing, note, target_count)``. The target list comes from the
@@ -58,7 +58,8 @@ def _shot_coverage(store, pipeline, run_id, kind, require_media):
     """
     from .production import _read_state_without_service
 
-    state = _read_state_without_service(store, pipeline, run_id)
+    if state is None:
+        state = _read_state_without_service(store, pipeline, run_id)
     targets = state['targets'][kind]
     if not targets['complete_list']:
         # A legacy prose script has no readable shot list. Say so instead of
@@ -103,6 +104,7 @@ def evaluate(store, pipeline, run_id, goal, *, revision_scope=None, analysis_com
     missing: list[str] = []
     note = ''
     target_count = None
+    delivery_status = None
     if goal in ('intake', 'direction', 'writing'):
         state = pipeline.stage_state(run_id, goal)
         if not state.latest or state.stale or not state.integrity_ok or state.open_attempt:
@@ -119,20 +121,26 @@ def evaluate(store, pipeline, run_id, goal, *, revision_scope=None, analysis_com
                 # the controller at a generation it cannot justify.
                 missing = ['当前脚本待用户采用']
         else:
-            kind = media_kind or production_kind or 'image'
-            missing, note, target_count = _shot_coverage(
-                store, pipeline, run_id, kind, require_media=(goal == 'production_media'))
-            if goal == 'production_media' and missing:
-                # A conversation cannot generate media: submission is the user's
-                # click. So when every shot is prepared and a confirmation is
-                # ready, this turn has delivered everything it can — the endpoint
-                # *is* the confirmation. Reporting it incomplete would push the
-                # controller to retry a submission it has no tool for.
-                from .decision import prepare_generation_candidate
+            from .production import _read_state_without_service
 
-                if prepare_generation_candidate(store, pipeline, run_id, kind):
-                    missing, note = [], (
-                        f'{target_count} 面镜头的输入已齐备，正在等你在确认卡上决定这一次生成。')
+            kind = media_kind or production_kind or 'image'
+            production_state = _read_state_without_service(store, pipeline, run_id)
+            missing, note, target_count = _shot_coverage(
+                store, pipeline, run_id, kind, require_media=(goal == 'production_media'),
+                state=production_state)
+            if goal == 'production_media' and missing:
+                # A read-only candidate is neither a displayed confirmation nor
+                # a delivered result. Keep the missing-media evidence and expose
+                # the real stopping condition so the controller never retries an
+                # active/unknown job just to make the contract say complete.
+                progress = production_state['shots'][kind]
+                delivery_status = progress['state']
+                if delivery_status == 'input_ready':
+                    note = f'{target_count} 个镜头的输入已齐备，尚未提交生成；需要用户核对并授权。'
+                elif delivery_status == 'awaiting_authorisation':
+                    note = '准确生成确认已准备，等待用户授权；媒体尚未交付。'
+                elif delivery_status == 'in_progress':
+                    note = '原任务仍在执行，等待或查询原任务，不要重新提交。'
     elif goal == 'revision':
         if not revision_scope:
             missing.append('绑定本轮原话与准确基线的修订计划')
@@ -155,7 +163,7 @@ def evaluate(store, pipeline, run_id, goal, *, revision_scope=None, analysis_com
                     for e in store.read_events(run_id)) if turn_id else False
         if not saved:
             missing.append('本轮已保存的商品适配提示词')
-    return {'goal': goal, 'status': 'incomplete' if missing else 'complete',
+    return {'goal': goal, 'status': delivery_status or ('incomplete' if missing else 'complete'),
             'missing': missing, 'note': note, 'target_shots': target_count,
             'repeat_key': _repeat_missing(missing, 600)}
 
@@ -168,13 +176,15 @@ def media_progress(store, run_id, kind):
     Telling the controller a turn is incomplete while a provider task is in
     flight is how the same generation gets submitted twice.
     """
-    from .production import coverage, target_shots
+    from .production import _read_state_without_service
+    from .pipeline import Pipeline
 
-    targets = target_shots(store, run_id, kind)
+    state = _read_state_without_service(store, Pipeline(store), run_id)
+    targets = state['targets'][kind]
     if not targets['complete_list']:
         return {'status': 'unknown_targets', 'pending': False, 'notes': targets['notice']}
-    result = coverage({}, kind, targets=targets)
-    return {'status': 'ok', 'pending': bool(result['pending']),
+    result = state['shots'][kind]
+    return {'status': result['state'], 'pending': bool(result['pending']),
             'failed': bool(result['failed']), 'delivered': bool(result['delivered']),
             'total': result.get('total', 0),
             'in_flight': [row['ordinal'] for row in result['shots']

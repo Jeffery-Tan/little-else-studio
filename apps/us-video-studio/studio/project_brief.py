@@ -11,6 +11,21 @@ from .vocabulary import stage_label
 ACTIVE = {"queued", "running", "cancelling"}
 
 
+def content_format(events: list[dict]) -> str | None:
+    """The project's last explicit format, independent of one turn's intent.
+
+    A status/pause turn may carry format=none without changing the work being
+    made. This read model grants no execution scope: callers still need a new
+    user action and the exact source/image approvals before preparing anything.
+    """
+    for event in reversed(events):
+        if event.get('kind') == 'creative_context_selected':
+            value = event.get('selection', {}).get('format')
+            if value in {'video', 'photo'}:
+                return value
+    return None
+
+
 def latest_execution(store, run_id: str, rows=None) -> dict | None:
     """Read the same execution journal without the billing/recovery projection."""
     if rows is None:

@@ -356,3 +356,73 @@ def test_successes_between_identical_failures_do_not_reset_the_count():
     )
     assert result.stopped_because == "repeated_failure"
     assert result.rounds == 5, "read success in between does not reset the count"
+
+
+def test_fresh_dispatch_attempt_ids_cannot_reset_identical_failure_count():
+    from studio.tools.dispatch import DispatchOutcome
+    from studio.tools.execution import ToolResult
+
+    attempts = []
+
+    def execute(name, args):
+        attempts.append(f'direction#{len(attempts) + 1}')
+        outcome = DispatchOutcome(stage='direction', role='director', task_id=attempts[-1],
+                                  error='same deterministic failure')
+        return ToolResult(outcome.receipt(), is_error=True)
+
+    result = run_agent_loop(
+        ScriptedModel([tool_turn(f'call-{n}', 'dispatch', {'stage': 'direction'}) for n in range(8)]),
+        model='fake', system='', messages=[{'role': 'user', 'content': 'Offline task'}],
+        tools=[{'name': 'dispatch'}], execute_tool=execute, max_rounds=8,
+    )
+    assert result.stopped_because == 'repeated_failure'
+    assert len(attempts) == 4
+    assert len({entry['failure_key'] for entry in result.tool_log}) == 1
+    assert len({entry['result'] for entry in result.tool_log}) == 4
+
+
+def test_unsubmitted_child_receipts_share_failure_identity_across_attempts():
+    from studio.agents.client import _failure_key
+    from studio.tools.dispatch import DispatchOutcome
+
+    receipts = [DispatchOutcome(stage='writing', role='writer', task_id=f'writing#{n}',
+                               stopped_because='done').receipt() for n in range(1, 5)]
+    assert len({_failure_key(receipt) for receipt in receipts}) == 1
+
+
+def test_structured_failure_keys_ignore_transport_metadata_not_business_values():
+    from studio.agents.client import _failure_key
+    import json
+
+    def output(attempt, *, shot='shot-02', version=3, limit=12):
+        return json.dumps({'code': 'invalid_input', 'attempt_id': attempt,
+                           'error': {'message': f'Duration must not exceed {limit}',
+                                     'call_id': f'call-{attempt}'},
+                           'target': {'shot_id': shot, 'version': version}})
+
+    key = _failure_key(output('first'))
+    assert key == _failure_key(output('second'))
+    assert key != _failure_key(output('second', shot='shot-03'))
+    assert key != _failure_key(output('second', version=4))
+    assert key != _failure_key(output('second', limit=15))
+    assert _failure_key('failure #1') != _failure_key('failure #2')
+
+
+def test_failure_identity_is_computed_before_display_log_truncation():
+    from studio.tools.execution import ToolResult
+
+    count = 0
+
+    def execute(name, args):
+        nonlocal count
+        count += 1
+        return ToolResult('same prefix ' + 'x' * 2200 + f' distinct target {count}', is_error=True)
+
+    result = run_agent_loop(
+        ScriptedModel([tool_turn(f'call-{n}', 'validate', {}) for n in range(5)]),
+        model='fake', system='', messages=[], tools=[{'name': 'validate'}],
+        execute_tool=execute, max_rounds=5,
+    )
+    assert result.stopped_because == 'max_rounds'
+    assert len({entry['result'] for entry in result.tool_log}) == 1
+    assert len({entry['failure_key'] for entry in result.tool_log}) == 5

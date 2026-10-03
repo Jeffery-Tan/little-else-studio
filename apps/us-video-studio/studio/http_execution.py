@@ -9,7 +9,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 from .connection_checks import ConnectionCheckError
 from .connections import ConnectionConflict
-from .http_contracts import DeepSeekCheckIn, ReviewActionIn, JobIn, DirectionResumeIn, MessageIn, SteerIn, WritingRevisionIn, MediaFeedbackTarget, ProductionDraftFeedbackTarget, redact_http_event
+from .http_contracts import DeepSeekCheckIn, ReviewActionIn, JobIn, DirectionResumeIn, MessageIn, SteerIn, RoleResumeIn, WritingRevisionIn, MediaFeedbackTarget, ProductionDraftFeedbackTarget, redact_http_event
 from .models import PipelineError
 from .project_brief import project_brief, latest_execution
 from . import vocabulary
@@ -104,13 +104,16 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
     def revise_writing_action(run_id: str, payload: WritingRevisionIn):
         require_run(run_id)
         try:
+            from .conversation_input import receive
+            receipt = receive(store, run_id, payload.text, payload.request_id,
+                              feedback_target=payload.feedback_target.model_dump())
             def prepare_revision(rid):
                 from .revision_scope import validate_writing_target
                 validate_writing_target(store, pipeline, rid, payload.feedback_target.model_dump())
-                return prepare_job(rid, writing_revision=payload)
+                return prepare_job(rid, writing_revision=payload, user_input_id=receipt['message_id'])
             return present_job(jobs.submit(run_id, payload.text, payload.request_id,
                 kind='writing_revision', payload=payload.model_dump(exclude={'request_id'}),
-                prepare=prepare_revision))
+                prepare=prepare_revision, user_input_id=receipt['message_id']))
         except (PipelineError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -174,16 +177,35 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
                     raise ValueError('所选句子不在当前脚本中，请重新选择。')
         return feedback_context
 
+    def prepare_input(rid, receipt):
+        envelope = JobIn(text=receipt['text'], request_id=receipt['request_id'],
+                         feedback_target=receipt.get('feedback_target'),
+                         question_id=receipt.get('question_id'))
+        if envelope.question_id:
+            from .interactions import check_answer
+            check_answer(store, rid, envelope.question_id)
+        return prepare_job(rid, feedback_target=validate_feedback_target(rid, envelope.feedback_target),
+                           user_input_id=receipt['message_id'])
+
+    jobs.prepare_input = prepare_input
+    jobs.prepare_followup = lambda rid, source_id: prepare_job(rid, source_user_input_id=source_id)
+
     @app.post("/api/runs/{run_id}/jobs")
     def create_job(run_id: str, payload: JobIn):
         require_run(run_id)
         try:
+            from .conversation_input import receive
+            receipt = receive(store, run_id, payload.text, payload.request_id, payload.display_context_id,
+                              feedback_target=payload.feedback_target.model_dump(exclude_none=True)
+                                  if payload.feedback_target else None,
+                              question_id=payload.question_id)
             target = payload.feedback_target
             if target and payload.question_id:
                 raise ValueError('作品反馈不能同时回答待决问题。')
             def prepare_target(rid):
                 return prepare_job(rid, reference_consent=payload.reference_consent,
-                                   feedback_target=validate_feedback_target(rid, target))
+                                   feedback_target=validate_feedback_target(rid, target),
+                                   user_input_id=receipt['message_id'])
             target_meta = {'feedback_target': target.model_dump(exclude_none=True)} if target else {}
             if isinstance(target, MediaFeedbackTarget):
                 location = f'第 {target.at_seconds:.1f} 秒' if target.at_seconds is not None else '这张图片'
@@ -197,12 +219,14 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
                 from .interactions import check_answer
                 def prepare_answer(rid):
                     check_answer(store, rid, payload.question_id)
-                    return prepare_job(rid, reference_consent=payload.reference_consent)
+                    return prepare_job(rid, reference_consent=payload.reference_consent,
+                                       user_input_id=receipt['message_id'])
                 return present_job(jobs.submit(run_id, payload.text, payload.request_id,
-                    payload={'question_id': payload.question_id, **({'reference_consent': True} if payload.reference_consent else {})}, prepare=prepare_answer))
+                    payload={'question_id': payload.question_id, **({'reference_consent': True} if payload.reference_consent else {})}, prepare=prepare_answer,
+                    user_input_id=receipt['message_id']))
             return present_job(jobs.submit(run_id, message, payload.request_id,
                 payload={**target_meta, **({'reference_consent': True} if payload.reference_consent else {})} or None,
-                prepare=prepare_target))
+                prepare=prepare_target, user_input_id=receipt['message_id']))
         except (PipelineError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -210,6 +234,44 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
     def latest_job(run_id: str, after_seq: int = 0):
         require_run(run_id)
         return present_job(jobs.latest(run_id, max(0, after_seq)))
+
+    @app.get('/api/runs/{run_id}/agent-runtime')
+    def agent_runtime(run_id: str):
+        require_run(run_id)
+        from .agent_runtime import AgentRuntime
+        return AgentRuntime(store, run_id).snapshot()
+
+    @app.get('/api/runs/{run_id}/role-sessions')
+    def role_sessions(run_id: str):
+        require_run(run_id)
+        from .agent_sessions import AgentSessions
+        return AgentSessions(store, run_id).snapshot()
+
+    @app.post('/api/runs/{run_id}/role-sessions/{session_id}/resume')
+    def resume_role_session(run_id: str, session_id: str, payload: RoleResumeIn):
+        require_run(run_id)
+        try:
+            from .agent_sessions import AgentSessions
+            from .conversation_input import receive
+            session = AgentSessions(store, run_id).snapshot(session_id)
+            def prepare_resume(rid):
+                current = AgentSessions(store, rid).snapshot(session_id)
+                if (payload.expected_task_id is not None
+                        and current.get('task_id') != payload.expected_task_id):
+                    raise PipelineError('session_conflict', '角色任务已更新，请刷新后继续。')
+                if current.get('status') in {'queued', 'running'}:
+                    raise PipelineError('session_busy', '这项任务仍在执行，请直接补充或停止。')
+                if current.get('status') == 'cancelled' or current.get('stop_requested'):
+                    raise PipelineError('session_cancelled', '这项任务已经停止，不能恢复旧执行；请发起新的明确任务。')
+                return prepare_job(rid, user_input_id=receipt['message_id'],
+                    role_resume={'session_id': session_id})
+            receipt = receive(store, run_id, payload.text, payload.request_id)
+            return present_job(jobs.submit(run_id, payload.text, payload.request_id,
+                kind='role_resume', payload={'session_id': session_id,
+                    'expected_task_id': payload.expected_task_id},
+                prepare=prepare_resume, user_input_id=receipt['message_id']))
+        except (PipelineError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.get("/api/runs/{run_id}/request-receipts/{request_id}")
     def request_receipt(run_id: str, request_id: str,
@@ -267,7 +329,10 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
             return present_job(jobs.steer(run_id, job_id, payload.text,
                                           payload.request_id, payload.expected_goal_revision,
                                           target, validate_target=lambda: validate_feedback_target(
-                                              run_id, payload.feedback_target)))
+                                               run_id, payload.feedback_target),
+                                           display_context_id=payload.display_context_id,
+                                           question_id=payload.question_id,
+                                           target_session_id=payload.target_session_id))
         except (PipelineError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -283,7 +348,12 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
     def send_message(run_id: str, payload: MessageIn, request: Request) -> StreamingResponse:
         require_run(run_id)
         try:
-            job = jobs.submit(run_id, payload.text, str(uuid.uuid4()))
+            from .conversation_input import receive
+            request_id = str(uuid.uuid4())
+            receipt = receive(store, run_id, payload.text, request_id)
+            job = jobs.submit(run_id, payload.text, request_id,
+                prepare=lambda rid: prepare_job(rid, user_input_id=receipt['message_id']),
+                user_input_id=receipt['message_id'])
         except (PipelineError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
         async def observe():

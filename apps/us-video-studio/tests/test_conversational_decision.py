@@ -51,7 +51,14 @@ def seed_direction(tmp_path):
 def orchestrator(store, pipeline, tmp_path, turns):
     model = ScriptedModel(turns)
     ledger = Ledger(store, settings_for(tmp_path))
-    return Orchestrator(store, pipeline, settings_for(tmp_path), model, ledger, RUN), model
+    orch = Orchestrator(store, pipeline, settings_for(tmp_path), model, ledger, RUN)
+    original_send = orch.send
+    def trusted_send(text, **kwargs):
+        from test_decision import received_message
+        receipt = received_message(store, pipeline, RUN, text)
+        return original_send(text, user_input_id=receipt['message_id'], **kwargs)
+    orch.send = trusted_send
+    return orch, model
 
 
 def proposal_for(store, pipeline, action, **fields):
@@ -62,8 +69,8 @@ def proposal_for(store, pipeline, action, **fields):
 
 # ---------------------------------------------------------------- scenario A -- #
 
-def test_scenario_a_adopting_a_direction_from_conversation_starts_the_work(tmp_path):
-    """'采用 B，继续出分镜' — recorded, continued, and nothing was generated."""
+def test_scenario_a_adopting_a_direction_records_pending_followup(tmp_path):
+    """Orchestrator alone records intent; HTTP integration verifies execution."""
     store, pipeline = seed_direction(tmp_path)
     question = candidates(store, pipeline, RUN)[0]
     orch, model = orchestrator(store, pipeline, tmp_path, [
@@ -174,6 +181,7 @@ def test_scenario_b2_the_agent_may_carry_the_constraint_through_the_tool(tmp_pat
 def test_scenario_c_a_bare_yes_answers_the_only_open_question(tmp_path):
     """'行。' against the one question the run is asking."""
     store, pipeline = seed_direction(tmp_path)
+    store.append_chat(RUN, 'assistant', '是否采用方向 B？')
     question = candidates(store, pipeline, RUN)[0]
     orch, _ = orchestrator(store, pipeline, tmp_path, [
         # The agent answers with the adoption answer for the only open question.
@@ -235,7 +243,9 @@ def storyboard_run(tmp_path, shots=3):
     pipeline.record_approval(RUN, "direction",
                              nonce=pipeline.issue_nonce(RUN, "direction"),
                              decision="approved", selected_option_id="A")
-    picture = {"tc": "0-2s", "picture": "one", "line": "a", "sound": "s", "duration": 2}
+    from visual_fixtures import stage_structure
+    picture = {"tc": "0-2s", "picture": "one", "line": "a", "sound": "s", "duration": 2,
+               "character_ids": "", "scene_id": "table"}
     for stage in ("material_plan", "writing"):
         attempt = pipeline.start_attempt(RUN, stage)
         pipeline.submit(RUN, stage, attempt.token, content=f"doc {stage}", summary=stage,
@@ -243,7 +253,7 @@ def storyboard_run(tmp_path, shots=3):
                             {**picture, "tc": f"{n * 2}-{n * 2 + 2}s",
                              "picture": f"shot {n + 1}", "line": f"line {n + 1}"}
                             for n in range(shots)], "total_duration": shots * 2}
-                        if stage == "writing" else {})
+                        if stage == "writing" else stage_structure(stage))
     pipeline.record_approval(RUN, "writing", nonce=pipeline.issue_nonce(RUN, "writing"),
                              decision="approved")
     source = store.latest_artifact(RUN, "writing")

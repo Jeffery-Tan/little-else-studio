@@ -25,6 +25,27 @@ const { blocksHtml } = require("../../studio/web/blocks.js");
 
 const one = (block) => blocksHtml([block]);
 
+test("shared visual design and per-shot identities use the existing readable blocks without new controls", () => {
+  const html = blocksHtml([
+    {type:'callout', title:'共同人物与场景设计', text:'US 日常处境：厨房 <morning>', items:[{text:'本轮设计假设需要核对'}]},
+    {type:'cards', title:'人物', cards:[{head:'Nora（nora）', fields:[
+      {label:'人物关系',value:'亲子日常'}, {label:'外观与服装',value:'Blue & white outfit'},
+      {label:'表演',value:'<script>stay in character</script>'},
+    ]}]},
+    {type:'cards', title:'场景', cards:[{head:'厨房（kitchen）',fields:[
+      {label:'布局',value:'<window> by the counter'}, {label:'光线与本地细节',value:'Morning light in a US home'},
+    ]}]},
+    {type:'list',title:'连续性要求',items:[{text:'服装延续',note:'实际生成结果逐镜核对'}]},
+    {type:'cards',title:'分镜',cards:[{head:'镜头 01',fields:[
+      {label:'本镜人物',value:'Nora（nora）'}, {label:'本镜场景',value:'厨房（kitchen）'},
+    ]}]},
+  ]);
+  for(const text of ['共同人物与场景设计','人物关系','布局','连续性要求','本镜人物','本镜场景'])assert.ok(html.includes(text));
+  assert.ok(html.includes('&lt;morning&gt;'));assert.ok(html.includes('&lt;script&gt;'));assert.ok(html.includes('&lt;window&gt;'));
+  assert.ok(html.indexOf('共同人物与场景设计')<html.indexOf('镜头 01'));
+  assert.doesNotMatch(html,/<button|<input|<script|<window>|data-approve|data-authorize/);
+});
+
 test("collapsed evidence preserves and escapes every field", () => {
   const html = one({type: 'cards', cards: [{head: 'A', fields: [
     {label: '主张', value: '主要内容'},

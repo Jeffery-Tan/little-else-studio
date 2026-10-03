@@ -12,11 +12,11 @@ This module is the one place that answers two questions:
   never from the message)
 * Is this proposed action the one the user actually expressed? (``resolve``)
 
-The split matters. ``candidates`` and ``resolve`` are **pure**: no store, no
-pipeline, no I/O, so every rule is exhaustively testable. Writing happens only in
-``commit``, which derives the candidates *again* under the run lock and re-runs
-the same check, so a decision can never be recorded against a state that moved
-while it was being validated.
+``candidates`` reads the current shared state projection. ``resolve`` is a pure
+proposal check; with a receipt it also checks the real ingress message and the
+offered view. ``commit`` reads that receipt from the journal, re-derives current
+candidates under the run lock, and records a stage decision only through
+``Pipeline.record_approval``. Brief changes use the existing amendment route.
 
 Two classes of action, and the class is a property of the action rather than of
 the words used to ask for it:
@@ -31,10 +31,11 @@ the words used to ask for it:
     submitting stays behind the workbench's own one-time authorisation, bound to
     exact inputs. Nothing here can submit anything.
 
-What this module deliberately does **not** do: read the user's message to guess
-intent. Understanding the sentence is the agent's job. This module's job is to
-refuse an action that the run's current state does not actually offer, and to ask
-instead of guessing when more than one decision is open.
+The model still interprets natural language. Receipt, version and option checks
+limit its authority; conservative contradiction guards and a bounded adjacent
+yes/no shorthand do not prove general language understanding. Follow-up intent
+is recorded here and consumed exactly once by the job manager; it is never
+reported as started before an actual job receipt exists.
 """
 from __future__ import annotations
 
@@ -63,7 +64,7 @@ class DecisionError(PipelineError):
 
 #: Which actions adopt the version rather than send it back. The mapping lives in
 #: one place so the two channels cannot disagree about what a decision means.
-ADOPTING = frozenset({"select_direction", "approve_stage", "amend_brief"})
+ADOPTING = frozenset({"select_direction", "approve_stage"})
 
 
 def record(store, run_id, pipeline, *, stage: str, artifact_sha256: str, version: int,
@@ -149,7 +150,7 @@ def pending_decisions(store, pipeline, run_id, ledger=None) -> list[dict[str, An
     return [pending] if pending else []
 
 
-def candidates(store, pipeline, run_id) -> list[dict[str, Any]]:
+def candidates(store, pipeline, run_id, *, pending=None) -> list[dict[str, Any]]:
     """The decisions this run is waiting on, each with the answers it allows.
 
     A **question**, not a flat list of actions. The distinction is what makes the
@@ -168,7 +169,7 @@ def candidates(store, pipeline, run_id) -> list[dict[str, Any]]:
         user's choice.
     """
     out: list[dict[str, Any]] = []
-    for row in pending_decisions(store, pipeline, run_id):
+    for row in (pending_decisions(store, pipeline, run_id) if pending is None else pending):
         stage = str(row.get("stage") or "")
         version = row.get("version")
         sha = str(row.get("artifact_sha256") or "")
@@ -260,17 +261,19 @@ def prepare_generation_candidate(store, pipeline, run_id, kind="image") -> dict[
 
     state = _read_state_without_service(store, pipeline, run_id)
     coverage = state["shots"].get(kind) or {}
-    if not coverage.get("complete_list") or not coverage.get("ready"):
+    if (not coverage.get("complete_list") or not coverage.get("ready")
+            or coverage.get('state') not in {'input_ready', 'awaiting_authorisation'}):
         return None
     draft_ids = []
     for row in coverage.get("shots") or []:
-        if row.get("draft_id") and row.get("is_current", True) is not False:
+        if (row.get("draft_id") and row.get("is_current", True) is not False
+                and row.get('stage') in {'input_ready', 'awaiting_authorisation'}):
             draft_ids.append(row["draft_id"])
     if not draft_ids:
         return None
     drafts = {d["draft_id"]: d for d in state["drafts"]}
     frozen = [{"draft_id": d, "draft_sha256": drafts[d].get("draft_sha256")}
-              for d in sorted(set(draft_ids))]
+              for d in dict.fromkeys(draft_ids)]
     known = [drafts[f["draft_id"]].get("estimate", {}).get("amount") for f in frozen]
     total = sum(a for a in known if isinstance(a, (int, float)))
     return {
@@ -295,7 +298,8 @@ def action_id_of(action: dict | None) -> str:
     return str(action.get("action") or action.get("id") or "").strip()
 
 
-def resolve(decisions: list[dict], proposed: dict | None, *, source: str = "conversation") -> dict:
+def resolve(decisions: list[dict], proposed: dict | None, *, source: str = "conversation",
+            receipt: dict | None = None, interpretation: dict | None = None) -> dict:
     """Decide what a proposed answer means. Pure; no state, no I/O.
 
     Returns one of:
@@ -354,6 +358,23 @@ def resolve(decisions: list[dict], proposed: dict | None, *, source: str = "conv
               "stage": decision["stage"], "version": decision["version"],
               "artifact_sha256": decision["artifact_sha256"]}
 
+    def verified(action):
+        if receipt is not None:
+            from .conversation_input import validate_proposal, continue_after
+            displayed = (receipt.get('displayed') or {}).get('decisions') or []
+            viewed = next((d for d in displayed if d['target'] == decision['target']), None)
+            if viewed is None or viewed['answers'] != decision['answers']:
+                return {'status': 'reject', 'reason': 'target_not_displayed',
+                        'message': '这个决定对应的内容与发送消息时展示的版本不同，请刷新后重新决定。'}
+            reason = validate_proposal(receipt, proposed, action)
+            if reason:
+                return {'status': 'clarify', 'reason': reason,
+                        'question': '请明确这次要对当前展示的哪份内容做什么决定。'}
+            action = {**action, 'message_id': receipt['message_id'],
+                      'display_context_id': receipt.get('display_context_id'),
+                      'continue_after': continue_after(receipt, proposed, interpretation=interpretation)}
+        return {'status': 'commit', 'action': action}
+
     if answer["action"] == "select_direction":
         option = str(target.get("option_id") or proposed.get("option_id") or "").strip().upper()
         offered = {o["id"].upper() for o in answer.get("options") or []}
@@ -367,7 +388,7 @@ def resolve(decisions: list[dict], proposed: dict | None, *, source: str = "conv
             return {"status": "reject", "reason": "option_not_available",
                     "message": f"当前{decision['label']}这一版里没有可采用的方向 {option}。"}
         action["target"] = {**action["target"], "option_id": option}
-        return {"status": "commit", "action": action}
+        return verified(action)
 
     if answer["action"] == "return_stage":
         note = str(proposed.get("note") or "").strip()
@@ -375,14 +396,14 @@ def resolve(decisions: list[dict], proposed: dict | None, *, source: str = "conv
             return {"status": "clarify", "reason": "return_needs_note", "action": action,
                     "question": "退回需要说明要改什么，否则责任角色只能猜。"}
         action["note"] = note
-        return {"status": "commit", "action": action}
+        return verified(action)
 
     # A plain adoption. It answers the run's one open question, so a bare
     # confirmation is enough — but only when that question is the *only* one.
     if len(decisions) != 1:
         return {"status": "clarify", "reason": "several_decisions_open",
                 "question": _clarify_question(decisions)}
-    return {"status": "commit", "action": action}
+    return verified(action)
 
 
 def _clarify_question(decisions: list[dict]) -> str:
@@ -427,70 +448,95 @@ def commit(store, pipeline, run_id, action: dict, *, source: str, user_message: 
     stage = str((action.get("target") or {}).get("stage") or "")
     if stage not in STAGE_SPEC or not STAGE_SPEC[stage].gated:
         raise DecisionError("decision", f"{stage or '这个动作'} 不是由你直接决定的阶段。")
-    if source == "ui":
+    if source != "conversation":
         raise DecisionError("decision", "这个入口只记录对话中表达的决定；界面点击走原确认入口。")
     wanted = action_id_of(action)
     if not wanted:
         raise DecisionError("decision", "这个动作没有说明是哪一件事。")
 
+    from .conversation_input import message, interpretation_for
     with store.run_lock(run_id):
-        fresh = candidates(store, pipeline, run_id)
-        match = None
-        for decision in fresh:
-            if decision["stage"] != stage:
-                continue
-            if decision["artifact_sha256"] != action["target"]["artifact_sha256"]:
-                continue
-            answer = next((a for a in decision["answers"] if a["action"] == wanted), None)
-            if answer is not None:
-                match = {**answer, "target": dict(decision["target"])}
-                break
-        if match is None:
-            raise DecisionError("decision_conflict",
-                                "等待你决定的内容已经变化，请查看当前版本后再决定。")
-        target = match["target"]
-        decision = "approved" if match["action"] in ADOPTING else "returned"
-        option = action.get("option_id") or (action.get("target") or {}).get("option_id")
-        continuation = accepting_user_words(note or action.get("continuation_note") or "",
-                                           user_message)
-        # The nonce is issued by the pipeline and only ever written down as a
-        # hash. Its plaintext stays inside this call and is returned to nobody, so
-        # a conversation decision cannot be replayed by an agent — no agent ever
-        # sees a usable value.
-        nonce = pipeline.issue_nonce(run_id, stage,
-                                     expected_artifact_sha256=target["artifact_sha256"],
-                                     expected_version=int(target["version"]))
+        try:
+            receipt = message(store, run_id, action.get('message_id'))
+        except PipelineError as exc:
+            raise DecisionError(getattr(exc, 'rule', 'user_message'), str(exc)) from exc
+        if request_id and receipt['request_id'] != request_id:
+            raise DecisionError('message_mismatch', '这个动作没有绑定本轮用户消息。')
+        request_id = receipt['request_id']
+        if any(e['kind'] == 'user_message_consumed' and e.get('message_id') == receipt['message_id']
+               for e in store.read_events(run_id)):
+            raise DecisionError('message_consumed', '这条用户消息已经记录过决定，不能再次使用。')
+        verdict = resolve(candidates(store, pipeline, run_id), action, receipt=receipt,
+                          interpretation=interpretation_for(store, run_id, receipt['message_id']))
+        if verdict['status'] != 'commit':
+            raise DecisionError(verdict.get('reason', 'decision_conflict'),
+                                verdict.get('message') or verdict.get('question') or '当前内容已变化。')
+        match = verdict['action']
+        target = match['target']
+        user_message = receipt['text']  # Never trust a model-authored replacement.
+        continuation = accepting_user_words(note or action.get('continuation_note') or '', user_message)
+        proceed = match['continue_after']
+        if wanted == 'amend_brief':
+            from .active_brief import apply_brief_amendment
+            payload = match['payload']  # Only the offered proposal, not model payload.
+            displayed = receipt['displayed']['pending']
+            amendment = apply_brief_amendment(store, run_id,
+                changes=[{'op': payload.get('op') or 'replace',
+                          'clause_id': payload['clause_id'], 'text': payload['text']}],
+                note=user_message[:2000], source='conversation', approve=True,
+                request_id=f"conversation:{receipt['message_id']}",
+                expected_brief_fingerprint=displayed['brief_fingerprint'],
+                expected_artifact_sha256=target['artifact_sha256'], expected_version=target['version'])
+            result = {'status': 'recorded', 'action': wanted, 'stage': stage,
+                      'version': target['version'],
+                      'amendment': {'id': amendment['id'], 'status': amendment['status']}}
+            followup_id = amendment_redo_request_id(amendment['id'])
+            followup_text = amendment_redo_text()
+        else:
+            decision = 'approved' if wanted in ADOPTING else 'returned'
+            return_note = accepting_user_words(action.get('note') or '', user_message)
+            if wanted == 'return_stage' and not return_note:
+                raise DecisionError('note_not_user_words', '修改意见须引用这条用户消息的原话。')
+            nonce = pipeline.issue_nonce(run_id, stage,
+                expected_artifact_sha256=target['artifact_sha256'], expected_version=target['version'])
+            approval = record(store, run_id, pipeline, stage=stage,
+                artifact_sha256=target['artifact_sha256'], version=target['version'],
+                decision=decision, source=source, nonce=nonce, note=return_note,
+                selected_option_id=target.get('option_id'), continue_after=proceed,
+                continuation_note=continuation, action_id=wanted, action_class=match['class'],
+                request_id=request_id)
+            result = {'status': 'recorded', 'action': wanted, 'stage': stage,
+                      'version': approval.artifact_version, 'decision': approval.decision,
+                      'selected_option_id': approval.selected_option_id,
+                      'continuation_note': approval.continuation_note}
+            followup_id, followup_text = continuation_request_id(approval), continuation_text(approval)
+        result['continuation_status'] = 'pending' if proceed else 'paused'
+        if proceed:
+            # The optional model-selected note is only a locator. Carry the
+            # complete source independently so omitted conditions survive both
+            # normal scheduling and recovery of this exact continuation.
+            followup_text += ('\n本次决定所附的完整用户原话（附加要求须保留；'
+                              '决定已记录，不是新的批准或生成授权）：\n' + user_message)
+            store.append_event(run_id, 'decision_followup_requested', request_id=followup_id,
+                source_request_id=request_id, message_id=receipt['message_id'],
+                source_user_input_id=receipt['message_id'],
+                text=followup_text, action_id=wanted, target=target)
+            result['continuation_request_id'] = followup_id
+        store.append_event(run_id, 'user_message_consumed', message_id=receipt['message_id'],
+                           request_id=request_id, action_id=wanted, result=result)
+        store.append_event(run_id, 'user_action_committed', action_id=wanted, stage=stage,
+                           source=source, request_id=request_id, message_id=receipt['message_id'])
+        return result
 
-    approval = record(
-        store, run_id, pipeline,
-        stage=stage, artifact_sha256=target["artifact_sha256"], version=int(target["version"]),
-        decision=decision, source=source, nonce=nonce,
-        note=str(action.get("note") or ""),
-        selected_option_id=str(option).upper() if option else None,
-        continue_after=True, continuation_note=continuation,
-        action_id=match["action"], action_class=match["class"], request_id=request_id,
-    )
-    result = {"status": "recorded", "action": match["action"], "stage": stage,
-              "version": approval.artifact_version, "decision": approval.decision,
-              "selected_option_id": approval.selected_option_id,
-              "continuation_note": approval.continuation_note}
-    if match["action"] == "amend_brief":
-        from .active_brief import apply_brief_amendment
 
-        payload = action.get("payload") or match.get("payload") or {}
-        amendment = apply_brief_amendment(
-            store, run_id,
-            changes=[{"op": payload.get("op") or "replace",
-                      "clause_id": payload.get("clause_id"),
-                      "text": payload.get("text")}],
-            note=user_message[:2000], source="conversation", approve=True,
-            expected_artifact_sha256=target["artifact_sha256"],
-            expected_version=int(target["version"]),
-        )
-        result["amendment"] = {"id": amendment.get("id"), "status": amendment.get("status")}
-    store.append_event(run_id, "user_action_committed", action_id=match["action"],
-                       stage=stage, source=source, request_id=request_id or "")
-    return result
+def amendment_redo_request_id(amendment_id):
+    return f'brief-amendment:{amendment_id}'
+
+
+def amendment_redo_text():
+    return ('有效简报已按我的决定修订；原先的方向方案写的是旧简报，本版作废。'
+            '请团队按新简报重新做创意方向，完成内部检查后再展示给我确认。'
+            '先不要提交图片或视频生成。')
 
 
 def reject_event(store, run_id, proposed: dict | None, resolution: dict, *, source: str) -> None:
@@ -508,7 +554,8 @@ def continuation_intent(store, pipeline, run_id, request_id: str = "") -> dict[s
     same request identity from the same approval record.
     """
     rows = store.read_events(run_id)
-    created = {row.get("request_id") for row in rows if row.get("kind") == "job_created"}
+    created = {row.get("request_id") for row in rows
+               if row.get("kind") in {"job_created", "decision_followup_suppressed"}}
     for approval in reversed(store.list_approvals(run_id)):
         if not approval.continue_after:
             continue
@@ -531,7 +578,7 @@ def continuation_request_id(approval) -> str:
     return f"decision:{approval.nonce_sha256}"
 
 
-def continuation_text(approval) -> str:
+def continuation_text(approval, *, store=None, run_id=None) -> str:
     """The work the user's decision asks for next.
 
     Written once, here, so a decision made by clicking and the same decision made
@@ -541,6 +588,12 @@ def continuation_text(approval) -> str:
     ``continuation_note`` is the user's own instruction for this next round — it
     rides along without being part of what was adopted.
     """
+    if store is not None and run_id is not None:
+        saved = next((e for e in store.read_events(run_id)
+                      if e['kind'] == 'decision_followup_requested'
+                      and e.get('request_id') == continuation_request_id(approval)), None)
+        if saved:
+            return saved['text']
     stage_label = {"direction": "创意方向", "writing": "完整方案"}.get(
         approval.stage, approval.stage)
     extra = (approval.continuation_note or "").strip()

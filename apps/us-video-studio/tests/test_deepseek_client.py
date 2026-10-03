@@ -22,7 +22,7 @@ def response(text="Done", reasoning="private reasoning", calls=None, finish=None
 
 
 def transport(monkeypatch, replies):
-    original = httpx.Client
+    original = httpx.AsyncClient
     seen = []
     def handle(request):
         seen.append(request)
@@ -32,7 +32,7 @@ def transport(monkeypatch, replies):
         assert kwargs["follow_redirects"] is False
         assert kwargs["trust_env"] is False
         return original(**kwargs, transport=httpx.MockTransport(handle))
-    monkeypatch.setattr(httpx, "Client", factory)
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
     return seen
 
 
@@ -117,7 +117,8 @@ def test_streamed_public_progress_never_exposes_reasoning_or_partial_tool_args(m
     assert turn.tool_calls[0].input == {'stage': 'intake'}
     assert turn.raw_blocks[0] == {'type': REASONING_BLOCK, 'reasoning_content': 'private reasoning '}
     assert turn.usage.input_tokens == 13 and turn.usage.output_tokens == 19
-    assert progress and all(p['type'] == 'agent_narration_preview' for p in progress)
+    assert any(p['type'] == 'agent_narration_preview' for p in progress)
+    assert all(p['type'] in ('agent_narration_preview', 'agent_activity') for p in progress)
     assert 'private reasoning' not in str(progress) and 'intake' not in str(progress)
 
 

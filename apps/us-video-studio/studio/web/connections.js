@@ -57,6 +57,9 @@ function openConnectionDialog(config) {
     box("p", "muted", loaded
       ? `进程启动：${loaded.started_at} · 代码指纹：${loaded.code_fingerprint} · 数据根标识：${loaded.data_root_id} · Python ${loaded.python}。FFmpeg：${loaded.media_tools?.ffmpeg ? '可找到' : '未找到'}。${loaded.meaning}`
       : "运行信息暂不可用；请确认后端已更新并重新打开模型设置。"));
+  if (loaded) runtime.append(box("p", "muted", loaded.hot_reload?.enabled
+    ? `热重载已开启。${loaded.hot_reload.message || '代码修改后自动更新；执行中等待本轮结束。'}`
+    : "热重载未开启。请使用新版启动脚本启动服务。"));
   form.append(runtime);
   const steps = box("ol", "connection-steps");
   for (const step of ["连接服务", "验证密钥与模型", "分配角色", "保存设置"]) steps.append(box("li", "", step));

@@ -82,7 +82,9 @@
 
 启动、依赖和离线测试命令见 [README](../README.md#启动与检查)。`start.ps1 -CheckOnly` 不写业务状态；首次显式 `-AllowNew` 启动空工作台会写 `.studio-root.json`，之后可正常重启。环境兼容项：`STUDIO_DATA_ROOT` 选择数据根；旧客户端的 `STUDIO_BASE_URL` / `ANTHROPIC_BASE_URL` 与 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` 不会自动导入站内连接。Codex 优先从服务进程 PATH 定位；Windows 未配置 PATH 时使用当前用户桌面应用安装目录内的 CLI（具体优先顺序见 README），无需打开桌面客户端；百炼通过 `%LOCALAPPDATA%/E-commerce/credentials/` 使用原用户 DPAPI 凭据，只在明确提交或查询原任务时解密。
 
-服务更新前先确认目标端口、对应 studio.server 进程和数据根；查看各项目 recovery，确认活动任务、开放尝试、未知用量，保留原记录再正常停止对应服务。不要因更新而清空 ledger、覆盖运行目录或启动第二个 writer。若执行工具拒绝停止/启动，记录实际拒绝，不宣称已加载；再次操作前重新查端口与进程，不使用过期 PID。服务重新启动只恢复本地状态，不自动重发模型或视频请求。
+`start.ps1` 默认后台热重载，常规代码修改由启动器等制作和登录结束后换 worker，旧 worker 完全退出后新 worker 才取得同一数据根 writer 锁。业务任务与登录均空闲后，HTTP 优雅退出等待上限为 10 秒，避免 Windows 连接重置造成无限等待；该上限不作用于在途制作或角色任务。`/api/runtime.hot_reload` 报告 watching、settling、waiting_for_idle、invalid_code 或 reloading；模型设置同步说明实际状态。语法错误保留旧服务，导入错误查看启动回执中的 stderr 日志，修复代码后监督进程自动再启动。不监听运行数据或凭据，不自动重发模型或视频请求。修改依赖、启动脚本或监督进程自身逻辑仍需正常重启；前台诊断用 `-Foreground`，固定版本用 `-NoReload`。
+
+首次切换旧启动方式或需要手动重启时，先确认目标端口、实际 worker/监督进程和数据根；查看各项目 recovery，确认活动任务、开放尝试、未知用量，保留原记录再正常停止对应服务。不要因更新而清空 ledger、覆盖运行目录或启动第二个 writer。若执行工具拒绝停止/启动，记录实际拒绝，不宣称已加载；再次操作前重新查端口与进程，不使用过期 PID。服务重新启动只恢复本地状态，不自动重发模型或视频请求。
 
 以下 PowerShell 是只读冒烟，不调用模型；`<RUN_ID>` 替换为 `/api/runs` 返回的实际项目 ID。不要将响应中的业务内容或费用明细复制到公开日志。
 

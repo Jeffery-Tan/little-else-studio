@@ -770,7 +770,8 @@ def compile_active_brief(store: Store, run_id: str, *, version: int | None = Non
     intake = store.latest_artifact(run_id, "intake")
     structured: dict[str, Any] = dict(intake.structured or {}) if intake else {}
     source = intake.key if intake else "intake:missing"
-    chat = store.read_chat(run_id)
+    from .conversation_input import visible_chat
+    chat = [row for _, row in visible_chat(store, run_id)]
     replies = _user_replies(chat)
 
     # Authority first, interpretation second. ``_goal_from_intake`` stays as the

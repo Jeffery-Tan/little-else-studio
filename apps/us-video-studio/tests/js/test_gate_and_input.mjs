@@ -846,7 +846,8 @@ test('clearing a settled request never takes an unresolved one with it', async (
   const blocked = await app.ctx.submit();
   assert.equal(blocked.uncertain, true);
   assert.match(String(blocked.reason), /还没有确认/);
-  assert.equal(markers.size, 1, 'still just the original marker');
+  assert.deepEqual([...markers.keys()].filter(key=>key.startsWith('studio-job-pending:')),
+    ['studio-job-pending:run-1'], 'still just the original request marker; composer drafts have their own key');
 
   // Once that outcome is settled, a later request proceeds — and its own
   // definite rejection clears only its own marker.

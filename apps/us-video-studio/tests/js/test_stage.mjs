@@ -624,6 +624,31 @@ test('visual script shows every picture and sound without opening details or inv
   assert.doesNotMatch(html,/data-creator-target="第 1 段台词"/);
 });
 
+test('the specialised script reader keeps each shot character and scene identities in the main reading flow', () => {
+  const html=stageHtml(step({stage:'writing',blocks:[{type:'cards',title:'逐段',cards:[
+    {head:'0:00–0:05',fields:[{label:'画面',value:'Ava opens the bag'},{label:'人物身份',value:'ava,jordan'},{label:'场景身份',value:'office_table'}]},
+    {head:'0:05–0:10',fields:[{label:'画面',value:'Product close-up'},{label:'本镜人物',value:''},{label:'本镜场景',value:'厨房 <morning>'}]},
+  ]}],artifact_sha256:'a'.repeat(64)}),{contentFormat:'video'});
+  assert.match(html,/人物<\/strong><p>ava,jordan<\/p>/);
+  assert.match(html,/场景<\/strong><p>office_table<\/p>/);
+  assert.match(html,/本镜不包含人物/);assert.match(html,/厨房 &lt;morning&gt;/);
+  const shots=html.match(/<article id="script-segment-\d+"[\s\S]*?<\/article>/g);
+  assert.equal(shots.length,2);assert.match(shots[0],/ava,jordan/);assert.doesNotMatch(shots[1],/ava,jordan/);
+  assert.doesNotMatch(shots.join(''),/<details|<morning>|data-creator-path="[^\"]*(?:character_ids|scene_id)/);
+});
+
+test('human character and scene labels take priority while legacy scripts do not invent missing design references',()=>{
+  const html=stageHtml(step({stage:'writing',blocks:[{type:'cards',title:'逐段',cards:[
+    {head:'0:00–0:05',fields:[{label:'画面',value:'Current shot'},{label:'人物身份',value:'unused_raw_cast'},{label:'场景身份',value:'unused_raw_scene'},
+      {label:'本镜人物',value:'Ava & Jordan（ava,jordan）'},{label:'本镜场景',value:'办公室桌面（table）'}]},
+    {head:'0:05–0:10',fields:[{label:'画面',value:'Legacy shot only'}]},
+  ]}],artifact_sha256:'a'.repeat(64)}),{contentFormat:'video'});
+  assert.match(html,/Ava &amp; Jordan（ava,jordan）/);assert.match(html,/办公室桌面（table）/);
+  assert.doesNotMatch(html,/unused_raw_cast|unused_raw_scene/);
+  const legacy=html.match(/<article id="script-segment-2"[\s\S]*?<\/article>/)[0];
+  assert.match(legacy,/Legacy shot only/);assert.doesNotMatch(legacy,/本镜人物|本镜场景|本镜不包含人物/);
+});
+
 test('photo script reads page pictures and on-image copy without video labels', () => {
   const html=stageHtml(step({stage:'writing',blocks:[{type:'cards',cards:[
     {head:'第 1 页',fields:[{label:'画面',value:'桌上并排两款包'},{label:'台词',value:'Pick your lunch size'}]},

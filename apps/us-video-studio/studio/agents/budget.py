@@ -43,7 +43,8 @@ class BudgetedClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> Turn:
-        with self.ledger.call_guard():
+        with self.ledger.call_guard(concurrent=True,
+                                    check_cancel=getattr(self.inner, 'check_cancel', None)):
             return self._complete_guarded(model=model, system=system, messages=messages, tools=tools)
 
     def _complete_guarded(self, *, model: str, system: str,

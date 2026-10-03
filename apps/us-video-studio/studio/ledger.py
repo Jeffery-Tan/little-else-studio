@@ -19,7 +19,9 @@ from .models import BudgetExceeded, LedgerEntry, utcnow
 from .store import Store
 
 _JOURNAL_LOCK = threading.RLock()
-_ACTIVE_CALL = threading.Lock()
+_CALL_CONDITION = threading.Condition(threading.RLock())
+_CALL_LEASES: dict[str, dict[str, Any]] = {}
+MAX_ACTIVE_MODEL_CALLS = 4
 
 
 @dataclass(frozen=True)
@@ -60,45 +62,66 @@ class Ledger:
         self.settings = settings
 
     @contextmanager
-    def call_guard(self):
-        """OS lease for a live request, released automatically on process exit.
+    def call_guard(self, *, concurrent=False, check_cancel=None):
+        """Bounded calls share one process lease; reconciliation is exclusive.
 
-        Reconciliation uses the same lease, so it cannot clear an intent while
-        its original HTTP request is still running.
+        The OS lease is held until every local call has settled. A second
+        process and reconciliation therefore cannot overwrite a live intent.
+        Waiting for a slot does not create an intent or spend anything.
         """
-        if not _ACTIVE_CALL.acquire(blocking=False):
-            raise BudgetExceeded("a model call is still active; wait for it to stop before spending or reconciling")
-        handle = None
-        acquired = False
+        root = self.settings.data_root.resolve()
+        key = os.path.normcase(str(root))
+        with _CALL_CONDITION:
+            while True:
+                if check_cancel:
+                    check_cancel()
+                lease = _CALL_LEASES.get(key)
+                if lease and (not concurrent or lease['exclusive']):
+                    raise BudgetExceeded('a model call is still active; wait before reconciliation')
+                if lease and lease['count'] >= MAX_ACTIVE_MODEL_CALLS:
+                    _CALL_CONDITION.wait(.05)
+                    continue
+                if lease is None:
+                    root.mkdir(parents=True, exist_ok=True)
+                    handle = open(root / '.model-call.lock', 'a+b')
+                    handle.seek(0, os.SEEK_END)
+                    if handle.tell() == 0:
+                        handle.write(b'0')
+                        handle.flush()
+                    handle.seek(0)
+                    try:
+                        if os.name == 'nt':
+                            import msvcrt
+                            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        else:
+                            import fcntl
+                            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError as exc:
+                        handle.close()
+                        raise BudgetExceeded('another process has an active model call; await it before spending or reconciliation') from exc
+                    lease = {'handle': handle, 'count': 0, 'exclusive': not concurrent}
+                    _CALL_LEASES[key] = lease
+                lease['count'] += 1
+                break
         try:
-            self.settings.data_root.mkdir(parents=True, exist_ok=True)
-            handle = open(self.settings.data_root / ".model-call.lock", "a+b")
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
-                handle.write(b"0")
-                handle.flush()
-            handle.seek(0)
-            try:
-                if os.name == "nt":
-                    import msvcrt
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
-            except OSError as exc:
-                raise BudgetExceeded("another process has an active model call; stop or await it before reconciliation") from exc
             yield
         finally:
-            if handle is not None:
-                if acquired:
-                    handle.seek(0)
-                    if os.name == "nt":
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                    else:
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                handle.close()
-            _ACTIVE_CALL.release()
+            with _CALL_CONDITION:
+                lease['count'] -= 1
+                if lease['count'] == 0:
+                    handle = lease['handle']
+                    try:
+                        handle.seek(0)
+                        if os.name == 'nt':
+                            import msvcrt
+                            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                        else:
+                            import fcntl
+                            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    finally:
+                        handle.close()
+                        _CALL_LEASES.pop(key, None)
+                _CALL_CONDITION.notify_all()
 
     @contextmanager
     def _locked(self):

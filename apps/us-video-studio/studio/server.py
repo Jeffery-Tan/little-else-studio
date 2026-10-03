@@ -90,7 +90,8 @@ def build_app(
             raise PipelineError('review', '这一版当前不能发起审核，请刷新项目状态。')
 
     def prepare_job(run_id, review=None, reference_consent=False, feedback_target=None,
-                    writing_revision=None, direction_resume=None):
+                    writing_revision=None, direction_resume=None, user_input_id=None,
+                    source_user_input_id=None, role_resume=None):
         if review is not None:
             require_review_version(run_id, review)
         if writing_revision is not None:
@@ -118,6 +119,31 @@ def build_app(
             job_client = client if client_factory is not None else snapshot.client(
                 check_cancel=check_cancel, max_tokens=job_settings.max_tokens,
                 cancel_event=jobs.cancelled)
+            if role_resume is not None:
+                from .conversation_input import message as user_message, accept, start_execution
+                from .tools.dispatch import Dispatcher
+                from .task_contract import evaluate
+                check_cancel()
+                receipt = user_message(store, run_id, user_input_id)
+                accept(store, run_id, receipt)
+                start_execution(store, run_id, receipt)
+                outcome = Dispatcher(store, pipeline, job_settings, job_client,
+                    Ledger(store, job_settings), run_id, on_event=emit,
+                    check_cancel=check_cancel, learning_service=learning).resume_session(
+                        role_resume['session_id'], brief=receipt['text'],
+                        user_input_id=receipt['message_id'])
+                if outcome.stopped_because == 'cancelled':
+                    reply = '这项角色任务已停止，已有内容与记录保留；不会自动重试。'
+                    store.append_chat(run_id, 'assistant', reply)
+                    return OrchestratorTurn(reply, 'done', outcome.rounds,
+                                            deliverable=evaluate(store, pipeline, run_id, 'follow_up'))
+                if not outcome.submitted:
+                    raise PipelineError('role_resume', outcome.error or '角色尚未交付；会话与旧内容保留。')
+                delivery = evaluate(store, pipeline, run_id,
+                    'direction' if outcome.stage == 'direction' else 'writing' if outcome.stage == 'writing' else 'follow_up')
+                reply = f'这项创作任务已交回：{outcome.submitted}。请阅读当前版本，原批准不会自动继承。'
+                store.append_chat(run_id, 'assistant', reply)
+                return OrchestratorTurn(reply, 'done', outcome.rounds, deliverable=delivery)
             if review is not None:
                 # A typed command bypasses the producer loop, not review checks.
                 require_review_version(run_id, review)
@@ -142,7 +168,10 @@ def build_app(
                 from .tools.dispatch import Dispatcher
 
                 check_cancel()
-                store.append_chat(run_id, 'user', text)
+                from .conversation_input import message as user_message, accept, start_execution
+                receipt = user_message(store, run_id, user_input_id)
+                accept(store, run_id, receipt)
+                start_execution(store, run_id, receipt)
                 target = validate_writing_target(store, pipeline, run_id,
                                                  writing_revision.feedback_target.model_dump())
                 previous = creative_selection(store, run_id)
@@ -159,7 +188,8 @@ def build_app(
                 outcome = Dispatcher(store, pipeline, job_settings, job_client, ledger_for_task,
                                      run_id, on_event=emit, check_cancel=check_cancel,
                                      learning_service=learning).dispatch('writing', text,
-                                                                          revision_scope=scope)
+                                                                          revision_scope=scope,
+                                                                          user_input_id=user_input_id)
                 if not outcome.submitted:
                     raise PipelineError('revision', outcome.error or '编剧未提交新版本，原稿已保留。')
                 revised = store.latest_artifact(run_id, 'writing')
@@ -231,7 +261,9 @@ def build_app(
                 learning_service=learning,
                 reference_observer=observe_reference, product_video_observer=observe_product_video,
                 image_observer=observe_images).send(
-                    text, feedback_context=feedback_target)
+                    text, feedback_context=feedback_target, user_input_id=user_input_id,
+                    source_user_input_id=source_user_input_id,
+                    internal_instruction=user_input_id is None)
         return run, summary
 
     jobs = JobManager(store, pipeline, ledger, prepare_job)
@@ -241,11 +273,11 @@ def build_app(
     # One identity and one text for a decision's follow-up work, shared by the
     # browser's click and a decision the user stated in conversation. Two copies
     # is how the two channels would start behaving differently for one decision.
-    from .decision import continuation_request_id, continuation_text
+    from .decision import continuation_request_id, continuation_text, amendment_redo_request_id, amendment_redo_text
 
     def continuation_job(run_id, approval):
-        return jobs.submit(run_id, continuation_text(approval),
-                           continuation_request_id(approval))
+        return jobs.submit_decision_followup(run_id, continuation_text(approval, store=store, run_id=run_id),
+                                            continuation_request_id(approval))
 
     # ---- brief amendment → team redo (F5) --------------------------------- #
     #
@@ -254,17 +286,9 @@ def build_app(
     # The request identity is derived from the amendment id, never from a
     # timestamp: retrying a lost response, or pressing the explicit "继续重做"
     # button, resolves the *same* job instead of buying a second one.
-    def amendment_redo_request_id(amendment_id):
-        return f'brief-amendment:{amendment_id}'
-
-    def amendment_redo_text():
-        return ('有效简报已按我的决定修订；原先的方向方案写的是旧简报，本版作废。'
-                '请团队按新简报重新做创意方向，完成内部审核后再展示给我确认。'
-                '先不要提交图片或视频生成。')
-
     def amendment_redo_job(run_id, amendment_id):
-        return jobs.submit(run_id, amendment_redo_text(),
-                           amendment_redo_request_id(amendment_id))
+        return jobs.submit_decision_followup(run_id, amendment_redo_text(),
+                                            amendment_redo_request_id(amendment_id))
 
     def pending_amendment_redo(run_id):
         """An approved amendment whose redo never started, as a recovery entry.
@@ -292,8 +316,13 @@ def build_app(
         if not approved:
             return None
         newest = approved[-1]
+        if any(e['kind'] == 'user_message_consumed'
+               and (e.get('result') or {}).get('amendment', {}).get('id') == newest.get('id')
+               and e['result'].get('continuation_status') == 'paused'
+               for e in store.read_events(run_id)):
+            return None
         created = {row.get('request_id') for row in store.read_events(run_id)
-                   if row.get('kind') == 'job_created'}
+                   if row.get('kind') in {'job_created', 'decision_followup_suppressed'}}
         if amendment_redo_request_id(newest.get('id')) in created:
             return None
 
@@ -326,16 +355,13 @@ def build_app(
             job_busy = jobs.busy(run_id)
         if job_busy:
             return None
-        rows = store.read_events(run_id)
-        created = {row.get('request_id') for row in rows if row.get('kind') == 'job_created'}
-        for approval in reversed(store.list_approvals(run_id)):
-            if not approval.continue_after or continuation_request_id(approval) in created:
-                continue
-            current = pipeline.stage_state(run_id, approval.stage).latest
-            if current and current.version == approval.artifact_version and current.sha256 == approval.artifact_sha256:
-                return {'stage': approval.stage, 'expected_version': approval.artifact_version,
-                        'expected_artifact_sha256': approval.artifact_sha256,
-                        'message': '决定已保存，下一步尚未启动。请检查连接后点击继续。'}
+        from .decision import continuation_intent
+        pending = continuation_intent(store, pipeline, run_id)
+        if pending:
+            approval = pending['approval']
+            return {'stage': pending['stage'], 'expected_version': approval['artifact_version'],
+                    'expected_artifact_sha256': approval['artifact_sha256'],
+                    'message': '决定已保存，下一步尚未启动。请检查连接后点击继续。'}
         return None
 
     @asynccontextmanager

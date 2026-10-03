@@ -13,8 +13,12 @@ leaving one behind would be a silent trap for the next dispatch.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from concurrent.futures import TimeoutError as FutureTimeout
+import copy
 import hashlib
 import json
+import threading
+import time
 from typing import Any, Callable
 
 from ..agents.budget import BudgetedClient
@@ -31,6 +35,31 @@ from .execution import ToolResult
 from .workspace import ToolError, Workspace
 from ..revision_scope import check_base, patch_payload, record_applied, work_plan
 from ..task_context import assemble_role_task
+from ..agent_runtime import AgentRuntime, TERMINAL, current_task_id, bind_task, reset_task
+from ..agent_sessions import AgentSessions, SessionJournal
+from ..role_executor import DEFAULT_EXECUTOR
+
+_HANDLES = {}
+_HANDLES_LOCK = threading.Lock()
+
+
+def in_flight_role_futures(store, run_id=None, parent_job_id=None):
+    """Reserved/running workers; durable terminal status is not execution idle."""
+    root = str(store.root.resolve())
+    with DEFAULT_EXECUTOR.lock:
+        active = tuple(DEFAULT_EXECUTOR.active.items())
+    futures = []
+    for (data_root, role_run_id, session_id), future in active:
+        if data_root != root or (run_id is not None and role_run_id != run_id):
+            continue
+        if future.done():
+            continue
+        if parent_job_id is not None:
+            row = AgentSessions(store, role_run_id).snapshot(session_id)
+            if row.get('parent_job_id') != parent_job_id:
+                continue
+        futures.append(future)
+    return tuple(futures)
 
 
 @dataclass
@@ -38,6 +67,7 @@ class DispatchOutcome:
     stage: str
     role: str
     task_id: str = ""
+    session_id: str = ""
     submitted: str | None = None
     artifact_version: int | None = None
     artifact_sha256: str = ""
@@ -51,13 +81,15 @@ class DispatchOutcome:
 
     def receipt(self) -> str:
         """A compact, machine-readable handoff for the parent Agent."""
-        status = "failed" if self.error else "submitted" if self.submitted else "incomplete"
+        status = ('cancelled' if self.stopped_because == 'cancelled' else
+                  'failed' if self.error else 'submitted' if self.submitted else 'incomplete')
         return json.dumps({
             "ok": status == "submitted",
             "status": status,
             "stage": self.stage,
             "role": self.role,
             "task_id": self.task_id or None,
+            "session_id": self.session_id or None,
             "artifact": ({"key": self.submitted, "version": self.artifact_version,
                           "sha256": self.artifact_sha256}
                          if self.submitted else None),
@@ -118,6 +150,9 @@ class Dispatcher:
             from ..learning import LearningService
             learning_service = LearningService(store)
         self.learning = learning_service
+        self._sessions = AgentSessions(store, run_id)
+        self._session_id = None
+        self._resume_messages = []
 
     def _emit(self, event: dict[str, Any]) -> None:
         if self.on_event is not None:
@@ -125,7 +160,8 @@ class Dispatcher:
 
     # ------------------------------------------------------------- public -- #
 
-    def dispatch(self, stage: str, brief: str, *, revision_scope=None) -> DispatchOutcome:
+    def dispatch(self, stage: str, brief: str, *, revision_scope=None,
+                 user_input_id=None, turn_scope=None, session_id=None) -> DispatchOutcome:
         if stage not in STAGE_SPEC:
             raise ToolError(f"unknown stage: {stage!r}")
         role = OWNER[stage]
@@ -134,11 +170,198 @@ class Dispatcher:
                 f"{stage} is owned by the orchestrator. Write it directly with write_stage "
                 f"— it is the intake conversation, not delegated work."
             )
-        return self.run_role(stage, role, brief, revision_scope=revision_scope)
+        return self.run_role(stage, role, brief, revision_scope=revision_scope,
+                             user_input_id=user_input_id, turn_scope=turn_scope, session_id=session_id)
+
+    def sessions(self):
+        return self._sessions.sessions()
+
+    def snapshot(self):
+        return self._sessions.snapshot()
+
+    def session_contract(self, session_id):
+        return self._sessions.contract(session_id)
+
+    def message_session(self, session_id, message_id, text, *, source_message_id=None):
+        return self._sessions.post_message(session_id, message_id, text, source_message_id=source_message_id)
+
+    def cancel_session(self, session_id, *, reason='User stopped this role session'):
+        return self._sessions.cancel(session_id, reason=reason)
+
+    def _key(self, session_id):
+        return (str(self.store.root.resolve()), self.run_id, session_id)
+
+    def _saved_outcome(self, session_id):
+        row = self._sessions.snapshot(session_id)
+        outcome = DispatchOutcome(stage=row['stage'], role=row['role'], session_id=session_id,
+                                  task_id=row.get('task_id') or '', stopped_because=row['status'])
+        artifact = next((a for a in self.store.list_artifacts(self.run_id, row['stage'])
+                         if a.attempt == row.get('task_id')), None)
+        if artifact:
+            outcome.submitted, outcome.artifact_version = artifact.key, artifact.version
+            outcome.artifact_sha256, outcome.summary = artifact.sha256, artifact.summary
+            outcome.limitations = artifact.limitations
+        if row['status'] == 'failed':
+            outcome.error = row.get('reason') or 'Role execution failed'
+        return outcome
+
+    def wait_session(self, session_id, timeout_seconds=0):
+        deadline = time.monotonic() + min(30, max(0, float(timeout_seconds)))
+        with _HANDLES_LOCK:
+            future = _HANDLES.get(self._key(session_id))
+        while future is not None and not future.done() and time.monotonic() < deadline:
+            if self.check_cancel:
+                self.check_cancel()
+            try:
+                future.result(timeout=min(.1, max(.001, deadline - time.monotonic())))
+            except FutureTimeout:
+                pass
+            except Exception:
+                break  # Failed child is exposed below as its durable receipt.
+        row = self._sessions.snapshot(session_id)
+        done = row['status'] not in {'idle', 'queued', 'running'}
+        outcome = self._saved_outcome(session_id) if done else None
+        # Observing a failed child reports it; it does not throw its exception
+        # into another independently running task.
+        if future is not None and future.done() and not future.exception():
+            outcome = future.result()
+        return {'session': row, 'done': done, 'outcome': json.loads(outcome.receipt()) if outcome else None}
+
+    def _wait_outcome(self, session_id):
+        with _HANDLES_LOCK:
+            future = _HANDLES[self._key(session_id)]
+        while not future.done():
+            if self.check_cancel:
+                try:
+                    self.check_cancel()
+                except JobCancelled:
+                    self.cancel_session(session_id, reason='Owning task stopped')
+                    # Independent transports observe their own session stop.
+                    while not future.done():
+                        try:
+                            future.result(timeout=.1)
+                        except FutureTimeout:
+                            pass
+                    raise
+            try:
+                future.result(timeout=.05)
+            except FutureTimeout:
+                pass
+        if self.check_cancel:
+            self.check_cancel()
+        return future.result()
+
+    def start_role(self, stage, brief, *, revision_scope=None, user_input_id=None,
+                   turn_scope=None, session_id=None, _resume=False, parent_job_id=None,
+                   selection_override=None):
+        if stage not in OWNER or OWNER[stage] == 'orchestrator':
+            raise ToolError('Only specialist stages can have independent role sessions')
+        if self.check_cancel:
+            self.check_cancel()
+        parent_id = current_task_id()
+        parent = AgentRuntime(self.store, self.run_id).task(parent_id) if parent_id else None
+        parent_job_id = parent_job_id or (parent['parent_job_id'] if parent else None)
+        user_input_id = user_input_id or (parent['source_message_id'] if parent else None)
+        if parent_job_id and any(row.get('parent_job_id') == parent_job_id and row['stage'] == stage
+                and (row['stop_requested'] or row['status'] == 'cancelled') for row in self._sessions.sessions()):
+            raise ToolError('本轮该项角色任务已经停止，不能重新派工或自动重试；等待新的用户任务。')
+        contract = {'stage': stage, 'brief': brief, 'revision_scope': revision_scope,
+                    'user_input_id': user_input_id, 'turn_scope': turn_scope,
+                    'selection': selection_override or creative_selection(self.store, self.run_id)}
+        row = self._sessions.ensure(role=OWNER[stage], stage=stage, session_id=session_id,
+            source_message_id=user_input_id, parent_job_id=parent_job_id, contract=contract)
+        session_id = row['session_id']
+        self._sessions.claim(session_id, resume=_resume, source_message_id=user_input_id,
+                             parent_job_id=parent_job_id)
+        worker = copy.copy(self)
+        worker._session_id = session_id
+        worker._resume_messages = self._sessions.recovery_messages(session_id) if _resume else []
+        worker.check_cancel = lambda: self._sessions.check_cancel(session_id)
+        if hasattr(self.client, '_snapshot'):
+            worker.client = self.client._snapshot.client(check_cancel=worker.check_cancel,
+                max_tokens=self.client.max_tokens, cancel_event=threading.Event())
+        elif self.client.__class__.__module__.startswith('studio.'):
+            worker.client = copy.copy(self.client)
+            if hasattr(worker.client, 'check_cancel'):
+                worker.client.check_cancel = worker.check_cancel
+            if hasattr(worker.client, 'cancel_event'):
+                worker.client.cancel_event = threading.Event()
+
+        def execute():
+            try:
+                result = worker._run_role_inline(stage, OWNER[stage], brief, revision_scope=revision_scope,
+                    user_input_id=user_input_id, turn_scope=copy.deepcopy(turn_scope),
+                    selection_override=contract['selection'])
+                result.session_id = session_id
+                status = 'completed' if result.submitted else 'failed' if result.error else 'waiting'
+                self._sessions.finish(session_id, status, reason=result.error or result.stopped_because,
+                    artifact_receipt={'stage': stage, 'version': result.artifact_version,
+                                      'sha256': result.artifact_sha256} if result.submitted else None)
+                return result
+            except JobCancelled:
+                self._sessions.finish(session_id, 'cancelled', reason='Role execution stopped')
+                return self._saved_outcome(session_id)
+            except BaseException as exc:
+                self._sessions.finish(session_id, 'failed', reason=f'{type(exc).__name__}: {exc}')
+                raise
+        try:
+            future = DEFAULT_EXECUTOR.submit(self._key(session_id), execute)
+        except Exception as exc:
+            self._sessions.finish(session_id, 'failed', reason=str(exc))
+            raise
+        with _HANDLES_LOCK:
+            _HANDLES[self._key(session_id)] = future
+        return self._sessions.snapshot(session_id)
+
+    def run_role(self, stage, role, brief, *, revision_scope=None, user_input_id=None,
+                 turn_scope=None, session_id=None):
+        if OWNER.get(stage) != role:
+            raise ToolError('Role must own its delegated stage')
+        row = self.start_role(stage, brief, revision_scope=revision_scope, user_input_id=user_input_id,
+                              turn_scope=turn_scope, session_id=session_id)
+        return self._wait_outcome(row['session_id'])
+
+    def resume_session(self, session_id, *, brief='', user_input_id=None, parent_job_id=None):
+        with self.store.run_lock(self.run_id):
+            row = self._sessions.snapshot(session_id)
+            if row['status'] in {'queued', 'running', 'cancelled'} or row['stop_requested']:
+                raise ToolError('Only interrupted or waiting sessions can be explicitly continued')
+            saved = self._saved_outcome(session_id)
+            if saved.submitted:
+                self._sessions.finish(session_id, 'completed', artifact_receipt={
+                    'stage': row['stage'], 'version': saved.artifact_version, 'sha256': saved.artifact_sha256})
+                return saved
+            old = self.pipeline.state(self.run_id).stages[row['stage']].open_attempt
+            if old and old.key == row['task_id']:
+                self._close_attempt(old, 'Explicit session continuation supersedes interrupted attempt')
+            if row['task_id']:
+                runtime = AgentRuntime(self.store, self.run_id)
+                if runtime.task(row['task_id'])['status'] not in TERMINAL:
+                    runtime.transition(row['task_id'], 'interrupted', reason='Explicit session continuation')
+            contract = self._sessions.contract(session_id)
+            from ..conversation_input import constraints_for_inputs, message, accept, start_execution
+            if user_input_id:
+                receipt = message(self.store, self.run_id, user_input_id)
+                accept(self.store, self.run_id, receipt)
+                start_execution(self.store, self.run_id, receipt)
+            identities = [*self._sessions.source_messages(session_id)]
+            if user_input_id:
+                identities.append(user_input_id)
+            scope = {**(contract.get('turn_scope') or {}),
+                     'project_constraints': constraints_for_inputs(self.store, self.run_id, identities)}
+            selection = contract.get('selection') or next((dict(event['selection']) for event in
+                reversed(self.store.read_events(self.run_id)) if event['kind'] == 'creative_context_selected'
+                and production_allowed(event['selection'])), creative_selection(self.store, self.run_id))
+        row = self.start_role(row['stage'], brief or contract['brief'],
+            revision_scope=contract.get('revision_scope'),
+            user_input_id=user_input_id or row['source_message_id'], turn_scope=scope,
+            session_id=session_id, _resume=True, parent_job_id=parent_job_id, selection_override=selection)
+        return self._wait_outcome(row['session_id'])
 
     # ------------------------------------------------------------ internal -- #
 
-    def run_role(self, stage: str, role: str, brief: str, *, revision_scope=None) -> DispatchOutcome:
+    def _run_role_inline(self, stage: str, role: str, brief: str, *, revision_scope=None,
+                 user_input_id=None, turn_scope=None, selection_override=None) -> DispatchOutcome:
         if self.check_cancel:
             self.check_cancel()
         role_def = ROLES[role]
@@ -148,9 +371,16 @@ class Dispatcher:
             if revision_scope['stage'] != stage:
                 raise ToolError('派工阶段与修订计划不一致。')
             check_base(self.store, self.pipeline, self.run_id, revision_scope)
-        selection = creative_selection(self.store, self.run_id)
+        selection = selection_override or creative_selection(self.store, self.run_id)
         if not production_allowed(selection):
             raise ToolError("当前明确路由只允许读取/反馈；先明确选择 new/continue/edit 和交付格式，才能派工。")
+        from ..conversation_input import project_constraints, constraints_for_scope
+        constraints = ((turn_scope or {})['project_constraints']
+                       if 'project_constraints' in (turn_scope or {}) else project_constraints(self.store, self.run_id))
+        paths = [field['path'] for field in revision_scope['fields']] if local_revision else None
+        if any(row['status'] == 'needs_clarification' for row in
+               constraints_for_scope(constraints, stage=stage, paths=paths)):
+            raise ToolError('本阶段的用户项目条件尚有冲突，须先澄清，不能沿旧条件继续派工。')
         context = self.learning.prepare_context(
             self.run_id, role, **selection,
             purpose="message" if role == "director" else "storyboard",
@@ -176,12 +406,118 @@ class Dispatcher:
         )
         task_tools = tools_for(role, local_revision=local_revision)
         allowed_tools = {tool['name'] for tool in task_tools}
+        runtime = AgentRuntime(self.store, self.run_id)
+        parent_id = current_task_id()
+        runtime_created = False
+        try:
+            runtime.create_task(attempt.key, role=role, stage=stage,
+                session_id=self._session_id,
+                parent_task_id=parent_id,
+                parent_job_id=runtime.task(parent_id)['parent_job_id'] if parent_id else None,
+                source_message_id=user_input_id,
+                context_refs={'method_ref': context['evidence_ref'],
+                              'method_sha256': context['snapshot_sha256']},
+                allowed_tools=allowed_tools,
+                expected_result={'artifact_stage': stage, 'user_decision_required': STAGE_SPEC[stage].gated})
+            runtime_created = True
+            if self._session_id:
+                self._sessions.bind_attempt(self._session_id, attempt.key)
+            runtime.transition(attempt.key, 'running')
+        except Exception as exc:
+            self._close_attempt(attempt, f'派工准备失败：{type(exc).__name__}')
+            if runtime_created:
+                task = runtime.task(attempt.key)
+                if task['status'] not in TERMINAL:
+                    runtime.transition(attempt.key, 'cancelled' if task['stop_requested'] else 'failed',
+                                       reason=type(exc).__name__)
+                if task['stop_requested']:
+                    raise JobCancelled('Role task stopped before execution') from None
+            raise
+        # Parent runtime provenance also covers service-owned stage commands;
+        # never substitute a global latest receipt while an older task runs.
+        user_input_id = runtime.task(attempt.key)['source_message_id']
+        if user_input_id:
+            from ..conversation_input import message, accept, start_execution
+            receipt = message(self.store, self.run_id, user_input_id)
+            accept(self.store, self.run_id, receipt)
+            start_execution(self.store, self.run_id, receipt)
+        task_binding = bind_task(attempt.key)
 
         submitted: dict[str, Any] = {}
+        source = {'message_id': user_input_id, 'needs_interpretation': False}
+
+        def inbox(item):
+            if source['needs_interpretation']:
+                return False
+            if not item.get('source_message_id'):
+                return  # Non-user notes are context, never an authority source.
+            from ..conversation_input import message, accept, start_execution
+            receipt = message(self.store, self.run_id, item['source_message_id'])
+            accept(self.store, self.run_id, receipt)
+            start_execution(self.store, self.run_id, receipt)
+            source.update(message_id=receipt['message_id'], needs_interpretation=True)
+            self._sessions.activate_source(self._session_id, receipt['message_id'])
+
+        journal = SessionJournal(self._sessions, self._session_id, inbox_handler=inbox) if self._session_id else None
+
+        def check_user_limits():
+            from ..conversation_input import (message, interpretation_for, interpreted_task_constraints,
+                                               constraints_for_inputs)
+            if self.check_cancel:
+                self.check_cancel()
+            if self._session_id and self._sessions.pending(self._session_id):
+                raise ToolError('新要求已收到但尚未进入本轮模型上下文；先处理下一步消息，不能提交旧方案。')
+            if source['needs_interpretation']:
+                raise ToolError('先解释本步骤收到的用户新要求，再在原任务允许范围内提交。')
+            identities = (self._sessions.source_messages(self._session_id, current_turn=True) if self._session_id
+                          else list(dict.fromkeys([user_input_id, source['message_id']])))
+            for identity in identities:
+                if not identity:
+                    continue
+                receipt = message(self.store, self.run_id, identity)
+                limits = interpreted_task_constraints(receipt, interpretation_for(self.store, self.run_id, identity))
+                if limits['readonly'] or ('allowed_stages' in limits and stage not in limits['allowed_stages']):
+                    raise ToolError('本轮真实用户要求不允许修改这一阶段。')
+                if limits['local_only'] and not local_revision:
+                    raise ToolError('新要求仅限局部字段；整稿提交已停止，需由主制片绑定准确版本和字段后建立新修订任务。')
+                if local_revision:
+                    # A content condition's path is not an instruction to edit
+                    # that field. Only the trusted task/feedback binding owns
+                    # the modification scope; conditions are filtered below.
+                    requested = []
+                    target = receipt.get('feedback_target') or {}
+                    if target.get('path'):
+                        if target.get('stage', stage) != stage:
+                            raise ToolError('新反馈指向另一阶段，不能沿本角色旧任务提交。')
+                        if (target.get('version', revision_scope['version']) != revision_scope['version']
+                                or target.get('artifact_sha256', revision_scope['sha256']) != revision_scope['sha256']):
+                            raise ToolError('新反馈版本与本角色固定修订版本不一致。')
+                        requested.append(target['path'])
+                    allowed = [field['path'] for field in revision_scope['fields']]
+                    if any(path not in allowed for path in requested):
+                        raise ToolError('新要求超出本角色固定字段范围；需主制片建立新的准确修订计划。')
+                    if identity != user_input_id and limits['local_only'] and not requested:
+                        raise ToolError('新局部要求尚未绑定具体字段，先澄清或解释准确路径，不能猜测修改对象。')
+            paths = [entry['path'] for entry in revision_scope['fields']] if local_revision else None
+            constraints = constraints_for_inputs(self.store, self.run_id,
+                self._sessions.source_messages(self._session_id) if self._session_id else identities,
+                stage=stage, paths=paths)
+            if any(row['status'] == 'needs_clarification' for row in constraints):
+                raise ToolError('当前阶段存在尚未澄清的用户条件，不能提交。')
 
         def execute(name: str, args: dict[str, Any]) -> str | ToolResult:
             if name not in allowed_tools:
                 raise ToolError(f'{role} 的本次任务不能调用 {name}。')
+            if name == 'propose_task_interpretation':
+                from ..conversation_input import message, record_task_interpretation
+                if not source['message_id']:
+                    raise ToolError('当前角色没有真实用户原话可供解释。')
+                result = record_task_interpretation(self.store, self.run_id,
+                    message(self.store, self.run_id, source['message_id']), args,
+                    prior_user_input_ids=self._sessions.source_messages(self._session_id)
+                        if self._session_id else ())
+                source['needs_interpretation'] = False
+                return json.dumps(result, ensure_ascii=False)
             if name == "read_capabilities":
                 from .context import capabilities
                 return json.dumps(capabilities(self.settings, role, local_revision=local_revision), ensure_ascii=False)
@@ -198,11 +534,16 @@ class Dispatcher:
                 return workspace.render_artifact(args["stage"], args.get("version"))
             if name == "list_materials":
                 return workspace.render_materials()
+            if name == 'read_role_history':
+                if not self._session_id:
+                    raise ToolError('当前角色没有绑定的历史会话。')
+                return json.dumps(self._sessions.read_role_history(self._session_id, **args), ensure_ascii=False)
             if name in ("submit_stage", "submit_patch"):
                 if local_revision != (name == 'submit_patch'):
                     raise ToolError('本次仅允许绑定范围的字段补丁。' if local_revision else '本次未绑定局部修改范围。')
                 changes = []
                 with self.store.run_lock(self.run_id):
+                    check_user_limits()
                     if revision_scope:
                         check_base(self.store, self.pipeline, self.run_id, revision_scope)
                     if local_revision:
@@ -236,7 +577,7 @@ class Dispatcher:
             task_context = assemble_role_task(
                 self.store, self.pipeline, self.learning, self.run_id, workspace,
                 stage, brief, previous=previous, revision_scope=revision_scope,
-                method_context=context)
+                method_context=context, user_input_id=user_input_id, turn_scope=turn_scope)
             system = role_def.system(self.store.read_run(self.run_id),
                                      extra=task_context.system_extra, format=selection['format'])
             if revision_scope:
@@ -264,12 +605,16 @@ class Dispatcher:
                 budgeted,
                 model=model,
                 system=system,
-                messages=[{"role": "user", "content": task_context.seed}],
+                messages=([{"role": "user", "content": task_context.seed}, *self._resume_messages,
+                           {"role": "user", "content": task_context.seed}] if self._resume_messages
+                          else [{"role": "user", "content": task_context.seed}]),
                 tools=task_tools,
                 execute_tool=execute,
                 max_rounds=self.settings.max_tool_rounds,
                 max_continuations=self.settings.max_continuations,
                 check_cancel=self.check_cancel,
+                session_journal=journal,
+                parallel_read_tools=frozenset({'read_capabilities', 'read_artifact', 'list_materials', 'read_role_history'}),
                 on_activity=lambda event: self._emit({"role": role, "stage": stage, **event}),
                 on_turn=lambda t: self._emit(
                     {"type": "agent_turn", "role": role, "stage": stage,
@@ -293,9 +638,12 @@ class Dispatcher:
             # `vocabulary.rejection_sentence` keys off it to say 预算 rather
             # than print "[budget]".
             self._close_attempt(attempt, f"派工中断：{exc}")
+            runtime.transition(attempt.key, 'cancelled' if isinstance(exc, JobCancelled) else 'failed',
+                               reason=type(exc).__name__)
             raise
         except ModelError as exc:
             self._close_attempt(attempt, f"派工失败：{type(exc).__name__}")
+            runtime.transition(attempt.key, 'failed', reason=type(exc).__name__)
             if exc.status == 0 and 'usage unconfirmed' in exc.message:
                 raise NonRetryableStageError(
                     '负责这一步的团队模型连接超时或中断，本阶段新版未保存；本次调用用量无法确认，'
@@ -316,11 +664,15 @@ class Dispatcher:
         except PipelineError as exc:
             outcome.error = str(exc)
             self._close_attempt(attempt, f"派工中断：{exc}")
+            runtime.transition(attempt.key, 'failed', reason=type(exc).__name__)
             return outcome
         except Exception as exc:
             outcome.error = f"{type(exc).__name__}: {exc}"
             self._close_attempt(attempt, f"派工失败：{type(exc).__name__}")
+            runtime.transition(attempt.key, 'failed', reason=type(exc).__name__)
             return outcome
+        finally:
+            reset_task(task_binding)
 
         outcome.text = result.text
         outcome.stopped_because = result.stopped_because
@@ -333,6 +685,21 @@ class Dispatcher:
             outcome.artifact_sha256 = submitted["sha256"]
             outcome.summary = submitted["summary"]
             outcome.limitations = submitted["limitations"]
+            # Artifact persistence and cancellation are separate facts. A stop
+            # arriving after submit preserves the artifact, closes the role as
+            # cancelled, and never leaves an open runtime task behind.
+            with self.store.run_lock(self.run_id):
+                task = runtime.task(attempt.key)
+                try:
+                    if task['stop_requested']:
+                        raise JobCancelled('Role stopped after artifact was saved')
+                    if self.check_cancel:
+                        self.check_cancel()
+                except JobCancelled:
+                    runtime.transition(attempt.key, 'cancelled', reason='Stopped after artifact was saved')
+                    raise
+                runtime.transition(attempt.key, 'completed', artifact_receipt={
+                    'stage': stage, 'version': outcome.artifact_version, 'sha256': outcome.artifact_sha256})
             self.store.append_event(
                 self.run_id,
                 "dispatch_done",
@@ -348,6 +715,7 @@ class Dispatcher:
                 attempt,
                 f"{role} 结束于 {result.stopped_because}，没有提交 {stage}",
             )
+            runtime.transition(attempt.key, 'failed', reason=f'No stage submission: {result.stopped_because}')
         return outcome
 
     # --------------------------------------------------------------- parts -- #

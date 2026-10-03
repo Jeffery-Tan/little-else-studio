@@ -20,11 +20,13 @@ from pathlib import Path
 
 APP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(APP))
+sys.path.insert(0, str(APP / 'tests'))
 sys.stdout.reconfigure(encoding='utf-8')
 
 from studio.pipeline import Pipeline  # noqa: E402
 from studio.production import agent_production_state  # noqa: E402
 from studio.store import Store  # noqa: E402
+from visual_fixtures import designed_script, stage_structure  # noqa: E402
 
 RUN = 'live-storyboard'
 PORT = 4764
@@ -36,6 +38,7 @@ SCRIPT = {
     ],
     'total_duration': 6,
 }
+SCRIPT = designed_script(SCRIPT)
 
 
 def call(method, path, body=None, base=f'http://127.0.0.1:{PORT}'):
@@ -57,7 +60,7 @@ def seed(root):
         attempt = pipeline.start_attempt(RUN, stage)
         structured = SCRIPT if stage == 'writing' else (
             {'options': [{'key': 'A', 'claim': 'Synthetic', 'satisfies': 'goal.primary'}]}
-            if stage == 'direction' else {})
+            if stage == 'direction' else stage_structure(stage))
         pipeline.submit(RUN, stage, attempt.token, content='Synthetic ' + stage, summary=stage,
                         evidence=['Fixture only'], limitations=['Not market evidence'],
                         structured=structured)
@@ -118,13 +121,21 @@ def main():
         )
         dstore, dpipeline = seed_decision_gate(root)
         waiting = candidates(dstore, dpipeline, DECISION_RUN)
+        from studio.conversation_input import display_context, receive
+        from studio.timeline import build_timeline
+        from studio.ledger import Ledger
+        from studio.config import load_settings
+        shown = build_timeline(dstore, dpipeline, Ledger(dstore, load_settings(root)), DECISION_RUN, None)
+        context_id = display_context(dstore, dpipeline, DECISION_RUN, shown)
+        receipt = receive(dstore, DECISION_RUN,
+            'B 吧，开头生活化一点，然后继续出分镜。', 'offline-live-decision', context_id)
         print('\n[F5-1] what the run is waiting on, as the agent reads it')
         print('    question:', waiting[0]['question'] if waiting else '(nothing)')
         print('    answers :', [a['action'] for a in waiting[0]['answers']] if waiting else [])
 
         verdict = resolve(waiting, {'action': 'select_direction',
                                     'target': {'stage': 'direction', 'option_id': 'B'},
-                                    'option_id': 'B'})
+                                    'option_id': 'B'}, receipt=receipt)
         print('    a stated decision resolves to:', verdict['status'])
 
         ambiguous = resolve(waiting, {'action': 'select_direction'})
@@ -215,19 +226,28 @@ def main():
         print('    covers', before['count'] if before else 0, 'shots ·',
               'cost known:', before['estimate']['known'] if before else None)
         stale = [dict(row) for row in before['target']['drafts']] if before else []
+        assert before and len(stale) == 3
+        status, newest = call('POST', f'/api/runs/{RUN}/production/drafts', {
+            'request_id': 'frame-2-v3', 'kind': 'image', 'prompt': 'Frame 2, revised after confirmation',
+            'source_version': source['version'], 'source_sha256': source['artifact_sha256'],
+            'model': 'codex-image', 'supersedes': 'frame-2-v2'})
+        assert status == 200, newest
         status, stale_refused = call('POST', f'/api/runs/{RUN}/production/batch-generate', {
             'request_id': 'stale-confirm',
-            'drafts': [{'draft_id': 'frame-1', 'expected_sha256': 'f' * 64}],
+            'drafts': [{'draft_id': row['draft_id'], 'expected_sha256': row['draft_sha256']}
+                       for row in stale],
             'consent': True, 'nonce': page['nonce']})
+        assert status == 409 and '替换' in str(stale_refused), stale_refused
         print('    an authorisation whose inputs moved is refused:', status)
         print('    (the frozen set it was prepared for was', len(stale), 'drafts)')
         attempts = [e for e in store.read_events(RUN) if e['kind'] == 'production_attempt']
+        assert attempts == []
         print('    nothing was submitted by preparing or by the stale attempt:', attempts == [])
 
         status, refused = call('POST', f'/api/runs/{RUN}/production/drafts', {
             'request_id': 'bad-replace', 'kind': 'image', 'prompt': 'x',
             'source_version': source['version'], 'source_sha256': source['artifact_sha256'],
-            'model': 'codex-image', 'shot_id': 'shot-03', 'supersedes': 'frame-2-v2'})
+            'model': 'codex-image', 'shot_id': 'shot-03', 'supersedes': 'frame-2-v3'})
         print('\n[6] naming one shot while replacing another is refused:', status)
         print('    reason:', refused if isinstance(refused, str) else refused)
 

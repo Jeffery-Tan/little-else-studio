@@ -20,6 +20,7 @@ import uuid
 from typing import Any, Callable
 
 from ..config import Settings
+from ..conversation_input import visible_chat
 from ..ledger import Ledger
 from ..models import PipelineError, STAGE_SPEC
 from ..pipeline import Pipeline
@@ -119,6 +120,12 @@ class Orchestrator:
         self.method_context = None
         self._context_refs: list[str] = []
         self._current_user_message = ""
+        self._current_user_input = None
+        self._task_user_input = None
+        self._task_constraints = {}
+        self._project_constraints = []
+        self._dispatched_stages = set()
+        self._decision_recorded = None
         self.dispatcher = Dispatcher(
             store, pipeline, settings, client, ledger, run_id, on_event=on_event,
             check_cancel=check_cancel,
@@ -131,10 +138,13 @@ class Orchestrator:
 
     # -------------------------------------------------------------- public -- #
 
-    def send(self, message: str, *, feedback_context: dict | None = None) -> OrchestratorTurn:
+    def send(self, message: str, *, feedback_context: dict | None = None,
+             user_input_id: str | None = None, internal_instruction: bool = False,
+             source_user_input_id: str | None = None) -> OrchestratorTurn:
         """One turn of conversation. The user's message is logged first."""
         if self.store.read_run(self.run_id).kind == 'learning':
-            return self._send_learning(message)
+            return self._send_learning(message, user_input_id=user_input_id,
+                                       internal_instruction=internal_instruction)
         message = message.strip()
         if not message:
             raise ValueError("empty message")
@@ -150,10 +160,40 @@ class Orchestrator:
         #    the intake artifact it produced.
         # 2. If the budget cap aborts the turn, what he wrote must survive. It
         #    used to be dropped, because the raise happened before the append.
-        self.store.append_chat(self.run_id, "user", message)
+        from ..conversation_input import receive, message as received_message
+        self._current_user_input = (received_message(self.store, self.run_id, user_input_id)
+            if user_input_id else None if internal_instruction else
+            receive(self.store, self.run_id, message, uuid.uuid4().hex, feedback_target=feedback_context))
+        if self._current_user_input:
+            message = self._current_user_input['text']
+        # A consumed decision can supply constraints for internal continuation,
+        # but it never becomes a fresh user decision in that continuation.
+        self._task_user_input = (self._current_user_input or
+            (received_message(self.store, self.run_id, source_user_input_id)
+             if source_user_input_id else None))
+        from ..conversation_input import interpreted_task_constraints, interpretation_for
+        self._task_constraints = (interpreted_task_constraints(self._task_user_input,
+            interpretation_for(self.store, self.run_id, self._task_user_input['message_id']))
+            if self._task_user_input else {})
+        if internal_instruction:
+            self.store.append_event(self.run_id, 'internal_planning_instruction', text=message,
+                                    origin='saved_decision_or_steer')
+        self._decision_recorded = None
+        if self._current_user_input:
+            from ..conversation_input import accept, start_execution
+            accept(self.store, self.run_id, self._current_user_input)
+            start_execution(self.store, self.run_id, self._current_user_input)
+        from ..conversation_input import record_project_constraints, project_constraints
+        self._project_constraints = (record_project_constraints(self.store, self.run_id, self._current_user_input)
+            if self._current_user_input else [row for row in project_constraints(self.store, self.run_id)
+                if row['status'] in {'active', 'needs_clarification'}])
+        from ..conversation_input import applicable_constraints
+        self._project_constraints = applicable_constraints(self.store, self.run_id,
+            user_input_id=self._task_user_input['message_id'] if self._task_user_input else None)
         from ..interactions import answer
-        answer(self.store, self.run_id, message)
-        self._current_user_message = message
+        if not internal_instruction:
+            answer(self.store, self.run_id, message)
+        self._current_user_message = self._task_user_input['text'] if self._task_user_input else message
         self._reference_used = False
         self._product_video_used = False
         self._product_video_report = None
@@ -170,24 +210,38 @@ class Orchestrator:
         self._scope_selected = False
         self._revision_scope = None
         self._turn_id = uuid.uuid4().hex
+        self._dispatched_stages = set()
         self.selection = {"intent": "status", "format": previous["format"], "tags": [], "case_ids": None}
         self.store.append_event(self.run_id, "agent_turn_scope_started", turn_id=self._turn_id,
-                                previous_selection=previous, scope_selected=False)
+                                previous_selection=previous, scope_selected=False,
+                                user_input_id=self._task_user_input['message_id'] if self._task_user_input else None,
+                                constraints=self._task_constraints, project_constraints=self._project_constraints)
         self.method_context = self.learning.prepare_context(
             self.run_id, "orchestrator", **self.selection, purpose="message")
         self._context_refs = [self.method_context["evidence_ref"]]
 
-        history = self._build_messages()
+        history = self._build_messages(allow_empty=internal_instruction)
+        if internal_instruction:
+            history.append({'role': 'user', 'content': '服务端根据已保存决定派生的文字工作指令（不是新的用户决定）：' + message})
         workspace = Workspace(self.store, self.pipeline, self.run_id, "orchestrator")
         budgeted = BudgetedClient(
             self.client, self.ledger, run_id=self.run_id, role="orchestrator", stage="intake"
         )
 
         def execute(name: str, args: dict[str, Any]) -> str | ToolResult:
+            if self._decision_recorded and name not in {
+                    'read_project_state', 'read_conversation_history', 'read_artifact',
+                    'read_work_plan', 'read_capabilities', 'read_production', 'read_user_actions'}:
+                raise ToolError('决定已记录；接续由服务端另建唯一任务。本轮不要重复派工或提交其它决定。')
             return self._execute(name, args, workspace)
 
         try:
             extra = self._system_extra()
+            extra += ('\n# 本轮绑定的真实用户来源与仍有效的项目条件\n' + json.dumps({
+                'current_input': self._task_constraints, 'project_constraints': self._project_constraints,
+                'input_authority': 'current_user_receipt' if self._current_user_input else
+                    'saved_source_only_no_new_user_decision'},
+                ensure_ascii=False) + '\n只按本轮原话决定动作；项目条件与派工摘要冲突时保留条件，必要时澄清。')
             historical_readonly = self.method_context.get('historical_readonly') is True
             if historical_readonly:
                 extra += ('\n# 旧库只读回放\n原学习库完整字节无法核对。只回答状态与已保存记录，'
@@ -221,6 +275,8 @@ class Orchestrator:
                 model=self.settings.model_for("orchestrator"),
                 system=system,
                 messages=history,
+                pinned_user_input=message,
+                preserve_initial_context=False,
                 tools=available_tools,
                 execute_tool=execute,
                 max_rounds=self.settings.max_tool_rounds,
@@ -237,6 +293,8 @@ class Orchestrator:
                 ),
             )
         except Exception as exc:
+            self._cancel_owned_roles('主任务结束，保留会话记录，停止尚未完成的角色工作。')
+            self._settle_owned_roles()
             # Leave a trace on disk. The SSE error event is not persisted, so
             # without this a reload shows his question followed by silence and
             # no way to find out why. 'system' is filtered out of model requests
@@ -246,6 +304,7 @@ class Orchestrator:
             self.store.append_chat(self.run_id, "system", f"{type(exc).__name__}: {detail}")
             raise
 
+        self._wait_owned_roles()
         if getattr(self, '_reference_report', None):
             result.text = self._reference_report
             self._reference_report = None
@@ -257,7 +316,8 @@ class Orchestrator:
             self._reference_prompt_text = None
         asked_user = any(entry.get('tool') == 'ask_user' and entry.get('ok')
                          for entry in result.tool_log)
-        if result.stopped_because == 'done' and not asked_user and self._ready_direction_command():
+        if (result.stopped_because == 'done' and not asked_user and not self._decision_recorded
+                and self._ready_direction_command()):
             # The producer has finished understanding the request and saving
             # its facts. Stage routing is now a program decision: one director
             # task, then the user's choice. A missing model tool call cannot
@@ -265,7 +325,9 @@ class Orchestrator:
             from ..direction_command import task_brief
             try:
                 outcome = self.dispatcher.dispatch('direction',
-                    task_brief(self.store, self.pipeline, self.run_id))
+                    task_brief(self.store, self.pipeline, self.run_id),
+                    user_input_id=self._task_user_input['message_id'] if self._task_user_input else None,
+                    turn_scope=self._role_turn_scope())
                 if not outcome.submitted:
                     raise PipelineError('direction_dispatch',
                         outcome.error or '导演没有提交新版方向；当前资料已保留。')
@@ -289,6 +351,17 @@ class Orchestrator:
                 technical_requested=bool(re.search(
                     r'版本号|内部版本|技术记录|sha256|hash', message, re.I)),
             )
+        if self._decision_recorded:
+            # A proposal has saved an intent, not started a successor yet. The
+            # job manager will publish the real receipt after this turn ends.
+            selected = self._decision_recorded.get('selected_option_id')
+            adopted = (f'已采用方向 {selected}。' if selected else
+                       '简报修订已保存。' if self._decision_recorded['action'] == 'amend_brief' else
+                       '修改意见已保存。' if self._decision_recorded.get('decision') == 'returned' else
+                       '已采用当前方案。')
+            result.text = adopted + ('下一步已记录，待本轮结束后启动；实际进展会显示在任务状态。'
+                if self._decision_recorded['continuation_status'] == 'pending' else
+                '按你的要求暂停推进。')
         # A correction is accepted under the same run lock. If this final text
         # wins the lock it was committed before the correction; otherwise the
         # old goal cannot leak a late reply into the next turn's chat context.
@@ -305,14 +378,23 @@ class Orchestrator:
             deliverable=delivery,
         )
 
-    def _send_learning(self, message: str) -> OrchestratorTurn:
+    def _send_learning(self, message: str, *, user_input_id=None,
+                       internal_instruction=False) -> OrchestratorTurn:
         """A narrow discussion loop with no production or paid media tools."""
         message = message.strip()
         if not message:
             raise ValueError('empty message')
         if self.check_cancel:
             self.check_cancel()
-        self.store.append_chat(self.run_id, 'user', message)
+        if user_input_id:
+            from ..conversation_input import accept, start_execution, message as received_message
+            self._current_user_input = received_message(self.store, self.run_id, user_input_id)
+            message = self._current_user_input['text']
+            accept(self.store, self.run_id, self._current_user_input)
+            start_execution(self.store, self.run_id, self._current_user_input)
+        elif not internal_instruction:
+            self._current_user_input = None
+            self.store.append_chat(self.run_id, 'user', message)
         from ..interactions import answer
         answer(self.store, self.run_id, message)
         self._current_user_message = message
@@ -365,7 +447,8 @@ class Orchestrator:
                     observation_ids=args.get('observation_ids'),
                     discussion_cursor=args.get('discussion_cursor'),
                     discussion_limit=args.get('discussion_limit', 20),
-                    message_ids=args.get('message_ids')), ensure_ascii=False)
+                    message_ids=args.get('message_ids'),
+                    visible_indexes={index for index, _ in visible_chat(self.store, self.run_id)}), ensure_ascii=False)
             if name == 'retrieve_learning_methods':
                 return json.dumps(self.learning.method_summaries(
                     run_id=self.run_id, purpose=args.get('purpose', 'message'),
@@ -414,7 +497,58 @@ class Orchestrator:
 
     # ------------------------------------------------------------- context -- #
 
+    def _owned_active_roles(self):
+        from ..agent_runtime import current_task_id
+        parent = current_task_id()
+        if not parent or not hasattr(self.dispatcher, 'sessions'):
+            return []
+        return [row for row in self.dispatcher.sessions()
+                if row.get('parent_job_id') == parent and row.get('status') in {'queued', 'running'}]
+
+    def _cancel_owned_roles(self, reason):
+        for row in self._owned_active_roles():
+            self.dispatcher.cancel_session(row['session_id'], reason=reason)
+
+    def _owned_stopped_roles(self):
+        from ..agent_runtime import current_task_id
+        parent = current_task_id()
+        return [row for row in self.dispatcher.sessions() if parent and row.get('parent_job_id') == parent
+                and (row['stop_requested'] or row['status'] == 'cancelled')]
+
+    def _wait_owned_roles(self):
+        """Root remains observable until its independent children actually settle."""
+        while pending := self._owned_active_roles():
+            if self.check_cancel:
+                self.check_cancel()
+            self._emit({'type': 'agent_control', 'message': '角色任务仍在执行，正在等待实际交付。'})
+            self.dispatcher.wait_session(pending[0]['session_id'], timeout_seconds=10)
+
+    def _settle_owned_roles(self):
+        """Cancellation requests do not release the owner before workers settle."""
+        from concurrent.futures import wait
+        from ..agent_runtime import current_task_id
+        from ..tools.dispatch import in_flight_role_futures
+        parent = current_task_id()
+        if not parent:
+            return
+        while futures := in_flight_role_futures(self.store, self.run_id, parent):
+            # No parent cancellation check: it is precisely why we are settling.
+            # Child exceptions are already saved; preserve the original error.
+            wait(futures, timeout=.1)
+
     def _completion_check(self):
+        if hasattr(self.dispatcher, 'sessions'):
+            from ..agent_runtime import current_task_id
+            pending = [row for row in self.dispatcher.sessions()
+                       if row.get('parent_job_id') == current_task_id()
+                       and row.get('status') in {'queued', 'running'}]
+            if pending:
+                return ('仍有本轮角色任务执行中：' + ', '.join(row['session_id'] for row in pending)
+                        + '。请 wait_role 等待真实回执；不要宣称交付完成或重复派工。')
+            if self._owned_stopped_roles():
+                return None  # A user stop is not a missing-result retry prompt.
+        if self._decision_recorded:
+            return None
         if not self._deliverable or (self._deliverable != 'analysis' and not production_allowed(self.selection)):
             return None
         delivery = self._deliverable_status()
@@ -494,7 +628,11 @@ class Orchestrator:
 
     def _ready_direction_command(self):
         if (self._deliverable != 'direction' or self._revision_scope is not None
+                or 'direction' in self._dispatched_stages
                 or not production_allowed(self.selection)):
+            return False
+        if hasattr(self.dispatcher, 'sessions') and any(row['stage'] == 'direction'
+                for row in self._owned_stopped_roles()):
             return False
         from ..direction_command import available
         if available(self.store, self.pipeline, self.run_id) is None:
@@ -515,7 +653,7 @@ class Orchestrator:
                                     media_kind=self._media_kind,
                                     turn_id=self._turn_id)
 
-    def _build_messages(self) -> list[dict[str, Any]]:
+    def _build_messages(self, *, allow_empty=False) -> list[dict[str, Any]]:
         """The request history. Only user and assistant turns may come out of it.
 
         The chat log also holds 'system' entries (failures) so the timeline can
@@ -523,30 +661,16 @@ class Orchestrator:
         Messages API would be a 400. The filter is the invariant that keeps the
         two audiences from colliding.
         """
-        prior = self.store.read_chat(self.run_id)[-CHAT_WINDOW:]
-        turns: list[tuple[str, str]] = [
-            (t["role"], t["text"])
-            for t in prior
-            if t.get("role") in ("user", "assistant") and t.get("text")
-        ]
-
-        # Merge consecutive same-role turns and make sure the list opens with a
-        # user turn: the Messages API requires it, and a shim may or may not
-        # enforce it. Getting this wrong is a 400, not a subtle bug.
-        while turns and turns[0][0] != "user":
-            turns.pop(0)
-
-        messages: list[dict[str, Any]] = []
-        for role, text in turns:
-            if messages and messages[-1]["role"] == role:
-                messages[-1]["content"] += "\n\n" + text
-            else:
-                messages.append({"role": role, "content": text})
+        from ..context_projection import build_conversation_context
+        context = build_conversation_context(self.store, self.pipeline, self.run_id,
+            current_receipt=self._current_user_input, recent_limit=CHAT_WINDOW)
+        messages = context['messages']
+        self._context_projection_ref = context['projection_ref']
 
         # send() persisted the user's message before calling this, so the list
         # always ends with their turn. Anything else means the log was emptied
         # under us and continuing would send a request with no question in it.
-        if not messages:
+        if not messages and not allow_empty:
             raise PipelineError(
                 "empty_history",
                 "the chat log has no user turn; refusing to send a request with "
@@ -598,7 +722,8 @@ class Orchestrator:
             "有图片不能只读list_materials就宣称无观察能力。主语言模型不支持图片时，observe_images仍可通过现有百炼视觉能力看到像素并返回带来源的观察。图片可见特征可用于构思，不须先让用户逐条确认；尺寸/性能/实测效果保持未知。不把看图、分工或方法选择发回用户。状态/暂停/反馈不启动观察。",
             "**你不能替用户做决定，也没有自授权的工具。** 但用户在对话里说出的决定就是决定："
             "他说「采用 B」「这个脚本可以，继续」「第二镜重做」，你用 read_user_actions 看现在真正在等什么，"
-            "再用 propose_user_action 指认他表达的那一件事，由服务端核验版本与指纹后记录，后续工作随即开始。"
+            "再用 propose_user_action 指认他表达的那一件事，由服务端核验真实消息、展示版本与指纹后记录。"
+            "工具仅记录接续意图；实际任务由服务端在本轮结束后启动并留下回执，不得提前声称已经开始或同轮重复派工。"
             "不要让他去别的页面再点一次，也不要说「请到创作板确认」。"
             "同一时刻有多件事等他决定而他只说「行」时，propose_user_action 会要求澄清：照它给的问题问一句，不要猜。"
             "收费生成不由你提交：你只能把准确的这一次生成准备成一张确认卡，等他点确认。"
@@ -608,7 +733,8 @@ class Orchestrator:
             "blocker 状态码（如 unmapped）或「准入/冲突」这类内部词，也不要把英文状态码念给他听。",
             "",
             "# 当前项目摘要（界面与对话共用）\n" + json.dumps(
-                project_brief(self.pipeline.state(self.run_id).to_dict(), latest_execution(self.store, self.run_id), self.store.read_chat(self.run_id)), ensure_ascii=False),
+                project_brief(self.pipeline.state(self.run_id).to_dict(), latest_execution(self.store, self.run_id),
+                              [row for _, row in visible_chat(self.store, self.run_id)]), ensure_ascii=False),
             "# 当前项目状态（本次重新读取，历史对话不能覆盖）",
             workspace.render_state(),
             workspace.render_context('writing' if self.store.latest_artifact(self.run_id, 'intake') else 'intake'),
@@ -616,6 +742,7 @@ class Orchestrator:
             "当前显式路由：" + json.dumps(self.selection, ensure_ascii=False),
             "确定本次创作目标后，按任务条件查看合资格方法及其不适用条件；可以拒绝现有方法。决定参考某方法时先用 read_learning_method 读取准确正文、支持与反例。若方法确实影响了已保存稿件，用 record_method_usage 绑定准确段落。该记录只是使用声明，不能代替自检或效果验证。",
             "本轮工作范围尚未选择。历史路由不授予权限；写稿、派工前必须按当前用户原话调用 prepare_creative_context。",
+            "先按真实原话用 propose_task_interpretation 解释这轮任务及内容条件。要求只作用于这轮还是整个项目、哪些角色/字段受影响、否定/撤销/假设都要区分；项目持续条件须有明确原话依据。有歧义就待澄清，不能把提到某个要求当成决定。解释不能批准、改商品事实或改变有效简报的产品目标。prepare_creative_context必须遵守已经绑定的解释。独立任务可用start_role后继续调度，用read_role_sessions/wait_role核对真实交付；用message_role把用户原话送到准确角色，cancel_role只停那一个。依赖未采用不能并行写下游。",
             "# 一句话入口与参考调配\n用户不填写模式表。用户明确把视频用作参考且要求拆解时，才用observe_reference(action=analyze)交付后停止；明确只要针对当前商品的提示词时用action=prompt，读取分析和商品事实后选择deliverable=reference_prompt，直接调用save_reference_prompt交付，不派导演/素材/编剧；明确‘按参考做完整方案’用recreate；仅借开头/风格做完整方案用inspiration并填写具体scope。商品视频是商品证据，不是爆款参考；用户明确要求用其提供的TK链接补全商品信息时，调用observe_product_video并交付声画观察，结果留在素材区等待用户逐条核对采用；不要调用observe_reference、自动采用或启动制作。已上传的本地商品视频仍在素材区按原流程分析。裸链接或用途不明先ask_user只问视频用于‘补全商品信息’还是‘拆解参考表达’，不先下载或分析。工具必须引用本轮用户原话。仅历史提及、状态查询、暂停不调用观察。",
             "自主创作无需参考：prepare_creative_context选择creation_mode=autonomous。继续同一参考时沿用已保存的reference_scope，不要只因改写说明而重选来源；用户明确修改参考范围或不再参考时，用edit或相应新模式表达。复刻或局部借鉴先读/复用指定分析，然后绑定reference_id和reference_scope；不要把所有素材自动混入参考。用户已明确的商品、目标、方式不重复问。先给具体改编方案，不让用户填内部参数或选Agent。",
             "仅继续更新已经过期、尚未采用的方向时，按当前有效需求直接dispatch导演重出；不要plan_revision。plan_revision用于本轮用户明确提出的定向修改，quote必须逐字出现在本轮用户消息中。",
@@ -627,6 +754,20 @@ class Orchestrator:
     # --------------------------------------------------------------- tools -- #
 
     def _execute(self, name: str, args: dict[str, Any], workspace: Workspace) -> str | ToolResult:
+        if name == 'propose_task_interpretation':
+            if self._current_user_input is None:
+                raise ToolError('内部接续没有新的用户消息，不能创造新的用户任务或项目条件。')
+            from ..conversation_input import interpretation_for
+            correcting_feedback = (self.selection.get('intent') == 'feedback'
+                                   and not self._task_constraints.get('readonly'))
+            if self._scope_selected and not correcting_feedback and not interpretation_for(self.store, self.run_id,
+                                                               self._current_user_input['message_id']):
+                raise ToolError('须在选择本轮范围之前解释原话；已经开始的任务不能改解释绕过范围。')
+            from ..conversation_input import record_task_interpretation, interpreted_task_constraints
+            result = record_task_interpretation(self.store, self.run_id, self._current_user_input, args)
+            self._task_constraints = interpreted_task_constraints(self._current_user_input, result)
+            self._project_constraints = result['project_constraints']
+            return json.dumps(result, ensure_ascii=False)
         if name == 'retrieve_learning_methods':
             return json.dumps(self.learning.method_summaries(
                 run_id=self.run_id, purpose=args.get('purpose', 'message'),
@@ -641,7 +782,56 @@ class Orchestrator:
             return json.dumps(record_method_usage(self.store, self.learning,
                                                   self.run_id, args), ensure_ascii=False)
         if name == 'read_work_plan':
-            return json.dumps(work_plan(self.pipeline, self.run_id, **args), ensure_ascii=False)
+            from ..agent_runtime import AgentRuntime
+            return json.dumps({**work_plan(self.pipeline, self.run_id, **args),
+                               'agent_runtime': AgentRuntime(self.store, self.run_id).snapshot()}, ensure_ascii=False)
+        if name == 'read_role_sessions':
+            return json.dumps(self.dispatcher.sessions(), ensure_ascii=False)
+        if name in {'wait_role', 'message_role', 'cancel_role', 'resume_role'}:
+            session_id = args['session_id']
+            sessions = self.dispatcher.sessions()
+            session = next((row for row in sessions if row['session_id'] == session_id), None)
+            if session is None:
+                raise ToolError('角色会话不属于当前项目。')
+            from ..agent_runtime import current_task_id
+            if name != 'resume_role' and session.get('parent_job_id') != current_task_id():
+                raise ToolError('只能调度本轮拥有的角色任务；历史会话须明确恢复。')
+            if name == 'wait_role':
+                return json.dumps(self.dispatcher.wait_session(session_id,
+                    timeout_seconds=min(30, max(0, args.get('timeout_seconds', 10)))), ensure_ascii=False)
+            receipt = self._current_user_input
+            quote = args.get('quote', '')
+            if not receipt or not quote.strip() or quote not in receipt['text']:
+                raise ToolError('角色调整须引用本轮真实用户原话，不能由模型创造用户要求。')
+            if name == 'cancel_role':
+                from ..steer_intent import classify
+                if (self._task_constraints.get('task_mode') != 'stop'
+                        and classify(receipt['text'])['class'] != 'stop'):
+                    raise ToolError('本轮原话没有绑定停止意图，不能截取其中的词语停止角色任务。')
+                return json.dumps(self.dispatcher.cancel_session(session_id,
+                    reason=quote), ensure_ascii=False)
+            if name == 'message_role':
+                return json.dumps(self.dispatcher.message_session(session_id,
+                    receipt['message_id'], receipt['text'],
+                    source_message_id=receipt['message_id']), ensure_ascii=False)
+            if not self._scope_selected or not production_allowed(self.selection):
+                raise ToolError('恢复创作角色前须明确本轮创作范围。')
+            stage = session['stage']
+            if ('allowed_stages' in self._task_constraints
+                    and stage not in self._task_constraints['allowed_stages']):
+                raise ToolError('本轮用户范围不允许恢复这一阶段。')
+            saved_scope = self.dispatcher.session_contract(session_id).get('revision_scope')
+            if self._task_constraints.get('local_only') and not (saved_scope and saved_scope['mode'] == 'local'):
+                raise ToolError('当前只允许局部修改，不能恢复整稿任务；先绑定新的准确修订范围。')
+            if self._revision_scope and self._revision_scope != saved_scope:
+                raise ToolError('本轮修订与旧角色任务范围不同，不能以恢复旧任务代替新计划。')
+            if saved_scope:
+                check_base(self.store, self.pipeline, self.run_id, saved_scope)
+                self._revision_scope = saved_scope
+            outcome = self.dispatcher.resume_session(session_id, brief=quote,
+                user_input_id=receipt['message_id'], parent_job_id=current_task_id())
+            return ToolResult(outcome.receipt(), is_error=bool(outcome.error or not outcome.submitted
+                                                             or outcome.stopped_because == 'cancelled'))
         if name == 'read_user_actions':
             from ..decision import actions, candidates, prepare_generation_candidate
             decisions = candidates(self.store, self.pipeline, self.run_id)
@@ -654,29 +844,37 @@ class Orchestrator:
                 ready = prepare_generation_candidate(self.store, self.pipeline, self.run_id, kind)
                 if ready:
                     payload.setdefault('preparable_execution', []).append(ready)
+            if self._current_user_input:
+                payload['user_input'] = self._current_user_input
             return json.dumps(payload, ensure_ascii=False)
         if name == 'propose_user_action':
             from ..decision import DecisionError, candidates, commit, reject_event, resolve
+            if self._current_user_input is None:
+                raise ToolError('本轮是已保存决定派生的内部工作，没有新的真实用户决定，不能再记录批准。')
             decisions = candidates(self.store, self.pipeline, self.run_id)
             proposed = {k: v for k, v in args.items() if k != 'continuation_note'}
-            verdict = resolve(decisions, proposed, source='conversation')
+            from ..conversation_input import interpretation_for
+            verdict = resolve(decisions, proposed, source='conversation', receipt=self._current_user_input,
+                interpretation=interpretation_for(self.store, self.run_id, self._current_user_input['message_id']))
             if verdict['status'] == 'commit':
                 try:
                     result = commit(self.store, self.pipeline, self.run_id, verdict['action'],
                                     source='conversation',
                                     user_message=self._current_user_message,
-                                    note=args.get('continuation_note', ''))
+                                    note=args.get('continuation_note', ''),
+                                    request_id=self._current_user_input['request_id'])
                 except (DecisionError, PipelineError) as exc:
                     reject_event(self.store, self.run_id, proposed,
-                                 {'reason': getattr(exc, 'code', 'decision')},
+                                 {'reason': getattr(exc, 'rule', 'decision')},
                                  source='conversation')
                     raise ToolError(
                         f'这个决定没有记录：{exc}。请核对当前版本后重新确认，不要猜。') from exc
+                self._decision_recorded = result
                 return json.dumps({
                     **result,
-                    'notice': ('决定已按用户原话记录，后续工作已经开始。用用户看得懂的话说明'
-                               '采用了什么、接下来做什么；不要说内部阶段名，也不要让用户'
-                               '再去点一次。'),
+                    'notice': ('决定已记录。continuation_status=pending 仅表示接续意图，'
+                               '实际任务由服务端在本轮结束后创建；不可说已经开始，也不要本轮重复派工。'
+                               'paused 表示只采用、按用户要求暂不继续。'),
                 }, ensure_ascii=False)
             if verdict['status'] == 'clarify':
                 if verdict.get('reason') not in {'no_action_proposed', 'nothing_open'}:
@@ -698,7 +896,8 @@ class Orchestrator:
             return json.dumps(capabilities(self.settings, 'orchestrator'), ensure_ascii=False)
         if name == 'read_conversation_history':
             from ..tools.context import conversation
-            return json.dumps(conversation(self.store, self.run_id, **args), ensure_ascii=False)
+            return json.dumps(conversation(self.store, self.run_id, **args,
+                visible_indexes={index for index, _ in visible_chat(self.store, self.run_id)}), ensure_ascii=False)
         if name == 'ask_user':
             from ..interactions import ask
             question = ask(self.store, self.run_id, args)
@@ -709,8 +908,57 @@ class Orchestrator:
                     else snapshot(self.store, self.run_id))
             return json.dumps(data, ensure_ascii=False)
         if name == "prepare_creative_context":
+            if args.get('task_interpretation') is not None:
+                self._execute('propose_task_interpretation', args['task_interpretation'], workspace)
             selection = {"intent": args["intent"], "format": args["format"],
                          "tags": args.get("tags", []), "case_ids": args.get("case_ids")}
+            from ..task_contract import DELIVERABLES
+            deliverable = args.get('deliverable')
+            limits = self._task_constraints
+            if limits.get('deliverable') and deliverable != limits['deliverable']:
+                raise ToolError('本轮交付与已经绑定的用户任务解释不一致，请按原要求执行或澄清。')
+            if limits.get('task_mode') in {'status', 'stop', 'discuss', 'clarify'} and production_allowed(selection):
+                raise ToolError('本轮解释为只读、停止或澄清，不能扩大为创作。')
+            if deliverable not in DELIVERABLES:
+                raise ToolError('先明确本轮具体交付 deliverable；不能省略交付目标再开始工作。')
+            producing = production_allowed(selection)
+            if producing and self._current_user_input and not limits.get('interpretation_id'):
+                raise ToolError('先绑定真实用户原话的任务解释与内容条件，再开始创作。可用 task_interpretation 同时提交。')
+            from ..conversation_input import constraints_for_scope
+            endpoint = {'intake': 'intake', 'direction': 'direction', 'writing': 'writing',
+                        'revision': ((self._current_user_input or {}).get('feedback_target') or {}).get('stage')}
+            target = (self._current_user_input or {}).get('feedback_target') or {}
+            scope = self._revision_scope
+            stage, paths = endpoint.get(deliverable), None
+            if deliverable == 'revision':
+                if scope:
+                    stage = scope['stage']
+                    paths = [field['path'] for field in scope['fields']] if scope['mode'] == 'local' else None
+                elif target.get('path'):
+                    stage, paths = target.get('stage', 'writing'), [target['path']]
+            relevant = (constraints_for_scope(self._project_constraints, stage=stage, paths=paths)
+                        if deliverable != 'revision' or stage is not None else [])
+            if producing and any(row['status'] == 'needs_clarification' for row in relevant):
+                raise ToolError('本次内容条件尚有冲突，请澄清保留还是替换，不能自行选一个。')
+            if producing and deliverable in {'follow_up', 'analysis'}:
+                raise ToolError('只读问答或分析不能同时选择创作路由；请按本轮实际要求声明范围。')
+            if not producing and deliverable not in {'follow_up', 'analysis'}:
+                raise ToolError('具体创作交付须选择相应的 new/continue/edit 与格式；只读不能承诺写稿交付。')
+            if limits.get('readonly') and producing:
+                raise ToolError('用户本轮明确只查询、分析或暂停，首次选择范围也不能扩大为创作。')
+            if limits.get('prompt_only') and deliverable != 'reference_prompt':
+                raise ToolError('用户本轮只要提示词，不能扩大为完整制片流程。')
+            if producing and limits.get('format') and selection['format'] != limits['format']:
+                raise ToolError('本轮格式与用户明确要求不符，不能改为另一种交付。')
+            if (producing and self._scope_selected and production_allowed(self.selection)
+                    and selection['format'] != self.selection['format']):
+                raise ToolError('本轮创作格式已绑定，不能在同一轮改成另一种交付。')
+            if limits.get('local_only') and producing and (selection['intent'] != 'edit' or deliverable != 'revision'):
+                raise ToolError('用户本轮只要求局部修改，请选择 edit / revision 并绑定准确修改范围。')
+            correcting_feedback_route = (self._deliverable == 'follow_up'
+                and self.selection.get('intent') == 'feedback' and not limits.get('readonly'))
+            if self._deliverable and deliverable != self._deliverable and not correcting_feedback_route:
+                raise ToolError('本轮交付目标已绑定，不能通过改目标跳过未完成的交付；有冲突请澄清。')
             if self._scope_selected and not production_allowed(self.selection) and production_allowed(selection):
                 # An explicit decision to pause, or a request to only report
                 # state, is not upgraded inside its own turn. A correction the
@@ -759,7 +1007,15 @@ class Orchestrator:
             data = self.image_observer(args['images'], self._emit, self.check_cancel or (lambda: None))
             return json.dumps(data, ensure_ascii=False) + '\n观察已进入本项目策划上下文。继续完成本轮具体创意方向；旧需求若受影响须先更新。'
         if name == 'observe_reference':
-            if self._scope_selected and not production_allowed(self.selection):
+            limits = self._task_constraints
+            if limits.get('readonly') and not limits.get('analysis_only'):
+                raise ToolError('本轮只讨论、查状态或暂停，不能启动视频观察。')
+            if limits.get('analysis_only') and args.get('action') != 'analyze':
+                raise ToolError('本轮只分析，不能扩大为复刻或制作。')
+            if limits.get('prompt_only') and args.get('action') != 'prompt':
+                raise ToolError('本轮只交付参考适配提示词，不能扩大为完整方案。')
+            if (self._scope_selected and not production_allowed(self.selection)
+                    and not (self._deliverable == 'analysis' and args.get('action') == 'analyze')):
                 raise ToolError('本轮已明确为只读/反馈/暂停，不能再启动视频分析或复刻。')
             if not self.reference_observer or self._reference_used:
                 raise ToolError('本轮参考调用不可用或已尝试；不要自动重复调用。请保留结果，下轮明确要求后再继续。')
@@ -776,7 +1032,7 @@ class Orchestrator:
             if not isinstance(scope, str) or len(scope) > 2000 or (args['action'] != 'analyze' and not scope.strip()):
                 raise ToolError('先确定具体借鉴范围，再启动分析；不要把内部范围问题交给用户填表。')
             if source.startswith('https://'):
-                supplied = [r.get('text', '') for r in self.store.read_chat(self.run_id) if r.get('role') == 'user']
+                supplied = [r.get('text', '') for _, r in visible_chat(self.store, self.run_id) if r.get('role') == 'user']
                 supplied.append(self.store.read_run(self.run_id).brief)
                 from ..tiktok_reference import checked_url
                 urls = set()
@@ -824,7 +1080,7 @@ class Orchestrator:
                 raise ToolError('商品视频链接观察只接受用户提供的 TikTok HTTPS 链接。')
             from ..tiktok_reference import checked_url
             checked = checked_url(source)
-            supplied = [r.get('text', '') for r in self.store.read_chat(self.run_id) if r.get('role') == 'user']
+            supplied = [r.get('text', '') for _, r in visible_chat(self.store, self.run_id) if r.get('role') == 'user']
             supplied.append(self.store.read_run(self.run_id).brief)
             urls = set()
             for text in supplied:
@@ -886,13 +1142,25 @@ class Orchestrator:
             from ..production import agent_production_state
             return json.dumps(agent_production_state(self.store, self.pipeline, self.run_id),
                               ensure_ascii=False)
-        if name in ("write_stage", "dispatch", "compile_creative_package", "prepare_production", "plan_revision", "submit_patch"):
+        if name in ("write_stage", "dispatch", "start_role", "compile_creative_package", "prepare_production", "plan_revision", "submit_patch"):
             if self._deliverable == 'reference_prompt':
                 raise ToolError('本轮只交付参考适配提示词，不能启动完整制片阶段。')
+            if self._deliverable in {'reference_prompt', 'analysis', 'follow_up'}:
+                raise ToolError('本轮只交付提示词、分析或问答，不能启动完整制片阶段。')
             if not self._scope_selected:
                 raise ToolError("尚未选择本轮工作范围；先根据本条用户消息调用 prepare_creative_context。历史制作路由不能自动沿用。")
             if not production_allowed(self.selection):
                 raise ToolError("当前明确路由只允许读取/反馈；先明确选择 new/continue/edit 和交付格式，才能开始制作。")
+            endpoint_stages = {'intake': {'intake'}, 'direction': {'intake', 'direction'}}
+            if (name in {'write_stage', 'dispatch', 'start_role', 'plan_revision'}
+                    and 'allowed_stages' in self._task_constraints
+                    and args.get('stage') not in self._task_constraints['allowed_stages']):
+                raise ToolError('该阶段超出用户本轮任务范围。')
+            if (name in {'write_stage', 'dispatch', 'start_role'} and self._deliverable in endpoint_stages
+                    and args.get('stage') not in endpoint_stages[self._deliverable]):
+                raise ToolError('这个阶段超出本轮约定的交付目标，不能自行继续到下游。')
+            if self._task_constraints.get('local_only') and name in {'compile_creative_package', 'prepare_production'}:
+                raise ToolError('用户本轮限定局部修改，不能另外启动制作输入或整包编译。')
         if name == 'plan_revision':
             if (self.selection['intent'] == 'continue' and args.get('stage') == 'direction'
                     and self.pipeline.stage_state(self.run_id, 'direction').stale):
@@ -900,7 +1168,8 @@ class Orchestrator:
                         '请直接按当前有效需求 dispatch 导演重出方向；本轮不要再次调用 plan_revision。')
             with self.store.run_lock(self.run_id):
                 self._revision_scope = plan_revision(self.store, self.pipeline, self.run_id, args,
-                    turn_id=self._turn_id, user_message=self._current_user_message, previous=self._revision_scope)
+                    turn_id=self._turn_id, user_message=self._current_user_message, previous=self._revision_scope,
+                    constraints=self._task_constraints)
             return json.dumps(self._revision_scope, ensure_ascii=False)
         if name == 'submit_patch':
             scope = self._revision_for('intake', args.get('plan_id'))
@@ -941,8 +1210,10 @@ class Orchestrator:
             # has just spent money on four dispatch rounds needs the current
             # number, not the number from before it started.
             return "# 当前项目摘要\n" + json.dumps(project_brief(
-                self.pipeline.state(self.run_id).to_dict(), latest_execution(self.store, self.run_id), self.store.read_chat(self.run_id),
-                store=self.store, run_id=self.run_id), ensure_ascii=False) + "\n\n" + workspace.render_state()
+                self.pipeline.state(self.run_id).to_dict(), latest_execution(self.store, self.run_id),
+                [row for _, row in visible_chat(self.store, self.run_id)],
+                store=self.store, run_id=self.run_id), ensure_ascii=False) + "\n\n" + workspace.render_state() + (
+                '\n\n当前用户内容条件（带来源与范围）：' + json.dumps(self._project_constraints, ensure_ascii=False))
         if name == "read_artifact":
             rendered = workspace.render_artifact(args["stage"], args.get("version"))
             artifact = (self.store.read_artifact(self.run_id, args["stage"], args["version"])
@@ -962,11 +1233,24 @@ class Orchestrator:
                 if images and any(not m['observations'] for m in images):
                     raise ToolError('先用 observe_images 检查本次商品图片，list_materials 仅列出文件。若多于一次容量，选择相关图片并说明未覆盖范围。')
             return self._write_stage(args)
-        if name == "dispatch":
+        if name in {"dispatch", "start_role"}:
             scope = self._revision_for(args['stage'], args.get('plan_id'))
-            outcome = self.dispatcher.dispatch(args["stage"], args.get("brief", ""), revision_scope=scope)
+            self._dispatched_stages.add(args['stage'])
+            if name == 'start_role':
+                return json.dumps(self.dispatcher.start_role(args['stage'], args.get('brief', ''),
+                    revision_scope=scope,
+                    user_input_id=self._task_user_input['message_id'] if self._task_user_input else None,
+                    turn_scope=self._role_turn_scope()), ensure_ascii=False)
+            outcome = self.dispatcher.dispatch(args["stage"], args.get("brief", ""), revision_scope=scope,
+                user_input_id=self._task_user_input['message_id'] if self._task_user_input else None,
+                turn_scope=self._role_turn_scope())
             return ToolResult(outcome.receipt(), is_error=bool(outcome.error or not outcome.submitted))
         raise ToolError(f"orchestrator has no tool named {name!r}")
+
+    def _role_turn_scope(self):
+        return {'turn_id': self._turn_id, 'selection': self.selection,
+                'deliverable': self._deliverable, 'project_constraints': self._project_constraints,
+                'task_constraints': self._task_constraints}
 
     def _revision_for(self, stage, plan_id):
         scope = self._revision_scope
@@ -977,7 +1261,7 @@ class Orchestrator:
                 raise ToolError('修订计划不是本轮当前阶段的范围，请重新核对。')
             check_base(self.store, self.pipeline, self.run_id, scope)
             return scope
-        if ((scope and scope['mode'] == 'local') or
+        if (self._task_constraints.get('local_only') or (scope and scope['mode'] == 'local') or
                 (self.selection['intent'] == 'edit' and self.store.latest_artifact(self.run_id, stage))):
             raise ToolError('修改已有内容前先用 plan_revision 绑定准确版本和范围，并传入 plan_id。')
         return None

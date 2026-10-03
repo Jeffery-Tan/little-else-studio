@@ -8,32 +8,138 @@
     try{const name=decodeURIComponent(value.slice(prefix.length));return name&&!/[\/\\]/.test(name)&&name!=='.'&&name!=='..'?value:'';}catch(_){return '';}
   }
   function price(estimate){return typeof estimate?.amount==='number'&&Number.isFinite(estimate.amount)&&estimate.amount>=0?`${esc(estimate.currency||'')} ${Number(estimate.amount).toFixed(2)}（估算）`:'费用未知';}
+  const referencePurposes={product:'商品外观',character:'人物外观',scene:'场景环境',continuity:'画面衔接'};
+  function draftReferences(draft){
+    // Explicit references are the actual provider inputs. An empty set must not
+    // silently bring back the legacy single-reference field.
+    if(Array.isArray(draft.references))return draft.references;
+    return draft.reference?[{...draft.reference,purpose:draft.kind==='video'?'continuity':'product'}]:[];
+  }
+  function generationPrompt(draft){return typeof draft.compiled_prompt==='string'?draft.compiled_prompt:String(draft.prompt||'');}
+  function referenceInputs(draft,data,runId){
+    return draftReferences(draft).map(ref=>{
+      const material=(data.materials||[]).find(m=>m.kind==='image'&&m.name===ref?.name&&m.sha256===ref?.sha256);
+      const labels=draft.design_labels||{};
+      const entity=ref?.purpose==='character'?(labels.characters||[]).find(row=>row.id===ref.design_id)
+        :ref?.purpose==='scene'&&labels.scene?.id===ref.design_id?labels.scene:null;
+      const identity=ref?.design_id?entity?.label?`${entity.label}（${ref.design_id}）`:ref.design_id:'';
+      return {...ref,label:(referencePurposes[ref?.purpose]||'用途未明确')+(identity?` · ${identity}`:''),url:mediaUrl(material?.url,runId)};
+    });
+  }
+  function referenceInputIssue(draft,data){
+    if(!Array.isArray(draft.references))return '';
+    const refs=draftReferences(draft);
+    if(draft.kind==='video'&&(refs.length!==1||refs[0]?.purpose!=='continuity'))return '视频每段必须使用一张已确认的首帧，请重新核对制作输入。';
+    if(draft.kind==='image'&&refs.length>5)return '图片最多使用五张参考图，请重新核对制作输入。';
+    if(refs.some(ref=>!referencePurposes[ref?.purpose]))return '参考图用途尚未明确，请重新核对制作输入。';
+    if(refs.some(ref=>!(data.materials||[]).some(m=>m.kind==='image'&&m.name===ref?.name&&m.sha256===ref?.sha256)))return '本次参考图文件已变化或不可用，请重新核对制作输入。';
+    return '';
+  }
+  function designBindingHtml(draft){
+    const binding=draft.design_binding,labels=draft.design_labels||{};
+    const issue=String(draft.design_issue||'');
+    if(!binding)return issue?`<p class="production-design-issue" role="status">${esc(issue)}</p>`:'';
+    const characters=(binding.character_ids||[]).map(id=>{
+      const row=(labels.characters||[]).find(item=>item.id===id);
+      return row?.label?`${row.label}（${id}）`:id;
+    });
+    const scene=labels.scene?.id===binding.scene_id&&labels.scene.label?`${labels.scene.label}（${binding.scene_id}）`:binding.scene_id;
+    return `<section class="production-design-binding"><strong>本镜采用的共享设计${binding.material_plan?.version?` · 素材计划第 ${esc(binding.material_plan.version)} 版`:''}</strong>`+
+      `<dl><dt>人物</dt><dd>${esc(characters.join('、')||'本镜不包含人物')}</dd><dt>场景</dt><dd>${esc(scene||'未绑定场景')}</dd></dl>`+
+      '<p class="form-note">人物、场景与衔接要求用于本次制作输入，实际结果仍需逐镜核对。</p>'+
+      (issue?`<p class="production-design-issue" role="status">${esc(issue)}</p>`:'')+
+      `<details><summary>查看设计版本与指纹</summary><p>素材计划：${esc(binding.material_plan?.sha256||'未提供')}<br>脚本版本 ${esc(binding.writing?.version||draft.source_version)}：${esc(binding.writing?.sha256||draft.source_sha256||'未提供')}<br>共享设计：${esc(binding.design_sha256||'未提供')}</p></details></section>`;
+  }
+  function referencesHtml(draft,data,runId){
+    const refs=referenceInputs(draft,data,runId);
+    if(!refs.length)return '<p class="form-note">本方案未使用参考图像素输入。</p>';
+    const inputIssue=referenceInputIssue(draft,data);
+    return `<section class="production-reference-inputs"><strong>${inputIssue?'待核对的参考图':draft.kind==='video'?'本段实际使用的首帧':'本次参考图像素输入'} · ${refs.length} 张</strong><div class="production-reference-grid">`+
+      refs.map(ref=>`<figure class="production-shot-reference production-reference-input">`+
+        (ref.url?`<a href="${esc(ref.url)}" target="_blank" rel="noopener"><img src="${esc(ref.url)}" alt="${esc(ref.label)}参考图：${esc(ref.name)}"></a>`:'<span class="production-reference-missing">参考图不可用</span>')+
+        `<figcaption><strong>${esc(ref.label)}</strong><span>${esc(ref.name)}</span><span>${draft.kind==='video'?ref.purpose==='continuity'?'作为本段视频的起始画面':'此用途不能用于本段视频提交':ref.purpose==='product'?'上传商品原图，仅供生成参考':'供本次图片生成参考'}</span>`+
+        (ref.url?'':`<span>文件已变化或不可用，请重新核对。</span>`)+`</figcaption></figure>`).join('')+'</div>'+
+      `<details><summary>查看本次参考图文件与指纹</summary>${refs.map(ref=>`<p>${esc(ref.label)} · ${esc(ref.name)}<br>${esc(ref.sha256)}</p>`).join('')}</details></section>`;
+  }
   function reviewGate(draft,data){
     if(data.active)return '制作团队正在执行，请等待本轮结束';
+    if(draft.design_issue)return String(draft.design_issue);
+    if(data.visual_design_status?.ready===false)return (data.visual_design_status.issues||[]).join(' ')||'当前共同人物与场景设计尚未就绪。';
     if(draft.source_ready===false)return '关联稿件已变化，请核对后保存新方案';
     return '';
   }
   function gate(draft,data){
     const common=reviewGate(draft,data);if(common)return common;
+    const inputIssue=referenceInputIssue(draft,data);if(inputIssue)return inputIssue;
     if(!data.capabilities?.[draft.kind]?.available)return data.capabilities?.[draft.kind]?.reason||'该制作方式尚未就绪';
     if(draft.source_ready===false)return '关联稿件已变化，请核对后保存新方案';
-    if(draft.kind==='video'&&(!draft.reference||draft.reference_approved!==true))return '先查看并确认本张参考图';
+    if(draft.kind==='video'&&(!draftReferences(draft).length||draft.reference_approved!==true))return '先查看并确认本张参考图';
     if(draft.can_generate===false)return draft.reason||'当前方案暂不能生成，请核对记录';
     if((draft.attempts||[]).some(a=>['queued','running','preparing','submitting','submitted','downloading','retrieve_failed','unknown','submission_unknown','recovering','cancelling'].includes(a.status)))return '已有制作任务，请先查询或核实结果';
     return '';
+  }
+  function reuseCandidatesHtml(data,kind){
+    const rows=(data?.reuse_candidates||[]).filter(row=>row.kind===kind);
+    if(!rows.length)return '';
+    const targets=data.targets?.[kind]?.shots||[];
+    return '<details class="production-record"><summary>沿用未受修改影响的镜头素材</summary><p class="form-note">沿用只保存现有素材，不调用生成、不新增生成费用。素材会重新绑定当前方案；图片确认和生成授权不会沿用。</p>'+rows.map(row=>{
+      const shot=targets.find(item=>item.shot_id===row.shot_id);
+      return `<div class="production-card"><strong>${shot?`第 ${esc(shot.ordinal)} 镜`:'旧镜头'}</strong><p>${esc(row.reason||'依赖未变化，可沿用已保存素材。')}</p>`+
+        (row.eligible?`<button class="ghost small" data-reuse-attempt="${esc(row.source_attempt_id)}" ${data.active?'disabled':''}>沿用此镜素材</button>`:'')+'</div>';
+    }).join('')+'</details>';
   }
   function submission(values,data,requestId){
     const source=(data.sources||[]).find(s=>s.version===Number(values.source_version)&&s.artifact_sha256===values.source_sha256);
     if(!source||!source.ready)throw new Error('请选择已就绪的准确脚本版本。');
     if(!['image','video'].includes(values.kind))throw new Error('请选择制作类型。');
     const material=(data.materials||[]).find(m=>m.name===values.reference_name&&m.sha256===values.reference_sha256&&m.kind==='image');
-    if(values.reference_name&&!material)throw new Error('参考图已变化，请重新选择。');
-    if(values.kind==='video'&&!material)throw new Error('请明确选择视频使用的参考图。');
+    const refs=Array.isArray(values.references)?values.references.map(ref=>({name:ref.name,sha256:ref.sha256,purpose:ref.purpose,...(ref.design_id?{design_id:ref.design_id}:{})})):null;
+    if(refs){const issue=referenceInputIssue({kind:values.kind,references:refs},data);if(issue)throw new Error(issue);}
+    else{
+      if(values.reference_name&&!material)throw new Error('参考图已变化，请重新选择。');
+      if(values.kind==='video'&&!material)throw new Error('请明确选择视频使用的参考图。');
+    }
     if(!String(values.prompt||'').trim())throw new Error('请填写制作描述。');
     const model=values.kind==='video'?(data.capabilities?.video?.models||[]).find(m=>m.id===values.model):null;
     const duration=values.kind==='video'?Number(values.duration):null;
     if(values.kind==='video'&&(!model||!Number.isInteger(duration)||duration<model.durations.min||duration>model.durations.max||!model.resolutions.includes(values.resolution)))throw new Error('请核对视频模型、时长与画质。');
-    return {request_id:requestId,kind:values.kind,prompt:values.prompt.trim(),source_version:source.version,source_sha256:source.artifact_sha256,reference:material?{name:material.name,sha256:material.sha256}:null,model:values.kind==='image'?'codex-image':model.id,duration,resolution:values.kind==='image'?null:values.resolution};
+    return {request_id:requestId,kind:values.kind,prompt:values.prompt.trim(),source_version:source.version,source_sha256:source.artifact_sha256,
+      ...(refs?{references:refs}:{reference:material?{name:material.name,sha256:material.sha256}:null}),
+      ...(values.shot_id?{shot_id:values.shot_id}:{}),...(values.supersedes?{supersedes:values.supersedes}:{}),
+      model:values.kind==='image'?'codex-image':model.id,duration,resolution:values.kind==='image'?null:values.resolution};
+  }
+  function editValues(draft){return {kind:draft.kind,source_version:String(draft.source_version),source_sha256:draft.source_sha256,
+    reference_name:draft.reference?.name||'',reference_sha256:draft.reference?.sha256||'',
+    references:Array.isArray(draft.references)?draft.references.map(ref=>({...ref})):null,
+    shot_id:draft.shot_id||'',supersedes:draft.draft_id,
+    prompt:typeof draft.shot_prompt==='string'?draft.shot_prompt:draft.prompt,
+    model:draft.model,duration:String(draft.duration||5),resolution:draft.resolution||'720P'};}
+  function reusePayload(candidate,data,requestId){
+    const source=(data.sources||[]).find(row=>row.ready&&row.version===candidate?.source_version
+      &&row.artifact_sha256===candidate?.source_sha256);
+    const old=(data.drafts||[]).find(row=>row.draft_id===candidate?.source_draft_id
+      &&row.kind===candidate?.kind&&row.shot_id===candidate?.shot_id);
+    if(!candidate?.eligible||!Array.isArray(candidate.changed_dependencies)||candidate.changed_dependencies.length
+        ||!old||!source)throw new Error('素材依赖或当前方案已变化，请重新读取。');
+    const currentDraft=(data.drafts||[]).find(row=>row.kind===candidate.kind&&row.shot_id===candidate.shot_id
+      &&row.source_version===source.version&&row.source_sha256===source.artifact_sha256
+      &&row.source_ready&&row.is_current!==false);
+    const references=candidate.kind==='video'?[candidate.reuse_reference]:draftReferences(old);
+    const issue=referenceInputIssue({kind:candidate.kind,references},data);
+    if(issue)throw new Error(issue);
+    if(candidate.kind==='video'&&(!candidate.reuse_reference
+        ||candidate.reuse_reference.sha256!==draftReferences(old)[0]?.sha256))
+      throw new Error('当前首帧与旧视频的字节依赖无法核对，请重新读取。');
+    // Rebuild the allowed preparation fields rather than copying historical
+    // request identities, approvals or a generated frame's obsolete name.
+    return {request_id:requestId,kind:candidate.kind,
+      prompt:typeof old.shot_prompt==='string'?old.shot_prompt:old.prompt,
+      source_version:source.version,source_sha256:source.artifact_sha256,
+      shot_id:candidate.shot_id,reuse_attempt_id:candidate.source_attempt_id,
+      references:references.map(ref=>({name:ref.name,sha256:ref.sha256,purpose:ref.purpose,
+        ...(ref.design_id?{design_id:ref.design_id}:{})})),
+      model:old.model||old.request_payload?.model,duration:old.duration??null,resolution:old.resolution??null,
+      ...(currentDraft?{supersedes:currentDraft.draft_id}:{})};
   }
   function canRecoverUsage(attempt,data){return !data.active&&['unknown','unresolved'].includes(attempt?.usage_status)&&!['queued','running','preparing','submitting','submitted','downloading','recovering'].includes(attempt.status);}
   function usageQuantity(value,kind){const quantity=Number(value);if(String(value??'').trim()===''||!Number.isFinite(quantity)||quantity<0||quantity>10000||(kind==='image'&&!Number.isSafeInteger(quantity)))throw new Error(kind==='video'?'请按提供方凭证填写有效的非负视频秒数。':'请按提供方凭证填写非负整数图片用量。');return quantity;}
@@ -140,13 +246,14 @@
   function productionWorkForDraft(draft,data,runId){
 
     const attempt=(draft.attempts||[]).at(-1)||null;
-    const ref=(data.materials||[]).find(m=>m.name===draft.reference?.name&&m.sha256===draft.reference?.sha256);
-    const referenceUrl=mediaUrl(ref?.url,runId),currentOutput=outputUrl(attempt,data,runId);
+    const refs=referenceInputs(draft,data,runId);
+    const ref=refs.find(item=>item.purpose===(draft.kind==='video'?'continuity':'product'))||refs[0];
+    const referenceUrl=ref?.url||'',currentOutput=outputUrl(attempt,data,runId);
     const result=readableResult(draft,data,runId);
     const base={kind:draft.kind,draft,attempt,displayAttempt:result?.attempt||null,
       displaySourceVersion:result?.draft?.source_version||null,
       displaySourceSha256:result?.draft?.source_sha256||null,
-      outputUrl:result?.url||'',referenceUrl,outputName:result?.name||'',
+      outputUrl:result?.url||'',referenceUrl,referenceName:ref?.name||'',outputName:result?.name||'',
       resultIsPrevious:Boolean(result&&(result.draft.draft_id!==draft.draft_id||result.attempt.attempt_id!==attempt?.attempt_id)),
       primaryAction:'none',phase:'blocked',label:'当前制作需要核对',detail:''};
     if(attempt){
@@ -158,7 +265,7 @@
       if(attempt.status==='retrieve_failed')return {...base,phase:'unknown',primaryAction:attempt.task_id?'refresh':'recover',
         label:'这次结果尚未取回',detail:'查询原任务并取回结果，不会重新生成。'};
     }
-    if(draft.source_ready===false)return {...base,phase:'stale',primaryAction:'discuss',label:'这版作品依据已变化',detail:'告诉团队变化在哪里，旧结果仍可在这里阅读；不能沿用旧批准。'};
+    if(draft.design_issue||draft.source_ready===false)return {...base,phase:'stale',primaryAction:'discuss',label:draft.design_issue?'本镜制作输入需要重新核对':'这版作品依据已变化',detail:draft.design_issue||'告诉团队变化在哪里，旧结果仍可在这里阅读；不能沿用旧批准。'};
     if(attempt){
       if(['succeeded','completed'].includes(attempt.status)){
         if(!currentOutput)return {...base,phase:'missing',primaryAction:attempt.task_id?'refresh':'none',
@@ -197,6 +304,8 @@
     const base={kind,phase:'needs_plan',draft:null,attempt:null,outputUrl:'',referenceUrl:'',outputName:'',
       primaryAction:'open_plan',label:'先完成当前作品方案',detail:'脚本确认后，团队才能准备准确的制作输入。'};
     if(!readySource)return base;
+    if(data.visual_design_status?.ready===false)return {...base,phase:'needs_design',label:'先补齐共同人物与场景设计',
+      detail:(data.visual_design_status.issues||[]).join(' ')||'当前素材计划没有可用的共同设计，请先补齐设计与分镜。'};
     if(kind==='video'&&!readyReference)return {...base,phase:'image_pending',primaryAction:'view_images',
       label:'先确认用于视频的图片',detail:'在画面区查看并确认准确图片，然后准备视频输入。'};
     return {...base,phase:'prepare',primaryAction:'prepare',
@@ -291,14 +400,13 @@
     }
     const items=generation?intent.drafts.map((item,index)=>{
       const draft=(data.drafts||[]).find(row=>row.draft_id===item.draft_id&&row.draft_sha256===item.expected_sha256);
-      if(!draft)return null;
-      const ref=(data.materials||[]).find(m=>m.name===draft.reference?.name&&m.sha256===draft.reference?.sha256);
-      const url=mediaUrl(ref?.url,runId);
-      const description=String(draft.prompt||'').trim();
-      const sentences=description.match(/[^.!?。]+[.!?。]?/g)||[];
-      const scene=(sentences.find(sentence=>!/^\s*Vertical\b/i.test(sentence))||sentences[0]||description).trim();
+      if(!draft||gate(draft,data)||referenceInputs(draft,data,runId).some(ref=>!ref.url))return null;
+      const description=generationPrompt(draft).trim();
+      const shotDescription=String(draft.shot_prompt??description).trim();
+      const sentences=shotDescription.match(/[^.!?。]+[.!?。]?/g)||[];
+      const scene=(sentences.find(sentence=>!/^\s*Vertical\b/i.test(sentence))||sentences[0]||shotDescription).trim();
       return `<li><strong>${video?'视频段':'首帧'} ${String(index+1).padStart(2,'0')}</strong>`+
-        (url?`<img src="${esc(url)}" alt="第 ${index+1} 张的上传参考原图">`:'')+
+        designBindingHtml(draft)+referencesHtml(draft,data,runId)+
         `<p>${esc(scene)}</p><details><summary>查看完整生成描述</summary><p>${esc(description)}</p></details>`+
         `<small>${video?`${esc(draft.duration)} 秒 · ${esc(draft.resolution)} · `:''}${price(draft.estimate)} · ${esc(draft.estimate?.notice||'实际费用以提供方为准')}</small></li>`;
     }):intent.images.map((item,index)=>{
@@ -330,16 +438,14 @@
       const rows=shotRows(data,'image'),coverage=shotCoverage(data,'image');
       // A revision replaces its shot's input. Showing the replaced one next to it
       // is how "改第二镜" read as "there are now seven shots".
-      const drafts=(data?.drafts||[]).filter(draft=>draft.kind==='image'&&draft.source_ready!==false&&draft.is_current!==false);
+      const drafts=(data?.drafts||[]).filter(draft=>draft.kind==='image'&&(draft.source_ready!==false||draft.design_issue)&&draft.is_current!==false);
       const superseded=supersededDrafts(data,'image');
       if(drafts.length||rows.length){
         const generated=drafts.filter(draft=>productionWorkForDraft(draft,data,runId).outputUrl).length;
         const items=drafts.map((draft,index)=>{
           const work=productionWorkForDraft(draft,data,runId);
           const row=shotForDraft(draft,data,'image');
-          const reference=(data.materials||[]).find(m=>m.name===draft.reference?.name&&m.sha256===draft.reference?.sha256);
-          const referenceUrl=mediaUrl(reference?.url,runId);
-          const description=String(draft.prompt||'').trim();
+          const description=String(draft.shot_prompt??draft.prompt??'').trim();
           const sentences=description.match(/[^.!?。]+[.!?。]?/g)||[];
           const scene=(sentences.find(sentence=>!/^\s*Vertical\b/i.test(sentence))||sentences[0]||'查看出图描述').trim();
           const shortScene=scene.length>72?`${scene.slice(0,72).trimEnd()}…`:scene;
@@ -356,9 +462,11 @@
             `<p class="production-shot-stage">${esc(badge)}${row?.blocker?` · ${esc(row.blocker)}`:''}${revision?` · ${esc(revision)}`:''}</p>`+
             (cause?`<p class="production-shot-cause" role="status">${esc(cause)}</p>`:'')+
             (work.outputUrl?'':work.detail?`<p class="production-shot-next">${esc(work.detail)}</p>`:'')+
+            designBindingHtml(draft)+
             `<p class="production-prompt">${esc(description||'暂无出图描述')}</p>`+
+            (generationPrompt(draft)!==description?`<details class="production-confirm-prompt"><summary>查看实际发送的完整画面描述</summary><p class="production-prompt">${esc(generationPrompt(draft))}</p></details>`:'')+
             (work.outputUrl?`<figure class="production-shot-output"><img src="${esc(work.outputUrl)}" alt="镜头 ${ordinal} 的生成结果"><figcaption>这面镜头的生成结果</figcaption></figure>`:'')+
-            (referenceUrl?`<figure class="production-shot-reference"><img src="${esc(referenceUrl)}" alt="镜头 ${ordinal} 使用的上传商品原图"><figcaption>上传商品原图，仅供生成参考</figcaption></figure>`:'')+
+            referencesHtml(draft,data,runId)+
             `<button type="button" class="ghost small" data-feedback-image-draft="${esc(draft.draft_id)}">对这条描述提意见</button>`+
             (work.outputUrl&&work.displayAttempt?`<button type="button" class="ghost small" data-feedback-image-attempt="${esc(work.displayAttempt.attempt_id)}">批注这张生成图</button>`:'')+
             `</div></details>`;
@@ -380,7 +488,7 @@
         const supersededLine=superseded.length
           ? `<details class="production-shot-history"><summary>已被替换的历史输入 · ${superseded.length}</summary><ul>${superseded.map(draft=>`<li>${esc(String(draft.prompt||'').slice(0,80))} · 已被 ${esc(draft.superseded_by||'新版本')} 替换</li>`).join('')}</ul><p class="form-note">历史输入保留可读，不会和当前输入一起生成。</p></details>`
           : '';
-        return `<article class="production-canvas production-storyboard"><header><span class="creator-kicker">画面</span><h2>分镜首帧（${total}）</h2><p>${esc(countLine)} 点开一条查看这一镜的状态、原因与出图描述；商品原图只作参考。</p></header><div class="production-shot-list">${items}${blanks}</div>${supersededLine}</article>`;
+        return `<article class="production-canvas production-storyboard"><header><span class="creator-kicker">画面</span><h2>分镜首帧（${total}）</h2><p>${esc(countLine)} 点开一条查看这一镜的状态、共享设计、出图描述与参考图用途。</p></header><div class="production-shot-list">${items}${blanks}</div>${supersededLine}</article>`;
       }
     }
     if(kind==='video'&&(data?.video_sequence||[]).length>1){
@@ -395,7 +503,9 @@
         `</details></section>`:'';
       const items=sequence.map(shot=>`<details class="production-shot" ${shot.outputUrl?'':'open'}><summary><strong>视频段 ${String(shot.index).padStart(2,'0')}</strong><small>${shot.outputUrl?'已取回':shot.unresolved?statuses[shot.unresolved.status]||'待核实':shot.draft?'待生成':shot.approved?'待准备输入':'待确认首帧'}</small></summary>`+
         `<div class="production-shot-body">${shot.outputUrl?`<video controls preload="metadata" src="${esc(shot.outputUrl)}"></video>`:shot.referenceUrl?`<img src="${esc(shot.referenceUrl)}" alt="第 ${shot.index} 段首帧">`:''}`+
-        (shot.draft?`<p class="production-prompt">${esc(shot.draft.prompt)}</p><small>${esc(shot.draft.duration)} 秒 · ${esc(shot.draft.resolution)} · ${price(shot.draft.estimate)}</small>`:'<p>这段的视频输入尚未准备。</p>')+
+        (shot.draft?designBindingHtml(shot.draft)+`<p class="production-prompt">${esc(shot.draft.shot_prompt??shot.draft.prompt)}</p>`+
+          (shot.draft.shot_prompt!==undefined?`<details class="production-confirm-prompt"><summary>查看实际发送的完整画面描述</summary><p class="production-prompt">${esc(generationPrompt(shot.draft))}</p></details>`:'')+
+          referencesHtml(shot.draft,data,runId)+`<small>${esc(shot.draft.duration)} 秒 · ${esc(shot.draft.resolution)} · ${price(shot.draft.estimate)}</small>`:'<p>这段的视频输入尚未准备。</p>')+
         `</div></details>`).join('');
       const writing=(rail||[]).find(step=>step.stage==='writing'&&step.has_doc);
       const caption=assembly&&writing&&!writing.stale&&writing.integrity_ok!==false?captionBlock(writing)?.text:'';
@@ -415,6 +525,7 @@
     return `<article class="production-canvas"><header><span class="creator-kicker">${kind==='video'?'成片与文案':'当前画面'}</span><h2>${esc(work.label)}</h2></header>`+
       (media?`<div class="production-canvas-media">${media}</div>`:`<div class="creator-production-empty">这里还没有生成的${kind==='video'?'视频':'画面'}。</div>`)+reference+
       `<p>${esc(work.detail)}</p>`+
+      (work.draft?designBindingHtml(work.draft)+referencesHtml(work.draft,data,runId):'')+
       (kind==='video'&&work.outputUrl?`<section class="creator-caption"><h3>这段视频对应的发布文案</h3><p>${caption?esc(caption):'暂时没有可核对的同版发布文案。'}</p></section>`:'')+
       '</article>';
   }
@@ -448,7 +559,8 @@
       hero+`<p class="creator-production-state">${missingResult?'结果文件暂不可用':esc(latest?statuses[latest.status]||latest.status:reason||'等待制作')}${latest?.message?` · ${esc(latest.message)}`:''}</p>`+
       `<div class="production-actions"><button class="primary" data-generate="${esc(draft.draft_id)}" ${reason?'disabled':''}>核对并生成</button><button class="ghost" data-edit-input="${esc(draft.draft_id)}">手动调整制作输入</button></div>`+
       (reason?`<p class="form-note">${esc(reason)}</p>`:'')+
-      `<details class="creator-production-detail"><summary>制作描述、检查依据与费用说明</summary><p class="production-prompt">${esc(draft.prompt)}</p><p class="form-note">${esc(draft.estimate?.notice||'费用以提供方实际结算为准。')}</p>${reviewHtml(draft.review)}</details>`+
+      designBindingHtml(draft)+referencesHtml(draft,data,runId)+
+      `<details class="creator-production-detail"><summary>制作描述、检查依据与费用说明</summary><p class="production-prompt">${esc(generationPrompt(draft))}</p><p class="form-note">${esc(draft.estimate?.notice||'费用以提供方实际结算为准。')}</p>${reviewHtml(draft.review)}</details>`+
       (records?`<details class="creator-production-detail"><summary>制作与取回记录 · ${attempts.length}</summary><div class="production-attempts">${records}</div></details>`:'')+'</article>';
   }
   function canDiagnoseWork(work){
@@ -459,7 +571,7 @@
   function primaryWorkAction(work){
     const draft=work.draft,attempt=work.attempt;
     switch(work.primaryAction){
-      case 'approve_image':return `<button class="primary" data-image="${esc(draft.kind==='video'?draft.reference?.name:attempt?.output?.name)}">查看并确认这张图</button>`;
+      case 'approve_image':return `<button class="primary" data-image="${esc(draft.kind==='video'?work.referenceName:attempt?.output?.name)}">查看并确认这张图</button>`;
       case 'generate':return `<button class="primary" data-generate="${esc(draft.draft_id)}">核对并生成${draft.kind==='video'?'视频':'图片'}</button>`;
       case 'refresh':return `<button class="primary" data-refresh="${esc(attempt.attempt_id)}">查询这次结果</button>`;
       case 'recover':return `<button class="primary" data-recover="${esc(attempt.attempt_id)}">核实提供方提交记录</button>`;
@@ -477,16 +589,16 @@
     const media=work.outputUrl
       ? draft.kind==='video'?`<video controls preload="metadata" src="${esc(work.outputUrl)}"></video>`
         : `<button class="production-thumb" data-image="${esc(work.outputName)}"><img src="${esc(work.outputUrl)}" alt="${work.phase==='image_pending'?'待确认图片':'当前图片'}"></button>`
-      : work.referenceUrl&&work.phase!=='missing'?`<button class="production-thumb" data-image="${esc(draft.reference.name)}"><img src="${esc(work.referenceUrl)}" alt="上传的商品原图，供生成参考"></button>`:'';
+      : draft.kind==='video'&&work.referenceUrl&&work.phase!=='missing'?`<button class="production-thumb" data-image="${esc(work.referenceName)}"><img src="${esc(work.referenceUrl)}" alt="本段视频使用的首帧参考"></button>`:'';
     const resultCaption=work.resultIsPrevious?`上一份已生成结果${work.displaySourceVersion ? ` · 来自脚本第 ${work.displaySourceVersion} 版` : ''} · 可继续核对；本次尝试的状态见下方。`
       :work.outputUrl?work.phase==='image_pending'?'这张图片已取回，等待你核对并确认。'
         :work.phase==='completed'?'当前可查看的作品':'已生成结果仍可核对；本次任务状态见下方。'
-      :'上传的商品原图仅作生成参考；这份分镜尚未出图。';
+      :'首帧仅作本段视频的起始参考；这段视频尚未生成。';
     const hero=media?`<div class="creator-result${!work.outputUrl?' creator-result-reference':''}">${media}<div class="creator-result-caption">${esc(resultCaption)}`+
       (work.displayAttempt&&work.outputUrl?` <button type="button" class="ghost small" data-feedback-attempt="${esc(work.displayAttempt.attempt_id)}">${draft.kind==='video'?'反馈当前时间点':'反馈这张图'}</button>`:'')+'</div></div>'
       : `<div class="creator-production-empty">${esc(work.phase==='missing'?'结果记录已保存，但媒体文件暂时无法核对。':work.phase==='processing'?'本次任务正在处理，结果取回后会显示在这里。':'本次画面尚未生成。')}</div>`;
     const pendingReference=draft.kind==='video'&&work.phase==='image_pending'&&work.referenceUrl&&work.outputUrl
-      ? `<div class="creator-result"><button class="production-thumb" data-image="${esc(draft.reference.name)}"><img src="${esc(work.referenceUrl)}" alt="本次待确认的视频参考图"></button><div class="creator-result-caption">本次待确认的参考图 · 查看大图后才能确认。</div></div>` : '';
+      ? `<div class="creator-result"><button class="production-thumb" data-image="${esc(work.referenceName)}"><img src="${esc(work.referenceUrl)}" alt="本次待确认的视频参考图"></button><div class="creator-result-caption">本次待确认的参考图 · 查看大图后才能确认。</div></div>` : '';
     const records=attempts.map(a=>{
       const prior=outputUrl(a,data,runId),unknown=['unknown','submission_unknown'].includes(a.status);
       return `<section><strong>${esc(statuses[a.status]||a.status)}</strong><p>${esc(a.message||'')}</p>`+
@@ -500,7 +612,8 @@
     return `<article class="production-card production-work production-phase-${esc(work.phase)}" data-draft-id="${esc(draft.draft_id)}"><header><div><span class="eyebrow">${draft.kind==='video'?'视频':'图片'} · 脚本第 ${esc(draft.source_version)} 版</span><h3>${esc(work.label)}</h3></div>`+
       (work.phase==='ready'?`<span class="production-price">${price(draft.estimate)}</span>`:'')+'</header>'+
       (work.phase==='unknown'?next+hero:hero+pendingReference+next)+
-      `<details class="creator-production-detail"><summary>制作描述、检查依据与费用说明</summary><p class="production-prompt">${esc(draft.prompt)}</p><p class="form-note">${esc(draft.estimate?.notice||'费用以提供方实际结算为准。')}</p>${reviewHtml(draft.review)}</details>`+
+      designBindingHtml(draft)+referencesHtml(draft,data,runId)+
+      `<details class="creator-production-detail"><summary>制作描述、检查依据与费用说明</summary><p class="production-prompt">${esc(generationPrompt(draft))}</p><p class="form-note">${esc(draft.estimate?.notice||'费用以提供方实际结算为准。')}</p>${reviewHtml(draft.review)}</details>`+
       `<details class="creator-production-detail"><summary>再次制作或高级编辑</summary><div class="production-actions"><button class="ghost" data-edit-input="${esc(draft.draft_id)}">手动调整制作输入</button><button class="ghost" data-generate="${esc(draft.draft_id)}" ${reason?'disabled':''}>再生成一次（可能产生新费用）</button></div>${reason?`<p class="form-note">${esc(reason)}</p>`:''}</details>`+
       (records?`<details class="creator-production-detail"><summary>制作与取回记录 · ${attempts.length}</summary><div class="production-attempts">${records}</div></details>`:'')+'</article>';
   }
@@ -512,8 +625,8 @@
     return `<section class="production-empty production-work"><span>${esc(work.label)}</span><p>${esc(work.detail)}</p>${reference}${action}</section>`;
   }
   function confirmationHtml(draft,data,runId){
-    const material=(data.materials||[]).find(m=>m.name===draft.reference?.name&&m.sha256===draft.reference?.sha256);
-    const reference=mediaUrl(material?.url,runId);
+    const inputs=referenceInputs(draft,data,runId);
+    const blocked=reviewGate(draft,data)||referenceInputIssue(draft,data)||(inputs.some(ref=>!ref.url)?'本次参考图文件已变化或不可用，请重新核对制作输入。':'');
     const scope=draft.kind==='video'
       ? `1 条视频 · ${esc(draft.duration)} 秒 · ${esc(draft.resolution)} · 原生声音开启 · 跟随参考图比例 · 不自动扩写`
       : '1 个图片生成任务；可能包含多次出图调用';
@@ -521,15 +634,17 @@
     return `<section class="production-confirm"><span class="eyebrow">生成前最后核对</span>`+
       `<h3>启动一个生成任务</h3>`+
       `<p class="production-confirm-scope">脚本第 ${esc(draft.source_version)} 版 · ${scope} · ${esc(draft.kind==='image'?`Codex Image / ${data.capabilities?.image?.controller_model||'本机默认模型'}`:draft.model)}</p>`+
-      (reference?`<img class="production-preview" src="${esc(reference)}" alt="本次使用的准确参考图">`:'<p class="form-note">本方案未使用参考图。</p>')+
+      (draft.shot_prompt?`<p class="production-prompt">${esc(draft.shot_prompt)}</p>`:'')+
+      designBindingHtml(draft)+referencesHtml(draft,data,runId)+
       `<p class="production-confirm-price"><strong>${price(draft.estimate)}</strong></p>`+
       `<p class="form-note">${esc(draft.estimate?.notice||'费用未知的部分保持未知；不代表免费。')} 不会自动重复提交。</p>`+
       (findings.length?`<div class="production-confirm-findings"><strong>历史检查意见（供核对）</strong>${findings.map(f=>`<p>${esc(typeof f==='string'?f:f.message||f.description||f.title||'请核对制作输入。')}</p>`).join('')}</div>`:'')+
-      `<details class="production-confirm-prompt"><summary>查看实际发送的完整画面描述</summary><p class="production-prompt">${esc(draft.prompt)}</p></details>`+
-      `<label class="production-consent"><input type="checkbox" data-consent>我已核对以上输入，同意本次生成任务及其费用</label>`+
-      `<div class="production-actions"><button class="primary" data-authorize disabled>启动生成任务</button><button class="ghost" data-dismiss>返回修改</button></div></section>`;
+      `<details class="production-confirm-prompt"><summary>查看实际发送的完整画面描述</summary><p class="production-prompt">${esc(generationPrompt(draft))}</p></details>`+
+      (blocked?`<p class="production-design-issue" role="status">${esc(blocked)}</p>`:'<label class="production-consent"><input type="checkbox" data-consent>我已核对以上输入，同意本次生成任务及其费用</label>')+
+      `<div class="production-actions">${blocked?'':'<button class="primary" data-authorize disabled>启动生成任务</button>'}<button class="ghost" data-dismiss>返回修改</button></div></section>`;
   }
-  root.StudioProduction={esc,mediaUrl,price,gate,reviewGate,canRecoverUsage,usageQuantity,usageFormHtml,reviewHtml,captionHtml,captionMatches,canDiagnoseWork,uncertain,submission,actionRequest,currentProductionWork,batchBlocker,batchGenerationDrafts,batchApprovalImages,videoSequenceState,videoBatchGenerationDrafts,assemblyClips,currentAssembly,batchConfirmationHtml,canvasHtml,draftHtml,historyDraftHtml,emptyWorkHtml,confirmationHtml,shotRows,shotCoverage,shotForDraft,shotCause,shotBadge,supersededDrafts};
+  function generationConsentReady(checked,images){return Boolean(checked)&&images.every(img=>img.complete&&img.naturalWidth>0);}
+  root.StudioProduction={esc,mediaUrl,price,draftReferences,generationPrompt,referenceInputs,designBindingHtml,referencesHtml,generationConsentReady,editValues,reusePayload,gate,reviewGate,canRecoverUsage,usageQuantity,usageFormHtml,reviewHtml,captionHtml,captionMatches,canDiagnoseWork,uncertain,submission,actionRequest,currentProductionWork,batchBlocker,batchGenerationDrafts,batchApprovalImages,videoSequenceState,videoBatchGenerationDrafts,assemblyClips,currentAssembly,batchConfirmationHtml,canvasHtml,draftHtml,historyDraftHtml,emptyWorkHtml,confirmationHtml,shotRows,shotCoverage,shotForDraft,shotCause,shotBadge,supersededDrafts,reuseCandidatesHtml};
   if(typeof module!=='undefined')module.exports=root.StudioProduction;
 })(typeof window!=='undefined'?window:globalThis);
 
@@ -550,21 +665,41 @@ async function openProduction(options={}){
   if(mount)dialog.querySelector('.form-note').remove();
   const storageKey=`studio-production:${runId}`;let data=null,timer=null,reading=false,busy=false,closed=false,pending=null,lastJob=null,renderedRecords='',values={kind:'video',source_version:'',source_sha256:'',reference_name:'',reference_sha256:'',prompt:'',model:'wan3.0-video',duration:'5',resolution:'720P'};
   const captionCache=new Map();
+  let feedbackOnClose=false;
   try{const saved=JSON.parse(sessionStorage.getItem(storageKey)||'null');if(saved){values={...values,...saved.values};pending=saved.pending||null;lastJob=saved.lastJob||null;}}catch(_){}
   if(pending?.action==='review')pending=null;
   if(!pending){values.kind=kind;values.model=kind==='image'?'codex-image':'wan3.0-video';}
   function persist(){try{sessionStorage.setItem(storageKey,JSON.stringify({values,pending,lastJob}));}catch(_){error.textContent='浏览器无法暂存本次输入，请保持窗口直到请求结果确认。';}}
   function current(){return !closed&&(mount?dialog.isConnected:dialog.open)&&state.runId===runId;}
   function close(){closed=true;clearTimeout(timer);if(mount)dialog.remove();else dialog.close();}
+  function handoffFeedback(bound){
+    if(!bound||mount)return;
+    feedbackOnClose=true;close();$('chat-input').focus();
+  }
   dialog.studioClose=close;
   dialog.querySelector('[data-close]').onclick=close;
   dialog.addEventListener('cancel',()=>{closed=true;clearTimeout(timer);});
-  dialog.addEventListener('close',()=>{closed=true;clearTimeout(timer);dialog.remove();opener?.focus();});
+  dialog.addEventListener('close',()=>{
+    closed=true;clearTimeout(timer);dialog.remove();
+    if(feedbackOnClose){if(state.runId===runId)$('chat-input').focus();}
+    else opener?.focus();
+  });
   function notify(message){if(current())error.textContent=message;}
   function lock(){const save=body.querySelector('[data-save]');if(save)save.disabled=busy||!!pending||!!data?.active;if(busy||pending)body.querySelectorAll('input,textarea,select,button').forEach(b=>b.disabled=true);dialog.querySelectorAll('button[data-generate],button[data-image],button[data-refresh],button[data-recover],button[data-recover-usage],button[data-save],button[data-upload]').forEach(b=>{if(busy||pending)b.disabled=true;});}
   function editor(){
     const video=values.kind==='video',cap=data.capabilities?.[values.kind],models=data.capabilities?.video?.models||[];
-    return `<form class="production-editor"><h3>新制作方案</h3><div class="production-tabs" role="group" aria-label="制作类型"><button type="button" class="${!video?'active':''}" data-kind="image">图片</button><button type="button" class="${video?'active':''}" data-kind="video">视频</button></div>${!cap?.available?`<p class="production-notice">${U.esc(cap?.reason||'该制作方式暂未就绪')}。可以保存方案，或上传已有图片用于视频制作。</p>`:''}${!(data.sources||[]).some(s=>s.ready)?'<p class="production-notice">请先在创作板完成并确认当前脚本，再保存制作方案。</p>':''}<label>关联脚本<select name="source_version" required><option value="">请选择准确版本</option>${(data.sources||[]).map(s=>`<option value="${s.version}" ${s.ready?'':'disabled'}>版本 ${s.version}${s.ready?'':' · 尚未就绪'}</option>`).join('')}</select></label><p class="form-note" data-source-note></p><label>${video?'视频参考图':'参考图片（可选）'}<select name="reference_name" ${video?'required':''}><option value="">${video?'请选择一张图片':'不使用参考图'}</option>${(data.materials||[]).filter(m=>m.kind==='image').map(m=>`<option value="${U.esc(m.name)}">${U.esc(m.name)} · ${m.approved?'已确认':'待图审'}</option>`).join('')}</select></label><button type="button" class="ghost small" data-upload>上传现有图片</button><label>画面与动作描述<textarea name="prompt" rows="7" maxlength="5000" required placeholder="写清楚画面、主体、动作与镜头。保存后需核对并确认才会生成。"></textarea></label>${video?`<div class="production-grid"><label>模型<select name="model">${models.map(m=>`<option value="${U.esc(m.id)}">${U.esc(m.label)}</option>`).join('')}</select></label><label>画质<select name="resolution">${(models.find(m=>m.id===values.model)?.resolutions||['720P']).map(r=>`<option value="${U.esc(r)}">${U.esc(r)}</option>`).join('')}</select></label><label>时长（秒）<input name="duration" type="number" min="${models.find(m=>m.id===values.model)?.durations?.min||2}" max="${models.find(m=>m.id===values.model)?.durations?.max||30}" step="1" required></label></div>`:''}<button class="primary" data-save type="submit">保存新方案</button><p class="form-note">保存不调用模型。旧方案及生成记录会保留。</p></form>`;
+    const references=Array.isArray(values.references)
+      ? U.referencesHtml({kind:values.kind,references:values.references},data,runId)+'<p class="form-note">手动修改沿用以上准确参考图与用途。需要更换参考图时，请在对话中说明，团队会准备新版输入。</p>'
+      : `<label>${video?'视频参考图':'参考图片（可选）'}<select name="reference_name" ${video?'required':''}><option value="">${video?'请选择一张图片':'不使用参考图'}</option>${(data.materials||[]).filter(m=>m.kind==='image').map(m=>`<option value="${U.esc(m.name)}">${U.esc(m.name)} · ${m.approved?'已确认':'待图审'}</option>`).join('')}</select></label>`;
+    return `<form class="production-editor"><h3>${values.supersedes?'修改本镜制作输入':'新制作方案'}</h3><div class="production-tabs" role="group" aria-label="制作类型"><button type="button" class="${!video?'active':''}" data-kind="image" ${values.supersedes?'disabled':''}>图片</button><button type="button" class="${video?'active':''}" data-kind="video" ${values.supersedes?'disabled':''}>视频</button></div>`+
+      (!cap?.available?`<p class="production-notice">${U.esc(cap?.reason||'该制作方式暂未就绪')}。可以保存方案，或上传已有图片用于视频制作。</p>`:'')+
+      (!(data.sources||[]).some(s=>s.ready)?'<p class="production-notice">请先在创作板完成并确认当前脚本，再保存制作方案。</p>':'')+
+      (data.visual_design_status?.ready===false?`<p class="production-design-issue">${U.esc((data.visual_design_status.issues||[]).join(' '))}</p>`:'')+
+      `<label>关联脚本<select name="source_version" required><option value="">请选择准确版本</option>${(data.sources||[]).map(s=>`<option value="${s.version}" ${s.ready?'':'disabled'}>版本 ${s.version}${s.ready?'':' · 尚未就绪'}</option>`).join('')}</select></label><p class="form-note" data-source-note></p>`+
+      (values.shot_id?`<p class="form-note">本镜身份：${U.esc(values.shot_id)} · 保存为替换本镜的新输入</p>`:'')+references+
+      '<button type="button" class="ghost small" data-upload>上传现有图片</button><label>画面与动作描述<textarea name="prompt" rows="7" maxlength="5000" required placeholder="写清楚画面、主体、动作与镜头。保存后需核对并确认才会生成。"></textarea></label>'+
+      (video?`<div class="production-grid"><label>模型<select name="model">${models.map(m=>`<option value="${U.esc(m.id)}">${U.esc(m.label)}</option>`).join('')}</select></label><label>画质<select name="resolution">${(models.find(m=>m.id===values.model)?.resolutions||['720P']).map(r=>`<option value="${U.esc(r)}">${U.esc(r)}</option>`).join('')}</select></label><label>时长（秒）<input name="duration" type="number" min="${models.find(m=>m.id===values.model)?.durations?.min||2}" max="${models.find(m=>m.id===values.model)?.durations?.max||30}" step="1" required></label></div>`:'')+
+      '<button class="primary" data-save type="submit">保存新方案</button><p class="form-note">保存不调用模型。旧方案及生成记录会保留。</p></form>';
   }
   function captionMarkup(){
     if(kind!=='video')return '';
@@ -623,9 +758,12 @@ async function openProduction(options={}){
     lock();if(pending)pendingView();
   }
   function records(){
+    return U.reuseCandidatesHtml(data,mount?kind:values.kind)+workRecords();
+  }
+  function workRecords(){
     const currentKind=mount?kind:values.kind;
     if(options.focusDraft){
-      const drafts=(data.drafts||[]).filter(d=>d.kind===currentKind&&d.source_ready!==false);
+      const drafts=(data.drafts||[]).filter(d=>d.kind===currentKind&&(d.source_ready!==false||d.design_issue));
       const index=drafts.findIndex(d=>d.draft_id===options.focusDraft);
       if(index>=0)return `<section class="production-record-shot"><h3>${currentKind==='video'?'视频段':'首帧'} ${String(index+1).padStart(2,'0')}</h3>${U.draftHtml(drafts[index],{...data,drafts:[drafts[index]]},runId)}</section>`;
     }
@@ -669,8 +807,14 @@ async function openProduction(options={}){
     if(busy||pending)return;const blocked=U.gate(draft,data);if(blocked){notify(blocked);return;}
     const connectionRevision=draft.kind==='image'?data.capabilities?.image?.connection_revision:undefined;
     confirm.innerHTML=U.confirmationHtml(draft,data,runId);
-    const button=confirm.querySelector('[data-authorize]');confirm.querySelector('[data-consent]').onchange=e=>button.disabled=!e.target.checked;
-    button.onclick=()=>{if(busy||pending||!current()||!confirm.querySelector('[data-consent]').checked)return;const reason=U.gate(draft,data);if(reason){notify(reason);return;}pending=U.actionRequest('generate',draft,data.nonce,crypto.randomUUID(),null,connectionRevision);persist();sendPending();};
+    const button=confirm.querySelector('[data-authorize]'),consent=confirm.querySelector('[data-consent]');
+    const images=[...confirm.querySelectorAll('.production-reference-input img')];
+    const ready=()=>U.generationConsentReady(consent?.checked,images);
+    const update=()=>{if(button)button.disabled=!ready();};
+    images.forEach(img=>{img.onload=update;img.onerror=()=>{update();notify('参考图未能完整加载，暂不能提交生成。');};});
+    if(consent)consent.onchange=update;
+    if(button)button.onclick=()=>{if(busy||pending||!current()||!ready())return;const reason=U.gate(draft,data);if(reason){notify(reason);return;}pending=U.actionRequest('generate',draft,data.nonce,crypto.randomUUID(),null,connectionRevision);persist();sendPending();};
+    update();
     confirm.querySelector('[data-dismiss]').onclick=()=>{confirm.innerHTML='';};confirm.scrollIntoView({block:'start'});
   }
   function imageView(name){
@@ -720,7 +864,7 @@ async function openProduction(options={}){
     const draft=data.drafts.find(d=>(d.attempts||[]).some(a=>a.attempt_id===button.dataset.feedbackAttempt));
     const attempt=draft?.attempts.find(a=>a.attempt_id===button.dataset.feedbackAttempt);
     const time=draft?.kind==='video'?button.closest('.creator-result')?.querySelector('video')?.currentTime:null;
-    setMediaFeedbackTarget(runId,attempt,draft?.kind,time);
+    handoffFeedback(setMediaFeedbackTarget(runId,attempt,draft?.kind,time));
   });
   body.addEventListener('click',e=>{
     const b=e.target.closest('button');if(!b||busy||pending||!current())return;
@@ -737,6 +881,13 @@ async function openProduction(options={}){
       values.model=values.kind==='video'?'wan3.0-video':'codex-image';persist();render();
     }else if(b.hasAttribute('data-upload')){close();toggleMaterials(true);
     }else if(b.hasAttribute('data-model-settings')){$('connections-open')?.click();
+    }else if(b.dataset.reuseAttempt){
+      if(busy||pending||data.active)return;
+      const candidate=(data.reuse_candidates||[]).find(row=>row.source_attempt_id===b.dataset.reuseAttempt&&row.eligible);
+      let payload;
+      try{payload=U.reusePayload(candidate,data,crypto.randomUUID());}
+      catch(err){notify(err.message);return;}
+      pending={action:'drafts',path:'/drafts',body:payload};persist();sendPending();
     }else if(b.dataset.productionDiagnose){
       const d=data.drafts.find(d=>d.draft_id===b.dataset.productionDiagnose);
       const work=d&&U.currentProductionWork({...data,drafts:[d]},d.kind,runId);
@@ -746,16 +897,11 @@ async function openProduction(options={}){
       }else notify('这次问题记录已变化，请重新读取当前作品。');
     }else if(b.dataset.productionFeedback){
       const d=data.drafts.find(d=>d.draft_id===b.dataset.productionFeedback);
-      if(d){
-        if(!mount)close();
-        setProductionFeedbackTarget(runId,d,(d.attempts||[]).at(-1)||null);
-      }
+      if(d)handoffFeedback(setProductionFeedbackTarget(runId,d,(d.attempts||[]).at(-1)||null));
     }else if(b.dataset.editInput){
       const d=data.drafts.find(d=>d.draft_id===b.dataset.editInput);
       if(d){
-        values={kind:d.kind,source_version:String(d.source_version),source_sha256:d.source_sha256,
-          reference_name:d.reference?.name||'',reference_sha256:d.reference?.sha256||'',prompt:d.prompt,
-          model:d.model,duration:String(d.duration||5),resolution:d.resolution||'720P'};
+        values=U.editValues(d);
         persist();render();
         const advanced=body.querySelector('.production-advanced');if(advanced)advanced.open=true;
         body.querySelector('textarea')?.focus();

@@ -7,6 +7,7 @@ isolation claims in the README are only worth anything if they are checked.
 from __future__ import annotations
 
 import json
+import copy
 
 from studio.agents.client import LoopResult, ToolCall, Turn, Usage, _parse_stream
 
@@ -57,9 +58,14 @@ def tool_stream(call_id: str, name: str, arguments: str, *, fragments: int = 1) 
 class ScriptedModel:
     """Returns pre-built turns in order and records every request."""
 
-    def __init__(self, turns: list[Turn]):
+    def __init__(self, turns: list[Turn], *, legacy_task_contracts=True):
         self.turns = list(turns)
         self.calls: list[dict] = []
+        # Baseline scripts predate the required interpretation protocol. This
+        # explicit test-only upgrade echoes their declared task and adds no
+        # semantic constraints. Semantic tests supply their own proposal;
+        # missing-contract counterexamples set legacy_task_contracts=False.
+        self.legacy_task_contracts = legacy_task_contracts
 
     def complete(self, *, model, system, messages, tools):
         self.calls.append(
@@ -69,10 +75,63 @@ class ScriptedModel:
         )
         if not self.turns:
             raise AssertionError("scripted model ran out of turns")
-        return self.turns.pop(0)
+        turn = copy.deepcopy(self.turns.pop(0))
+        if self.legacy_task_contracts:
+            turn = upgrade_fixture_task_contract(turn, system)
+        return turn
 
     def requests_text(self) -> str:
         return json.dumps(self.calls, ensure_ascii=False)
+
+
+def _fixture_current_input(system):
+    marker = '# 本轮绑定的真实用户来源与仍有效的项目条件'
+    position = system.find(marker)
+    if position < 0:
+        return None
+    start = system.find('{', position)
+    if start < 0:
+        raise AssertionError('The bound-current-input fixture context is malformed')
+    context, _ = json.JSONDecoder().raw_decode(system[start:])
+    if context.get('input_authority') == 'saved_source_only_no_new_user_decision':
+        return None
+    # Never quote a tool result, an inferred requirement, or an internal
+    # continuation as if it were the original user input.
+    source = context.get('current_input', {}).get('text')
+    return source if isinstance(source, str) and source else None
+
+
+def upgrade_fixture_task_contract(turn, system):
+    """Explicitly opt a custom baseline fake into the current tool protocol."""
+    upgraded = copy.deepcopy(turn)
+    source = _fixture_current_input(system)
+    for call in upgraded.tool_calls:
+        if (call.name == 'prepare_creative_context' and source
+                and call.input.get('intent') in {'new', 'continue', 'edit'}
+                and call.input.get('deliverable') and 'task_interpretation' not in call.input):
+            call.input['task_interpretation'] = fixture_task_interpretation(
+                source, intent=call.input['intent'], format=call.input['format'],
+                deliverable=call.input['deliverable'])
+            for block in upgraded.raw_blocks:
+                if block.get('type') == 'tool_use' and block.get('id') == call.id:
+                    block['input'] = call.input
+    return upgraded
+
+
+def fixture_task_interpretation(text, *, intent='continue', format='video', deliverable='writing'):
+    """A declared baseline task contract, not a natural-language interpreter."""
+    mode = {'edit': 'revise', 'status': 'status', 'pause': 'stop'}.get(intent, 'produce')
+    if intent not in {'new', 'continue', 'edit'}:
+        stages = []
+    elif deliverable == 'intake':
+        stages = ['intake']
+    elif deliverable == 'direction':
+        stages = ['intake', 'direction']
+    else:
+        stages = ['intake', 'direction', 'material_plan', 'writing']
+    return {'task': {'quote': text, 'mode': mode, 'deliverable': deliverable,
+                     'format': format, 'allowed_stages': stages, 'pause_after': False},
+            'constraints': []}
 
 
 def tool_turn(call_id: str, name: str, args: dict, text: str = "") -> Turn:

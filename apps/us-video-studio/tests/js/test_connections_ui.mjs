@@ -80,6 +80,21 @@ test('service and validation precede role assignment; generic advanced fields re
   assert.doesNotMatch(visible(h.card('ds')), /max_completion_tokens|输出上限参数|服务地址（/);
 });
 
+test('runtime states hot reload truthfully without changing settings or starting work', () => {
+  const initial = config();
+  initial.runtime = {started_at:'synthetic',code_fingerprint:'abc',hot_reload:{enabled:true,
+    state:'waiting_for_idle',message:'等待当前制作结束后自动更新。'}};
+  const h = harness(initial);
+  for (const detail of nodes(h.body).filter(node => node.tag === 'details')) detail.open = true;
+  assert.match(visible(h.body), /热重载已开启.*等待当前制作结束/);
+  assert.equal(h.calls.length, 0);
+  initial.runtime.hot_reload = {enabled:false};
+  const old = harness(initial);
+  for (const detail of nodes(old.body).filter(node => node.tag === 'details')) detail.open = true;
+  assert.match(visible(old.body), /热重载未开启/);
+  assert.equal(old.calls.length, 0);
+});
+
 test('Codex reads the local model catalog and saves an explicit role choice', async () => {
   const initial=config(); initial.roles.writer={connection:'codex',model:'older-model'};
   const h=harness(initial,async call => call.url === '/api/connections/codex/models'

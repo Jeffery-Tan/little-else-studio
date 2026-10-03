@@ -63,7 +63,10 @@ def plan_args(store, stage='writing', path=None, mode='local', quote=QUOTE):
 
 
 def plan(env, **kwargs):
-    return plan_revision(env[0], env[1], RUN, plan_args(env[0], **kwargs), turn_id='turn-1', user_message=QUOTE)
+    if kwargs.get('mode') == 'rework':
+        kwargs.setdefault('quote', '重新构思整个方案')
+    return plan_revision(env[0], env[1], RUN, plan_args(env[0], **kwargs), turn_id='turn-1',
+                         user_message=kwargs.get('quote', QUOTE))
 
 
 def patch(path=None, value='Try this line'):
@@ -250,7 +253,8 @@ def latest_plan(store):
 
 
 def route(intent='edit'):
-    return tool_turn('route', 'prepare_creative_context', {'intent': intent, 'format': 'video'})
+    return tool_turn('route', 'prepare_creative_context', {'intent': intent, 'format': 'video',
+        'deliverable': 'revision' if intent == 'edit' else 'direction' if intent == 'continue' else 'follow_up'})
 
 
 def test_chat_routes_one_line_to_writer_and_blocks_whole_pipeline_rewrite(env):
@@ -278,12 +282,15 @@ def test_chat_routes_one_line_to_writer_and_blocks_whole_pipeline_rewrite(env):
 
 def test_next_turn_cannot_reuse_old_plan_but_can_choose_new_scope(env):
     store, pipe, settings, ledger = env
-    model = PlannedModel([route(), tool_turn('plan', 'plan_revision', plan_args(store)), final_turn('Planned'),
+    question = tool_turn('ask', 'ask_user', {'question': '先确认新的修改范围？',
+        'options': [{'label': '保留'}, {'label': '调整'}]})
+    whole = '重新构思整个方案'
+    model = PlannedModel([route(), tool_turn('plan', 'plan_revision', plan_args(store)), question,
         route(), lambda: tool_turn('old', 'dispatch', {'stage': 'writing', 'brief': QUOTE, 'plan_id': latest_plan(store)}),
-        tool_turn('new', 'plan_revision', plan_args(store, mode='rework')), final_turn('New scope')])
+        tool_turn('new', 'plan_revision', plan_args(store, mode='rework', quote=whole)), question])
     main = Orchestrator(store, pipe, settings, model, ledger, RUN)
     main.send(QUOTE)
-    result = main.send(QUOTE)
+    result = main.send(whole)
     assert [t['tool'] for t in result.failed_tools] == ['dispatch']
     assert main._revision_scope['mode'] == 'rework'
 
@@ -294,7 +301,8 @@ def test_continue_stale_direction_skips_revision_quote_binding(env):
     assert pipe.stage_state(RUN, 'direction').stale
     model = ScriptedModel([route('continue'),
         tool_turn('unnecessary-plan', 'plan_revision', plan_args(store, stage='direction', mode='rework')),
-        final_turn('按有效需求重新准备创意方向')])
+        tool_turn('clarify', 'ask_user', {'question': '需要沿用之前的表现方式吗？',
+            'options': [{'label': '沿用'}, {'label': '重新构思'}]})])
     result = Orchestrator(store, pipe, settings, model, ledger, RUN).send('继续创意方向')
     assert not result.failed_tools
     assert '直接按当前有效需求 dispatch' in model.requests_text()

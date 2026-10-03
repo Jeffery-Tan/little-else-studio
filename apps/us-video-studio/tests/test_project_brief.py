@@ -6,12 +6,22 @@ from fakes import ScriptedModel, final_turn, tool_turn
 from studio.agents.client import ModelError, run_agent_loop
 from studio.models import PipelineError
 from studio.pipeline import Pipeline
-from studio.project_brief import project_brief
+from studio.project_brief import project_brief, content_format
 from studio.server import build_app
 from studio.structured import is_user_question, open_questions
 from studio.store import Store
 from test_server import settings_for, RUN
 from test_jobs import wait_job
+
+
+def test_project_format_survives_a_readonly_turn_but_preserves_an_explicit_photo_choice():
+    def scope(intent, format):
+        return {'kind':'creative_context_selected', 'selection':{'intent':intent, 'format':format}}
+    events = [scope('new', 'video'), scope('status', 'none')]
+    assert content_format(events) == 'video'
+    events += [scope('edit', 'photo'), scope('pause', 'none')]
+    assert content_format(events) == 'photo'
+    assert content_format([scope('status', 'none')]) is None
 
 
 def project(tmp_path):

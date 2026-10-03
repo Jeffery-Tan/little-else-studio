@@ -18,7 +18,7 @@ class TaskContext:
 
 def assemble_role_task(store, pipeline, learning, run_id, workspace: Workspace,
                        stage: str, brief: str, *, previous=None, revision_scope=None,
-                       method_context: dict) -> TaskContext:
+                       method_context: dict, user_input_id=None, turn_scope=None) -> TaskContext:
     """Read exact stage versions once; log only identities and hashes elsewhere."""
     role = workspace.role
     local_revision = bool(revision_scope and revision_scope['mode'] == 'local')
@@ -31,6 +31,44 @@ def assemble_role_task(store, pipeline, learning, run_id, workspace: Workspace,
                     for name, artifact in visible.items() if artifact)
 
     parts = ['# 给你的任务', '', brief.strip(), '', f'# 你要交付的阶段：{stage}', '']
+    from .conversation_input import applicable_constraints, constraints_for_scope
+    constraints = ((turn_scope or {})['project_constraints']
+                   if 'project_constraints' in (turn_scope or {}) else applicable_constraints(
+                       store, run_id, user_input_id=user_input_id))
+    paths = [field['path'] for field in revision_scope['fields']] if local_revision else None
+    applicable = constraints_for_scope(constraints, stage=stage, paths=paths)
+    conflicts = [row for row in applicable if row['status'] == 'needs_clarification']
+    if conflicts:
+        raise ToolError('本阶段的用户条件冲突，需要先澄清：' + '；'.join(
+            row.get('ambiguity') or row['quote'] for row in conflicts))
+    applicable = [row for row in applicable if row['status'] == 'active']
+    if applicable:
+        parts += ['# 仍有效且适用于本阶段的用户项目条件', json.dumps(applicable, ensure_ascii=False),
+                  '这些条件来自已经执行的用户消息，超过对话窗口仍有效。不得用任务摘要覆盖；'
+                  'scope.stages/paths 限定适用范围，exceptions 指定局部例外；不得把局部条件扩成全片。'
+                  '冲突时报告冲突，只有明确替换才使旧条件失效。', '']
+        sources += tuple({'kind': 'user_constraint', 'message_id': row['source_message_id'],
+                          'sha256': hashlib.sha256(row['quote'].encode('utf-8')).hexdigest(),
+                          'constraint_id': row['id'], 'scope': row['scope']} for row in applicable)
+        sources += tuple({'kind': 'user_constraint_exception', 'message_id': exception['source_message_id'],
+                          'sha256': hashlib.sha256(exception['quote'].encode('utf-8')).hexdigest(),
+                          'constraint_id': exception['replacement_id'], 'scope': exception['scope']}
+                         for row in applicable for exception in row.get('exceptions', []) if exception.get('quote'))
+    if user_input_id:
+        from .conversation_input import message, interpretation_for, interpreted_task_constraints
+        receipt = message(store, run_id, user_input_id)
+        constraints = interpreted_task_constraints(receipt, interpretation_for(store, run_id, user_input_id))
+        source = {'kind': 'user_message', 'message_id': receipt['message_id'],
+                  'sha256': hashlib.sha256(receipt['text'].encode('utf-8')).hexdigest(),
+                  'scope': {'stage': stage, 'turn': turn_scope or {},
+                            'revision_plan_id': revision_scope['plan_id'] if revision_scope else None}}
+        sources += (source,)
+        parts += ['# 本轮真实用户要求（由服务端绑定，不是主制片摘要）',
+                  json.dumps({'source': source, 'text': receipt['text'],
+                              'constraints': constraints}, ensure_ascii=False),
+                  '原话里的条件在本阶段范围内同样适用；派工摘要不得删改这些条件。'
+                  '只完成本阶段，不重新记录决定，不扩大局部范围，也不授予媒体或费用执行权限。'
+                  '原话与本阶段或已采用版本冲突时说明冲突，不自行更换方向或重做其他阶段。', '']
     if stage == 'direction':
         from .active_brief import compile_active_brief
         active = compile_active_brief(store, run_id)
@@ -42,6 +80,15 @@ def assemble_role_task(store, pipeline, learning, run_id, workspace: Workspace,
     # A producing role receives facts once. Keep alternate layout and unrelated
     # direction options out of the specialist request.
     parts += [workspace.render_context(stage, versions=versions, include_layout=False), '']
+    if stage == 'writing' and visible.get('material_plan'):
+        # Legacy dual-written artifacts may have a short prose body. The
+        # versioned design object remains authoritative and must reach the
+        # specialist even when alternate presentation is suppressed.
+        design = (visible['material_plan'].structured or {}).get('visual_design')
+        if design:
+            parts += ['# 当前素材计划中的共同人物与场景设计',
+                      json.dumps(design, ensure_ascii=False, sort_keys=True),
+                      '分镜通过 character_ids 与 scene_id 引用此设计；无人镜头明确 character_ids=""。', '']
     for up in workspace.readable:
         if up in ('intake', stage):
             continue

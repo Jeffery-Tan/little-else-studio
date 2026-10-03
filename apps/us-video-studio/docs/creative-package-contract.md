@@ -61,6 +61,8 @@
 
 视频包输出 `brief.json`, `library-snapshot.json`, `prompt.txt`, `manifest.json`, `review.md`。它是可复核生成输入，不直接执行。Studio 的「制作」入口另存准确 prompt、脚本与参考图版本，完成制作检查，并由用户分别确认图审和费用后提交；编译包的存在不授予执行权限。
 
+实际媒体制作还须承接已保存的 `material_plan.structured.visual_design` 与当前脚本中准确的 `character_ids`、`scene_id`。`prepare_production.prompt` 是本镜补充描述，服务端把共同设计、已采用分镜和有用途的参考图列表编成实际发送描述，冻结素材计划与脚本版本、设计指纹及镜头引用；完整编译描述和所有参考图显示在原制作确认中。旧包或独立文本提示词不能补造缺失的共同设计，也不替代当前设计绑定、图审或费用授权。共同设计契约见[视觉设计方法](methods/visual-design.md)。
+
 ## 图文 manifest
 
 `schema_version=1`，`market="US"`，`placement="shoppable_photo"`，`music="publish-time-on-TikTok"`。当前只支持自然挂车图文，不套用付费轮播或商品详情页规则，也不合成音频或 MP4。

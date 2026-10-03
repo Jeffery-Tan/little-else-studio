@@ -38,6 +38,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .visual_design import normalize_visual_design
+
 #: Longest a single prose cell may be before it is truncated. Generous — this is
 #: a guard against a runaway payload, not an editorial limit.
 MAX_CELL = 4000
@@ -124,6 +126,7 @@ SHAPES: dict[str, Shape] = {
         Field("open_questions", "rows", QUESTION_COLUMNS),
     )),
     "material_plan": Shape("material_plan", (
+        Field("visual_design", "visual_design"),
         # One row per shot, carrying its availability. `status` is one of the
         # five the role is told to use — see `MATERIAL_STATUSES`. `file` is a
         # filename in `runs/<id>/materials/`; it is the one field the role
@@ -137,7 +140,7 @@ SHAPES: dict[str, Shape] = {
         # One row per timed shot. `duration` is an assumption, and the role is
         # told to say so; it stays a string so "约 3 秒" survives as written.
         # `file` names the material this shot would use, when one exists.
-        Field("segments", "rows", ("tc", "picture", "line", "sound", "duration", "file")),
+        Field("segments", "rows", ("tc", "picture", "line", "sound", "duration", "file", "character_ids", "scene_id")),
         Field("total_duration", "text"),
         Field("caption", "text"),
         Field("assumptions", "texts"),
@@ -196,6 +199,10 @@ BRIEF: dict[str, str] = {
   提问时允许用户回答「没有」「不确定」，再据此调整方案。""",
 
     "material_plan": """\
+- `visual_design`：采用方向后的共同视觉设计，按 visual-design 方法卡完整填写。
+  schema_version=1、market=US；明确 audience、everyday_context、localization、style、product_appearance。
+  characters 与 scenes 使用稳定英文 id，逐项设计人物关系、外观、服装、表演及场景布局、道具、光线、生活细节。
+  continuity[] 写跨镜保持项，assumptions[] 标明创作假设；无人时 characters=[]，仍须设计至少一个场景。
 - `items`：一个镜头或一段一行。`shot` 是什么画面，`purpose` 它证明或传达什么，
   `status` 五选一（已有 / 需要拍 / 需要生成 / 无法获得 / 不确定），`note` 补充。
   **不确定就写不确定，不要往「已有」上靠。**
@@ -209,6 +216,10 @@ BRIEF: dict[str, str] = {
     "writing": """\
 - `segments`：一段一行。`tc` 时码，`picture` 画面（拍什么/显示什么），
   `line` 台词或字幕原文，`sound` 声音，`duration` 时长。
+  现有镜头修改、复制到新版或重排须照抄原 `shot_id`（图文也保留 `page_id`）；
+  新增或复制成另一个镜头时省略身份，由服务器分配。身份不代表顺序，不得自造或改号。
+  `character_ids` 明确引用共同设计中的人物 id（逗号分隔，无人镜头写空字符串）；
+  `scene_id` 引用共同设计中的场景 id。不得在自由画面描述中另造人物或更换场景身份。
   `duration` 是假设就写成假设的样子（「约 3 秒」）。
   `file`：这一段用 `materials/` 里的哪个文件，**先调 `list_materials` 再照抄
   文件名**；没有就先别填——这一段还没到能配画面的地步。
@@ -322,6 +333,10 @@ def _rows(value: Any, columns: tuple[str, ...]) -> tuple[list[dict[str, str]], i
                 continue
             row[column] = _text(cell)
         if any(v for v in row.values()):
+            if 'picture' in columns and 'line' in columns:
+                for identity in ('shot_id', 'page_id'):
+                    if identity in item:
+                        row[identity] = item[identity]
             kept.append(row)
         else:
             dropped += 1
@@ -357,6 +372,12 @@ def normalize(stage: str, payload: Any) -> Outcome:
             dropped += lost
             if values:
                 data[field.name] = values
+        elif field.kind == "visual_design":
+            if raw is not None:
+                try:
+                    data[field.name] = normalize_visual_design(raw)
+                except ValueError:
+                    dropped += 1
         else:
             values, lost = _rows(raw, field.columns)
             dropped += lost
@@ -469,6 +490,7 @@ def canonical_document(stage: str, data: dict[str, Any]) -> str:
         "options": "方向方案", "recommended": "推荐方向", "recommended_because": "推荐理由",
         "prerequisites": "需要验证的前提", "dependency_matrix": "方案依赖", "items": "素材安排",
         "gaps": "素材缺口", "segments": "分镜内容", "total_duration": "总时长", "caption": "发布文案", "assumptions": "时长假设",
+        "visual_design": "共同人物与场景设计", "character_ids": "人物身份", "scene_id": "场景身份",
         "label": "事实", "value": "内容", "source": "来源", "key": "方案", "title": "标题", "claim": "主张",
         "audience_moment": "观众与处境", "hook": "开场", "story": "推进概念", "gives_up": "方案取舍",
         "evidence_strength": "依据", "difficulty": "执行难度", "asset_needs": "素材需求",
@@ -483,7 +505,9 @@ def canonical_document(stage: str, data: dict[str, Any]) -> str:
         if not value:
             continue
         lines += ["", f"## {labels.get(field.name, field.name)}", ""]
-        if isinstance(value, str):
+        if field.kind == "visual_design":
+            lines.append(visual_design_document(value))
+        elif isinstance(value, str):
             lines.append(value)
         elif field.kind == "texts":
             lines.extend(f"- {item}" for item in value)
@@ -518,7 +542,9 @@ def validate_canonical_input(stage: str, payload: dict) -> None:
             if value:
                 raise ValueError(f"结构化正文不支持字段 {key}，请放入对应内容字段或使用完整正文。")
             continue
-        if field.kind == 'text':
+        if field.kind == 'visual_design':
+            normalize_visual_design(value)
+        elif field.kind == 'text':
             check_text(value)
         elif isinstance(value, list):
             for item in value:
@@ -526,7 +552,8 @@ def validate_canonical_input(stage: str, payload: dict) -> None:
                     check_text(item)
                 elif isinstance(item, dict):
                     for column, cell in item.items():
-                        if column not in field.columns and cell:
+                        identity = stage == 'writing' and key == 'segments' and column in {'shot_id', 'page_id'}
+                        if column not in field.columns and not identity and cell:
                             raise ValueError(f"结构化正文不支持 {key}.{column}，请使用已定义字段。")
                         if column == 'options':
                             if not isinstance(cell, dict) or any(not isinstance(v, bool) for v in cell.values()):
@@ -611,6 +638,9 @@ LABEL: dict[str, str] = {
     "sound": "声音",
     "duration": "时长",
     "need": "空白",
+    "visual_design": "共同人物与场景设计",
+    "character_ids": "人物身份",
+    "scene_id": "场景身份",
 }
 
 #: Status -> how it should read before anyone reads the word.
@@ -793,8 +823,64 @@ def _direction(data: dict[str, Any]) -> list[dict[str, Any]]:
     return blocks
 
 
+VISUAL_LABELS = {
+    'market': '市场', 'audience': '目标观众', 'everyday_context': '生活处境',
+    'localization': '美国站生活语境', 'style': '画面风格', 'product_appearance': '商品外观依据',
+    'relationship': '人物与观众的关系', 'appearance': '外观', 'wardrobe': '服装', 'performance': '表演',
+    'location': '地点', 'layout': '空间布局', 'props': '道具', 'lighting': '光线', 'local_details': '生活细节',
+}
+
+
+def visual_design_blocks(design: dict) -> list[dict[str, Any]]:
+    blocks = [{'type': 'cards', 'title': '共同人物与场景设计', 'cards': [{
+        'head': '美国站创作语境', 'fields': [
+            {'label': VISUAL_LABELS[key], 'value': design[key]}
+            for key in ('market', 'audience', 'everyday_context', 'localization', 'style', 'product_appearance')]}]}]
+    for key, title, fields in (
+            ('characters', '人物与服装', ('relationship', 'appearance', 'wardrobe', 'performance')),
+            ('scenes', '场景与道具', ('location', 'layout', 'props', 'lighting', 'local_details'))):
+        rows = design[key]
+        if rows:
+            blocks.append({'type': 'cards', 'title': title, 'cards': [
+                {'head': f'{row["label"]}（{row["id"]}）', 'fields': [
+                    {'label': VISUAL_LABELS[field], 'value': row[field]} for field in fields]}
+                for row in rows]})
+        elif key == 'characters':
+            blocks.append({'type': 'text', 'title': title, 'text': '本设计不出现人物。'})
+    for key, title in (('continuity', '跨镜保持项'), ('assumptions', '创作假设，尚非市场证据')):
+        if design[key]:
+            blocks.append({'type': 'list', 'title': title, 'items': [{'text': item} for item in design[key]]})
+    return blocks
+
+
+def visual_design_document(design: dict) -> str:
+    # The same values feed the canvas, specialist context and canonical body.
+    lines = []
+    for block in visual_design_blocks(design):
+        lines += [f'### {block["title"]}', '']
+        if block['type'] == 'cards':
+            for card in block['cards']:
+                lines.append(f'#### {card["head"]}')
+                lines += [f'- **{field["label"]}**：{field["value"]}' for field in card['fields']]
+        elif block['type'] == 'list':
+            lines += [f'- {item["text"]}' for item in block['items']]
+        else:
+            lines.append(block['text'])
+        lines.append('')
+    return '\n'.join(lines).strip()
+
+
 def _material(data: dict[str, Any]) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
+    if data.get('visual_design'):
+        try:
+            blocks += visual_design_blocks(normalize_visual_design(data['visual_design']))
+        except ValueError as exc:
+            blocks.append({'type': 'callout', 'title': '共同设计需补齐', 'text': str(exc), 'tone': 'warn'})
+    else:
+        blocks.append({'type': 'callout', 'title': '共同设计尚未保存',
+                       'text': '这份素材计划没有共同人物与场景设计。再次制作前需补齐设计并更新分镜；历史作品仍可阅读。',
+                       'tone': 'warn'})
     items = data.get("items") or []
 
     if items:
@@ -910,7 +996,7 @@ def _writing(data: dict[str, Any]) -> list[dict[str, Any]]:
                 "cards": [
                     {
                         "head": s.get("tc", ""),
-                        "fields": _fields(s, ("picture", "line", "sound", "duration")),
+                        "fields": _fields(s, ("picture", "line", "sound", "duration", "character_ids", "scene_id")),
                         "media": s.get("file", ""),
                     }
                     for s in segments

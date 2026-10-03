@@ -22,6 +22,15 @@ function jobGuidance(job) {
   if (/连续失败/.test(reason)) return "本轮因同一问题反复失败已停止。具体错误见「团队工作记录」，改掉原因后再发新的指令。";
   if (job.job_kind === 'writing_revision' && job.revision_result?.change_status === 'saved')
     return "脚本新版已保存，请查看准确版本并决定采用或退回。";
+  const mediaState = job.deliverable?.status;
+  const mediaGuidance = {
+    input_ready:'分镜输入已齐备，实际媒体尚未生成。请查看准确输入并确认生成范围与费用。',
+    awaiting_authorisation:'准确生成确认已准备，等待你核对范围与费用；尚未提交媒体生成。',
+    in_progress:'媒体仍在执行，请查询原任务；不要重新提交。',
+    failed:'媒体生成失败，请查看原任务的具体错误与下一步；不会自动重试。',
+    unknown:'媒体结果尚待核实，请查询原任务；不要重新提交。',
+  };
+  if (mediaGuidance[mediaState]) return mediaGuidance[mediaState];
   if (job.deliverable?.status === 'incomplete') {
     const stageNames = {intake:'创作需求',direction:'创意方向',material_plan:'素材计划',writing:'脚本'};
     const missing = (job.deliverable.missing || []).map(item => String(item).replace(
@@ -104,12 +113,22 @@ function liveJobStatus(job, view) {
   const events = job.events || [];
   const last = events.at(-1);
   const recordedAt = teamTime(last?.at);
+  const waiting = modelWaiting(job);
+  const withWaiting = detail => waiting ? `${detail}；${waiting.text}` : detail;
+  if (job.steer_status === 'delivered') return {
+    label: job.steer_class === 'role_stop' ? '此项停止要求已收到' : '角色补充已收到',
+    detail: job.steer_reason || (job.steer_class === 'role_stop'
+      ? '已要求停止指定角色，其他任务继续。'
+      : '原话已送到指定角色，等待其处理；其他任务继续。'), recordedAt};
   if (job.steer_status === 'received') return {
-    label: '调整已收到', detail: '正在等待当前模型调用结束，再按你的调整接续。', recordedAt};
+    label: job.steer_class === 'discussion' ? '讨论已收到' : '调整已收到',
+    detail: withWaiting(job.steer_class === 'discussion'
+      ? '原任务继续执行，结束后单独回答讨论；不会自动改稿。'
+      : '正在等待当前模型调用结束，再按你的调整接续。'), recordedAt};
   if (job.status === 'queued') return {
     label: view.label, detail: '任务已排队，尚未开始处理。', recordedAt};
   if (job.status === 'cancelling') return {
-    label: '正在停止', detail: '等待当前调用结束；不会启动下一步。', recordedAt};
+    label: '正在停止', detail: withWaiting('等待当前调用结束；不会启动下一步。'), recordedAt};
   if (job.job_kind === 'direction_resume') {
     const director = events.filter(e => e.role === 'director');
     const saved = director.some(e => e.type === 'agent_tool' && e.tool === 'submit_stage' && e.ok === true);
@@ -123,9 +142,9 @@ function liveJobStatus(job, view) {
       .map(([, , label]) => label);
     const prefix = checked.length ? `已核对${checked.join('、')}；` : '';
     return {label: view.label, recordedAt,
-      detail: saved ? '新版 A/B/C 已保存，正在收尾。'
+      detail: withWaiting(saved ? '新版 A/B/C 已保存，正在收尾。'
         : submitting ? `${prefix}正在保存新版 A/B/C。`
-        : `${prefix}导演正在准备 A/B/C，新版尚未保存。`};
+        : `${prefix}导演正在准备 A/B/C，新版尚未保存。`)};
   }
   const latestActivity = [...events].reverse().find(e => e.type === 'agent_activity' && JOB_ROLE_NAMES[e.role]);
   const role = JOB_ROLE_NAMES[latestActivity?.role] || '制片团队';
@@ -139,7 +158,8 @@ function liveJobStatus(job, view) {
     && checkedNames[e.tool]).map(e => e.tool === 'read_artifact'
       ? TEAM_STAGES[e.args?.stage || e.stage] || checkedNames[e.tool] : checkedNames[e.tool]))];
   const milestone = saved ? `已保存${stage}` : checked.length ? `已核对${checked.slice(-3).join('、')}` : '';
-  const working = latestActivity?.phase === 'tool' && latestActivity.tool
+  const working = waiting ? `${JOB_ROLE_NAMES[waiting.role] || role}：${waiting.text}`
+    : latestActivity?.phase === 'tool' && latestActivity.tool
     ? `${role}正在${teamAction(latestActivity)}` : `正在等待${role}的模型回复`;
   return {label: view.label, recordedAt,
     detail: `${milestone ? `${milestone}；` : ''}${working}；${saved ? '正在继续处理本轮工作。' : '本轮结果尚未提交。'}`};
@@ -161,6 +181,8 @@ function canSteerJob(job) {
 function syncComposerAction(job = currentJob) {
   const active = Boolean(job && JOB_ACTIVE.has(job.status));
   const canInsert = canSteerJob(job);
+  const directRevision = state.composerRequestKind === 'writing_revision';
+  const roleTarget = state.roleTarget?.run_id === state.runId ? state.roleTarget : null;
   const unresolved = readPendingJob(state.runId) || readPendingSteer(state.runId);
   const button = $('send');
   const stop = $('job-stop');
@@ -185,23 +207,26 @@ function syncComposerAction(job = currentJob) {
     button.disabled = blocked || stopping;
   } else {
     button.setAttribute?.('data-mode', 'send');
-    button.textContent = '发送 ↑';
-    button.setAttribute?.('aria-label', '发送消息');
+    button.textContent = directRevision ? '直接修改 ↑' : '发送 ↑';
+    button.setAttribute?.('aria-label', directRevision ? '按意见直接修改脚本' : '发送消息');
     button.disabled = blocked || state.busy;
   }
   const hint = $('composer-key-hint');
   if (hint) hint.textContent = active
-    ? '中途补充会先保存，当前调用结束后由主制片处理 · Shift + Enter 换行'
-    : 'Enter 发送 · Shift + Enter 换行';
+    ? directRevision ? '直接修改草稿已保留，等本轮结束后发送 · Shift + Enter 换行'
+    : canInsert ? roleTarget ? `原话只送给${roleTarget.label}，其他任务继续 · Shift + Enter 换行`
+      : '中途补充会先保存，当前调用结束后由主制片处理 · Shift + Enter 换行'
+    : job.status === 'queued' ? '任务正在排队，草稿可继续编辑；开始执行后可插入调整'
+    : '任务正在停止，草稿可继续编辑；结束后可发送'
+    : directRevision ? 'Enter 按意见直接修改 · Shift + Enter 换行' : 'Enter 发送 · Shift + Enter 换行';
   if (stop) {
-    // The secondary slot carries the composer action while the job runs: an
-    // adjustment if this job can take one, otherwise plain sending (which the
-    // server records rather than refusing, per F6).
+    // Only advertise an adjustment when the current job can actually accept it.
     stop.hidden = !active;
-    stop.disabled = blocked;
-    stop.textContent = canInsert ? '插入调整 ↑' : '发送 ↑';
-    stop.setAttribute?.('aria-label', canInsert ? '插入当前任务的调整' : '发送消息');
-    stop.setAttribute?.('data-mode', canInsert ? 'insert' : 'send');
+    stop.disabled = Boolean(blocked || !canInsert || directRevision);
+    stop.textContent = directRevision ? '等待直接修改' : canInsert ? roleTarget ? '发送给此项 ↑' : '插入调整 ↑'
+      : job?.status === 'queued' ? '正在排队…' : '正在停止…';
+    stop.setAttribute?.('aria-label', stop.textContent);
+    stop.setAttribute?.('data-mode', canInsert && !directRevision ? 'insert' : 'blocked');
   }
 }
 async function stopCurrentJob() {
@@ -299,16 +324,19 @@ function readPendingJobOptions(runId, payload) {
 }
 /* Clearing is by identity, never by key alone (U2): a late answer for one
  * request must not delete the marker standing for a different unresolved one. */
-function clearPendingJob(runId, requestId) {
+function clearPendingJob(runId, requestId, accepted = true) {
   const stored = readPendingJob(runId);
   if (stored && stored.request_id !== requestId) return;
   sessionStorage.removeItem(pendingJobKey(runId));
   sessionStorage.removeItem(pendingJobUiKey(runId));
+  if (typeof settleComposerRequest === 'function') settleComposerRequest(runId, requestId, accepted);
+  if (typeof StudioComposer !== 'undefined') StudioComposer.settle(runId, requestId, accepted);
 }
-function clearPendingSteer(runId, requestId) {
+function clearPendingSteer(runId, requestId, accepted = true) {
   const stored = readPendingSteer(runId);
   if (stored && stored.request_id !== requestId) return;
   sessionStorage.removeItem(pendingSteerKey(runId));
+  if (typeof settleComposerRequest === 'function') settleComposerRequest(runId, requestId, accepted);
 }
 
 function showJob(job, notice = "") {
@@ -329,9 +357,12 @@ function showJob(job, notice = "") {
   if (typeof renderJourneyDecision === 'function') renderJourneyDecision();
   const host = $("job-status");
   if (typeof renderJobProgress === 'function') renderJobProgress(job);
+  const waiting = modelWaiting(job);
+  const live = view.active && job ? liveJobStatus(job, view) : null;
   const lastMessage = [...(job?.events || [])].reverse().find((event) => event.say || event.message);
-  const renderKey = JSON.stringify([state.runId, job?.job_id, job?.status, job?.events?.length, job?.goal_revision,
-    job?.steer_status, job?.successor_job_id, view.detail, view.guidance, job?.reason,
+  const renderKey = JSON.stringify([state.runId, job?.job_id, job?.status, job?.events?.length, job?.cursor, job?.goal_revision,
+    job?.steer_status, job?.steer_reason, job?.role_sessions, job?.successor_job_id, view.detail, view.guidance, job?.reason,
+    live?.detail, waiting?.text,
     lastMessage?.say, lastMessage?.message, notice, job?.recovery, job?.unresolved_calls, job?.open_attempts, currentRecovery?.revision]);
   updateTeamDialog();
   if (renderKey === jobRenderKey) return;
@@ -346,7 +377,6 @@ function showJob(job, notice = "") {
   // observer; historical usage cannot turn it back into a second status panel.
   if (job && !notice && !state.recoveryBlocked && ['conversation','stage_review','direction_resume'].includes(job.job_kind)) {
     if (view.active) {
-      const live = liveJobStatus(job, view);
       const summary = box('div','job-live-summary');
       summary.append(box('strong','job-live-title',live.label),
         box('span','job-live-detail',live.detail));
@@ -376,6 +406,9 @@ function showJob(job, notice = "") {
       };
       copy.append(resumeAdjustment);
     }
+    if (job.steer_status === 'unanswered') {
+      copy.append(box('span','job-warning',job.steer_reason || '上次询问还没有保存答复，请重新查询当前状态。'));
+    }
     const activity = box('button','text-button job-activity-open','团队工作记录 ↗');
     activity.onclick = openTeamProgress;
     copy.append(activity);
@@ -383,7 +416,9 @@ function showJob(job, notice = "") {
     return;
   }
   copy.append(box("strong", "", notice || view.label || "先处理待恢复事项"));
-  if (view.detail) copy.append(box("span", "muted", view.detail));
+  const detail = waiting && !view.detail?.includes(waiting.text)
+    ? `${view.detail ? `${view.detail}；` : ''}${waiting.text}` : view.detail;
+  if (detail) copy.append(box("span", "muted", detail));
   if (view.active && job?.events?.length) {
     const activity = teamProgress(job);
     const latest = activity.history.at(-1);
@@ -560,7 +595,12 @@ async function restoreJob(runId) {
     if (steer) {
       const receipt = await api(`/api/runs/${runId}/request-receipts/${encodeURIComponent(steer.request_id)}?kind=steer&job_id=${encodeURIComponent(steer.job_id)}`);
       if (runId !== state.runId || generation !== jobWatch) return;
-      if (receipt.received) clearPendingSteer(runId, steer.request_id);
+      if (receipt.rejected === true) {
+        if (receipt.kind !== 'steer' || receipt.request_id !== steer.request_id || receipt.job_id !== steer.job_id)
+          throw new Error('补充回执身份无法核对。');
+        clearPendingSteer(runId, steer.request_id, false);
+        toast(receipt.reason || '这条补充未能投递，原话已保留。请重新选择当前任务后发送。', true);
+      } else if (receipt.received) clearPendingSteer(runId, steer.request_id);
       else {
         showJob(job, '调整是否收到尚未确认。请确认提交状态。');
         const retry = box('button','ghost small','确认调整状态');
@@ -605,6 +645,7 @@ async function submitSteer(runId, jobId, payload) {
   }
   steerPosting = true;
   sessionStorage.setItem(pendingSteerKey(runId), JSON.stringify({...payload, job_id:jobId}));
+  if (!unresolved && typeof freezeComposerRequest === 'function') freezeComposerRequest(runId, payload.request_id);
   if (currentJob?.job_id === jobId) showJob(currentJob, '正在提交调整…');
   try {
     const updated = await api(`/api/runs/${runId}/jobs/${jobId}/steer`,
@@ -614,7 +655,7 @@ async function submitSteer(runId, jobId, payload) {
     return {ok:true, job:updated};
   } catch (err) {
     if (err.status >= 400 && err.status < 500) {
-      clearPendingSteer(runId, payload.request_id);
+      clearPendingSteer(runId, payload.request_id, false);
       const notActive = err.status === 409 &&
         /原任务已经结束|任务不在此进程运行/u.test(String(err.message || ''));
       if (runId === state.runId && notActive) {
@@ -640,6 +681,11 @@ async function submitSteer(runId, jobId, payload) {
 
 async function submitJob(runId, payload, options = {}) {
   if (runId !== state.runId) return {accepted:false,error:new Error('项目已切换，请重新打开当前项目。')};
+  // Bind new conversation messages to the exact view already rendered. Saved
+  // retries retain their original receipt rather than silently rebasing.
+  if (!readPendingJob(runId) && !payload.request_kind
+      && !Object.hasOwn(payload, 'display_context_id') && state.timeline?.display_context_id)
+    payload = {...payload, display_context_id:state.timeline.display_context_id};
   // Compare the exact wire payload, including the default reference scope.
   payload = jobWirePayload(runId, payload);
   // One unresolved submission identity per project (U2). A new request_id must
@@ -678,19 +724,24 @@ async function submitJob(runId, payload, options = {}) {
   // Persist only the user's request, never connection credentials. A retry uses
   // the same id even when the browser never received the acceptance response.
   sessionStorage.setItem(pendingJobKey(runId), JSON.stringify(payload));
+  if (!unresolved && typeof freezeComposerRequest === 'function') freezeComposerRequest(runId, payload.request_id);
   if (options.preserveComposerOnError)
     sessionStorage.setItem(pendingJobUiKey(runId), JSON.stringify({request_id:payload.request_id,preserveComposerOnError:true}));
   else sessionStorage.removeItem(pendingJobUiKey(runId));
   showJob(null, "正在提交…");
   let job;
   try {
-    const route = payload.request_kind === 'reference_video' ? 'reference-videos' : payload.request_kind === 'stage_review' ? 'actions/review' : payload.request_kind === 'writing_revision' ? 'actions/revise-writing' : payload.request_kind === 'direction_resume' ? 'actions/resume-direction' : payload.request_kind === 'video_analysis' ? 'video-analysis' : payload.request_kind === 'image_analysis' ? 'image-analysis' : payload.request_kind === 'artifact_revision'
+    const route = payload.request_kind === 'role_resume' ? `role-sessions/${encodeURIComponent(payload.session_id)}/resume` : payload.request_kind === 'reference_video' ? 'reference-videos' : payload.request_kind === 'stage_review' ? 'actions/review' : payload.request_kind === 'writing_revision' ? 'actions/revise-writing' : payload.request_kind === 'direction_resume' ? 'actions/resume-direction' : payload.request_kind === 'video_analysis' ? 'video-analysis' : payload.request_kind === 'image_analysis' ? 'image-analysis' : payload.request_kind === 'artifact_revision'
       ? `edits/${encodeURIComponent(payload.stage)}/${encodeURIComponent(payload.draft_id)}/generate` : 'jobs';
     job = await api(`/api/runs/${runId}/${route}`, { method: "POST", body: JSON.stringify(payload) });
   } catch (err) {
-    if (runId !== state.runId || generation !== jobWatch) return {accepted:false,error:err};
-    if (err.status >= 400 && err.status < 500) {
-      clearPendingJob(runId, payload.request_id);
+    const rejected = err.status >= 400 && err.status < 500;
+    // Receipt ownership follows the project that sent the request, even after
+    // navigation. Only visible UI updates depend on the current project.
+    if (rejected) clearPendingJob(runId, payload.request_id, false);
+    if (runId !== state.runId || generation !== jobWatch)
+      return {accepted:false,error:err,uncertain:!rejected,request_id:payload.request_id,rejected_text:payload.text};
+    if (rejected) {
       // A definite rejection: the words go back only if the composer is still
       // empty. `preserveComposerOnError` means the caller owns the draft (it has
       // a newer copy than this closure does), so this must not touch it.

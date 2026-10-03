@@ -501,7 +501,7 @@ def test_a_stale_version_is_not_sent_for_review(env, tmp_path):
 def test_orchestrator_turn_dispatches_writes_and_reports(env, tmp_path):
     store, pipeline, ledger = env
     model = ScriptedModel([
-        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video"}),
+        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video", "deliverable": "direction"}),
         tool_turn("t1", "read_project_state", {}),
         tool_turn("t2", "write_stage", {
             "stage": "intake",

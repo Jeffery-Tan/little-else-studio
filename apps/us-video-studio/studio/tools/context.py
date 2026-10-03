@@ -36,7 +36,8 @@ def capabilities(settings, role, *, local_revision=False):
     }
 
 
-def conversation(store, run_id, *, before=None, limit=10, message_index=None, offset=0):
+def conversation(store, run_id, *, before=None, limit=10, message_index=None, offset=0,
+                 visible_indexes=None):
     """Index pages use durable chat positions; message chunks never silently cut text."""
     rows = store.read_chat(run_id)
     if type(limit) is not int or not 1 <= limit <= 20:
@@ -46,6 +47,8 @@ def conversation(store, run_id, *, before=None, limit=10, message_index=None, of
     if message_index is not None:
         if type(message_index) is not int or not 0 <= message_index < len(rows):
             raise ValueError("unknown conversation message")
+        if visible_indexes is not None and message_index not in visible_indexes:
+            raise ValueError('this message belongs to a future user turn')
         row = rows[message_index]
         if row.get("role") not in ("user", "assistant"):
             raise ValueError("diagnostic messages are not conversation context")
@@ -58,7 +61,8 @@ def conversation(store, run_id, *, before=None, limit=10, message_index=None, of
         before = len(rows)
     if type(before) is not int or not 0 <= before <= len(rows):
         raise ValueError("invalid conversation cursor")
-    visible = [(i, r) for i, r in enumerate(rows[:before]) if r.get("role") in ("user", "assistant")]
+    visible = [(i, r) for i, r in enumerate(rows[:before]) if r.get("role") in ("user", "assistant")
+               and (visible_indexes is None or i in visible_indexes)]
     page = visible[-limit:]
     return {"messages": [{"message_index": i, "role": r["role"], "preview": r.get("text", "")[:400],
                           "total_chars": len(r.get("text", "")), "preview_only": True} for i, r in page],

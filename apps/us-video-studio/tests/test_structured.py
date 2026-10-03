@@ -43,7 +43,7 @@ def test_the_direction_shape_covers_what_the_role_is_told_to_write():
 
 def test_the_writing_shape_covers_the_timed_columns():
     columns = s.SHAPES["writing"].field("segments").columns
-    assert columns == ("tc", "picture", "line", "sound", "duration", "file")
+    assert columns == ("tc", "picture", "line", "sound", "duration", "file", "character_ids", "scene_id")
 
 
 # ----------------------------------------------------------- the happy path -- #
@@ -402,7 +402,7 @@ def test_critical_material_gap_is_visible_even_when_shot_can_be_made():
 def test_a_status_the_model_invented_is_not_given_a_tone():
     """Mapping it to a colour would present a guess as a classification."""
     data = s.normalize("material_plan", {"items": [{"shot": "x", "status": "待定"}]}).data
-    cards = s.view("material_plan", data)[0]["cards"]
+    cards = next(b for b in s.view("material_plan", data) if b['type'] == 'cards')["cards"]
     assert cards[0]["chip"] == {"text": "待定", "tone": "unknown"}
 
 

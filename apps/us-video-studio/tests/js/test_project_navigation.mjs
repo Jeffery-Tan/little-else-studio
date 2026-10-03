@@ -10,7 +10,7 @@ const section = (start, end) => {
   assert.ok(from >= 0 && to > from, `Missing source section: ${start}`);
   return app.slice(from, to);
 };
-const effects = section('async function selectRun(', 'async function refreshTimeline(')
+const effects = section('function composerDraft(', 'async function refreshTimeline(')
   + section('function toggleMaterials(', '/* Dropping files')
   + section('function newRunDialog(', 'function autoRunId(');
 
@@ -19,11 +19,13 @@ function harness({ post, list, loadRuns } = {}) {
   let nextId = 0, listLoads = 0;
   const get = selector => {
     const key = selector.replace(/^#/, '');
-    if (!nodes.has(key)) nodes.set(key, { value: '', disabled: false, textContent: '', style: {}, focus() {}, setAttribute(name,value) {this[name]=value;} });
+    if (!nodes.has(key)) nodes.set(key, { value: '', disabled: false, textContent: '', style: {},
+      focus() {}, setAttribute(name,value) {this[name]=value;},
+      replaceChildren() {this.children=[];this.innerHTML='';this.textContent='';} });
     return nodes.get(key);
   };
   const state = { runId: 'old-run', decisionBusy: false, busy: false, chatDrafts: new Map(),
-    artifactBodies: new Map(), runs: [], view: 'home' };
+    artifactBodies: new Map(), clarificationChoices: new Map(), composerSubmissions: new Map(), runs: [], view: 'home' };
   get('run-select').value = state.runId;
   const context = vm.createContext({
     state, $: get,
@@ -63,6 +65,7 @@ function harness({ post, list, loadRuns } = {}) {
     toast: message => messages.push(message),
     sessionStorage: { setItem() {} },
     clearFeedbackTarget() { state.feedbackTarget = null; },
+    renderFeedbackTarget() {}, updatesComposerVersion() { state.composerVersion = (state.composerVersion || 0) + 1; },
     loadDraft() {}, refreshTimeline: async () => {}, restoreJob: async () => { state.busy = false; },
     loadMaterialWorkspace() { calls.push({materialRun:state.runId}); },
   });
@@ -215,7 +218,7 @@ test('successful project switches keep chat drafts separate', async () => {
   h.get('chat-input').value = 'Draft for other run';
   assert.equal(await h.context.selectRun('old-run'), true);
   assert.equal(h.get('chat-input').value, 'Draft for old run');
-  assert.equal(h.state.chatDrafts.get('other-run'), 'Draft for other run');
+  assert.equal(h.state.chatDrafts.get('other-run').text, 'Draft for other run');
 });
 
 test('home cannot open remembered project materials; project panel names its owner', () => {

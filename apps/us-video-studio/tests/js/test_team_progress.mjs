@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
-const {teamProgress, teamAction} = createRequire(import.meta.url)('../../studio/web/team-progress.js');
+const {teamProgress, teamAction, modelWaiting} = createRequire(import.meta.url)('../../studio/web/team-progress.js');
 
 test('role handoff follows the newest start event, including return to producer',()=>{
   const events = [{type:'agent_activity',role:'director',phase:'thinking',stage:'direction'}];
@@ -75,4 +75,60 @@ test('public preview updates the live line and settled narration enters history 
   const settled = teamProgress({status:'running',events});
   assert.equal(settled.history.length,1);
   assert.match(settled.history[0].text,/先核对当前方案/);
+});
+
+const waitEvent = (extra = {}) => ({type:'agent_activity',role:'director',phase:'waiting_model',
+  elapsed_seconds:90,remaining_seconds:510,transport_state:'waiting',...extra});
+
+test('transport waiting and receiving use only reported statistics without saved outputs',()=>{
+  const event = waitEvent({text:'private-reasoning',args:{content:'private-tool-arguments'}});
+  const waiting = teamProgress({status:'running',events:[event]});
+  assert.match(waiting.current,/创意导演 · 已等待 1分30秒；等待模型回复；单次最多等待 10分钟；本次最多还能等待 8分30秒/);
+  assert.equal(waiting.history.length,0);
+  assert.equal(waiting.outputs.length,0);
+  assert.doesNotMatch(JSON.stringify(waiting),/private-|已保存 \d|已完成|%/);
+  const receiving = teamProgress({status:'running',events:[waitEvent({transport_state:'receiving'})]});
+  assert.match(receiving.current,/正在接收模型回复/);
+  assert.doesNotMatch(receiving.current,/回复已完成|已保存/);
+  assert.equal(receiving.history.length,0);
+});
+
+test('new thinking, tool, reply and role events clear the previous transport wait',()=>{
+  for (const next of [
+    {type:'agent_activity',role:'orchestrator',phase:'thinking'},
+    {type:'agent_activity',role:'director',phase:'tool',tool:'read_artifact',args:{stage:'direction'}},
+    {type:'agent_tool',role:'director',tool:'read_artifact',ok:true},
+    {type:'agent_narration_preview',role:'director',text:'接下来核对商品事实。'},
+    {type:'agent_narration',role:'director',text:'接下来核对商品事实。'},
+    {type:'agent_turn',role:'director'},
+  ]) {
+    const job = {status:'running',events:[waitEvent(),next]};
+    assert.equal(modelWaiting(job),null);
+    assert.doesNotMatch(teamProgress(job).current,/已等待|单次最多等待/);
+  }
+});
+
+test('queued and finished jobs never display a lingering transport wait',()=>{
+  for (const status of ['queued','succeeded','failed','blocked','interrupted','cancelled']) {
+    const job = {status,events:[waitEvent()]};
+    assert.equal(modelWaiting(job),null);
+    assert.doesNotMatch(teamProgress(job).current,/已等待|接收模型回复|单次最多等待/);
+  }
+  const stopping = teamProgress({status:'cancelling',events:[waitEvent()]});
+  assert.match(stopping.current,/随后停止；已等待 1分30秒/);
+  assert.equal(stopping.currentRole,null);
+  assert.ok(stopping.participants.every(row=>row.status!=='处理中'));
+});
+
+test('missing and malformed timing cannot invent a wait duration or expose payloads',()=>{
+  for (const elapsed of [undefined,null,-1,NaN,Infinity,'90',{secret:'private'}]) {
+    const view = modelWaiting({status:'running',events:[waitEvent({elapsed_seconds:elapsed,remaining_seconds:null})]});
+    assert.equal(view.text,'等待模型回复');
+  }
+  const remainingOnly = modelWaiting({status:'running',events:[waitEvent({elapsed_seconds:null,remaining_seconds:60})]});
+  assert.equal(remainingOnly.text,'等待模型回复；本次最多还能等待 1分钟');
+  const explicitLimit = modelWaiting({status:'running',events:[waitEvent({timeout_seconds:900})]});
+  assert.match(explicitLimit.text,/单次最多等待 15分钟/);
+  const overflow = modelWaiting({status:'running',events:[waitEvent({elapsed_seconds:Number.MAX_VALUE,remaining_seconds:Number.MAX_VALUE})]});
+  assert.doesNotMatch(overflow.text,/Infinity|NaN|单次最多等待/);
 });

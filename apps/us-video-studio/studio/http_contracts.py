@@ -77,6 +77,7 @@ class ProductionDraftFeedbackTarget(BaseModel):
 
 class JobIn(MessageIn):
     request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
+    display_context_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
     question_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
     reference_consent: bool = Field(default=False, strict=True)
     feedback_target: FeedbackTarget | MediaFeedbackTarget | ProductionDraftFeedbackTarget | None = None
@@ -90,7 +91,16 @@ class DirectionResumeIn(BaseModel):
 class SteerIn(MessageIn):
     request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
     expected_goal_revision: int = Field(ge=0, strict=True)
+    display_context_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
+    question_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
+    target_session_id: str | None = Field(default=None, min_length=1, max_length=160)
     feedback_target: FeedbackTarget | MediaFeedbackTarget | ProductionDraftFeedbackTarget | None = None
+
+
+class RoleResumeIn(BaseModel):
+    request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
+    expected_task_id: str | None = Field(default=None, max_length=200)
+    text: str = Field(default='继续这项未完成的创作任务，保留已保存内容并先核对当前依据。', min_length=1, max_length=4000)
 
 
 class ReviewActionIn(BaseModel):

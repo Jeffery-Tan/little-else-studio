@@ -22,12 +22,15 @@ from pathlib import Path
 
 APP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(APP))
+sys.path.insert(0, str(APP / 'tests'))
 sys.stdout.reconfigure(encoding='utf-8')
 
 from studio.decision import prepare_generation_candidate  # noqa: E402
 from studio.pipeline import Pipeline  # noqa: E402
-from studio.production import DraftIn, draft_records, prepare_draft  # noqa: E402
+from studio.production import DraftIn, prepare_draft  # noqa: E402
 from studio.store import Store  # noqa: E402
+from studio.task_contract import evaluate  # noqa: E402
+from visual_fixtures import designed_script, stage_structure  # noqa: E402
 
 RUN = 'live-confirm'
 PORT = 4765
@@ -39,6 +42,7 @@ SCRIPT = {
     ],
     'total_duration': 6,
 }
+SCRIPT = designed_script(SCRIPT)
 
 
 def call(method, path, body=None):
@@ -60,7 +64,7 @@ def seed(root):
         attempt = pipeline.start_attempt(RUN, stage)
         structured = SCRIPT if stage == 'writing' else (
             {'options': [{'key': 'A', 'claim': 'Synthetic', 'satisfies': 'goal.primary'}]}
-            if stage == 'direction' else {})
+            if stage == 'direction' else stage_structure(stage))
         pipeline.submit(RUN, stage, attempt.token, content='Synthetic ' + stage, summary=stage,
                         structured=structured)
         if stage in {'direction', 'writing'}:
@@ -104,6 +108,9 @@ def main():
               [isinstance(d.get('estimate', {}).get('amount'), (int, float)) for d in drafts])
 
         candidate = prepare_generation_candidate(store, pipeline, RUN, 'image')
+        assert candidate and candidate['count'] == 3
+        assert evaluate(store, pipeline, RUN, 'production_media')['status'] == 'input_ready'
+        assert page['shots']['image']['delivered'] is False
         print('    server-side frozen set:', [row['draft_id'] for row in candidate['target']['drafts']])
         print('    total estimate known:', candidate['estimate']['known'],
               '· amount:', candidate['estimate']['amount'])
@@ -113,6 +120,7 @@ def main():
         # must describe the same set.
         page_ids = sorted(d['draft_id'] for d in drafts)
         frozen_ids = sorted(row['draft_id'] for row in candidate['target']['drafts'])
+        assert page_ids == frozen_ids
         print('    card and page describe the same set:', page_ids == frozen_ids)
 
         before = [e for e in store.read_events(RUN) if e['kind'] == 'production_attempt']
@@ -126,6 +134,7 @@ def main():
             'consent': True, 'nonce': 'wrong'})
         print('\n[E-3] a confirmation without the browser nonce is refused:', status)
         after = [e for e in store.read_events(RUN) if e['kind'] == 'production_attempt']
+        assert status == 409 and before == after == []
         print('    provider attempts after:', len(after))
         print('\nconfirm check complete; no model call, no media generation.')
     finally:

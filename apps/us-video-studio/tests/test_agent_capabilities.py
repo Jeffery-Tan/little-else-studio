@@ -32,7 +32,8 @@ def submit(pipeline, stage, text):
 
 
 def route(intent="edit"):
-    return tool_turn("route-" + intent, "prepare_creative_context", {"intent": intent, "format": "video"})
+    return tool_turn("route-" + intent, "prepare_creative_context", {"intent": intent, "format": "video",
+        "deliverable": "follow_up" if intent in {"status", "pause", "feedback"} else "intake"})
 
 
 @pytest.mark.parametrize("intent", ["status", "pause"])
@@ -67,7 +68,7 @@ def test_a_feedback_scope_can_widen_when_the_message_is_actually_a_correction(en
         tool_turn("write", "write_stage", {"stage": "intake", "content": "handled", "summary": "s"}),
         final_turn("Handled")])
     main = Orchestrator(store, pipeline, settings, model, ledger, RUN)
-    result = main.send("第二镜不要太像广告，改得自然一点，其他先不动")
+    result = main.send("修改本轮需求，让表达自然一点")
     assert not result.failed_tools
     assert store.read_artifact_text(RUN, "intake", 1) == "handled"
 
@@ -78,17 +79,20 @@ def test_even_same_orchestrator_cannot_inherit_previous_production_scope(env):
         tool_turn("write", "write_stage", {"stage": "intake", "content": "forbidden", "summary": "s"}),
         final_turn("Only status")])
     main = Orchestrator(store, pipeline, settings, model, ledger, RUN)
+    baseline = submit(pipeline, "intake", "Existing fixture intake")
     main.send("准备继续")
     result = main.send("目前进度怎样")
     assert "本轮工作范围" in result.failed_tools[0]["result"]
-    assert store.latest_artifact(RUN, "intake") is None
+    assert store.latest_artifact(RUN, "intake").sha256 == baseline.sha256
 
 
 def test_new_video_request_does_not_inherit_old_photo_system_constraint(env):
     store, pipeline, settings, ledger = env
     store.append_event(RUN, "creative_context_selected", selection={
         "intent": "new", "format": "photo", "tags": [], "case_ids": None})
-    model = ScriptedModel([route(), final_turn("Video work")])
+    model = ScriptedModel([route(),
+        tool_turn("save", "write_stage", {"stage": "intake", "content": "Video fixture", "summary": "s"}),
+        final_turn("Video work")])
     Orchestrator(store, pipeline, settings, model, ledger, RUN).send("现在改做视频")
     assert "本次交付明确为图文" not in model.calls[0]["system"]
     assert '"format": "video"' in model.calls[1]["messages"][-1]["content"][0]["content"]

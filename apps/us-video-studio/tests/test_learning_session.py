@@ -13,7 +13,7 @@ from fakes import ScriptedModel, final_turn, tool_turn
 from local_http import TestClient
 from studio.agents.orchestrator import Orchestrator
 from studio.config import Pricing, Settings
-from studio.learning import LearningConflict, LearningService
+from studio.learning import LearningConflict, LearningService, METHOD_CARDS
 from studio.learning_assets import LearningAssets, run_material_resource_id
 from studio.learning_session import (
     agent_session_context, proposal_for_agent, session_phase, session_snapshot,
@@ -34,6 +34,10 @@ ROOT = Path(__file__).resolve().parents[3]
 def setup(tmp_path):
     repo = tmp_path / 'repo'
     shutil.copytree(ROOT / '.agents/skills', repo / '.agents/skills')
+    for spec in METHOD_CARDS.values():
+        method = repo / spec['file']
+        method.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / spec['file'], method)
     target = repo / 'tracks/us/creative/learning/library.json'
     target.parent.mkdir(parents=True)
     shutil.copyfile(ROOT / 'tracks/us/creative/learning/library.json', target)
@@ -43,6 +47,56 @@ def setup(tmp_path):
                                         input_usd_per_mtok=1, output_usd_per_mtok=2))
     learning = LearningService(store, repository_root=repo)
     return repo, store, settings, learning
+
+
+def test_agent_learning_discussion_visibility_preserves_ids_ui_and_full_digest(tmp_path):
+    from studio.conversation_input import accept, receive, start_execution, visible_chat
+    _, store, _, learning = setup(tmp_path)
+    run_id = 'learning-visibility'
+    store.create_run(run_id, 'Synthetic learning', 'Offline', kind='learning')
+    first = receive(store, run_id, 'CURRENT_LEARNING_A', 'first')
+    future = receive(store, run_id, 'FUTURE_LEARNING_B', 'future')
+    accept(store, run_id, first)
+    accept(store, run_id, future)
+    start_execution(store, run_id, first)
+    before = session_snapshot(store, learning, run_id)
+    allowed = {index for index, _ in visible_chat(store, run_id)}
+    bounded = agent_session_context(store, learning, run_id, discussion_cursor=0,
+                                    discussion_limit=1, visible_indexes=allowed)
+    assert bounded['discussion_total'] == 1
+    assert bounded['discussion'][0]['id'] == f'user-chat:{run_id}:0'
+    assert bounded['discussion_next_cursor'] is None
+    assert bounded['discussion_sha256'] == before['discussion_sha256']
+    assert len(before['discussion']) == 2
+    with pytest.raises(ValueError, match='Unknown discussion message ID'):
+        agent_session_context(store, learning, run_id, message_ids=[f'user-chat:{run_id}:1'],
+                              visible_indexes=allowed)
+    assert session_snapshot(store, learning, run_id) == before
+
+
+def test_learning_tool_cannot_read_future_queued_message_until_its_turn(tmp_path):
+    from studio.conversation_input import accept, receive
+    _, store, settings, learning = setup(tmp_path)
+    run_id = 'learning-future-turn'
+    store.create_run(run_id, 'Synthetic learning', 'Offline', kind='learning')
+    first = receive(store, run_id, 'CURRENT_LEARNING_A', 'first')
+    future = receive(store, run_id, 'FUTURE_LEARNING_B', 'future')
+    accept(store, run_id, first)
+    accept(store, run_id, future)
+    first_model = ScriptedModel([
+        tool_turn('session', 'read_learning_session', {}),
+        tool_turn('future', 'read_learning_session', {'message_ids': [f'user-chat:{run_id}:1']}),
+        final_turn('A answered')])
+    result = Orchestrator(store, Pipeline(store), settings, first_model, Ledger(store, settings),
+        run_id, learning_service=learning).send(first['text'], user_input_id=first['message_id'])
+    assert 'FUTURE_LEARNING_B' not in first_model.requests_text()
+    assert [row['tool'] for row in result.failed_tools] == ['read_learning_session']
+    later_model = ScriptedModel([tool_turn('session', 'read_learning_session', {}), final_turn('B answered')])
+    Orchestrator(store, Pipeline(store), settings, later_model, Ledger(store, settings),
+        run_id, learning_service=learning).send(future['text'], user_input_id=future['message_id'])
+    assert 'FUTURE_LEARNING_B' in later_model.requests_text()
+    assert later_model.calls[0]['messages'][-1] == {'role': 'user', 'content': future['text']}
+    assert [row['text'] for row in store.read_chat(run_id) if row['role'] == 'user'] == [first['text'], future['text']]
 
 
 def test_learning_run_has_no_production_stages_and_discusses_with_narrow_tools(tmp_path):

@@ -5,9 +5,11 @@ on 2026-09-19. Never retries a request or presents reasoning as assistant text.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import math
 import re
-import threading
+import time
 import httpx
 
 from .client import JobCancelled, ModelError
@@ -16,6 +18,8 @@ from .openai_compat import _messages as openai_messages, _parse as openai_parse
 ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
 MODELS = ("deepseek-flash", "deepseek-v4-pro")
 REASONING_BLOCK = "deepseek_reasoning"
+REQUEST_TIMEOUT = 600.0
+PROGRESS_INTERVAL = 10.0
 
 
 def _messages(system, messages, *, with_tools):
@@ -67,17 +71,18 @@ def _parse(data, model, *, require_reasoning=False):
     return turn
 
 
-def _stream_turn(lines, model, *, require_reasoning, on_progress=None, check_cancel=None):
+async def _stream_turn(lines, model, *, require_reasoning, on_progress=None,
+                       check_cancel=None, on_model_data=None):
     """Assemble public text and private replay fields from one complete SSE turn.
 
-    Only `delta.content` can produce observer progress. Partial tool JSON and
-    reasoning remain local until the complete response validates in `_parse`.
+    Only `delta.content` can produce public text. The model-data callback carries
+    no content; private reasoning and partial tool JSON remain local.
     """
     content, reasoning, calls = [], [], {}
     finish, usage, actual_model, done = None, None, model, False
     preview_count, last_preview_size = 0, 0
     try:
-        for line in lines:
+        async for line in lines:
             if check_cancel:
                 check_cancel()
             if not line.startswith('data:'):
@@ -94,6 +99,8 @@ def _stream_turn(lines, model, *, require_reasoning, on_progress=None, check_can
             delta = choice.get('delta') or {}
             if not isinstance(delta, dict):
                 raise ValueError('invalid stream delta')
+            if on_model_data and any(delta.get(key) for key in ('content', 'reasoning_content', 'tool_calls')):
+                on_model_data()
             public = delta.get('content')
             private = delta.get('reasoning_content')
             if public is not None:
@@ -164,7 +171,8 @@ def _stream_turn(lines, model, *, require_reasoning, on_progress=None, check_can
 
 class DeepSeekClient:
     def __init__(self, token, *, max_tokens=None, timeout=180.0, check_cancel=None,
-                 cancel_event=None, reasoning_effort='high'):
+                 cancel_event=None, reasoning_effort='high', request_timeout=REQUEST_TIMEOUT,
+                 progress_interval=PROGRESS_INTERVAL):
         if (not isinstance(token, str) or not token or not token.isascii()
                 or any(character.isspace() or ord(character) < 33 or ord(character) == 127 for character in token)):
             raise ValueError("DeepSeek API key must contain ASCII characters without whitespace or control characters")
@@ -172,61 +180,116 @@ class DeepSeekClient:
             raise ValueError("DeepSeek max_tokens must be an integer between 1 and 393216")
         if reasoning_effort not in ('none', 'low', 'high'):
             raise ValueError('DeepSeek reasoning_effort must be none, low or high')
+        for name, value in (('request_timeout', request_timeout), ('progress_interval', progress_interval)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f'DeepSeek {name} must be a positive finite number')
         self._token = token
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
         self.timeout = timeout
         self.check_cancel = check_cancel
         self.cancel_event = cancel_event
+        self.request_timeout = request_timeout
+        self.progress_interval = progress_interval
 
     def complete_with_progress(self, *, model, system, messages, tools, on_progress=None):
         payload = self._payload(model, system, messages, tools)
         payload['stream'] = True
+        return self._complete_request(payload, model, tools, on_progress=on_progress)
+
+    def _check_cancel(self):
         if self.check_cancel:
             self.check_cancel()
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise JobCancelled('用户已请求停止；未启动下一次模型调用或工具。')
+
+    def _complete_request(self, payload, model, tools, *, on_progress=None):
+        self._check_cancel()
         try:
-            with httpx.Client(timeout=self.timeout, follow_redirects=False, trust_env=False) as client:
-                with client.stream('POST', ENDPOINT,
-                                   headers={'Authorization': f'Bearer {self._token}'}, json=payload) as response:
-                    if response.status_code != 200:
-                        raise ModelError(response.status_code, 'request rejected; usage unconfirmed')
-                    done = threading.Event()
-                    def stop_reader():
-                        while not done.wait(.1):
-                            if self.cancel_event.is_set():
-                                try:
-                                    response.close()
-                                except (RuntimeError, httpx.TransportError):
-                                    pass
-                                return
-                    monitor = (threading.Thread(target=stop_reader, daemon=True)
-                               if self.cancel_event is not None else None)
-                    if monitor:
-                        monitor.start()
-                    try:
-                        turn = _stream_turn(response.iter_lines(), model,
-                                            require_reasoning=bool(tools) and self.reasoning_effort != 'none',
-                                            on_progress=on_progress, check_cancel=self.check_cancel)
-                        if self.check_cancel:
-                            try:
-                                self.check_cancel()
-                            except JobCancelled as exc:
-                                raise JobCancelled(str(exc), usage=turn.usage, usage_final=True) from exc
-                        return turn
-                    finally:
-                        done.set()
-                        if monitor:
-                            monitor.join(timeout=.2)
+            return asyncio.run(self._bounded_request(payload, model, tools, on_progress))
         except httpx.TransportError as exc:
-            if self.check_cancel:
-                self.check_cancel()
+            self._check_cancel()
             raise ModelError(0, f'transport failed ({type(exc).__name__}); usage unconfirmed') from None
         except (ModelError, JobCancelled):
             raise
         except RuntimeError as exc:
-            if self.check_cancel:
-                self.check_cancel()
+            self._check_cancel()
             raise ModelError(0, f'stream failed ({type(exc).__name__}); usage unconfirmed') from None
+
+    async def _bounded_request(self, payload, model, tools, on_progress):
+        # Async cancellation interrupts headers and body reads as well as SSE.
+        # No abandoned request thread or second provider attempt is created.
+        started = time.monotonic()
+        receiving = False
+        last_progress = started
+
+        def report():
+            nonlocal last_progress
+            last_progress = time.monotonic()
+            if on_progress:
+                elapsed = min(self.request_timeout, max(0.0, last_progress - started))
+                on_progress({'type': 'agent_activity', 'phase': 'waiting_model',
+                             'elapsed_seconds': round(elapsed, 1),
+                             'remaining_seconds': round(max(0.0, self.request_timeout - elapsed), 1),
+                             'timeout_seconds': self.request_timeout,
+                             'transport_state': 'receiving' if receiving else 'waiting'})
+
+        def model_data():
+            nonlocal receiving
+            if not receiving:
+                receiving = True
+                report()
+
+        report()
+        task = asyncio.create_task(self._exchange(payload, model, tools, on_progress, model_data))
+        try:
+            while True:
+                if task.done():
+                    try:
+                        turn = task.result()
+                    except ModelError as failure:
+                        try:
+                            self._check_cancel()
+                        except JobCancelled as exc:
+                            raise JobCancelled(str(exc), usage=failure.usage,
+                                               usage_final=failure.usage_status == 'known') from exc
+                        raise
+                    try:
+                        self._check_cancel()
+                    except JobCancelled as exc:
+                        raise JobCancelled(str(exc), usage=turn.usage, usage_final=True) from exc
+                    return turn
+                self._check_cancel()
+                remaining = self.request_timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise ModelError(0, f'模型单次等待超过 {self.request_timeout:g} 秒，本轮已停止；'
+                                     '未自动重试，已保存内容保留。请检查连接后发送新的指令；usage unconfirmed')
+                if time.monotonic() - last_progress >= self.progress_interval:
+                    report()
+                await asyncio.wait({task}, timeout=min(.1, remaining, self.progress_interval))
+        finally:
+            if not task.done():
+                task.cancel()
+            # Await closure before releasing the job/ledger; late replies cannot
+            # become a turn, tool call, or saved artifact after timeout/stop.
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _exchange(self, payload, model, tools, on_progress, model_data):
+        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False, trust_env=False) as client:
+            async with client.stream('POST', ENDPOINT,
+                                     headers={'Authorization': f'Bearer {self._token}'}, json=payload) as response:
+                if response.status_code != 200:
+                    raise ModelError(response.status_code, 'request rejected; usage unconfirmed')
+                if payload['stream']:
+                    return await _stream_turn(response.aiter_lines(), model,
+                        require_reasoning=bool(tools) and self.reasoning_effort != 'none',
+                        on_progress=on_progress, check_cancel=self._check_cancel, on_model_data=model_data)
+                await response.aread()
+                try:
+                    data = response.json()
+                except ValueError:
+                    raise ModelError(200, 'invalid JSON response; usage unconfirmed') from None
+                return _parse(data, model, require_reasoning=bool(tools) and self.reasoning_effort != 'none')
 
     def _payload(self, model, system, messages, tools):
         # The provider's discovered model list may grow or retain an existing
@@ -255,16 +318,4 @@ class DeepSeekClient:
 
     def complete(self, *, model, system, messages, tools):
         payload = self._payload(model, system, messages, tools)
-        try:
-            with httpx.Client(timeout=self.timeout, follow_redirects=False, trust_env=False) as client:
-                response = client.post(ENDPOINT, headers={"Authorization": f"Bearer {self._token}"}, json=payload)
-                if response.status_code != 200:
-                    raise ModelError(response.status_code, "request rejected; usage unconfirmed")
-                try:
-                    data = response.json()
-                except ValueError:
-                    raise ModelError(200, "invalid JSON response; usage unconfirmed") from None
-                return _parse(data, model,
-                              require_reasoning=bool(tools) and self.reasoning_effort != 'none')
-        except httpx.TransportError as exc:
-            raise ModelError(0, f"transport failed ({type(exc).__name__}); usage unconfirmed") from None
+        return self._complete_request(payload, model, tools)

@@ -2,10 +2,11 @@
 import copy
 import hashlib
 import json
+import shutil
 
 import pytest
 
-from studio.learning import LearningConflict, LearningService, SKILLS, _json, _sha, core
+from studio.learning import LearningConflict, LearningService, METHOD_CARDS, REPOSITORY, SKILLS, _json, _sha, core
 from studio.learning_assets import run_material_resource_id
 from studio.learning_session import model_finding_observation, session_snapshot
 from studio.material_observations import material_workspace, save_human_observation
@@ -37,6 +38,10 @@ def env(tmp_path):
         path = repo / ".agents/skills" / skill / "SKILL.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("Test skill " + skill, encoding="utf-8")
+    for spec in METHOD_CARDS.values():
+        path = repo / spec['file']
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(REPOSITORY / spec['file'], path)
     store = Store(tmp_path / "data")
     store.create_run("learning-one", "Study", "Study reference", kind="learning")
     service = LearningService(store, repo)

@@ -25,6 +25,7 @@ from studio.production import DraftIn, assemble_videos, prepare_draft, read_imag
 from studio.server import build_app
 from studio.store import Store
 from test_server import RUN, settings_for
+from visual_fixtures import stage_structure
 
 BASE = f'/api/runs/{RUN}/production'
 ENDPOINT = 'https://fixture.cn-beijing.maas.aliyuncs.com/api/v1'
@@ -46,7 +47,7 @@ def seed(store):
                     evidence=['Fixture only'], limitations=['Not market evidence'],
                     structured={'options': [{'key': 'A', 'claim': 'Synthetic claim',
                                              'satisfies': 'goal.primary'}]}
-                    if stage == 'direction' else {})
+                    if stage == 'direction' else stage_structure(stage))
         if stage in {'direction', 'writing'}:
             pipe.record_review(RUN, stage, verdict='pass', findings=[])
             pipe.record_approval(RUN, stage, nonce=pipe.issue_nonce(RUN, stage), decision='approved',
@@ -222,6 +223,65 @@ def test_approved_image_continues_exact_video_work_once_without_generation(scene
     assert calls == [RUN]
 
 
+@pytest.mark.parametrize('query_format', ['video', 'none'])
+def test_status_query_does_not_disable_a_new_image_approval_video_continuation(scene, query_format):
+    video_goal(scene)
+    scene[1].append_event(RUN, 'creative_context_selected',
+        selection={'intent': 'status', 'format': query_format, 'tags': [], 'case_ids': None})
+    calls = capture_continuation(scene, finish_input=True)
+    assert workspace(scene)['active'] is False and calls == []
+    response = approve(scene)
+    assert response.status_code == 200, response.text
+    continuation = response.json()['continuation']
+    assert continuation and continuation['job_id'], response.json()
+    assert wait(scene, scene[0].get(f"/api/runs/{RUN}/jobs/{continuation['job_id']}"))['status'] == 'succeeded'
+    assert calls == [RUN]
+    assert not scene[4].calls and not scene[5].calls
+
+
+@pytest.mark.parametrize('query_format', ['video', 'none'])
+def test_explicit_batch_video_preparation_after_status_uses_the_same_approved_frames_once(scene, query_format):
+    http, store, pipeline, _reviewer, images, videos, _settings = scene
+    adopt_shot_count(scene, 2)
+    frames = [draft(scene, kind='image', request_id=f'frame-{index}',
+                    shot_id=f'shot-{index:02d}').json() for index in (1, 2)]
+    assert wait(scene, http.post(BASE + '/batch-generate', json=batch_payload(scene, frames)))['status'] == 'succeeded'
+    outputs = [next(d for d in workspace(scene)['drafts'] if d['draft_id'] == frame['draft_id'])
+               ['attempts'][0]['output'] for frame in frames]
+    refs = [{'name': output['name'], 'sha256': output['sha256']} for output in outputs]
+    approval = http.post(BASE + '/material-approvals/batch', json={
+        'request_id':'approve-before-video-route', 'nonce':workspace(scene)['nonce'], 'images':refs})
+    assert approval.status_code == 200 and approval.json()['continuation'] is None
+    video_goal(scene)
+    store.append_event(RUN, 'creative_context_selected',
+        selection={'intent':'status', 'format':query_format, 'tags':[], 'case_ids':None})
+    calls = []
+    def prepare(run_id):
+        calls.append(run_id)
+        def run(text, emit, check_cancel):
+            source = workspace(scene)['sources'][-1]
+            for index, ref in enumerate(refs, 1):
+                prepare_draft(store, pipeline, run_id, DraftIn(request_id=f'clip-after-status-{index}',
+                    kind='video', prompt=f'Offline approved clip {index}.',
+                    source_version=source['version'], source_sha256=source['artifact_sha256'],
+                    shot_id=f'shot-{index:02d}', reference=ref,
+                    model='wan3.0-video', duration=3, resolution='720P'), actor='agent')
+            return OrchestratorTurn('Prepared offline.', 'done', 1)
+        return run, {'source':'offline-batch-after-status'}
+    http.app.state.jobs.prepare = prepare
+    assert workspace(scene)['active'] is False and calls == []
+    payload = {'request_id':'explicit-continue-after-status', 'images':refs}
+    response = http.post(BASE + '/material-approvals/batch/continue', json=payload)
+    assert response.status_code == 200, response.text
+    continuation = response.json()['continuation']
+    assert wait(scene, http.get(f"/api/runs/{RUN}/jobs/{continuation['job_id']}"))['status'] == 'succeeded'
+    assert calls == [RUN] and not videos.calls and len(images.calls) == 2
+    assert [shot['video_draft_id'] for shot in workspace(scene)['video_sequence']] == [
+        'clip-after-status-1', 'clip-after-status-2']
+    assert http.post(BASE + '/material-approvals/batch/continue', json=payload).status_code == 200
+    assert calls == [RUN] and not videos.calls and len(images.calls) == 2
+
+
 def test_approved_image_continuation_can_resume_after_job_was_not_started(scene):
     video_goal(scene)
     calls = capture_continuation(scene)
@@ -338,6 +398,21 @@ def batch_payload(scene, drafts, request_id='batch-1'):
                        for item in drafts]}
 
 
+def adopt_shot_count(scene, count):
+    """Batch fixtures describe their intended shot count in the actual script."""
+    structure = stage_structure('writing')
+    first = structure['segments'][0]
+    structure['segments'] = [{**first, 'tc': f'{index * 5}–{(index + 1) * 5}',
+                              'picture': f'Synthetic product demonstration shot {index + 1}.'}
+                             for index in range(count)]
+    structure['segments'][0]['shot_id'] = scene[1].latest_artifact(RUN, 'writing').structured['segments'][0]['shot_id']
+    pipe = scene[2]
+    attempt = pipe.start_attempt(RUN, 'writing')
+    pipe.submit(RUN, 'writing', attempt.token, content=f'Synthetic {count}-shot script',
+                summary='Explicit offline batch storyboard', structured=structure)
+    pipe.record_approval(RUN, 'writing', nonce=pipe.issue_nonce(RUN, 'writing'), decision='approved')
+
+
 def set_material_model(scene, model):
     saved = scene[0].get('/api/connections').json()
     saved['roles']['material'] = {'connection': 'codex', 'model': model}
@@ -378,9 +453,10 @@ def test_selected_image_model_requires_a_fresh_confirmation_page(scene):
 
 
 def test_saved_material_model_reaches_every_image_in_batch(scene):
+    adopt_shot_count(scene, 2)
     revision = set_material_model(scene, 'gpt-6-sol')
-    first = draft(scene, kind='image', request_id='model-shot-1').json()
-    second = draft(scene, kind='image', request_id='model-shot-2').json()
+    first = draft(scene, kind='image', request_id='model-shot-1', shot_id='shot-01').json()
+    second = draft(scene, kind='image', request_id='model-shot-2', shot_id='shot-02').json()
     payload = {**batch_payload(scene, [first, second], 'model-batch'),
                'expected_connection_revision': revision}
     assert scene[0].post(BASE + '/batch-generate', json={
@@ -392,8 +468,9 @@ def test_saved_material_model_reaches_every_image_in_batch(scene):
 
 def test_one_batch_decision_generates_pinned_images_once_and_approves_exact_outputs(scene):
     http, store, _, _, images, videos, _ = scene
-    first = draft(scene, kind='image', request_id='shot-1').json()
-    second = draft(scene, kind='image', request_id='shot-2', prompt='A different synthetic shot.').json()
+    adopt_shot_count(scene, 2)
+    first = draft(scene, kind='image', request_id='shot-1', shot_id='shot-01').json()
+    second = draft(scene, kind='image', request_id='shot-2', shot_id='shot-02', prompt='A different synthetic shot.').json()
     payload = batch_payload(scene, [first, second])
     assert http.post(BASE + '/batch-generate', json={**payload, 'consent': False}).status_code == 409
     assert http.post(BASE + '/batch-generate', json={**payload, 'drafts': [
@@ -422,8 +499,9 @@ def test_one_batch_decision_generates_pinned_images_once_and_approves_exact_outp
 def test_five_approved_frames_prepare_five_clips_then_generate_and_assemble_in_order(scene, monkeypatch):
     http, store, _, _, images, videos, _ = scene
     video_goal(scene)
+    adopt_shot_count(scene, 5)
     image_drafts = [draft(scene, kind='image', request_id=f'frame-{index}',
-                          prompt=f'Synthetic frame {index}.').json() for index in range(1, 6)]
+                          shot_id=f'shot-{index:02d}', prompt=f'Synthetic frame {index}.').json() for index in range(1, 6)]
     source = workspace(scene)['sources'][-1]
     plan_payload = {'request_id': 'five-scene-edit', 'source_version': source['version'],
         'source_sha256': source['artifact_sha256'], 'confirmed_product': 'Small deep olive green bag',
@@ -456,6 +534,7 @@ def test_five_approved_frames_prepare_five_clips_then_generate_and_assemble_in_o
                 payload = DraftIn(request_id=f'clip-{index}', kind='video',
                     prompt=f'Synthetic segment {index}.', source_version=source['version'],
                     source_sha256=source['artifact_sha256'],
+                    shot_id=f'shot-{index:02d}',
                     reference={'name': output['name'], 'sha256': output['sha256']},
                     model='wan3.0-video', duration=3, resolution='720P')
                 prepare_draft(store, scene[2], run_id, payload, actor='agent')
@@ -568,8 +647,9 @@ def test_local_assembly_uses_explicit_picture_audio_cuts_and_overlay(tmp_path):
 def test_unknown_first_image_blocks_the_remaining_batch_until_user_accepts_uncertainty(scene, monkeypatch):
     http, store, _, _, images, _, settings = scene
     assert 'retry_with_unknown_cost' in workspace(scene)['recovery_modes']
-    first = draft(scene, kind='image', request_id='shot-1').json()
-    second = draft(scene, kind='image', request_id='shot-2', prompt='Second synthetic shot.').json()
+    adopt_shot_count(scene, 2)
+    first = draft(scene, kind='image', request_id='shot-1', shot_id='shot-01').json()
+    second = draft(scene, kind='image', request_id='shot-2', shot_id='shot-02', prompt='Second synthetic shot.').json()
     original = images.generate
     def unknown_once(request):
         if not images.calls:
@@ -899,7 +979,8 @@ def test_unapproved_script_cannot_become_production_plan(scene):
     pipe = scene[2]
     # Latest writing version is not approved; production requires an approved script.
     attempt = pipe.start_attempt(RUN, 'writing')
-    pipe.submit(RUN, 'writing', attempt.token, content='Unapproved rewrite', summary='rewrite')
+    pipe.submit(RUN, 'writing', attempt.token, content='Unapproved rewrite', summary='rewrite',
+                structured=stage_structure('writing'))
     assert pipe.stage_state(RUN, 'writing').approval is None
     assert draft(scene).status_code == 409
 

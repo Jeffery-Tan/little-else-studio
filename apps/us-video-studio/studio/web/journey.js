@@ -95,6 +95,7 @@ function bindQuestionChoices(root, q) {
       if (!state.clarificationChoices) state.clarificationChoices = new Map();
       state.clarificationChoices.set(runId, {id: q.id, text: selected});
       state.composerVersion = (state.composerVersion || 0) + 1;
+      if (typeof persistComposerDraft === 'function') persistComposerDraft();
       input.style.height = 'auto';
       input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
       root.querySelector('[data-feedback]').textContent = '已填入对话框；补充后再发送。';
@@ -183,6 +184,60 @@ function syncJourneyTabs() {
     button.tabIndex=selected?0:-1;
   }
   $('stage').setAttribute('aria-labelledby',`journey-tab-${active==='script'?'script':'plan'}`);
+}
+
+function renderCreativeBoard() {
+  const host=$('creative-board');
+  if(!host || typeof StudioCreativeBoard==='undefined')return;
+  const run=(state.runs||[]).find(row=>row.run_id===state.runId)||state.timeline?.run||{};
+  const boundRun=state.runId;
+  const boundWriting=(state.rail||[]).find(step=>step.stage==='writing');
+  const boundSource=boundWriting&&{version:boundWriting.version,sha256:boundWriting.artifact_sha256};
+  StudioCreativeBoard.render(host,{runId:boundRun,run,timeline:state.timeline,
+    production:state.productionData,materials:state.materials,
+    referenceTasks:state.referenceTasks,
+    format:state.creatorView?.format||run.content_format,
+    analysisOnly:Boolean(state.creatorView?.analysisOnly)}, {
+    openStage(stage,version){
+      if(state.runId!==boundRun)return;
+      openReader(stage,version).catch(error=>toast(`方案暂时无法打开：${error.message||error}`,true));
+    },
+    openMaterials(){if(state.runId===boundRun)toggleMaterials(true);},
+    openReference(){
+      if(state.runId!==boundRun)return;
+      if(state.creatorView?.analysisOnly)showJourneyTab('plan');
+      else if((state.referenceTasks||[]).some(task=>task.candidate))showJourneyTab('reference');
+      else toggleMaterials(true);
+    },
+    focusDecision(){
+      if(state.runId!==boundRun)return;
+      setProjectFocus('chat');setConversationOpen(true);
+      $('journey-decision')?.scrollIntoView({block:'nearest'});$('chat-input')?.focus();
+    },
+    openMedia(name){
+      if(state.runId!==boundRun)return;
+      const material=materialByName(name);
+      if(material?.usable)openViewer(material);
+      else toast('这份素材暂时无法读取。',true);
+    },
+    openShot(kind,shotId){
+      if(state.runId!==boundRun)return;
+      if(!shotId){showJourneyTab(kind==='video'?'video':'storyboard');return;}
+      const writing=(state.rail||[]).find(step=>step.stage==='writing');
+      const target=state.productionData?.targets?.[kind];
+      if(!writing || !boundSource || writing.version!==boundSource.version || writing.artifact_sha256!==boundSource.sha256 ||
+          target?.source_version!==writing.version || target.source_sha256!==writing.artifact_sha256){
+        toast('方案版本已变化，请刷新后查看对应结果。',true);return;
+      }
+      const shot=(state.productionData?.shots?.[kind]?.shots||[]).find(row=>row.shot_id===shotId);
+      if(shot?.draft_id)openProduction({kind,focusDraft:shot.draft_id});
+      else if(shot){
+        openReader('writing',writing.version).catch(error=>toast(`方案暂时无法打开：${error.message||error}`,true));
+      }else toast('这面镜头暂时无法核对，请刷新后查看。',true);
+    },
+  });
+  const writing=(state.rail||[]).find(step=>step.stage==='writing');
+  if(writing)wireCreatorFeedback(host,writing);
 }
 
 function renderJourneyDecision() {
@@ -281,7 +336,8 @@ function openProductionBatch(kind){
   if(kind==='generate'&&StudioProduction.batchBlocker(data,runId)){
     toast('整组中仍有首帧任务待核实，请先处理原任务。',true);return false;
   }
-  const target=['video_prepare','video_generate','assemble'].includes(kind)?'video':'storyboard';
+  const target=state.canvasTab==='board'?'board'
+    :['video_prepare','video_generate','assemble'].includes(kind)?'video':'storyboard';
   const existing=currentBatchIntent();
   if(existing){
     if(existing.kind!==kind&&(existing.uncertain||existing.submitting)){
@@ -294,7 +350,7 @@ function openProductionBatch(kind){
   }
   if(kind==='choose'){
     saveBatchIntent({kind,runId});
-    if(state.canvasTab!=='storyboard')showJourneyTab('storyboard');
+    if(state.canvasTab!==target)showJourneyTab(target);
     setProjectFocus('chat');renderProductionAction();return true;
   }
   const selected=kind==='approve'?StudioProduction.batchApprovalImages(data,runId)
@@ -340,8 +396,16 @@ async function submitProductionBatch(){
     saveBatchIntent(null);
     if(result.job_id||result.continuation?.job_id)void restoreJob(intent.runId);
     await refreshTimeline();
+    if(intent.kind==='video_prepare'){
+      const continuation=result.continuation;
+      const started=continuation?.status==='started';
+      const existing=continuation?.status==='existing';
+      toast(started?'团队正在准备逐段视频输入。'
+        :existing?'已找到本轮视频输入准备记录，请查看任务状态。'
+        :`视频输入尚未开始：${continuation?.reason||'请查看任务状态后显式继续准备。'}`,!started&&!existing);
+      return;
+    }
     toast(intent.kind==='approve'?`已一次确认 ${result.approved} 张生成图。${result.continuation?.status==='started'?'团队正在准备视频输入。':''}`
-      :intent.kind==='video_prepare'?'团队正在准备逐段视频输入。'
       :intent.kind==='assemble'?'本地拼接已启动。'
       :`整组生成已启动；将按顺序处理 ${intent.drafts.length} ${intent.kind==='video_generate'?'段':'张'}。`);
   }catch(error){
@@ -361,7 +425,12 @@ async function submitProductionBatch(){
 }
 function productionBatchCommand(text,available={}){
   const value=String(text||'').trim().replace(/^(?:好|好的|可以|行)[，,\s]*/,'').trim();
-  if(value.length>64||/[，。；;\n]/.test(value)||/(不要|别|暂不|先不|修改|调整|问题|重写)/.test(value))return null;
+  if(value.length>64||/[，。；;\n]/.test(value)||/(不要|别|暂不|先不|修改|调整|问题|重写|吗|么|？|\?|怎么|是否|能否|什么时候|有没有)/.test(value))return null;
+  // This explicit request only opens the existing review card. Require one
+  // ready operation so a generic shot request cannot choose between making
+  // new images and approving images that already exist.
+  if(available.generate&&!available.approve&&
+      /^(?:请)?(?:现在)?(?:开始(?:做)?(?:分镜生成|首帧出图)|(?:生成|出图)(?:分镜|首帧))(?:吧)?$/.test(value))return 'generate';
   if(/(全部|所有|整组|这[一二三四五六七八九十\d]+段)/.test(value)&&/(视频|片段|视频段)/.test(value)){
     if(/准备/.test(value)&&available.video_prepare)return 'video_prepare';
     if(/(生成|制作|开始)/.test(value)&&available.video_generate)return 'video_generate';
@@ -390,10 +459,17 @@ function renderProductionAction(){
   const host=$('production-action');
   if(!host)return;
   host.replaceChildren();
-  if(!['storyboard','video'].includes(state.canvasTab)||!state.productionData||
-      state.timeline?.pending||state.timeline?.interaction)return;
   const intent=currentBatchIntent();
-  const blocker=state.canvasTab==='storyboard'
+  // The board owns the default project view. Its conversation still needs the
+  // existing production action; use the same creator projection as the status
+  // row and let a frozen confirmation keep its own scope while it is open.
+  const tab=state.canvasTab==='board'
+    ?intent?(['video_prepare','video_generate','assemble'].includes(intent.kind)?'video':'storyboard')
+      :state.creatorView?.tab
+    :state.canvasTab;
+  if(!['storyboard','video'].includes(tab)||!state.productionData||
+      state.timeline?.pending||state.timeline?.interaction)return;
+  const blocker=tab==='storyboard'
     ?StudioProduction.batchBlocker(state.productionData,state.runId):null;
   if(blocker&&intent?.kind==='generate'&&!intent.uncertain&&!intent.submitting)saveBatchIntent(null);
   if(blocker&&(!intent||intent.kind==='generate'&&!intent.uncertain&&!intent.submitting)){
@@ -448,7 +524,7 @@ function renderProductionAction(){
     host.querySelector('[data-batch-status]').textContent=intent.error||'';
     return;
   }
-  if(state.canvasTab==='video'&&(state.productionData.video_sequence||[]).length>1){
+  if(tab==='video'&&(state.productionData.video_sequence||[]).length>1){
     const shots=StudioProduction.videoSequenceState(state.productionData,state.runId);
     const ready=shots.every(shot=>shot.approved&&shot.reference);
     const missing=shots.filter(shot=>!shot.draft).length;
@@ -488,7 +564,7 @@ function renderProductionAction(){
       return;
     }
   }
-  const kind=state.canvasTab==='storyboard'?'image':'video';
+  const kind=tab==='storyboard'?'image':'video';
   const imageDrafts=kind==='image'?(state.productionData.drafts||[]).filter(d=>d.kind==='image'&&d.source_ready!==false):[];
   if(imageDrafts.length>1){
     const generated=imageDrafts.filter(d=>StudioProduction.currentProductionWork({...state.productionData,drafts:[d]},'image',state.runId).outputUrl).length;
@@ -523,16 +599,27 @@ function showJourneyTab(tab, options={}) {
   if(!options.automatic)state.canvasTouched=true;
   closeEmbeddedProduction();
   state.canvasTab=tab;
+  if($('creative-board'))$('creative-board').hidden=tab!=='board';
+  if($('canvas-detail-nav')){
+    const learning=(state.runs||[]).find(run=>run.run_id===state.runId)?.kind==='learning';
+    $('canvas-detail-nav').hidden=tab==='board'||learning;
+    if($('canvas-detail-title'))$('canvas-detail-title').textContent=tab==='plan'
+      ? ((state.rail||[]).find(step=>step.stage===options.stage)?.label||'方案详情')
+      : ({assets:'素材与参考',reference:'参考拆解',storyboard:'画面与制作记录',video:'成片与制作记录'}[tab]||'');
+  }
   $('stage').hidden=tab!=='plan';
   $('journey-assets').hidden=tab!=='assets';
   $('journey-reference').hidden=tab!=='reference';
   $('journey-storyboard').hidden=tab!=='storyboard';
   $('journey-video').hidden=tab!=='video';
-  if(tab==='plan'){
+  if(tab==='board')renderCreativeBoard();
+  else if(tab==='plan'){
     const candidate=(options.stage && (state.rail||[]).some(s=>s.stage===options.stage) ? options.stage : null)
       || state.timeline?.pending?.stage || (state.rail||[]).find(s=>s.stage==='writing'&&s.has_doc)?.stage
       || (state.rail||[]).find(s=>s.stage==='direction'&&s.has_doc)?.stage || 'intake';
     selectStage(candidate);
+    renderPane();
+    if($('canvas-detail-title'))$('canvas-detail-title').textContent=(state.rail||[]).find(step=>step.stage===candidate)?.label||'方案详情';
   } else if(tab==='assets') renderCanvasMaterials();
   else if(tab==='reference') renderProjectReference();
   else {
@@ -620,6 +707,7 @@ function startFromConversation(){
 
 function initJourney() {
   bindJourneyTabs();
+  if($('canvas-back'))$('canvas-back').onclick=()=>{showJourneyTab('board');setProjectFocus('canvas');};
   $('chat-attach').onclick=()=>{if(!state.busy)$('chat-files').click();};
   $('chat-reference-attach').onclick=()=>{if(!state.busy)$('chat-reference-files').click();};
   const isVideoFile=file=>file.type.startsWith('video/')||/\.(mp4|mov|m4v|webm)$/i.test(file.name);

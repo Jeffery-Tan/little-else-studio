@@ -21,6 +21,9 @@ ROOT_MARKER = '.studio-root.json'
 def _fingerprint_paths() -> list[Path]:
     """All backend code and model-readable US methods, in stable order."""
     paths = list((APP_ROOT / 'studio').rglob('*.py'))
+    shared_learning = REPOSITORY / 'scripts/creative_learning.py'
+    if shared_learning.is_file():
+        paths.append(shared_learning)
     paths += list((APP_ROOT / 'docs/methods').glob('*.md'))
     for name in ('us-commerce-strategy', 'us-creator-video', 'us-photo-copy'):
         paths += list((REPOSITORY / '.agents/skills' / name).rglob('*.md'))
@@ -40,6 +43,8 @@ def runtime_identity(data_root: Path) -> dict:
     root = Path(data_root).expanduser().resolve()
     return {
         'started_at': datetime.now(timezone.utc).isoformat(),
+        'process_id': os.getpid(),
+        'hot_reload': {'enabled': False, 'state': 'disabled'},
         'code_fingerprint': code_fingerprint(),
         'data_root_id': hashlib.sha256(str(root).casefold().encode('utf-8')).hexdigest()[:12],
         'python': sys.version.split()[0],
@@ -54,6 +59,20 @@ def _version(name: str) -> str | None:
         return importlib.metadata.version(name)
     except importlib.metadata.PackageNotFoundError:
         return None
+
+
+def _probe_lock(path: Path):
+    """Probe an existing OS lock without creating or changing its contents."""
+    with path.open('r+b') as handle:
+        handle.seek(0)
+        if os.name == 'nt':
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _requirements() -> dict[str, str]:
@@ -122,16 +141,7 @@ def inspect(data_root: Path, port: int = 4760, *, host: str = '127.0.0.1', allow
         lock_file = root / '.studio-writer.lock'
         if lock_file.exists():
             try:
-                with lock_file.open('r+b') as handle:
-                    handle.seek(0)
-                    if os.name == 'nt':
-                        import msvcrt
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                    else:
-                        import fcntl
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                _probe_lock(lock_file)
             except Exception:
                 add('writer', 'error', '此数据根已有写入进程，或 writer 锁不可用。',
                     '请连接原服务；更新前先等待当前任务结束并停止原服务。')
@@ -139,6 +149,15 @@ def inspect(data_root: Path, port: int = 4760, *, host: str = '127.0.0.1', allow
                 add('writer', 'ok', 'writer 锁可取得。')
         else:
             add('writer', 'ok', '尚无 writer 锁文件；启动时会创建并取得锁。')
+        supervisor_lock = root / '.studio-supervisor.lock'
+        try:
+            if supervisor_lock.exists():
+                _probe_lock(supervisor_lock)
+        except OSError:
+            add('supervisor', 'error', '此数据根已有热重载启动器，或监督锁不可用。',
+                '请连接原服务；查看启动日志，修复代码后会自动恢复。不要另启第二个启动器。')
+        else:
+            add('supervisor', 'ok', '没有运行中的热重载启动器。')
         try:
             from .config import load_settings
             from .connections import ConnectionStore
@@ -181,6 +200,7 @@ def main() -> None:
     parser.add_argument('--json', action='store_true')
     parser.add_argument('--allow-new', action='store_true', help='明确允许已存在的空数据根作为新工作台')
     parser.add_argument('--start', action='store_true', help='检查通过后启动本地服务')
+    parser.add_argument('--reload', action='store_true', help='空闲时自动加载后端代码变更')
     args = parser.parse_args()
     report = inspect(args.data_root, args.port, allow_new=args.allow_new)
     if args.json:
@@ -197,6 +217,9 @@ def main() -> None:
         root = args.data_root.expanduser().resolve()
         if args.allow_new and not _has_project_data(root):
             mark_new_root(root)
+        if args.reload:
+            from .dev_reload import supervise
+            raise SystemExit(supervise(root, args.port))
         import uvicorn
         from .config import load_settings
         from .server import build_app

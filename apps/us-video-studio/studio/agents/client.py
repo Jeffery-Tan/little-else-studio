@@ -18,6 +18,7 @@ Two properties the loop guarantees:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Protocol
@@ -353,6 +354,46 @@ FAILURE_ADVISORY = (
 )
 
 
+_FAILURE_METADATA_KEYS = frozenset({
+    'task_id', 'attempt_id', 'attempt_number', 'call_id', 'request_id', 'job_id',
+    'timestamp', 'at', 'elapsed_seconds', 'nonce', 'token',
+})
+
+
+def _failure_key(output: str) -> str:
+    """Identify a failure independently of its execution receipt identity.
+
+    A dispatch creates a new attempt even if it fails for the same reason. Its
+    task_id must not reset the convergence guard. Only structured transport
+    metadata is excluded: plain-text errors and business values (shot, version,
+    duration, numeric limits, hashes) remain exact. Compute before log truncation.
+    """
+    def stable(value):
+        if isinstance(value, dict):
+            return {key: stable(item) for key, item in value.items()
+                    if key not in _FAILURE_METADATA_KEYS
+                    and not (key in {'attempt', 'call'} and isinstance(item, (str, int)))}
+        if isinstance(value, list):
+            return [stable(item) for item in value]
+        return value
+
+    try:
+        payload = json.loads(output)
+    except (TypeError, ValueError):
+        payload = None
+    if isinstance(payload, dict) and {'stage', 'role', 'status', 'task_id'} <= payload.keys():
+        # Dispatch receipts also contain summaries, read-more links and changing
+        # progress. Their stable failure contract is the error + role/stage.
+        payload = {key: payload.get(key) for key in
+                   ('stage', 'role', 'status', 'error', 'stop_reason', 'artifact')}
+    if isinstance(payload, dict) and any(key in payload for key in ('error', 'code', 'failure_key')):
+        identity = json.dumps(stable(payload), ensure_ascii=False, sort_keys=True,
+                              separators=(',', ':'))
+    else:
+        identity = output
+    return hashlib.sha256(identity.encode('utf-8')).hexdigest()
+
+
 def run_agent_loop(
     client: ModelClient,
     *,
@@ -369,6 +410,10 @@ def run_agent_loop(
     check_cancel: Callable[[], None] | None = None,
     stop_when: Callable[[], bool] | None = None,
     completion_check: Callable[[], str | None] | None = None,
+    session_journal=None,
+    parallel_read_tools: frozenset[str] = frozenset(),
+    pinned_user_input: str | None = None,
+    preserve_initial_context: bool = True,
 ) -> LoopResult:
     """Drive a tool-use conversation to completion.
 
@@ -398,9 +443,28 @@ def run_agent_loop(
     for round_index in range(1, max_rounds + 1):
         if check_cancel is not None:
             check_cancel()
+        if session_journal is not None:
+            session_journal.before_step(convo)
+            session_journal.retain_current_input(convo)
+            if 'read_role_history' in allowed_tools:
+                session_journal.retain_history_index(convo)
+        from ..context_projection import compact_message_history
+        current_input = (session_journal.pinned['content'] if session_journal is not None
+                         and session_journal.pinned else pinned_user_input)
+        projected = compact_message_history(convo, pinned_user_input=current_input,
+                                            preserve_initial=preserve_initial_context)
+        convo = projected['messages']
+        if session_journal is not None:
+            session_journal.projection(projected['projection'])
+            if 'read_role_history' in allowed_tools:
+                session_journal.retain_history_index(convo)
         if on_activity is not None:
             on_activity({"type": "agent_activity", "phase": "thinking", "round": round_index})
+        if session_journal is not None:
+            session_journal.request(model, system, convo, tools)
         turn = client.complete(model=model, system=system, messages=convo, tools=tools)
+        if session_journal is not None:
+            session_journal.response(turn)
         if on_turn is not None:
             on_turn(turn)
         # Cancellation may arrive while complete() is blocked. Its late final
@@ -418,6 +482,10 @@ def run_agent_loop(
             text_seen.append(turn.text)
 
         if not turn.tool_calls:
+            if session_journal is not None and session_journal.has_pending():
+                convo.append({'role': 'assistant', 'content': turn.text or '准备检查新消息。'})
+                text_seen.clear()
+                continue
             if turn.stop_reason == "max_tokens" and continuations_left > 0:
                 # Truncated mid-thought. Picking up where it stopped is much
                 # cheaper than discarding the call and starting the stage over.
@@ -463,6 +531,27 @@ def run_agent_loop(
 
         results: list[dict[str, Any]] = []
         concluded = False
+        parallel_values = {}
+        safe_reads = frozenset({'read_capabilities', 'read_artifact', 'list_materials'}) & parallel_read_tools
+        if len(turn.tool_calls) > 1 and all(c.name in safe_reads for c in turn.tool_calls):
+            from concurrent.futures import ThreadPoolExecutor
+            from contextvars import copy_context
+            def read(call):
+                validate_call(call.name, call.input, allowed_tools)
+                if check_cancel:
+                    check_cancel()
+                return execute_tool(call.name, call.input)
+            with ThreadPoolExecutor(max_workers=3, thread_name_prefix='studio-read') as readers:
+                futures = []
+                for call in turn.tool_calls:
+                    if session_journal is not None:
+                        session_journal.tool_started(call)
+                    futures.append(readers.submit(copy_context().run, read, call))
+                for call, future in zip(turn.tool_calls, futures):
+                    try:
+                        parallel_values[call.id] = (True, future.result())
+                    except Exception as exc:
+                        parallel_values[call.id] = (False, exc)
         for call in turn.tool_calls:
             skipped = concluded
             if check_cancel is not None and not concluded:
@@ -476,7 +565,14 @@ def run_agent_loop(
                     outcome = ToolResult("Not executed: this role's turn already concluded.", is_error=True)
                 else:
                     validate_call(call.name, call.input, allowed_tools)
-                    value = execute_tool(call.name, call.input)
+                    if call.id in parallel_values:
+                        succeeded, value = parallel_values[call.id]
+                        if not succeeded:
+                            raise value
+                    else:
+                        if session_journal is not None:
+                            session_journal.tool_started(call)
+                        value = execute_tool(call.name, call.input)
                     outcome = value if isinstance(value, ToolResult) else ToolResult(value)
                 output, is_error = outcome.content, outcome.is_error
                 if not is_error:
@@ -496,8 +592,12 @@ def run_agent_loop(
             except Exception as exc:  # surfaced, not hidden
                 output = f"{type(exc).__name__}: {exc}"
                 is_error = True
+            if session_journal is not None:
+                session_journal.tool_result(call, output, is_error, skipped)
             record = {"round": round_index, "tool": call.name, "args": call.input,
                       "ok": not is_error, "result": output[:2000]}
+            if is_error and not skipped:
+                record['failure_key'] = _failure_key(output)
             if skipped:
                 record["skipped"] = True
             tool_log.append(record)
@@ -512,7 +612,7 @@ def run_agent_loop(
                 }
             )
         # Non-convergence guard (see REPEATED_FAILURE_LIMIT): count identical
-        # (tool, failure result) pairs across the whole log — interleaved
+        # (tool, stable failure identity) pairs across the whole log — interleaved
         # successes do not reset a deterministic failure. At the limit, attach
         # ONE advisory telling the model to change method or report; if it does
         # the same thing anyway, stop the loop instead of feeding retries until
@@ -521,7 +621,7 @@ def run_agent_loop(
         failures: dict[tuple[str, str], int] = {}
         for rec in tool_log:
             if not rec["ok"] and not rec.get("skipped"):
-                key = (rec["tool"], rec.get("result", ""))
+                key = (rec["tool"], rec.get('failure_key') or _failure_key(rec.get("result", "")))
                 failures[key] = failures.get(key, 0) + 1
         if any(count > REPEATED_FAILURE_LIMIT for count in failures.values()):
             convo.append({"role": "user", "content": results})

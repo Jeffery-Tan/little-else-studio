@@ -52,6 +52,9 @@ def test_delivery_is_read_only_and_labels_unfinished_work(tmp_path):
     attempt = pipeline.start_attempt('fixture', 'intake')
     pipeline.submit('fixture', 'intake', attempt.token, content='Product brief', summary='Brief')
     before = store.read_events('fixture')
+    before_state = pipeline.state('fixture').to_dict()
+    before_artifacts = [a.to_dict() for a in store.list_artifacts('fixture')]
+    before_approvals = store.list_approvals('fixture')
     with TestClient(build_app(settings, client_factory=lambda: None)) as client:
         summary = client.get('/api/runs/fixture/delivery').json()
         assert not summary['ready']
@@ -64,10 +67,26 @@ def test_delivery_is_read_only_and_labels_unfinished_work(tmp_path):
             assert '创意方向' in archive.read('README.md').decode('utf-8-sig')
             manifest = json.loads(archive.read('delivery-manifest.json'))
             assert manifest['documents'][0]['sha256'] == summary['documents'][0]['sha256']
-        assert client.get('/api/runs/fixture/timeline').json()['progress']['stage'] == 'direction'
+        # Delivery and downloading remain fully read-only, independently of
+        # the timeline's deliberate offered-view receipt.
+        assert store.read_events('fixture') == before
+        first_view = client.get('/api/runs/fixture/timeline').json()
+        assert first_view['progress']['stage'] == 'direction'
+        after_view = store.read_events('fixture')
+        assert after_view[:len(before)] == before
+        receipts = after_view[len(before):]
+        assert len(receipts) == 1 and receipts[0]['kind'] == 'conversation_displayed'
+        assert receipts[0]['display_context_id'] == first_view['display_context_id']
+        second_view = client.get('/api/runs/fixture/timeline').json()
+        assert second_view['display_context_id'] == first_view['display_context_id']
+        assert store.read_events('fixture') == after_view
+        assert pipeline.state('fixture').to_dict() == before_state
+        assert [a.to_dict() for a in store.list_artifacts('fixture')] == before_artifacts
+        assert store.list_approvals('fixture') == before_approvals
+        assert client.app.state.jobs.list('fixture') == []
         assert client.get('/api/runs').json()[0]['progress']['completed'] == 1
         assert client.get('/api/runs/missing/delivery').status_code == 404
-    assert store.read_events('fixture') == before
+    assert store.read_events('fixture') == after_view
 
 
 def test_delivery_refuses_altered_document(tmp_path):

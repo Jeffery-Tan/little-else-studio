@@ -240,7 +240,7 @@ def session_snapshot(store, learning, run_id: str) -> dict:
 def agent_session_context(store, learning, run_id: str, *, cursor=0, limit=40,
                           analysis_id=None, observation_ids=None,
                           discussion_cursor=None, discussion_limit=20,
-                          message_ids=None) -> dict:
+                          message_ids=None, visible_indexes=None) -> dict:
     """Bounded model view; human proposal payloads and full-library diffs stay private."""
     if type(cursor) is not int or cursor < 0 or type(limit) is not int or not 1 <= limit <= 40:
         raise ValueError('Invalid learning observation page')
@@ -278,7 +278,11 @@ def agent_session_context(store, learning, run_id: str, *, cursor=0, limit=40,
         raise ValueError('Learning observation cursor is out of range')
     page = observations[cursor:cursor + limit]
     next_cursor = cursor + len(page) if cursor + len(page) < total else None
-    discussion_all = human['discussion']
+    # Keep full UI history and its concurrency digest untouched. Only this
+    # model-facing view excludes user messages queued for a future turn. IDs
+    # retain their original chat index, including when paging a filtered view.
+    discussion_all = [row for row in human['discussion']
+                      if visible_indexes is None or row['index'] in visible_indexes]
     discussion_total = len(discussion_all)
     if message_ids is not None:
         by_message = {row['id']: row for row in discussion_all}

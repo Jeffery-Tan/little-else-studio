@@ -4,6 +4,23 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const source = fs.readFileSync(new URL('../../studio/web/team-progress.js', import.meta.url), 'utf8') + '\n' + fs.readFileSync(new URL('../../studio/web/runtime.js', import.meta.url), 'utf8');
+test('received discussion keeps the current task running and describes a read-only successor',()=>{
+  const h=harness(async()=>{throw Error('render must not execute');});
+  h.context.showJob({job_id:'discussion',job_kind:'conversation',status:'running',
+    steer_status:'received',steer_class:'discussion',events:[]});
+  const strip=visibleText(h.nodes.get('job-status'));
+  assert.match(strip,/讨论已收到/);
+  assert.match(strip,/原任务继续执行/);
+  assert.match(strip,/不会自动改稿/);
+});
+test('unanswered recovered status question is visible and offers no adjustment replay',()=>{
+  const h=harness(async()=>{throw Error('render must not execute');});
+  h.context.showJob({job_id:'unanswered',job_kind:'conversation',status:'interrupted',
+    steer_status:'unanswered',steer_reason:'之前的问题未保存回答，请重新查询状态。',events:[]});
+  const strip=visibleText(h.nodes.get('job-status'));
+  assert.match(strip,/未保存回答/);
+  assert.doesNotMatch(strip,/继续保存的调整/);
+});
 test('uncertain reference submission preserves source and intent on the dedicated route',async()=>{
   const calls=[];
   const h=harness(async(url,options)=>{
@@ -79,6 +96,81 @@ test('running direction attempt is progress, not recovery, with checked sources 
   assert.match(h.nodes.get('send').textContent,/停止/);
   assert.match(h.nodes.get('job-stop').textContent,/插入调整/);
   assert.equal(h.nodes.get('job-stop').hidden,false);
+});
+
+const waitingModelEvent = (extra = {}) => ({type:'agent_activity',role:'director',phase:'waiting_model',
+  elapsed_seconds:90,remaining_seconds:510,transport_state:'waiting',at:'2026-10-02T02:00:00Z',...extra});
+
+test('the original conversation line shows real wait, transport and single call limit',()=>{
+  const h=harness(async()=>{throw new Error('render must not submit work');});
+  const event=waitingModelEvent({text:'private-reasoning',args:{content:'private-tool-arguments'}});
+  h.context.showJob({job_id:'waiting',job_kind:'conversation',status:'running',events:[event]});
+  const host=h.nodes.get('job-status'),strip=visibleText(host);
+  assert.match(strip,/创意导演：已等待 1分30秒；等待模型回复；单次最多等待 10分钟；本次最多还能等待 8分30秒/);
+  assert.match(strip,/本轮结果尚未提交/);
+  assert.doesNotMatch(strip,/private-|已完成|%/);
+  assert.equal(descendants(host,node=>node.className==='job-live-summary').length,1);
+  assert.equal(descendants(host,node=>node.tag==='dialog'||node.tag==='form'||node.attributes?.role==='alert').length,0);
+  assert.equal(h.timers.length,0);
+  assert.equal(h.nodes.get('send').dataset.mode,'stop');
+});
+
+test('wait heartbeats refresh at the same event count and ignore older snapshots',()=>{
+  const h=harness(async()=>{});
+  const job={job_id:'waiting',job_kind:'conversation',status:'running'};
+  h.context.showJob({...job,cursor:1,events:[waitingModelEvent()]});
+  h.context.showJob({...job,cursor:2,events:[waitingModelEvent({elapsed_seconds:120,remaining_seconds:480,transport_state:'receiving'})]});
+  const strip=visibleText(h.nodes.get('job-status'));
+  assert.match(strip,/已等待 2分钟；正在接收模型回复；单次最多等待 10分钟；本次最多还能等待 8分钟/);
+  assert.doesNotMatch(strip,/已等待 1分30秒|本轮完成/);
+  h.context.showJob({...job,cursor:1,events:[waitingModelEvent()]});
+  assert.equal(visibleText(h.nodes.get('job-status')),strip);
+  h.context.showJob({...job,cursor:3,events:[{type:'agent_activity',role:'writer',phase:'tool',tool:'read_artifact',args:{stage:'writing'}}]});
+  assert.match(visibleText(h.nodes.get('job-status')),/编剧正在阅读方案/);
+  assert.doesNotMatch(visibleText(h.nodes.get('job-status')),/已等待|单次最多等待/);
+});
+
+test('direction redo preserves real milestones while its model is still receiving',()=>{
+  const h=harness(async()=>{});
+  h.context.showJob({job_id:'redo-waiting',job_kind:'direction_resume',status:'running',events:[
+    {type:'agent_tool',role:'director',tool:'read_artifact',args:{stage:'direction'},ok:true},
+    waitingModelEvent({transport_state:'receiving'}),
+  ]});
+  const strip=visibleText(h.nodes.get('job-status'));
+  assert.match(strip,/已核对旧方向/);
+  assert.match(strip,/新版尚未保存/);
+  assert.match(strip,/已等待 1分30秒；正在接收模型回复；单次最多等待 10分钟/);
+  assert.doesNotMatch(strip,/新版 A\/B\/C 已保存|本轮完成/);
+});
+
+test('stopping keeps actual call wait after a saved adjustment has been discarded',()=>{
+  const h=harness(async()=>{});
+  h.context.showJob({job_id:'stopping',job_kind:'conversation',status:'cancelling',steer_status:'discarded',events:[waitingModelEvent()]});
+  const strip=visibleText(h.nodes.get('job-status'));
+  assert.match(strip,/正在停止/);
+  assert.match(strip,/不会启动下一步/);
+  assert.match(strip,/已等待 1分30秒/);
+  assert.doesNotMatch(strip,/调整已收到|按你的调整接续/);
+  assert.equal(h.nodes.get('send').dataset.mode,'stop');
+  assert.equal(h.nodes.get('send').disabled,true);
+  h.context.showJob({job_id:'stopping',job_kind:'conversation',status:'cancelled',events:[waitingModelEvent()]});
+  assert.doesNotMatch(visibleText(h.nodes.get('job-status')),/已等待|单次最多等待|正在接收/);
+  assert.equal(h.nodes.get('send').dataset.mode,'send');
+  assert.equal(h.context.state.busy,false);
+});
+
+test('adjustment and analysis jobs share the same reported transport statistics',()=>{
+  const h=harness(async()=>{});
+  for (const status of ['running','cancelling']) {
+    h.context.showJob({job_id:'adjusting',job_kind:'conversation',status,steer_status:'received',events:[waitingModelEvent()]});
+    assert.match(visibleText(h.nodes.get('job-status')),/调整已收到.*按你的调整接续.*已等待 1分30秒/s);
+    assert.equal(h.nodes.get('send').disabled,false);
+  }
+  h.context.showJob({job_id:'analysis',job_kind:'image_analysis',status:'running',events:[waitingModelEvent({role:'material'})]});
+  const strip=visibleText(h.nodes.get('job-status'));
+  assert.match(strip,/视觉策划正在分析素材/);
+  assert.match(strip,/已等待 1分30秒；等待模型回复；单次最多等待 10分钟/);
+  assert.equal((strip.match(/已等待/g)||[]).length,1);
 });
 
 test('closed reference event stream checks the job before reconnecting',async()=>{

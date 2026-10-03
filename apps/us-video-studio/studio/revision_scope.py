@@ -57,7 +57,14 @@ def work_plan(pipeline, run_id, target=None):
                      'requires': list(pipeline.upstream_stages(stage))})
     relevant = rows[:STAGES.index(target) + 1] if target else rows
     next_step = next((r for r in relevant if r['action'] != 'preserve'), None)
+    from .visual_design import design_status
+    visual = design_status(pipeline.store, pipeline, run_id)
+    production_next = None
+    if states['material_plan'].latest and not visual['ready']:
+        production_next = {'stage': 'material_plan' if not visual['design'] else 'writing',
+                           'action': 'update', 'reason': ' '.join(visual['issues'])}
     return {'stages': rows, 'next_step': next_step,
+            'visual_design_status': visual, 'production_next_step': production_next,
             'notice': '保留有效内容；按当前依赖逐步更新。审核/用户决定不等于重写；计划不批准或生成媒体。'}
 
 
@@ -127,7 +134,8 @@ def validate_writing_target(store, pipeline, run_id, target):
             'quote': quote}
 
 
-def plan_revision(store, pipeline, run_id, args, *, turn_id, user_message, previous=None):
+def plan_revision(store, pipeline, run_id, args, *, turn_id, user_message, previous=None,
+                  constraints=None):
     if (set(args) - {'stage', 'version', 'sha256', 'mode', 'quote', 'fields', 'reason'}
             or args.get('stage') not in STAGES or type(args.get('version')) is not int
             or args.get('mode') not in ('local', 'rework')):
@@ -141,6 +149,16 @@ def plan_revision(store, pipeline, run_id, args, *, turn_id, user_message, previ
         raise PipelineError('revision_scope', '修改字段列表无效。')
     if (args['mode'] == 'local') != bool(fields):
         raise PipelineError('revision_scope', 'local 须列出字段；rework 不接受局部字段列表。')
+    from .conversation_input import task_constraints
+    limits = constraints or task_constraints({'message_id': '', 'text': user_message})
+    if limits.get('local_only') and args['mode'] != 'local':
+        raise PipelineError('revision_scope', '用户本轮限定局部修改，首次修订也不能选 rework 扩大范围；有冲突请先澄清。')
+    target = limits.get('feedback_target') or {}
+    if target.get('path'):
+        if (args['stage'] != target.get('stage') or args['version'] != target.get('version')
+                or args['sha256'] != target.get('artifact_sha256')
+                or any(field.get('path') != target['path'] for field in fields)):
+            raise PipelineError('revision_scope', '修订范围须保持用户选中的准确版本和字段。')
     scope = {**copy.deepcopy(args), 'fields': fields, 'turn_id': turn_id}
     base, inputs = check_base(store, pipeline, run_id, scope)
     keys = []

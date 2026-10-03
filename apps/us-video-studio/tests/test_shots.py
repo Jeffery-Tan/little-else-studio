@@ -9,11 +9,14 @@ either one alone.
 """
 from __future__ import annotations
 
+import pytest
+
 from studio.pipeline import Pipeline
 from studio.production import (
-    DraftIn, apply_shots, coverage, draft_records, prepare_draft, shot_id_for, target_shots,
+    DraftIn, apply_shots, coverage, current_draft, draft_records, prepare_draft, shot_id_for, target_shots,
 )
 from studio.store import Store
+from visual_fixtures import designed_script, stage_structure
 
 RUN = 'shots'
 
@@ -25,6 +28,7 @@ SCRIPT = {
     ],
     'total_duration': 6,
 }
+SCRIPT = designed_script(SCRIPT)
 
 
 def prepared(tmp_path):
@@ -35,7 +39,7 @@ def prepared(tmp_path):
         attempt = pipe.start_attempt(RUN, stage)
         structured = SCRIPT if stage == 'writing' else (
             {'options': [{'key': 'A', 'claim': 'Synthetic', 'satisfies': 'goal.primary'}]}
-            if stage == 'direction' else {})
+            if stage == 'direction' else stage_structure(stage))
         pipe.submit(RUN, stage, attempt.token, content='Synthetic ' + stage, summary=stage,
                     evidence=['Fixture only'], limitations=['Not market evidence'],
                     structured=structured)
@@ -81,12 +85,15 @@ def test_legacy_prose_script_reports_an_unreadable_shot_list_instead_of_guessing
     assert '不要假定' in targets['notice']
 
 
-def test_each_new_input_gets_its_own_shot_and_list_position_never_defines_it(tmp_path):
+def test_new_inputs_bind_script_shots_and_never_guess_from_request_identity(tmp_path):
     store, pipe = prepared(tmp_path)
-    first = image_input(store, pipe, 'shot-a')
-    second = image_input(store, pipe, 'shot-b')
+    with pytest.raises(ValueError, match='shot_id'):
+        image_input(store, pipe, 'ambiguous')
+    first = image_input(store, pipe, 'shot-a', shot_id='shot-01')
+    second = image_input(store, pipe, 'shot-b', shot_id='shot-02')
     assert first['shot_id'] != second['shot_id']
-    assert first['shot_id'] == shot_id_for('shot-a')
+    assert first['shot_id'] == 'shot-01'
+    assert first['shot_id'] != shot_id_for('shot-a')
     assert first['shot_revision'] == 1 and second['shot_revision'] == 1
     assert first['is_current'] and second['is_current']
 
@@ -218,3 +225,71 @@ def test_preparation_reports_an_unadopted_script_as_its_own_reason(tmp_path):
     else:
         raise AssertionError('preparation must refuse while the script is unadopted')
     assert source.version < current.version
+
+
+def test_mixed_explicit_and_implicit_revisions_have_one_head_in_journal_order(tmp_path, monkeypatch):
+    store, pipe = prepared(tmp_path)
+    monkeypatch.setattr('studio.production.utcnow', lambda: '2026-09-29T12:00:00Z')
+    original = image_input(store, pipe, 'z-original', shot_id='shot-02')
+    explicit = image_input(store, pipe, 'y-explicit', supersedes=original['draft_id'])
+    implicit = image_input(store, pipe, 'a-implicit', shot_id='shot-02')
+    final = image_input(store, pipe, '0-final', supersedes=implicit['draft_id'])
+    rows = draft_records(Store(store.root), RUN)
+    apply_shots(rows)
+    heads = [row for row in rows.values() if row['is_current']]
+    assert [row['draft_id'] for row in heads] == [final['draft_id']]
+    assert current_draft(rows, 'shot-02', 'image')['draft_id'] == final['draft_id']
+    reordered = dict(reversed(list(rows.items())))
+    apply_shots(reordered)
+    assert current_draft(reordered, 'shot-02', 'image')['draft_id'] == final['draft_id']
+    assert rows[explicit['draft_id']]['superseded_by'] == implicit['draft_id']
+    assert [row['shot_revision'] for row in rows.values()] == [1, 2, 3, 4]
+    assert [row['event_seq'] for row in rows.values()] == sorted(row['event_seq'] for row in rows.values())
+
+
+def test_revision_heads_are_independent_per_baseline_and_media_kind():
+    def row(key, baseline, kind='image', shot='shot-01'):
+        return {'draft_id': key, 'kind': kind, 'source_sha256': 'script',
+                'source_snapshot': baseline, 'shot_id': shot, 'attempts': []}
+    rows = {item['draft_id']: item for item in [row('old', 'old'), row('new', 'new'),
+            row('video', 'new', 'video'), row('newer-old', 'old')]}
+    apply_shots(rows)
+    assert {key for key, value in rows.items() if value['is_current']} == {'new', 'video', 'newer-old'}
+    targets = {'complete_list': True, 'source_sha256': 'script', 'shots': [
+        {'ordinal': 1, 'shot_id': 'shot-01'}]}
+    assert coverage(rows, 'image', targets=targets, baseline='new')['shots'][0]['draft_id'] == 'new'
+    assert rows['old']['superseded_by'] == 'newer-old'
+
+
+def test_legacy_unlabelled_drafts_keep_readable_distinct_shots_after_reprojection():
+    rows = {key: {'draft_id': key, 'kind': 'image', 'source_sha256': 'script',
+                 'source_snapshot': 'baseline', 'attempts': []} for key in ['z-old', 'a-new']}
+    apply_shots(rows)
+    first = [(row['shot_id'], row['legacy_shot']) for row in rows.values()]
+    apply_shots(rows)
+    assert [(row['shot_id'], row['legacy_shot']) for row in rows.values()] == first
+    assert len({row['shot_id'] for row in rows.values()}) == 2
+    assert all(row['is_current'] for row in rows.values())
+
+
+@pytest.mark.parametrize('status,output,expected', [
+    ('succeeded', {'name': 'synthetic.png', 'sha256': 'a' * 64}, 'completed'),
+    ('succeeded', None, 'unverified'), ('failed', None, 'failed'),
+    ('unknown', None, 'unverified'), ('running', None, 'generating'),
+])
+def test_coverage_uses_actual_success_and_the_latest_attempt(status, output, expected):
+    row = {'draft_id': 'input', 'kind': 'image', 'source_sha256': 'script',
+           'source_snapshot': 'baseline', 'shot_id': 'shot-01', 'attempts': [
+               {'attempt_id': 'original', 'status': 'succeeded',
+                'output': {'name': 'previous.png', 'sha256': 'b' * 64}},
+               {'attempt_id': 'latest', 'status': status, 'output': output,
+                'message': 'Latest attempt reason', 'task_id': 'original-task'}]}
+    rows = {'input': row}
+    apply_shots(rows)
+    targets = {'complete_list': True, 'shots': [{'ordinal': 1, 'shot_id': 'shot-01'}]}
+    result = coverage(rows, 'image', targets=targets, baseline='baseline')
+    shot = result['shots'][0]
+    assert shot['stage'] == expected
+    assert result['delivered'] is (expected == 'completed')
+    assert shot['attempt_id'] == 'latest' and shot['reason'] == 'Latest attempt reason'
+    assert shot['output'] == (output or row['attempts'][0]['output'])

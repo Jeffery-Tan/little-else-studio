@@ -255,7 +255,7 @@ def test_subrole_connection_preflight_stops_orchestrator_without_retry_or_open_a
     if tool == 'request_review':
         attempt = pipeline.start_attempt('test-run', 'direction')
         pipeline.submit('test-run', 'direction', attempt.token, content='Synthetic directions', summary='fixture')
-    model = ScriptedModel([tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video"}), tool_turn('call-1', tool, {'stage': 'direction', 'brief': 'Synthetic task'})])
+    model = ScriptedModel([tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video", "deliverable": "direction"}), tool_turn('call-1', tool, {'stage': 'direction', 'brief': 'Synthetic task'})])
     class Router:
         def for_role(self, role, run_id):
             if role != 'orchestrator':

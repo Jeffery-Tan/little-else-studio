@@ -113,13 +113,17 @@ def test_incomplete_work_is_visible_as_failed_tool_to_main_agent(project, tool_n
         attempt = pipeline.start_attempt("harness-test", "direction")
         pipeline.submit("harness-test", "direction", attempt.token, content="Direction", summary="direction")
     model = ScriptedModel([
-        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video"}),
+        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video", "deliverable": "direction"}),
         tool_turn("work", tool_name, {"stage": "direction"}),
         final_turn("No committed result"),  # Child ends without submitting a result.
         final_turn("This work has not completed."),
+        final_turn("This work has not completed."),
     ])
     result = Orchestrator(store, pipeline, settings, model, ledger, "harness-test").send("Continue planning")
-    assert len(model.calls) == 4  # The child actually ran and failed to commit.
+    assert len(model.calls) == 5  # Child ran; bounded delivery checks retain the incomplete result.
+    assert result.stopped_because == 'incomplete'
+    tasks = [e for e in store.read_events('harness-test') if e['kind'] == 'agent_runtime_task_created']
+    assert len(tasks) == 1  # A failed child is not silently re-dispatched at turn completion.
     assert result.failed_tools[0]["tool"] == tool_name
-    assert model.calls[-1]["messages"][-1]["content"][0]["is_error"] is True
+    assert model.calls[3]["messages"][-1]["content"][0]["is_error"] is True
     assert store.list_approvals("harness-test") == []

@@ -30,6 +30,11 @@ test('a request phrased about shots still opens the one-time generation confirma
   assert.equal(productionBatchCommand('生成这六镜',{generate:6}),'generate');
   assert.equal(productionBatchCommand('这六个镜头先别生成'),null);
   assert.equal(productionBatchCommand('第二镜重做一下'),null);
+  assert.equal(productionBatchCommand('开始做分镜生成吧',{generate:5,approve:0}),'generate');
+  assert.equal(productionBatchCommand('开始做分镜生成吧',{generate:0,approve:0}),null);
+  assert.equal(productionBatchCommand('开始做分镜生成吧',{generate:2,approve:1}),null);
+  for(const query of ['这五张图生成了吗','是否生成这五张图','什么时候生成这五张图','能否生成这五张图'])
+    assert.equal(productionBatchCommand(query,{generate:5}),null,query);
 });
 
 test('clarification supports recommendation and free text without implicit selection',()=>{
@@ -72,7 +77,7 @@ test('only the conversation exposes a version-bound choice and submit action',()
   assert.ok(!stage.includes('data-act="approve"'));
   assert.ok(!stage.includes('pane-ask'));
 });
-test('canvas tabs keep one selected work surface as arrow keys move through available artifacts',()=>{
+test('hidden detail navigation keeps one selected surface as arrow keys move through available artifacts',()=>{
   const html=fs.readFileSync(new URL('../../studio/web/index.html',import.meta.url),'utf8');
   for(const [tab,panel] of [['plan','stage'],['assets','journey-assets'],['reference','journey-reference'],['storyboard','journey-storyboard'],['video','journey-video']]){
     assert.match(html,new RegExp(`id="journey-tab-${tab}"[^>]*aria-controls="${panel}"`));
@@ -93,6 +98,8 @@ test('canvas tabs keep one selected work surface as arrow keys move through avai
   globalThis.StudioProduction={canvasHtml:()=>'<article>当前成果</article>'};
   globalThis.renderCanvasMaterials=()=>{};
   globalThis.selectStage=stage=>{state.activeStage=stage;};
+  let detailRenders=0;
+  globalThis.renderPane=()=>{detailRenders++;};
   bindJourneyTabs();
   let prevented=false;
   tabs[0].onkeydown({key:'ArrowRight',preventDefault(){prevented=true;}});
@@ -102,6 +109,7 @@ test('canvas tabs keep one selected work surface as arrow keys move through avai
   tabs[1].onkeydown({key:'ArrowRight',preventDefault(){}});
   assert.equal(focused,'script');assert.equal(panels.stage.hidden,false);
   assert.equal(state.activeStage,'writing');assert.equal(panels.stage.attrs['aria-labelledby'],'journey-tab-script');
+  assert.equal(detailRenders,1);
   tabs[3].onkeydown({key:'End',preventDefault(){}});
   assert.equal(focused,'video');assert.equal(panels['journey-video'].hidden,false);
   assert.equal(panels['journey-video'].innerHTML,'<article>当前成果</article>');

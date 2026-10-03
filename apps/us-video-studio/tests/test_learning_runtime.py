@@ -11,7 +11,7 @@ from fakes import ScriptedModel, final_turn, tool_turn
 from studio.agents.orchestrator import Orchestrator
 from studio.agents.reviewer import run_review
 from studio.config import Settings, Pricing
-from studio.learning import LearningService, SKILLS
+from studio.learning import LearningService, METHOD_CARDS, SKILLS
 from studio.learning_session import proposal_for_agent
 from studio.ledger import Ledger
 from studio.pipeline import Pipeline
@@ -29,6 +29,10 @@ def runtime(tmp_path):
         target = repository / ".agents/skills" / skill / "SKILL.md"
         target.parent.mkdir(parents=True)
         shutil.copyfile(REPO / ".agents/skills" / skill / "SKILL.md", target)
+    for spec in METHOD_CARDS.values():
+        target = repository / spec['file']
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(REPO / spec['file'], target)
     library = repository / "tracks/us/creative/learning/library.json"
     library.parent.mkdir(parents=True)
     library.write_text(json.dumps({"schema_version": 1, "market": "US", "library_version": 1,
@@ -105,7 +109,7 @@ def test_explicit_read_only_route_prevents_dispatch_and_survives_next_job(runtim
     store, pipeline, settings, ledger, learning = runtime
     submit(pipeline, "intake")
     model = ScriptedModel([
-        tool_turn("route", "prepare_creative_context", {"intent": intent, "format": "none"}),
+        tool_turn("route", "prepare_creative_context", {"intent": intent, "format": "none", "deliverable": "follow_up"}),
         tool_turn("dispatch", "dispatch", {"stage": "direction", "brief": "must not execute"}),
         tool_turn("write", "write_stage", {"stage": "intake", "content": "must not overwrite", "summary": "s"}),
         final_turn("只读取原状态。"),
@@ -123,7 +127,7 @@ def test_explicit_read_only_route_prevents_dispatch_and_survives_next_job(runtim
 
 def test_main_explicit_photo_tool_returns_full_method_before_next_model_turn(runtime):
     model = ScriptedModel([
-        tool_turn("prepare", "prepare_creative_context", {"intent": "new", "format": "photo", "tags": []}),
+        tool_turn("prepare", "prepare_creative_context", {"intent": "new", "format": "photo", "tags": [], "deliverable": "intake"}),
         tool_turn("write", "write_stage", {"stage": "intake", "content": "图文需求", "summary": "图文"}),
         final_turn("已整理"),
     ])
@@ -152,7 +156,11 @@ def test_feedback_is_pending_then_applied_feedback_enters_next_job_but_not_revie
     proposal = learning.proposals(RUN)[0]
     assert proposal["status"] == "pending"
     learning.apply(RUN, proposal["id"], proposal["base_library_sha256"])
-    next_model = ScriptedModel([tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video"}), final_turn("收到局部反馈")])
+    next_model = ScriptedModel([
+        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video", "deliverable": "revision"}),
+        tool_turn("scope", "ask_user", {"question": "这次方向要修改哪些内容？",
+            "options": [{"label": "只调整角色关系"}, {"label": "重新考虑整个方向"}],
+            "context": "修订范围待确认"})])
     orchestrator(runtime, next_model).send("根据已保存反馈继续修改方向。")
     assert quote in next_model.calls[1]["messages"][-1]["content"][0]["content"]
     review_model = ScriptedModel([tool_turn("review", "finish_review", {"verdict": "pass"}), final_turn("已审")])
@@ -243,7 +251,7 @@ def test_model_reads_contract_and_compiles_real_local_video_pack(runtime):
     model = ScriptedModel([
         tool_turn("read", "read_artifact", {"stage": "intake"}),
         tool_turn("contract", "read_method_document", {"name": "creative-package-contract"}),
-        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video"}),
+        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video", "deliverable": "intake"}),
         tool_turn("compile", "compile_creative_package", args), final_turn("编译包已保存，未生成媒体。"),
     ])
     result = orchestrator(runtime, model).send("把当前已保存策划编译成视频输入包。")
@@ -276,7 +284,7 @@ def test_photo_contract_example_compiles_through_agent_without_generating_images
     for i, page in enumerate(manifest["pages"]):
         page["overlay_text"] = f"Offline page {i + 1}"
     model = ScriptedModel([
-        tool_turn("route", "prepare_creative_context", {"intent": "new", "format": "photo"}),
+        tool_turn("route", "prepare_creative_context", {"intent": "new", "format": "photo", "deliverable": "intake"}),
         tool_turn("compile", "compile_creative_package", {"format": "photo", "stage": "intake", "version": 1,
             "artifact_sha256": artifact.sha256, "manifest": manifest}), final_turn("只有策划包。"),
     ])
@@ -294,7 +302,7 @@ def test_photo_contract_example_compiles_through_agent_without_generating_images
 def test_malformed_compile_inputs_are_tool_errors_and_do_not_crash_job(runtime, manifest):
     store, pipeline, settings, ledger, learning = runtime
     artifact = submit(pipeline, "intake")
-    model = ScriptedModel([tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video"}), tool_turn("bad", "compile_creative_package", {
+    model = ScriptedModel([tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video", "deliverable": "intake"}), tool_turn("bad", "compile_creative_package", {
         "format": "video", "stage": "intake", "version": 1, "artifact_sha256": artifact.sha256,
         "manifest": manifest}), final_turn("输入不合格，保留原产物。")])
     result = orchestrator(runtime, model).send("校验这个待编译输入。")

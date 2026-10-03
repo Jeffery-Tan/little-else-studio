@@ -57,6 +57,7 @@ def test_midflight_message_pauses_an_atomic_job_then_reaches_producer(tmp_path):
             lambda _text, _emit, _check: SimpleNamespace(
                 stopped_because='done', text='producer considered the change', rounds=1, used_tools=[]),
             {'source': 'synthetic-producer'})
+        jobs.prepare_input = lambda rid, _receipt: jobs.prepare(rid)
         original = jobs.submit(RUN, '生成整组首帧', 'atomic-1',
                                kind='production_batch_generation', prepare=atomic)
         assert entered.wait(2)
@@ -115,7 +116,7 @@ def test_a_progress_question_while_generating_is_answered_without_stopping_work(
         body = asked.json()
         # Still working: no local wait was torn down for a read-only question.
         assert body['status'] == 'running'
-        assert body['steer_status'] == 'received'
+        assert body['steer_status'] == 'answered'
         assert body['steer_class'] == 'status'
         release.set()
         finished = wait_job(http, original['job_id'])
@@ -171,8 +172,8 @@ def test_a_status_question_left_by_a_restart_never_starts_work_on_resume(tmp_pat
     with TestClient(build_app(settings, client_factory=lambda: pytest.fail('no model call'))) as http:
         old = http.get(f'/api/runs/{RUN}/jobs/old-job').json()
         assert old['steer_class'] == 'status'
-        # A question is already answered, not a correction waiting for a click.
-        assert old['steer_status'] == 'answered'
+        # A restart cannot fabricate an answer, or turn the query into new work.
+        assert old['steer_status'] == 'unanswered'
         resumed = http.post(f'/api/runs/{RUN}/jobs/old-job/resume-steer', json={})
         assert resumed.status_code == 409
 
@@ -480,11 +481,14 @@ def test_inflight_steer_settles_old_job_then_continues_once(tmp_path):
         successor = wait_job(http, old['successor_job_id'])
         assert successor['status'] == 'succeeded'
         assert successor['parent_job_id'] == first['job_id']
-        assert len(model.calls) == 2
+        last = wait_job(http, successor['successor_job_id'])
+        assert last['parent_job_id'] == successor['job_id']
+        assert len(model.calls) == 3
         request = str(model.calls[1]['messages'])
         assert '先做完整视频方向' in request
         assert '先只分析，不写脚本' in request
-        assert '保留已有观察' in request
+        assert '保留已有观察' not in request
+        assert '保留已有观察' in str(model.calls[2]['messages'])
         chat = http.get(f'/api/runs/{RUN}/chat').json()
         assert not any('旧方向不应保存' in row['text'] for row in chat)
         assert chat[-1]['text'] == '已按调整后的目标处理'
@@ -510,6 +514,93 @@ def test_stop_after_steer_discards_automatic_continuation(tmp_path):
         old = wait_job(http, first['job_id'])
         assert old['status'] == 'cancelled' and old['successor_job_id'] is None
         assert http.get(f'/api/runs/{RUN}/jobs/latest').json()['job_id'] == first['job_id']
+
+
+@pytest.mark.parametrize('job_kind', ['conversation', 'production_batch_generation'])
+@pytest.mark.parametrize('ask_between', [False, True])
+def test_natural_stop_overrides_earlier_pending_work_without_a_successor(tmp_path, job_kind, ask_between):
+    """Both kinds use the same durable stop boundary; no model is involved."""
+    entered, release = threading.Event(), threading.Event()
+    successor_prepares = []
+    with TestClient(build_app(settings_for(tmp_path),
+                             client_factory=lambda: pytest.fail('no model call'))) as http:
+        make_run(http)
+        jobs = http.app.state.jobs
+        def prepare_original(_run_id):
+            def runner(_text, _emit, check_cancel):
+                entered.set()
+                assert release.wait(4)
+                check_cancel()
+                return SimpleNamespace(stopped_because='done', text='Original fixture', rounds=0, used_tools=[])
+            return runner, {'source': 'offline-held-runner'}
+        def prepare_successor(_run_id):
+            successor_prepares.append(_run_id)
+            return (lambda *_args: SimpleNamespace(stopped_because='done', text='Unexpected successor',
+                                                   rounds=0, used_tools=[])), {'source': 'offline-successor'}
+        original = jobs.submit(RUN, 'Original fixture request', 'work-stop-original',
+                               kind=job_kind, prepare=prepare_original)
+        jobs.prepare = prepare_successor
+        assert entered.wait(2)
+        path = f'/api/runs/{RUN}/jobs/{original["job_id"]}'
+        work = {'text': '改成室内场景', 'request_id': 'pending-work', 'expected_goal_revision': 0}
+        try:
+            received = http.post(path + '/steer', json=work)
+            assert received.status_code == 200, received.text
+            assert received.json()['steer_class'] == 'work'
+            revision = received.json()['goal_revision']
+            if ask_between:
+                asked = http.post(path + '/steer', json={'text': '现在进度怎么样？', 'request_id': 'status-between',
+                                                          'expected_goal_revision': revision})
+                assert asked.status_code == 200, asked.text
+                assert asked.json()['steer_class'] == 'status'
+                revision = asked.json()['goal_revision']
+            stop = {'text': '先停一下', 'request_id': 'natural-stop', 'expected_goal_revision': revision}
+            stopped = http.post(path + '/steer', json=stop)
+            assert stopped.status_code == 200, stopped.text
+            assert stopped.json()['steer_class'] == 'stop'
+            assert stopped.json()['steer_status'] == 'discarded'
+            assert http.post(path + '/steer', json=stop).status_code == 200
+            # Retrying the accepted old request is a receipt, never renewed work.
+            assert http.post(path + '/steer', json=work).json()['steer_status'] == 'discarded'
+            rejected = http.post(path + '/steer', json={'text': '再改目标', 'request_id': 'work-after-stop',
+                'expected_goal_revision': stopped.json()['goal_revision']})
+            assert rejected.status_code == 409
+        finally:
+            release.set()
+        finished = wait_job(http, original['job_id'])
+        assert finished['status'] == 'cancelled'
+        assert finished['steer_status'] == 'discarded'
+        assert finished['successor_job_id'] is None
+        assert successor_prepares == []
+        assert http.post(path + '/resume-steer', json={}).status_code == 409
+        events = jobs.store.read_events(RUN)
+        discarded = [row for row in events if row['kind'] == 'job_steer_discarded']
+        assert len(discarded) == 1
+        assert discarded[0]['request_id'] == 'natural-stop'
+        assert len([row for row in events if row['kind'] == 'job_created']) == 1
+
+
+@pytest.mark.parametrize('blocked_before_stop', [False, True])
+def test_restart_cannot_resume_work_overridden_by_a_saved_stop(tmp_path, blocked_before_stop):
+    """A saved stop remains authoritative even without the new discard marker."""
+    store = Store(tmp_path)
+    store.create_run(RUN, 'Synthetic restart', 'Synthetic request')
+    store.append_event(RUN, 'job_created', job_id='old-job', request_id='original',
+                       text='Old fixture work', model_config={}, context_refs={}, job_kind='conversation')
+    store.append_event(RUN, 'job_status', job_id='old-job', status='cancelled')
+    store.append_event(RUN, 'job_steer_received', job_id='old-job', request_id='work',
+                       text='改成室内', expected_goal_revision=0, goal_revision=1, steer_class='work')
+    if blocked_before_stop:
+        store.append_event(RUN, 'job_steer_blocked', job_id='old-job', reason='Fixture interrupted before stop settled')
+    store.append_event(RUN, 'job_steer_received', job_id='old-job', request_id='stop',
+                       text='停', expected_goal_revision=1, goal_revision=2, steer_class='stop')
+    with TestClient(build_app(settings_for(tmp_path),
+                             client_factory=lambda: pytest.fail('no replay model'))) as http:
+        job = http.get(f'/api/runs/{RUN}/jobs/old-job').json()
+        assert job['steer_status'] == 'discarded'
+        assert job['successor_job_id'] is None
+        assert http.post(f'/api/runs/{RUN}/jobs/old-job/resume-steer', json={}).status_code == 409
+        assert len([row for row in store.read_events(RUN) if row['kind'] == 'job_created']) == 1
 
 
 def test_stop_cannot_be_reinterpreted_as_new_steering(tmp_path):
@@ -697,7 +788,7 @@ def test_role_connections_are_frozen_per_job_and_keys_never_enter_events(tmp_pat
     monkeypatch.setattr(connections, '_dpapi', lambda data, **kwargs: data)
     entered, release = threading.Event(), threading.Event()
     model = ScriptedModel([
-        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video"}),
+            tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video", "deliverable": "direction"}),
         tool_turn('i', 'write_stage', {'stage': 'intake', 'content': '需求', 'summary': '需求'}),
         tool_turn('d', 'dispatch', {'stage': 'direction', 'brief': '两个方向'}),
         tool_turn('s', 'submit_stage', {'content': '方案', 'summary': '方向'}),

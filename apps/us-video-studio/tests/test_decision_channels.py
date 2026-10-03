@@ -88,8 +88,11 @@ def test_a_conversation_decision_reaches_the_same_write_point_with_a_server_nonc
     monkeypatch.setattr(decision, "record", spy)
     waiting = decision.candidates(store, pipeline, RUN)[0]
     selecting = next(a for a in waiting["answers"] if a["action"] == "select_direction")
+    from test_decision import received_message
+    receipt = received_message(store, pipeline, RUN, "用 C，然后继续出分镜")
     decision.commit(store, pipeline, RUN,
-                    {**selecting, "target": dict(waiting["target"]), "option_id": "C"},
+                    {**selecting, "target": dict(waiting["target"]), "option_id": "C",
+                     "message_id": receipt['message_id']},
                     source="conversation", user_message="用 C，然后继续出分镜")
 
     assert len(seen) == 1

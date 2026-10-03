@@ -59,6 +59,10 @@ const state = {
   creatorView: null,
   canvasTouched: false,
   feedbackTarget: null,
+  feedbackPresentation: null,
+  composerRequestKind: null,
+  composerSubmissions: new Map(),
+  composerRunId: null,
   timeline: null,
   rail: [],
   // Which stage owns the screen. Everything the page shows is drawn from this
@@ -158,6 +162,80 @@ async function loadRuns() {
   renderProjects();
 }
 
+function composerDraft() {
+  return {text:$('chat-input').value, feedbackTarget:state.feedbackTarget,
+    ...(state.roleTarget ? {roleTarget:state.roleTarget} : {}),
+    feedbackPresentation:state.feedbackPresentation, requestKind:state.composerRequestKind,
+    clarification:state.clarificationChoices.get(state.runId) || null};
+}
+
+function readComposerRecord(runId) {
+  try {
+    const record = JSON.parse(sessionStorage.getItem(`studio-composer-draft:${runId}`) || 'null');
+    return record?.version === 1 && record.run_id === runId && typeof record.draft?.text === 'string'
+      ? record : null;
+  } catch (_) { return null; }
+}
+
+function storeComposerDraft(runId, draft, frozen = readComposerRecord(runId)?.frozen) {
+  if (!runId) return;
+  state.chatDrafts.set(runId, draft);
+  try {
+    sessionStorage.setItem(`studio-composer-draft:${runId}`, JSON.stringify({version:1,run_id:runId,draft,
+      ...(frozen ? {frozen} : {})}));
+  } catch (_) { toast('浏览器暂时无法保存草稿，刷新前请先保留当前文字。', true); }
+}
+
+function persistComposerDraft() {
+  if (!state.runId) return;
+  state.composerRunId = state.runId;
+  storeComposerDraft(state.runId, composerDraft());
+}
+
+function freezeComposerRequest(runId, requestId) {
+  const submission = state.composerSubmissions.get(runId);
+  if (!submission) return;
+  const draft = state.runId === runId && state.composerVersion === submission.stamp
+    ? {text:'',feedbackTarget:null,requestKind:null,clarification:null}
+    : state.chatDrafts.get(runId) || {text:''};
+  storeComposerDraft(runId, draft, {requestId,draft:submission.draft});
+  if (submission.files.length && typeof StudioComposer !== 'undefined')
+    StudioComposer.freeze(runId, requestId, submission.files);
+}
+
+function settleComposerRequest(runId, requestId, accepted) {
+  const record = readComposerRecord(runId);
+  if (record?.frozen?.requestId !== requestId) return;
+  const restore = !accepted && !record.draft.text && (!record.draft.feedbackTarget ||
+    JSON.stringify(record.draft.feedbackTarget) === JSON.stringify(record.frozen.draft.feedbackTarget))
+    && (!record.draft.roleTarget || JSON.stringify(record.draft.roleTarget) === JSON.stringify(record.frozen.draft.roleTarget));
+  const draft = restore ? record.frozen.draft : record.draft;
+  storeComposerDraft(runId, draft, null);
+  if (restore && state.runId === runId && !state.composerSubmissions.has(runId)
+      && !$('chat-input').value && !state.feedbackTarget && !state.roleTarget) restoreComposerDraft(draft);
+}
+
+function restoreComposerDraft(draft) {
+  // Older in-memory drafts contained only text.
+  if (typeof draft === 'string') draft = {text:draft};
+  clearFeedbackTarget(false);
+  $('chat-input').value = draft?.text || '';
+  $('chat-input').style.height = 'auto';
+  state.feedbackTarget = draft?.feedbackTarget || null;
+  // Legacy drafts could retain the previous role after selecting a work
+  // result. The selected result remains the destination on draft recovery.
+  state.roleTarget = state.feedbackTarget ? null : draft?.roleTarget || null;
+  state.feedbackPresentation = draft?.feedbackPresentation || null;
+  state.composerRequestKind = draft?.requestKind || null;
+  if (draft?.clarification) state.clarificationChoices.set(state.runId, draft.clarification);
+  else state.clarificationChoices.delete(state.runId);
+  renderFeedbackTarget(false);
+  updatesComposerVersion(false);
+  persistComposerDraft();
+  const submission = state.composerSubmissions.get(state.runId);
+  if (submission && submission.savedDraft === draft) submission.stamp = state.composerVersion;
+}
+
 async function selectRun(runId) {
   if (state.decisionBusy) { $('run-select').value = state.runId; return false; }
   toggleMaterials(false);
@@ -167,19 +245,29 @@ async function selectRun(runId) {
   $('reference-video-open').onclick = null;
   $('materials-project-name').textContent = '';
   if (typeof closeEmbeddedProduction === 'function') closeEmbeddedProduction();
-  state.canvasTab = 'plan';
+  state.canvasTab = state.runs.find(run=>run.run_id===runId)?.kind==='learning' ? 'plan' : 'board';
   state.canvasTouched = false;
-  $('stage').hidden=false;$('journey-assets').hidden=true;$('journey-reference').hidden=true;
+  if($('creative-board')){
+    if(typeof StudioCreativeBoard!=='undefined')StudioCreativeBoard.destroy($('creative-board'));
+    $('creative-board').replaceChildren();$('creative-board').hidden=state.canvasTab!=='board';
+  }
+  if($('canvas-detail-nav'))$('canvas-detail-nav').hidden=true;
+  $('stage').hidden=state.canvasTab!=='plan';$('journey-assets').hidden=true;$('journey-reference').hidden=true;
   $('journey-storyboard').hidden=true;$('journey-video').hidden=true;
   for(const tab of document.querySelectorAll('[data-journey-tab]')){
     const selected=tab.id==='journey-tab-plan';tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;
   }
   $('spend-panel').hidden = true;
   $('spend-panel').costRequest = null;
-  if (state.runId) state.chatDrafts.set(state.runId, $('chat-input').value);
+  if (state.runId && (state.composerRunId === state.runId || $('chat-input').value || state.feedbackTarget)) {
+    const draft = composerDraft();
+    storeComposerDraft(state.runId, draft);
+    const submission = state.composerSubmissions.get(state.runId);
+    if (submission && submission.stamp === state.composerVersion) submission.savedDraft = draft;
+  }
   state.runId = runId;
   $('run-select').value = runId;
-  $('chat-input').value = state.chatDrafts.get(runId) || '';
+  restoreComposerDraft(state.chatDrafts.get(runId) || readComposerRecord(runId)?.draft);
   state.timeline = null;
   state.projectBrief = null;
   state.currentJob = null;
@@ -189,7 +277,6 @@ async function selectRun(runId) {
   state.learningSession = null;
   state.learningCatalog = null;
   state.creatorView = null;
-  clearFeedbackTarget();
   state.rail = [];
   $("rail").innerHTML = "";
   $("project-progress").innerHTML = "";
@@ -277,7 +364,7 @@ async function refreshTimeline() {
   renderSpend(tl);
   renderMaterials();
   renderProjects();
-  if (!state.canvasTouched && state.creatorView?.tab && state.creatorView.tab !== state.canvasTab)
+  if (state.canvasTab!=='board' && !state.canvasTouched && state.creatorView?.tab && state.creatorView.tab !== state.canvasTab)
     showJourneyTab(state.creatorView.tab, {automatic:true});
 }
 
@@ -373,6 +460,7 @@ function renderPane() {
       openResumeReference:task=>openReferenceVideo(run.run_id,task).catch(error=>toast(error.message,true))});
     return;
   }
+  if (state.canvasTab === 'board') { renderCreativeBoard(); return; }
   if (state.canvasTab && state.canvasTab !== 'plan') return;
   const host = $("stage");
   const step = (state.rail || []).find((s) => s.stage === state.activeStage);
@@ -423,38 +511,113 @@ function renderPane() {
   // After the pane exists, not per block: a picture an artifact names is only
   // resolvable once `state.materials` is loaded.
   wireMedia(host);
+  wireCreatorFeedback(host, displayStep);
   host.querySelector('[data-open-reference]')?.addEventListener('click',()=>showJourneyTab('reference'));
   host.scrollTop = kept;
 }
 
-function clearFeedbackTarget() {
+function clearFeedbackTarget(persist = true) {
   state.feedbackTarget = null;
+  state.roleTarget = null;
+  state.feedbackPresentation = null;
+  state.composerRequestKind = null;
   const chip = $('feedback-target');
   if (chip) { chip.hidden = true; chip.replaceChildren(); }
   const input = $('chat-input');
   if (input) input.placeholder = '说说想做什么，也可直接粘贴 TK 链接…';
+  if (typeof syncComposerAction === 'function') syncComposerAction();
+  if (persist) persistComposerDraft();
+}
+
+function switchFeedbackTarget({feedbackTarget = null, roleTarget = null,
+    feedbackPresentation = null, requestKind = null} = {}) {
+  // Selecting a work result or a role is one composer action. Keep the text
+  // and frozen request untouched, but never submit both destinations.
+  state.feedbackTarget = feedbackTarget;
+  state.roleTarget = feedbackTarget ? null : roleTarget;
+  state.feedbackPresentation = feedbackPresentation;
+  state.composerRequestKind = requestKind;
+  state.clarificationChoices.delete(state.runId);
+  updatesComposerVersion();
+  renderFeedbackTarget();
+}
+
+function renderFeedbackTarget(persist = true) {
+  if (state.roleTarget) {
+    const role = state.roleTarget;
+    const chip = $('feedback-target');
+    chip.replaceChildren(box('span', '', `补充给${role.label} · 其他任务继续`));
+    const clear = box('button', 'ghost small', '取消定向');
+    clear.type = 'button'; clear.onclick = () => { updatesComposerVersion(); clearFeedbackTarget(); };
+    chip.append(clear); chip.hidden = false;
+    $('chat-input').placeholder = '说明这项任务要调整什么…';
+    if (typeof syncComposerAction === 'function') syncComposerAction();
+    if (persist) persistComposerDraft();
+    return;
+  }
+  const target = state.feedbackTarget;
+  if (!target) return;
+  const fallback = target.kind === 'writing'
+    ? `已选原文 · 第 ${target.version} 版：「${target.quote || ''}」`
+    : target.kind === 'media' ? (target.at_seconds != null
+      ? `正在反馈视频 ${Number(target.at_seconds).toFixed(1)} 秒` : '正在反馈这张图片')
+      : '正在说明这版制作的问题';
+  const chip = $('feedback-target');
+  chip.replaceChildren(box('span', '', state.feedbackPresentation?.label || fallback));
+  if (target.kind === 'writing' && Array.isArray(target.path)) {
+    const direct = box('button', 'ghost small', state.composerRequestKind === 'writing_revision'
+      ? '直接修改（已保留）' : '按意见直接修改');
+    direct.type = 'button'; direct.onclick = () => { void submit('writing_revision'); };
+    chip.append(direct);
+  }
+  const clear = box('button', 'ghost small', '取消');
+  clear.type = 'button'; clear.onclick = () => { updatesComposerVersion(); clearFeedbackTarget(); };
+  chip.append(clear); chip.hidden = false;
+  $('chat-input').placeholder = state.feedbackPresentation?.placeholder || '说说这份内容哪里需要调整…';
+  if (typeof syncComposerAction === 'function') syncComposerAction();
+  if (persist) persistComposerDraft();
+}
+
+function setRoleFeedbackTarget(runId, session) {
+  const live = currentJob?.role_sessions?.find(row => row.session_id === session?.session_id);
+  if (state.runId !== runId || !session?.session_id || !canSteerJob(currentJob)
+      || !live || live.parent_job_id !== currentJob.job_id || live.stop_requested
+      || !['queued','running'].includes(live.status)) {
+    toast('这项任务已结束，请刷新团队记录后继续。', true); return false;
+  }
+  switchFeedbackTarget({roleTarget:{run_id:runId, session_id:session.session_id,
+    label:typeof TEAM_ROLES !== 'undefined' ? TEAM_ROLES[session.role] || '创作角色' : '创作角色'}});
+  setConversationOpen(true); $('chat-input').focus();
+  return true;
+}
+
+function feedbackShotOrdinal(draft) {
+  if (!draft?.draft_id || !draft.shot_id || !draft.draft_sha256) return null;
+  // The production projection owns current shot order. Historical inputs are
+  // never numbered by their position among all saved versions.
+  const row = (state.productionData?.shots?.[draft.kind]?.shots || []).find(shot =>
+    shot.draft_id === draft.draft_id && shot.shot_id === draft.shot_id
+    && shot.draft_sha256 === draft.draft_sha256);
+  return Number.isInteger(row?.ordinal) && row.ordinal > 0 ? row.ordinal : null;
 }
 
 function setMediaFeedbackTarget(runId, attempt, kind, atSeconds) {
   if (state.runId !== runId || !attempt?.attempt_id ||
       !/^[a-f0-9]{64}$/.test(attempt.output?.sha256 || '')) {
-    toast('这份结果暂时无法核对，请重新打开作品。', true); return;
+    toast('这份结果暂时无法核对，请重新打开作品。', true); return false;
   }
   const target = {kind:'media', run_id:runId, attempt_id:attempt.attempt_id,
     output_sha256:attempt.output.sha256};
   if (kind === 'video') target.at_seconds = Math.max(0, Math.round(Number(atSeconds || 0) * 10) / 10);
-  state.feedbackTarget = target;
-  const shotIndex=kind==='image'?(state.productionData?.drafts||[]).filter(row=>row.kind==='image')
-    .findIndex(row=>row.draft_id===attempt.draft_id):-1;
+  const draft=kind==='image'?(state.productionData?.drafts||[])
+    .find(row=>row.kind==='image'&&row.draft_id===attempt.draft_id):null;
+  const ordinal=feedbackShotOrdinal(draft);
   const label = kind === 'video' ? `正在反馈视频 ${target.at_seconds.toFixed(1)} 秒`
-    :shotIndex>=0?`正在批注首帧 ${String(shotIndex+1).padStart(2,'0')} 的生成图`:'正在反馈这张图片';
-  const chip = $('feedback-target');
-  chip.replaceChildren();
-  const clear = box('button', 'ghost small', '取消');
-  clear.type = 'button'; clear.onclick = clearFeedbackTarget;
-  chip.append(box('span', '', label), clear); chip.hidden = false;
-  $('chat-input').placeholder = kind === 'video' ? '说说这个时间点哪里需要调整…' : '说说这张图哪里需要调整…';
-  setProjectFocus('chat'); $('chat-input').focus();
+    :ordinal!=null?`正在批注首帧 ${String(ordinal).padStart(2,'0')} 的生成图`:'正在反馈这张图片';
+  switchFeedbackTarget({feedbackTarget:target, feedbackPresentation:{label, placeholder:kind === 'video'
+    ? '说说这个时间点哪里需要调整…' : '说说这张图哪里需要调整…'}});
+  setProjectFocus('chat'); setConversationOpen(true); $('chat-input').focus();
+  return true;
 }
 
 function productionFeedbackTarget(runId, draft, attempt) {
@@ -471,21 +634,16 @@ function productionFeedbackTarget(runId, draft, attempt) {
 function setProductionFeedbackTarget(runId, draft, attempt) {
   const target = productionFeedbackTarget(runId, draft, attempt);
   if (!target) {
-    toast('这份制作输入暂时无法核对，请重新打开当前作品。', true); return;
+    toast('这份制作输入暂时无法核对，请重新打开当前作品。', true); return false;
   }
-  state.feedbackTarget = target;
-  const chip = $('feedback-target');
-  chip.replaceChildren();
-  const shotIndex=draft.kind==='image'?(state.productionData?.drafts||[]).filter(row=>row.kind==='image')
-    .findIndex(row=>row.draft_id===draft.draft_id):-1;
-  const label = box('span', '', shotIndex>=0
-    ?`正在修改首帧 ${String(shotIndex+1).padStart(2,'0')} 的出图描述`
-    :`正在说明这版${draft.kind === 'video' ? '视频' : '图片'}制作的问题`);
-  const clear = box('button', 'ghost small', '取消');
-  clear.type = 'button'; clear.onclick = clearFeedbackTarget;
-  chip.append(label, clear); chip.hidden = false;
-  $('chat-input').placeholder = '说说哪里需要调整，团队会核对这版作品和本次问题…';
-  setProjectFocus('chat'); $('chat-input').focus();
+  const ordinal=draft.kind==='image'?feedbackShotOrdinal(draft):null;
+  const label = ordinal!=null
+    ?`正在修改首帧 ${String(ordinal).padStart(2,'0')} 的出图描述`
+    :`正在说明这版${draft.kind === 'video' ? '视频' : '图片'}制作的问题`;
+  switchFeedbackTarget({feedbackTarget:target,
+    feedbackPresentation:{label, placeholder:'说说哪里需要调整，团队会核对这版作品和本次问题…'}});
+  setProjectFocus('chat'); setConversationOpen(true); $('chat-input').focus();
+  return true;
 }
 
 function requestProductionDiagnosis(runId, draft, attempt, productionActive = false) {
@@ -510,12 +668,17 @@ function requestProductionDiagnosis(runId, draft, attempt, productionActive = fa
   return true;
 }
 
+const creatorFeedbackBindings = new WeakMap();
 function wireCreatorFeedback(host, step) {
   if (step.stage !== 'writing' || !step.has_doc || step.stale || step.integrity_ok === false ||
       !/^[a-f0-9]{64}$/.test(step.artifact_sha256 || '')) return;
   const bound = {run_id:state.runId, stage:step.stage, version:step.version,
     artifact_sha256:step.artifact_sha256};
+  const bindingKey=JSON.stringify(bound);
   for (const node of host.querySelectorAll('[data-creator-target], .artifact-prose p, .artifact-prose li')) {
+    const previous=creatorFeedbackBindings.get(node);
+    if(previous?.key===bindingKey)continue;
+    if(previous){node.removeEventListener('click',previous.choose);node.removeEventListener('keydown',previous.keydown);}
     const quote = node.textContent.trim().slice(0, 240);
     if (!quote) continue;
     const targetName = node.dataset.creatorTarget || '这段原文';
@@ -531,25 +694,20 @@ function wireCreatorFeedback(host, step) {
       }
       let path = null;
       try { path = JSON.parse(node.dataset.creatorPath || 'null'); } catch (_) { /* prose has no field path */ }
-      state.feedbackTarget = {...bound, kind:'writing', quote, ...(Array.isArray(path) ? {path} : {})};
-      const chip = $('feedback-target');
-      chip.replaceChildren();
-      const label = box('span', '', `已选${targetName} · 第 ${bound.version} 版：「${quote}」`);
-      if (Array.isArray(path)) {
-        const direct = box('button', 'ghost small', '按意见直接修改');
-        direct.type = 'button'; direct.onclick = () => { void submit('writing_revision'); };
-        chip.append(label, direct);
-      } else chip.append(label);
-      const clear = box('button', 'ghost small', '取消');
-      clear.type = 'button'; clear.onclick = clearFeedbackTarget;
-      chip.append(clear); chip.hidden = false;
-      $('chat-input').placeholder = '说说这句或这段想怎么改…';
+      switchFeedbackTarget({feedbackTarget:{...bound, kind:'writing', quote,
+        ...(Array.isArray(path) ? {path} : {})},
+        requestKind:!state.roleTarget && state.feedbackTarget?.kind === 'writing'
+          ? state.composerRequestKind : null,
+        feedbackPresentation:{label:`已选${targetName} · 第 ${bound.version} 版：「${quote}」`,
+          placeholder:'说说这句或这段想怎么改…'}});
       setProjectFocus('chat'); $('chat-input').focus();
     };
-    node.addEventListener('click', choose);
-    node.addEventListener('keydown', event => {
+    const keydown=event => {
       if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choose(); }
-    });
+    };
+    node.addEventListener('click', choose);
+    node.addEventListener('keydown',keydown);
+    creatorFeedbackBindings.set(node,{key:bindingKey,choose,keydown});
   }
 }
 
@@ -1907,7 +2065,7 @@ async function send(text, requestKind = null, clarificationId = null) {
     return {accepted: false, uncertain: true, reason: pendingMessage,
             rejected_text: text, run_id: state.runId};
   }
-  const batchKind=!state.busy&&!requestKind&&!clarificationId&&!state.feedbackTarget&&
+  const batchKind=!state.busy&&!requestKind&&!clarificationId&&!state.feedbackTarget&&!state.roleTarget&&
     typeof StudioProduction!=='undefined'&&
     !(typeof StudioComposer!=='undefined'&&StudioComposer.files(state.runId).length)
     &&typeof productionBatchCommand==='function'?productionBatchCommand(text,{
@@ -1926,6 +2084,12 @@ async function send(text, requestKind = null, clarificationId = null) {
   const runId=state.runId;
   try {
     const target = state.feedbackTarget;
+    const roleTarget = state.roleTarget;
+    const targetSession = roleTarget && currentJob?.role_sessions?.find(row => row.session_id === roleTarget.session_id);
+    if (roleTarget && (roleTarget.run_id !== runId || !state.busy || !canSteerJob(currentJob)
+        || !targetSession || targetSession.parent_job_id !== currentJob.job_id || targetSession.stop_requested
+        || !['queued','running'].includes(targetSession.status)))
+      throw Error('定向任务已经结束；原话已保留，请刷新团队记录后明确继续这项任务。');
     if (requestKind === 'writing_revision' &&
         (!target || target.kind !== 'writing' || !Array.isArray(target.path)))
       throw Error('这段内容无法精确定位到脚本字段，请用普通发送说明修改范围。');
@@ -1941,17 +2105,29 @@ async function send(text, requestKind = null, clarificationId = null) {
           throw Error('稿件版本已变化。意见已保留，请重新选择当前版本中的句子。');
       }
     }
+    if (requestKind === 'writing_revision' && currentJob && JOB_ACTIVE.has(currentJob.status))
+      throw Error('直接修改需要等本轮任务结束后再发送；原话、目标和直接修改模式已保留。');
     if (state.busy && canSteerJob(currentJob)) {
       if (typeof StudioComposer !== 'undefined' && StudioComposer.files(runId).length)
         throw Error('调整运行中的任务时请先移除待上传附件，或等本轮结束后发送。');
-      const adjusted = await submitSteer(runId, currentJob.job_id, {text, request_id:crypto.randomUUID(),
+      const adjustment = {text, request_id:crypto.randomUUID(),
         expected_goal_revision:currentJob.goal_revision || 0,
-        ...(target ? {feedback_target:target} : {})});
+        ...(roleTarget ? {target_session_id:roleTarget.session_id} : {}),
+        ...(target ? {feedback_target:target} : {}),
+        ...(state.timeline?.display_context_id ? {display_context_id:state.timeline.display_context_id} : {}),
+        ...(clarificationId ? {question_id:clarificationId} : {})};
+      const adjusted = await submitSteer(runId, currentJob.job_id, adjustment);
+      if (!['unknown','pending_unknown'].includes(adjusted?.reason))
+        settleComposerRequest(runId, adjustment.request_id, !adjusted || adjusted.ok !== false);
       if (!adjusted || adjusted.ok !== false) {
+        if (roleTarget && JSON.stringify(state.roleTarget) === JSON.stringify(roleTarget)) clearFeedbackTarget();
         if (target && JSON.stringify(state.feedbackTarget) === JSON.stringify(target)) clearFeedbackTarget();
         return {accepted: true};
       }
       if (adjusted.reason === 'job_not_active') {
+        if (roleTarget) return {accepted:false, uncertain:false,
+          reason:'定向任务已经结束；原话已保留，请刷新团队记录后明确继续这项任务。',
+          rejected_text:text, run_id:runId};
         // Previous job already ended: keep this prompt and open a fresh turn.
       } else if (adjusted.reason === 'unknown' || adjusted.reason === 'pending_unknown') {
         // The adjustment may or may not have been received — or an earlier one
@@ -1976,24 +2152,35 @@ async function send(text, requestKind = null, clarificationId = null) {
       }
       state.busy = false;
     }
-    if(typeof StudioComposer!=='undefined' && StudioComposer.files(runId).length){
+    const attachedFiles = typeof StudioComposer !== 'undefined' ? [...StudioComposer.files(runId)] : [];
+    if(attachedFiles.length){
       if(StudioComposer.missingVideoUse(runId))throw Error('请先为每段视频选择用途：补全商品信息或拆解参考表达。');
       state.busy=true;$('send').disabled=true;StudioComposer.render();
       const names=await StudioComposer.upload(runId,fetch);
       if(state.runId!==runId)throw Error('项目已切换，未发送对话。');
       text += '\n本次附上的素材：'+StudioComposer.describe(runId,names);
-      StudioComposer.clear(runId);state.busy=false;StudioComposer.render();
+      state.busy=false;StudioComposer.render();
     }
-    const payload = target
-      ? {text, request_id:crypto.randomUUID(), feedback_target:target,
-          ...(requestKind ? {request_kind:requestKind} : {})}
-      : {text, request_id:crypto.randomUUID(),
-          ...(clarificationId ? {question_id:clarificationId} : {})};
+    const payload = {text, request_id:crypto.randomUUID(),
+      ...(target ? {feedback_target:target} : {}),
+      ...(requestKind ? {request_kind:requestKind} : {}),
+      ...(clarificationId ? {question_id:clarificationId} : {})};
     // The result is passed through, not overwritten. `runtime.submitJob` is the
     // code that knows whether the server accepted this request, refused it, or
     // lost the answer; reporting `{accepted:true}` from here made the caller's
     // picture of what happened wrong for every outcome but one (A3).
     const result = await submitJob(runId, payload);
+    if (!result?.uncertain) {
+      settleComposerRequest(runId, payload.request_id, result?.accepted !== false);
+      if (typeof StudioComposer !== 'undefined') StudioComposer.settle(runId, payload.request_id, result?.accepted !== false);
+    }
+    // Confirmed rejection leaves the uploaded references and their uses in the
+    // draft. Unknown acceptance transfers them to the runtime's same-ID receipt
+    // recovery; it must not expose a fresh-send draft for those same materials.
+    if (attachedFiles.length && (result?.accepted !== false || result.uncertain)) {
+      StudioComposer.clear(runId, attachedFiles);
+      StudioComposer.render();
+    }
     if (result && result.accepted === false) {
       // An unknown result is not a rejection. Saying so would invite a resend
       // under a fresh request id, which is how one prompt could run twice (T2);
@@ -2002,8 +2189,6 @@ async function send(text, requestKind = null, clarificationId = null) {
       toast(result.uncertain
         ? '发送结果尚未确认，请在任务状态里确认这次提交，不要直接重发。'
         : (result.reason || result.error?.message || result.message || '这次发送没有被接受。'), true);
-      if (requestKind === 'writing_revision' && result.error?.status === 409)
-        clearFeedbackTarget();
       if (typeof StudioComposer !== 'undefined') StudioComposer.render();
       return {...result, run_id: runId};
     }
@@ -2053,8 +2238,21 @@ async function send(text, requestKind = null, clarificationId = null) {
  */
 async function submit(requestKind = null) {
   const input = $("chat-input");
-  if (currentJob && JOB_ACTIVE.has(currentJob.status) && !canSteerJob(currentJob))
-    return {accepted: false, reason: '当前调用正在停止，请等待本轮结算后再发送。'};
+  if (requestKind) state.composerRequestKind = requestKind;
+  requestKind = state.composerRequestKind;
+  if (requestKind) renderFeedbackTarget();
+  persistComposerDraft();
+  const active = currentJob && JOB_ACTIVE.has(currentJob.status);
+  if (active && (requestKind === 'writing_revision' || !canSteerJob(currentJob))) {
+    const reason = requestKind === 'writing_revision'
+      ? '直接修改需要等本轮任务结束后再发送；原话、目标和直接修改模式已保留。'
+      : currentJob.status === 'queued' ? '当前任务正在排队，请等开始执行后插入调整，或等本轮结束后发送。'
+      : currentJob.status === 'cancelling' ? '当前调用正在停止，请等待本轮结算后再发送。'
+      : '团队正在执行本轮，请等任务结束后再发送。';
+    toast(reason, true);
+    syncComposerAction();
+    return {accepted:false, reason};
+  }
   const value = input.value.trim() || (typeof StudioComposer!=='undefined' && StudioComposer.files(state.runId).length ? '我附上了素材，请按标注用途处理。' : '');
   if (!value || !state.runId || steerPosting ||
       state.decisionBusy || state.recoveryBlocked) return {accepted: false, reason: '现在不能发送。'};
@@ -2068,21 +2266,40 @@ async function submit(requestKind = null) {
     return {accepted: false, uncertain: true, reason: message, run_id: state.runId};
   }
   const owner = state.runId;
+  if (state.composerSubmissions.has(owner)) {
+    const reason = '正在提交这条消息，请等待回执；新草稿已保留。';
+    toast(reason, true);
+    return {accepted:false, reason};
+  }
   const clarification = state.clarificationChoices.get(owner);
-  const stamp = (state.composerVersion = (state.composerVersion || 0) + 1);
+  const submission = {draft:{...composerDraft(), text:value},
+    files:typeof StudioComposer !== 'undefined' ? [...StudioComposer.files(owner)] : [],
+    stamp:(state.composerVersion = (state.composerVersion || 0) + 1)};
+  state.composerSubmissions.set(owner, submission);
   input.value = "";
   input.style.height = "auto";
-  const result = await send(value, requestKind, clarification?.id || null);
+  let result;
+  try { result = await send(value, requestKind, clarification?.id || null); }
+  finally { state.composerSubmissions.delete(owner); }
   const restorable = result && result.accepted === false && !result.uncertain
     && state.runId === owner
-    && state.composerVersion === stamp;
+    && state.composerVersion === submission.stamp;
   if (restorable) {
-    input.value = value;
-    input.style.height = "auto";
+    restoreComposerDraft(submission.draft);
     input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
+  }
+  const savedDraft = state.chatDrafts.get(owner);
+  if (state.runId !== owner && submission.savedDraft && savedDraft === submission.savedDraft) {
+    // A late reply owns only the untouched draft left by this submission.
+    // Never replace words or targets the user edited before switching away.
+    storeComposerDraft(owner, result?.accepted === false && !result.uncertain
+      ? submission.draft : {text:'', feedbackTarget:null, requestKind:null, clarification:null});
   }
   if (result?.accepted !== false || result.uncertain)
     state.clarificationChoices.delete(owner);
+  if ((result?.accepted !== false || result.uncertain) && state.runId === owner && state.composerVersion === submission.stamp)
+    clearFeedbackTarget();
+  if (state.runId === owner) persistComposerDraft();
   return {...result, draft_restored: Boolean(restorable)};
 }
 
@@ -2104,7 +2321,10 @@ function pendingSubmission(runId) {
   catch { return null; }
 }
 
-function updatesComposerVersion() { state.composerVersion = (state.composerVersion || 0) + 1; }
+function updatesComposerVersion(persist = true) {
+  state.composerVersion = (state.composerVersion || 0) + 1;
+  if (persist) persistComposerDraft();
+}
 
 // One button, two meanings, decided by `syncComposerAction` — never by the
 // click itself. Reading the mode here is what keeps a press from doing the
@@ -2122,10 +2342,10 @@ $("chat-input").addEventListener("keydown", (e) => {
 });
 $("chat-input").addEventListener("input", (e) => {
   // Typing is the user moving the draft on. Any in-flight refusal is now stale.
-  updatesComposerVersion();
   const chosen = state.clarificationChoices.get(state.runId);
   if (chosen && !e.target.value.includes(chosen.text))
     state.clarificationChoices.delete(state.runId);
+  updatesComposerVersion();
   e.target.style.height = "auto";
   e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`;
 });
@@ -2234,9 +2454,11 @@ $("run-select").onchange = async (e) => {await selectRun(e.target.value);setStud
 (async function init() {
   try {
     initStudioNavigation();
+    // Establish the default before any read can finish late. Once the user
+    // opens a project, background restoration has no navigation authority.
+    setStudioView('home');
     await loadRuns();
     if (state.runId) await selectRun(state.runId);
-    setStudioView('home');
     loadInspiration();
   } catch (err) {
     toast(String(err.message || err), true);

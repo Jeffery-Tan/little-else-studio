@@ -215,6 +215,12 @@ function writingWorkHtml(step, ctx) {
     const line = fieldValue(card, isPhoto ? ['图内文案', '图内文字', '文案', '台词', '台词或字幕'] : ['台词', '台词或字幕']);
     const picture = fieldValue(card, ['画面', '画面与动作']);
     const sound = fieldValue(card, ['声音']), duration = fieldValue(card, ['时长']);
+    const characterLabels = ['本镜人物', '人物', '人物身份', 'character_ids'];
+    const sceneLabels = ['本镜场景', '场景', '场景身份', 'scene_id'];
+    const designValue = labels => labels.map(label => fieldValue(card, [label])).find(value => String(value).trim()) || '';
+    const characters = designValue(characterLabels), scene = designValue(sceneLabels);
+    const hasCharacters = (card.fields || []).some(field => characterLabels.includes(field.label));
+    const hasScene = (card.fields || []).some(field => sceneLabels.includes(field.label));
     const time = String(card.head || '').trim();
     const explicitNoLine = !isPhoto && /^(?:[（(]?无台词[）)]?|不使用口播|无口播)$/u.test(line.trim());
     const hasLine = Boolean(line.trim()) && !explicitNoLine && !['无', '—', '-'].includes(line.trim());
@@ -227,10 +233,15 @@ function writingWorkHtml(step, ctx) {
       (card.media ? `<div class="creator-script-media" data-media="${escapeHtml(card.media)}"></div>` : '') +
       (picture ? `<div class="creator-script-picture-wrap"><strong>${isPhoto ? '画面' : '画面与动作'}</strong><p class="creator-script-picture vf-value"${fieldTarget(`${target}画面`,'picture')}>${escapeHtml(picture)}</p></div>` : '') + '</div>' : '';
     const audio = sound ? `<div class="creator-script-sound"><strong>声音</strong><p${fieldTarget(`${target}声音`,'sound')}>${escapeHtml(sound)}</p></div>` : '';
+    // These are references to the shared design, not new creative decisions or
+    // directly editable script fields. Keep them in the main shot reader;
+    // the generic cards are consumed by this specialised layout.
+    const design = (hasCharacters ? `<div class="creator-script-sound"><strong>人物</strong><p>${escapeHtml(characters || '本镜不包含人物')}</p></div>` : '') +
+      (hasScene ? `<div class="creator-script-sound"><strong>场景</strong><p>${escapeHtml(scene || '场景尚未填写')}</p></div>` : '');
     const content = isPhoto || !hasLine ? visual + words : words + visual;
     const heading = isPhoto ? (time || `第 ${number} 页`) : `第 ${number} 段${time ? ` · ${time}` : ''}`;
     return `<article id="script-segment-${number}" class="creator-script-segment${isPhoto ? ' is-photo' : hasLine ? ' has-words' : ' is-visual'}"><header><span>${escapeHtml(heading)}</span>${duration && !isPhoto ? `<small>${escapeHtml(duration)}</small>` : ''}</header>` +
-      `<div class="creator-script-content">${content}${audio}${!content && !audio ? `<p class="creator-script-unwritten">这一${isPhoto ? '页' : '段'}尚未写出可读内容。</p>` : ''}</div></article>`;
+      `<div class="creator-script-content">${content}${audio}${design}${!content && !audio ? `<p class="creator-script-unwritten">这一${isPhoto ? '页' : '段'}尚未写出可读内容。</p>` : ''}</div></article>`;
   }).join('');
   return `<div class="pane-doc creator-script-work"><div class="creator-script-intro"><span class="creator-kicker">${isPhoto ? '当前图文稿' : '当前脚本'}</span><h2>${isPhoto ? '逐页看画面与图内文案' : '逐段读画面与表达'}</h2><p>${canSelect ? '点选画面或文字，可在对话中讨论，也可按意见直接修改该字段。' : '先阅读这份作品；来源或版本需要核对后才能针对具体内容修改。'}</p></div>${overview}<div class="creator-script-lines">${segments}</div>` +
     (caption?.text ? `<section class="creator-script-caption"><h3>发布文案</h3><p class="blk-text"${canSelect ? ` data-creator-target="发布文案" data-creator-path="${escapeHtml(JSON.stringify(['caption']))}"` : ''}>${escapeHtml(caption.text)}</p></section>` : '') +

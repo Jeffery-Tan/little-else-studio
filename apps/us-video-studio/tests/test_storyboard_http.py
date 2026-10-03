@@ -15,6 +15,7 @@ from studio.pipeline import Pipeline
 from studio.server import build_app
 from studio.store import Store
 from test_server import RUN, settings_for
+from visual_fixtures import designed_script, stage_structure
 
 BASE = f'/api/runs/{RUN}/production'
 
@@ -26,6 +27,7 @@ SCRIPT = {
     ],
     'total_duration': 6,
 }
+SCRIPT = designed_script(SCRIPT)
 
 
 @pytest.fixture
@@ -43,7 +45,7 @@ def scene(tmp_path, monkeypatch):
             attempt = pipeline.start_attempt(RUN, stage)
             structured = SCRIPT if stage == 'writing' else (
                 {'options': [{'key': 'A', 'claim': 'Synthetic', 'satisfies': 'goal.primary'}]}
-                if stage == 'direction' else {})
+                if stage == 'direction' else stage_structure(stage))
             pipeline.submit(RUN, stage, attempt.token, content='Synthetic ' + stage,
                             summary=stage, evidence=['Fixture only'],
                             limitations=['Not market evidence'], structured=structured)

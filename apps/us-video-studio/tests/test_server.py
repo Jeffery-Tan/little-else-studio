@@ -146,7 +146,7 @@ def drive_intake_and_direction(box, structured=None):
     http = box["http"]
     make_run(http)
     box["model"] = ScriptedModel([
-        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video"}),
+        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video", "deliverable": "direction"}),
         tool_turn("t1", "write_stage", {
             "stage": "intake", "content": "需求正文", "summary": "需求整理",
         }),

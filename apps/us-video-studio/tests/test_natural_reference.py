@@ -4,7 +4,7 @@ import hashlib
 
 import pytest
 
-from fakes import tool_turn, final_turn
+from fakes import tool_turn, final_turn, upgrade_fixture_task_contract
 from studio.agents.client import Turn, Usage
 from studio.creation_mode import current, select, select_for_turn
 
@@ -47,7 +47,7 @@ def scripted(native, monkeypatch, turns):
     original=model.__class__.complete.__get__(model)
     queue=iter(turns)
     def complete(**kwargs):
-        model.turn=next(queue)
+        model.turn=upgrade_fixture_task_contract(next(queue), kwargs.get('system', ''))
         return original(**kwargs)
     monkeypatch.setattr(model,'complete',complete)
 
@@ -83,7 +83,9 @@ def test_analyze_ends_turn_without_dispatch_or_adoption(native, monkeypatch):
 def test_recreate_and_autonomous_get_different_methods_and_reference_context(native,monkeypatch):
     accept_upload(native[1],RUN,'local.mp4',video_bytes(audio=True))
     scripted(native,monkeypatch,[inspect('recreate',quote='照这条做'),observation(),
-        tool_turn('route','prepare_creative_context',dict(intent='new',format='video')),final_turn('这是本款改编方案')])
+        tool_turn('route','prepare_creative_context',dict(intent='new',format='video',deliverable='intake')),
+        tool_turn('intake','write_stage',dict(stage='intake',content='按指定参考整理改编需求',summary='离线需求')),
+        final_turn('这是本款改编方案')])
     assert chat(native,'照这条做')['status']=='succeeded'
     creation=current(native[1],RUN)
     assert creation['mode']=='recreate'
@@ -131,9 +133,11 @@ def test_reuse_reference_after_analysis_never_downloads_or_analyzes_again(native
     scripted(native,monkeypatch,[inspect('analyze',source=URL,quote='分析这个'),observation()])
     assert chat(native,'分析这个 '+URL)['status']=='succeeded'
     scripted(native,monkeypatch,[inspect('inspiration',source=URL,quote='只借开头'),
-        tool_turn('route','prepare_creative_context',dict(intent='new',format='video')),final_turn('其余自主设计')])
+        tool_turn('route','prepare_creative_context',dict(intent='new',format='video',deliverable='intake')),
+        tool_turn('intake','write_stage',dict(stage='intake',content='只借开头，其余自主设计',summary='离线需求')),
+        final_turn('其余自主设计')])
     assert chat(native,'只借开头',request_id='natural-2')['status']=='succeeded'
-    assert calls==[URL] and len(native[2].calls)==5
+    assert calls==[URL] and len(native[2].calls)==6
     assert current(native[1],RUN)['mode']=='inspiration'
 
 
@@ -162,7 +166,7 @@ def test_product_video_attachment_cannot_be_reinterpreted_as_reference(native,mo
 def test_invalid_request_cannot_cross_reference_boundary(native,monkeypatch,fault):
     downloads=downloader(monkeypatch,video_bytes(audio=True))
     turns=[]
-    if fault=='scope':turns.append(tool_turn('readonly','prepare_creative_context',dict(intent='status',format='none')))
+    if fault=='scope':turns.append(tool_turn('readonly','prepare_creative_context',dict(intent='status',format='none',deliverable='follow_up')))
     turns.extend([inspect('analyze',source=URL,quote='不存在的指令' if fault=='quote' else '分析这个'),final_turn('保留当前内容')])
     scripted(native,monkeypatch,turns)
     chat(native,'分析这个'+('' if fault=='url' else ' '+URL),consent=fault!='consent')

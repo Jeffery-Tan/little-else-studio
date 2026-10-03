@@ -11,6 +11,9 @@ const TEAM_TOOLS = {
   list_materials:['查看素材清单','已查看素材清单'],
   write_stage:['保存创作内容','已保存创作内容'], submit_stage:['提交阶段方案','已提交阶段方案'],
   dispatch:['安排角色工作','角色工作已返回'], request_review:['安排独立审核','审核已返回'],
+  start_role:['安排角色工作','角色任务已启动'], wait_role:['等待角色交付','已读取角色回执'],
+  message_role:['传递本次补充','补充已送到对应角色'], cancel_role:['停止指定任务','已要求停止指定任务'],
+  resume_role:['继续角色任务','角色任务已返回'], propose_task_interpretation:['核对本次要求与范围','已绑定本次要求与范围'],
   finish_review:['记录审核结论','已记录审核结论'],
   read_method_document:['查阅创作方法','已查阅创作方法'],
   read_learning_cases:['阅读参考案例','已阅读参考案例'],
@@ -49,20 +52,46 @@ function teamAction(event, completed = false) {
   return text;
 }
 
+function modelWaitDuration(seconds) {
+  const total = Math.max(0, Math.round(seconds));
+  const minutes = Math.floor(total / 60), remainder = total % 60;
+  return minutes ? `${minutes}分${remainder ? `${remainder}秒` : '钟'}` : `${total}秒`;
+}
+
+function modelWaiting(job) {
+  if (!['running','cancelling'].includes(job?.status)) return null;
+  // A later reply, tool or new turn ends this transport observation. Never
+  // keep an old heartbeat visible while a different step is already running.
+  const latest = [...(job.events || [])].reverse().find(event =>
+    ['agent_activity','agent_narration','agent_narration_preview','agent_tool','agent_turn'].includes(event.type));
+  if (latest?.type !== 'agent_activity' || latest.phase !== 'waiting_model') return null;
+  const seconds = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+  const elapsed = seconds(latest.elapsed_seconds), remaining = seconds(latest.remaining_seconds);
+  const timeout = seconds(latest.timeout_seconds) ?? seconds(elapsed !== null && remaining !== null ? elapsed + remaining : null);
+  const parts = [latest.transport_state === 'receiving' ? '正在接收模型回复' : '等待模型回复'];
+  if (elapsed !== null) parts.unshift(`已等待 ${modelWaitDuration(elapsed)}`);
+  if (timeout !== null) parts.push(`单次最多等待 ${modelWaitDuration(timeout)}`);
+  if (remaining !== null) parts.push(`本次最多还能等待 ${modelWaitDuration(remaining)}`);
+  return {role:TEAM_ROLES[latest.role] ? latest.role : null, text:parts.join('；')};
+}
+
 function teamProgress(job) {
   const events = job?.events || [];
   const active = ['queued','running','cancelling'].includes(job?.status);
   const last = [...events].reverse().find(e => TEAM_ROLES[e.role]);
   const currentRole = active && job.status === 'running' ? last?.role : null;
+  const waiting = modelWaiting(job);
   let current = '';
   if (currentRole) {
     const action = last.type === 'agent_activity' && last.phase === 'tool' ? teamAction(last)
       : last.type === 'agent_activity' && last.phase === 'thinking' ? TEAM_WORK[currentRole]
+      : waiting ? waiting.text
       : '继续处理本轮内容（等待下一条进展）';
     current = `${TEAM_ROLES[currentRole]} · ${['agent_narration','agent_narration_preview'].includes(last.type) && typeof last.text === 'string'
       ? last.text.trim().slice(0, 220) : action}`;
   } else if (active) current = job.status === 'queued' ? '等待制作团队开始' : job.status === 'cancelling'
     ? '等待当前调用结束，随后停止' : '正在准备本轮工作，等待角色进展';
+  if (waiting && !current.includes(waiting.text)) current += `；${waiting.text}`;
   const history = [];
   for (const event of events) {
     if (event.type === 'agent_narration' && typeof event.text === 'string' && event.text.trim()) {
@@ -74,8 +103,12 @@ function teamProgress(job) {
       failed:event.ok === false, stage:event.ok && ['write_stage','submit_stage'].includes(event.tool)
         ? event.args?.stage || event.stage : null});
   }
-  const participants = Object.entries(TEAM_ROLES).map(([role,name]) => ({role,name,
-    status:role === currentRole ? '处理中' : events.some(e=>e.role === role) ? '本轮已参与' : '本轮未参与'}));
+  const participants = Object.entries(TEAM_ROLES).map(([role,name]) => {
+    const sessions = (job.role_sessions || []).filter(row => row.role === role && row.parent_job_id === job.job_id);
+    const working = active && sessions.some(row => ['queued','running'].includes(row.status) && !row.stop_requested);
+    return {role,name,status:role === currentRole || working ? '处理中'
+      : sessions.length || events.some(e=>e.role === role) ? '本轮已参与' : '本轮未参与'};
+  });
   const outputs = history.filter(row => row.stage);
   const summary = outputs.length ? `已保存 ${outputs.length} 次阶段内容，见团队工作记录。`
     : events.some(e=>e.type === 'done' && e.text) ? '本轮回复已保存到下方对话。'
@@ -100,15 +133,20 @@ function openTeamProgress() {
   const close = box('button','ghost small','关闭');
   close.onclick = () => dialog.close(); header.append(close);
   dialog.append(header, box('div','team-dialog-body'));
-  dialog.addEventListener('close',()=>{dialog.remove();teamDialog=null;teamDialogKey='';});
+  dialog.addEventListener('close',()=>{
+    dialog.remove();
+    if (teamDialog === dialog) { teamDialog=null;teamDialogKey=''; }
+    if (dialog.roleFeedbackRunId === state.runId) $('chat-input').focus();
+  });
   document.body.append(dialog); teamDialog=dialog; updateTeamDialog(); dialog.showModal();
 }
 
 function updateTeamDialog() {
   if (!teamDialog) return;
   const job = currentJob;
+  const runId = state.runId;
   const brief = state.projectBrief || job?.brief;
-  const key = JSON.stringify([state.runId, job?.job_id, job?.status, job?.events?.length, job?.cursor, brief]);
+  const key = JSON.stringify([runId, job?.job_id, job?.status, job?.events?.length, job?.cursor, job?.role_sessions, brief]);
   if (key === teamDialogKey) return;
   teamDialogKey = key;
   const host = teamDialog.querySelector('.team-dialog-body');
@@ -128,6 +166,49 @@ function updateTeamDialog() {
     card.append(box('strong','',row.name),box('span','',row.status));roles.append(card);
   }
   host.append(roles,box('h3','','本轮做了什么'));
+  for (const session of job.role_sessions || []) {
+    const card = box('div','team-member');
+    const labels = {queued:'等待执行',running:'正在执行',waiting:'等待明确继续',completed:'已交回',cancelled:'已停止',failed:'未完成',interrupted:'服务中断，未自动重跑'};
+    card.append(box('strong','',TEAM_ROLES[session.role] || '创作角色'),
+      box('span','',session.stop_requested && ['queued','running'].includes(session.status)
+        ? '正在停止此项' : labels[session.status] || '状态待核实'));
+    if (session.reason) card.append(box('p','muted',session.reason));
+    const liveSession = () => state.runId === runId && currentJob?.job_id === job.job_id
+      ? currentJob.role_sessions?.find(row => row.session_id === session.session_id) : null;
+    if (session.parent_job_id === job.job_id && canSteerJob(job) && !session.stop_requested && ['queued','running'].includes(session.status)) {
+      const amend = box('button','ghost small','补充要求');
+      amend.onclick = () => {
+        if (!setRoleFeedbackTarget(runId, liveSession())) return;
+        teamDialog.roleFeedbackRunId=runId;dialogCloseTeam();$('chat-input').focus();
+      };
+      const stop = box('button','ghost small','停止此项');
+      stop.onclick = async () => {
+        const live = liveSession();
+        if (!live || live.stop_requested || !canSteerJob(currentJob) || !['queued','running'].includes(live.status)) return;
+        stop.disabled = true;
+        try { await submitSteer(runId, job.job_id, {text:'停止', request_id:crypto.randomUUID(),
+          expected_goal_revision:currentJob.goal_revision || 0, target_session_id:session.session_id}); }
+        catch (err) { if (state.runId === runId) toast(err.message, true); }
+        finally { stop.disabled = false; }
+      };
+      card.append(amend,stop);
+    } else if (!JOB_ACTIVE.has(job.status) && !session.stop_requested && ['waiting','interrupted','failed'].includes(session.status)) {
+      const resume = box('button','ghost small','继续此项');
+      resume.onclick = async () => {
+        const live = liveSession();
+        if (!live || live.stop_requested || JOB_ACTIVE.has(currentJob.status)
+            || !['waiting','interrupted','failed'].includes(live.status)) return;
+        resume.disabled = true;
+        try { await submitJob(runId, {request_kind:'role_resume',session_id:session.session_id,
+          expected_task_id:live.task_id,request_id:crypto.randomUUID(),
+          text:'继续这项未完成的创作任务，保留已保存内容并先核对当前依据。'}); }
+        catch (err) { if (state.runId === runId) toast(err.message, true); }
+        finally { resume.disabled = false; }
+      };
+      card.append(resume);
+    }
+    host.append(card);
+  }
   const history = box('ol','team-history');
   for (const row of view.history) {
     const item = box('li',row.failed?'team-step failed':'team-step');
@@ -152,4 +233,4 @@ function updateTeamDialog() {
 }
 function dialogCloseTeam() { teamDialog?.close(); }
 
-if (typeof module !== 'undefined') module.exports = {teamAction, teamProgress};
+if (typeof module !== 'undefined') module.exports = {teamAction, teamProgress, modelWaiting};

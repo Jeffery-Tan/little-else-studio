@@ -60,3 +60,8 @@ def test_fingerprint_covers_extracted_route_modules(monkeypatch):
         patch.setattr(Path, 'read_bytes', lambda path: read_bytes(path) + b'changed'
                       if path == route else read_bytes(path))
         assert code_fingerprint() != before
+
+
+def test_fingerprint_includes_loaded_shared_learning_code():
+    assert any(path.as_posix().endswith('/scripts/creative_learning.py')
+               for path in _fingerprint_paths())
