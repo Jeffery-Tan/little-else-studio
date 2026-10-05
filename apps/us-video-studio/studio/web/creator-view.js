@@ -30,7 +30,9 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
   const requestedCaption = /(?:与|和|及|附|加上|需要|附带|[+＋]).{0,6}(?:英文)?(?:发布文案|caption)/iu.test(run.brief || '');
   const declaredFormat = /^交付形式：带货图片与文案。/u.test(run.brief || '') ? 'photo'
     : /^交付形式：商品视频。/u.test(run.brief || '') ? 'video' : null;
-  const format = run.content_format || declaredFormat || (videoWork?.draft ? 'video' : null) ||
+  const projectedFormat = Object.prototype.hasOwnProperty.call(timeline.run || {}, 'content_format')
+    ? timeline.run.content_format : run.content_format;
+  const format = projectedFormat || declaredFormat || (videoWork?.draft ? 'video' : null) ||
     (imageWork?.draft ? 'photo' : null) ||
     ((writing?.blocks || []).some(block => block.type === 'timeline') ? 'video' : null);
   const goal = analysisOnly ? '参考视频拆解报告'
@@ -107,7 +109,9 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
 
   // The latest unresolved attempt controls recovery; a verified earlier result
   // can remain the readable work. The selector checks its material bytes and URL.
-  const work = videoWork?.draft ? videoWork
+  const work = format === 'photo'
+    ? (imageWork?.draft || imageWork?.phase === 'prepare' ? imageWork : null)
+    : videoWork?.draft ? videoWork
     : imageWork?.phase === 'image_pending' && imageWork?.draft ? imageWork
     : videoWork?.phase === 'prepare' ? videoWork
     : imageWork?.draft ? imageWork : null;

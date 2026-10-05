@@ -267,7 +267,7 @@ class Workspace:
         return "\n".join(head) + "\n\n---\n\n" + body
 
     def render_context(self, stage: str, versions: dict[str, int] | None = None,
-                       *, include_layout: bool = True) -> str:
+                       *, include_layout: bool = True, reference_selection=None, include_reference=True) -> str:
         """The actual fact inputs and user choice, not merely permission to read.
 
         Reviewers may pin versions before assembling their isolated request.
@@ -326,7 +326,8 @@ class Workspace:
                 parts += ["尚无与此版本匹配的明确选项选择；不得沿用推荐项或自行选择。",
                           self.render_artifact("direction", artifact.version, include_layout=False)
                           if artifact else ""]
-        parts += ["# 素材证据与能力边界", self.render_materials(organize=True)]
+        parts += ["# 素材证据与能力边界", self.render_materials(organize=True,
+            reference_selection=reference_selection, include_reference=include_reference)]
         return "\n\n".join(parts)
 
     def render_reviews(self, stage: str) -> str:
@@ -348,7 +349,7 @@ class Workspace:
             )
         return "\n".join(out)
 
-    def render_materials(self, *, organize=False) -> str:
+    def render_materials(self, *, organize=False, reference_selection=None, include_reference=True) -> str:
         """What is really in ``runs/<id>/materials/``, by exact filename.
 
         Names are printed verbatim inside backticks because the model has to
@@ -362,7 +363,7 @@ class Workspace:
         """
         snapshot = evidence_snapshot(self.store, self.run_id)
         from ..creation_mode import current as creation_mode
-        selected_reference = creation_mode(self.store, self.run_id)
+        selected_reference = reference_selection or creation_mode(self.store, self.run_id)
         files = snapshot["materials"]
         out = [
             "以下是文件及导入观察的文字记录。本次请求未发送图片像素、视频帧或音频给模型。",
@@ -381,13 +382,16 @@ class Workspace:
             ]
             if not organize:
                 for observation in file["observations"]:
+                    if not include_reference and observation.get('purpose') == 'reference':
+                        continue
                     if selected_reference and observation.get('purpose') == 'reference' and observation.get('analysis_id') != selected_reference.get('analysis_id'):
                         continue
                     out.append("  导入观察：" + json.dumps(observation, ensure_ascii=False, sort_keys=True))
         if organize:
             from ..creative_evidence import creative_evidence
             out += ["# 创作前证据整理：商品观察、参考方法与缺口（先读，再构思）",
-                    json.dumps(creative_evidence(self.store, self.run_id, source=snapshot), ensure_ascii=False)]
+                    json.dumps(creative_evidence(self.store, self.run_id, source=snapshot,
+                        reference_selection=reference_selection, include_reference=include_reference), ensure_ascii=False)]
         out += [f"不可使用的证据：{error}" for error in snapshot["errors"]]
         out.append(snapshot["reference_discovery"]["reason"])
         out.append("`file` 字段只能逐字使用上面已列出的文件名；缺少素材时在 note 说明。")

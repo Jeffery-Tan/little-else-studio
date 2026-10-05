@@ -185,7 +185,8 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
             from .interactions import check_answer
             check_answer(store, rid, envelope.question_id)
         return prepare_job(rid, feedback_target=validate_feedback_target(rid, envelope.feedback_target),
-                           user_input_id=receipt['message_id'])
+                           user_input_id=receipt['message_id'],
+                           reference_consent=receipt.get('reference_consent', False))
 
     jobs.prepare_input = prepare_input
     jobs.prepare_followup = lambda rid, source_id: prepare_job(rid, source_user_input_id=source_id)
@@ -198,7 +199,25 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
             receipt = receive(store, run_id, payload.text, payload.request_id, payload.display_context_id,
                               feedback_target=payload.feedback_target.model_dump(exclude_none=True)
                                   if payload.feedback_target else None,
-                              question_id=payload.question_id)
+                              question_id=payload.question_id,
+                              attachments=[item.model_dump() for item in payload.attachments]
+                                  if payload.attachments is not None else None,
+                              reference_consent=payload.reference_consent,
+                              reference_target=payload.reference_target.model_dump()
+                                  if payload.reference_target else None,
+                              reference_recovery=payload.reference_recovery.model_dump(exclude_none=True)
+                                  if payload.reference_recovery else None)
+            if payload.reference_recovery:
+                recovery_meta = receipt['reference_recovery']
+                recovery_payload = {'reference_recovery': recovery_meta,
+                    'source_user_input_id': recovery_meta['source_user_input_id'],
+                    'reference_consent': payload.reference_consent}
+                recovery_payload.update({key: receipt[key] for key in ('attachments', 'reference_target')
+                                         if receipt.get(key) is not None})
+                return present_job(jobs.submit(run_id, payload.text, payload.request_id,
+                    kind='reference_recovery', payload=recovery_payload,
+                    parent_job_id=recovery_meta['parent_job_id'], user_input_id=receipt['message_id'],
+                    prepare=lambda rid: app.state.prepare_reference_recovery(rid, receipt)))
             target = payload.feedback_target
             if target and payload.question_id:
                 raise ValueError('作品反馈不能同时回答待决问题。')
@@ -207,6 +226,8 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
                                    feedback_target=validate_feedback_target(rid, target),
                                    user_input_id=receipt['message_id'])
             target_meta = {'feedback_target': target.model_dump(exclude_none=True)} if target else {}
+            media_meta = {key: receipt[key] for key in ('attachments', 'reference_target')
+                          if receipt.get(key) is not None}
             if isinstance(target, MediaFeedbackTarget):
                 location = f'第 {target.at_seconds:.1f} 秒' if target.at_seconds is not None else '这张图片'
                 message = f'针对项目中这次已保存媒体结果的{location}：{payload.text}'
@@ -222,10 +243,10 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
                     return prepare_job(rid, reference_consent=payload.reference_consent,
                                        user_input_id=receipt['message_id'])
                 return present_job(jobs.submit(run_id, payload.text, payload.request_id,
-                    payload={'question_id': payload.question_id, **({'reference_consent': True} if payload.reference_consent else {})}, prepare=prepare_answer,
+                    payload={'question_id': payload.question_id, **media_meta, **({'reference_consent': True} if payload.reference_consent else {})}, prepare=prepare_answer,
                     user_input_id=receipt['message_id']))
             return present_job(jobs.submit(run_id, message, payload.request_id,
-                payload={**target_meta, **({'reference_consent': True} if payload.reference_consent else {})} or None,
+                payload={**target_meta, **media_meta, **({'reference_consent': True} if payload.reference_consent else {})} or None,
                 prepare=prepare_target, user_input_id=receipt['message_id']))
         except (PipelineError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -255,7 +276,8 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
             from .conversation_input import receive
             session = AgentSessions(store, run_id).snapshot(session_id)
             def prepare_resume(rid):
-                current = AgentSessions(store, rid).snapshot(session_id)
+                sessions = AgentSessions(store, rid)
+                current = sessions.snapshot(session_id)
                 if (payload.expected_task_id is not None
                         and current.get('task_id') != payload.expected_task_id):
                     raise PipelineError('session_conflict', '角色任务已更新，请刷新后继续。')
@@ -263,12 +285,16 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
                     raise PipelineError('session_busy', '这项任务仍在执行，请直接补充或停止。')
                 if current.get('status') == 'cancelled' or current.get('stop_requested'):
                     raise PipelineError('session_cancelled', '这项任务已经停止，不能恢复旧执行；请发起新的明确任务。')
+                if payload.resume_action == 'continue':
+                    sessions.bind_resume_action(session_id, receipt, expected_task_id=payload.expected_task_id)
+                sessions.require_resume_input(session_id, receipt)
                 return prepare_job(rid, user_input_id=receipt['message_id'],
                     role_resume={'session_id': session_id})
             receipt = receive(store, run_id, payload.text, payload.request_id)
             return present_job(jobs.submit(run_id, payload.text, payload.request_id,
                 kind='role_resume', payload={'session_id': session_id,
-                    'expected_task_id': payload.expected_task_id},
+                    'expected_task_id': payload.expected_task_id,
+                    **({'resume_action': payload.resume_action} if payload.resume_action else {})},
                 prepare=prepare_resume, user_input_id=receipt['message_id']))
         except (PipelineError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -332,7 +358,12 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
                                                run_id, payload.feedback_target),
                                            display_context_id=payload.display_context_id,
                                            question_id=payload.question_id,
-                                           target_session_id=payload.target_session_id))
+                                           target_session_id=payload.target_session_id,
+                                           reference_consent=payload.reference_consent,
+                                           attachments=[item.model_dump() for item in payload.attachments]
+                                               if payload.attachments is not None else None,
+                                           reference_target=payload.reference_target.model_dump()
+                                               if payload.reference_target else None))
         except (PipelineError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 

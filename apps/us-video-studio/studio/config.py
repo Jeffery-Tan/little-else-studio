@@ -30,8 +30,10 @@ API_VERSION = "2023-06-01"
 KNOWN_MODELS = ("deepseek-flash", "deepseek-v4-pro")
 DEFAULT_MODEL = "deepseek-flash"
 
-#: Roles that produce a stage artifact or a review verdict.
+#: Historical configuration fields retain the retired reviewer binding.
 ROLES = ("orchestrator", "director", "material", "writer", "reviewer")
+#: Roles eligible for ordinary new creative jobs.
+ACTIVE_ROLES = ("orchestrator", "director", "material", "writer")
 
 #: Historical optional soft limits. New data roots do not impose spend caps.
 #: Existing numeric config.json values are still accepted; null disables a cap.
@@ -122,7 +124,8 @@ class Settings:
     def usd_estimate_available(self) -> bool:
         """Whether the configured rate cards can estimate every role's USD."""
         if self.connection_by_role:
-            return all(self.pricing_for(role, self.model_for(role)).known for role in ROLES)
+            return all(self.pricing_for(role, self.model_for(role)).known
+                       for role in self.connection_by_role)
         return self.pricing.known
 
     @property

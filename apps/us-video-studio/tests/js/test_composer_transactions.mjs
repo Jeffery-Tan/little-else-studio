@@ -317,3 +317,224 @@ test('a clicked clarification choice survives an immediate reload before typing 
   await fresh.run('submit()');
   assert.equal(fresh.jobs[0].payload.question_id,'question-one');
 });
+
+test('reference adaptation preserves words and replaces old destinations through the persistent composer transaction',async()=>{
+  const task={reference_id:'reference-one',name:'source.mp4',status:'completed',
+    candidate:{analysis_id:'analysis-one',candidate_sha256:'b'.repeat(64)}};
+  for(const previous of ['ordinary','writing','role']){
+    const f=fixture({result:{accepted:false,reason:'definite refusal'}});
+    f.ctx.__task=task;
+    f.run(webSource('journey.js'));
+    f.run(`state.referenceTasks=[__task];$('chat-input').value='用户原来的未发送要求';`);
+    if(previous==='writing'){
+      f.writing();
+      f.run(`state.composerRequestKind='writing_revision';$('chat-input').value='用户原来的未发送要求';`);
+    }
+    if(previous==='role')f.run(`state.roleTarget={run_id:'one',session_id:'old-role'};`);
+    f.run(`composeReferencePrompt(__task);`);
+    assert.equal(f.jobs.length,0,'selecting a reference must not send a task');
+    assert.match(f.run(`$('chat-input').value`),/^用户原来的未发送要求\n\n请把这条参考视频/);
+    assert.equal(f.run('state.feedbackTarget'),null);
+    assert.equal(f.run('state.roleTarget'),null);
+    assert.equal(f.run('state.composerRequestKind'),null);
+    const draft=JSON.parse(f.run(`JSON.stringify(readComposerRecord('one').draft)`));
+    assert.equal(draft.referenceTarget.reference_id,'reference-one');
+    assert.equal(draft.text,f.run(`$('chat-input').value`));
+    await f.run('submit()');
+    assert.equal(f.jobs[0].payload.reference_target.analysis_id,'analysis-one');
+    assert.equal(f.jobs[0].payload.request_kind,undefined);
+    assert.equal(f.jobs[0].payload.feedback_target,undefined);
+    assert.equal(f.run('state.referenceTarget.reference_id'),'reference-one');
+    const reloaded=fixture({storage:f.storage});
+    reloaded.ctx.__task=task;
+    reloaded.run(`state.referenceTasks=[__task];restoreComposerDraft(readComposerRecord('one').draft);`);
+    assert.equal(reloaded.run('state.referenceTarget.candidate_sha256'),'b'.repeat(64));
+    assert.equal(reloaded.run(`$('chat-input').value`),draft.text);
+    reloaded.run(`state.referenceTasks[0]={...__task,status:'stale'};`);
+    const blocked=await reloaded.run('submit()');
+    assert.equal(blocked.accepted,false);
+    assert.match(blocked.reason,/参考分析已变化/);
+    assert.equal(reloaded.jobs.length,0);
+    assert.equal(reloaded.run(`$('chat-input').value`),draft.text);
+  }
+});
+
+test('reference continuation keeps the original owner and true new words through rejection and refresh',async()=>{
+  const task={reference_id:'reference-one',name:'source.mp4',status:'analyzed',
+    instruction:'只拆解开场的动作和声音',
+    candidate:{analysis_id:'analysis-one',candidate_sha256:'b'.repeat(64)},
+    recovery:{allowed:true,reference_id:'reference-one',parent_job_id:'failed-parent',
+      source_user_input_id:'original-user-message',interpretation_id:'original-interpretation',
+      deliverable:'writing',original_text:'借用参考完成整套脚本',requires_observation:false}};
+  const f=fixture({result:{accepted:false,reason:'definite refusal'}});
+  f.ctx.__task=task;
+  f.run(webSource('reference-video.js'));f.run(webSource('journey.js'));
+  f.run(`state.referenceTasks=[__task];$('chat-input').value='这次补充：语气更像朋友';
+    composeReferenceContinuation(__task);`);
+  const original=f.run(`$('chat-input').value`);
+  assert.match(original,/^这次补充：语气更像朋友/);
+  assert.doesNotMatch(original,/原任务目标：只拆解|只拆解开场/);
+  assert.equal(f.run(`state.referenceRecovery.source_user_input_id`),'original-user-message');
+  await f.run('submit()');
+  assert.equal(f.jobs[0].payload.reference_recovery.parent_job_id,'failed-parent');
+  assert.match(f.jobs[0].payload.text,/这次补充：语气更像朋友/);
+  assert.equal(f.run(`$('chat-input').value`),original);
+  const fresh=fixture({storage:f.storage});fresh.ctx.__task=task;
+  fresh.run(`state.referenceTasks=[__task];restoreComposerDraft(readComposerRecord('one').draft);`);
+  assert.equal(fresh.run(`state.referenceRecovery.interpretation_id`),'original-interpretation');
+  fresh.run(`state.referenceTasks[0]={...__task,recovery:{...__task.recovery,parent_job_id:'different-parent'}};`);
+  const refused=await fresh.run('submit()');
+  assert.equal(refused.accepted,false);assert.match(refused.reason,/原任务已变化/);
+  assert.equal(fresh.jobs.length,0);assert.equal(fresh.run(`$('chat-input').value`),original);
+});
+
+test('a reference recovery draft cannot steer a different active job',async()=>{
+  const f=fixture();
+  f.run(`state.referenceRecovery={reference_id:'ref',parent_job_id:'failed',source_user_input_id:'old',interpretation_id:'task'};
+    state.referenceTasks=[{reference_id:'ref',recovery:{...state.referenceRecovery,allowed:true}}];
+    state.busy=true;currentJob={job_id:'other',job_kind:'conversation',status:'running'};
+    $('chat-input').value='继续原任务';`);
+  const refused=await f.run('submit()');
+  assert.equal(refused.accepted,false);assert.match(refused.reason,/等本轮结束/);
+  assert.equal(f.steers.length,0);assert.equal(f.jobs.length,0);
+  assert.equal(f.run(`$('chat-input').value`),'继续原任务');
+});
+
+test('both attachment pickers append and submit per-file uses instead of replacing the earlier material',async()=>{
+  const f=fixture();
+  f.run(webSource('journey.js'));
+  f.run(`initJourney();`);
+  const product=new File(['product'],'product.mp4',{type:'video/mp4'});
+  const image=new File(['image'],'product.jpg',{type:'image/jpeg'});
+  const reference=new File(['reference'],'reference.mp4',{type:'video/mp4'});
+  const select=(id,value)=>{const picker=f.document.getElementById(id);picker.files=value;picker.onchange();};
+  select('chat-files',[product,image]);select('chat-reference-files',[reference]);
+  assert.deepEqual(Array.from(f.run('StudioComposer.files("one").map(file=>file.name)')),
+    ['product.mp4','product.jpg','reference.mp4']);
+  assert.equal(f.document.getElementById('chat-attachments').querySelectorAll('.attachment-chip').length,3);
+  f.ctx.fetch=async()=>({ok:true});
+  f.run(`$('chat-input').value='按商品信息适配参考';`);
+  await f.run('submit()');
+  assert.deepEqual(JSON.parse(JSON.stringify(f.jobs[0].payload.attachments)),[
+    {name:'product.mp4',purpose:'product'},{name:'product.jpg',purpose:null},{name:'reference.mp4',purpose:'reference'},
+  ]);
+  select('start-reference-files',[reference]);select('start-files',[product,image]);
+  assert.equal(f.document.getElementById('start-attachments').querySelectorAll('.attachment-chip').length,3);
+  const uses=f.document.getElementById('start-attachments').querySelectorAll('select').map(select=>select.value);
+  assert.deepEqual(uses,['reference','product']);
+});
+
+test('home sends both purposes and restores confirmed uploads after a rejected first request without retransmitting',async()=>{
+  const f=fixture({result:{accepted:false,reason:'connection unavailable'}});
+  f.run(webSource('journey.js'));
+  f.run(`loadRuns=async()=>{};selectRun=async()=>{};setStudioView=()=>{};initJourney();`);
+  const uploads=[];
+  f.ctx.fetch=async(url,options)=>{
+    if(String(url).includes('/materials?'))uploads.push(options.body.get('file').name);
+    return {ok:true,json:async()=>({run_id:'one'})};
+  };
+  const select=(page,id,files)=>{const picker=page.document.getElementById(id);picker.files=files;picker.onchange();};
+  select(f,'start-files',[new File(['product'],'product.mp4',{type:'video/mp4'})]);
+  select(f,'start-reference-files',[new File(['reference'],'reference.mp4',{type:'video/mp4'})]);
+  f.run(`$('start-prompt').value='按这些素材拆解参考';`);
+  await f.document.getElementById('start-conversation').onsubmit({preventDefault(){}});
+  assert.deepEqual(uploads,['product.mp4','reference.mp4']);
+  assert.equal(f.jobs.length,1);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.jobs[0].payload.attachments)),[
+    {name:'product.mp4',purpose:'product'},{name:'reference.mp4',purpose:'reference'},
+  ]);
+  assert.equal(f.run(`$('start-prompt').value`),'按这些素材拆解参考');
+  assert.deepEqual(JSON.parse(f.storage.getItem('studio-first-message')).uploaded,[0,1]);
+  const restored=fixture({storage:f.storage});
+  restored.run(webSource('journey.js'));
+  restored.run(`loadRuns=async()=>{};selectRun=async()=>{};setStudioView=()=>{};initJourney();`);
+  restored.ctx.fetch=async(url)=>{
+    assert.doesNotMatch(String(url),/\/materials\?/,'confirmed uploads are referenced after reload');
+    return {ok:true,json:async()=>({run_id:'one'})};
+  };
+  assert.equal(restored.document.getElementById('start-attachments').querySelectorAll('.attachment-chip').length,2);
+  await restored.document.getElementById('start-conversation').onsubmit({preventDefault(){}});
+  assert.equal(restored.jobs.length,1);
+  assert.notEqual(restored.jobs[0].payload.request_id,f.jobs[0].payload.request_id,
+    'a confirmed rejection is corrected under a new input identity');
+  assert.deepEqual(JSON.parse(JSON.stringify(restored.jobs[0].payload.attachments)),JSON.parse(JSON.stringify(f.jobs[0].payload.attachments)));
+  assert.equal(restored.storage.getItem('studio-first-message'),null);
+});
+
+test('home partially uploaded first request restores exact uses and order across separate reselection pickers',async()=>{
+  const f=fixture();
+  f.run(webSource('journey.js'));
+  f.run(`loadRuns=async()=>{};selectRun=async()=>{};setStudioView=()=>{};initJourney();`);
+  const product=new File(['product'],'product.mp4',{type:'video/mp4'});
+  const reference=new File(['reference'],'reference.mp4',{type:'video/mp4'});
+  const image=new File(['image'],'product.jpg',{type:'image/jpeg'});
+  const select=(page,id,files)=>{const picker=page.document.getElementById(id);picker.files=files;picker.onchange();};
+  select(f,'start-files',[product,image]);select(f,'start-reference-files',[reference]);
+  f.run(`$('start-prompt').value='同一条首次请求';`);
+  f.ctx.fetch=async(url,options)=>{
+    const failed=String(url).includes('/materials?')&&options.body.get('file').name==='product.jpg';
+    return {ok:!failed,json:async()=>failed?{detail:'upload refused'}:{run_id:'one'}};
+  };
+  await f.document.getElementById('start-conversation').onsubmit({preventDefault(){}});
+  assert.equal(f.jobs.length,0);
+  const saved=JSON.parse(f.storage.getItem('studio-first-message'));
+  assert.deepEqual(saved.uploaded,[0]);
+  const restored=fixture({storage:f.storage});
+  restored.run(webSource('journey.js'));
+  restored.run(`loadRuns=async()=>{};selectRun=async()=>{};setStudioView=()=>{};initJourney();`);
+  const uploads=[];
+  restored.ctx.fetch=async(url,options)=>{
+    if(String(url).includes('/materials?'))uploads.push(options.body.get('file').name);
+    return {ok:true,json:async()=>({run_id:'one'})};
+  };
+  select(restored,'start-reference-files',[reference]);
+  select(restored,'start-files',[image]);
+  await restored.document.getElementById('start-conversation').onsubmit({preventDefault(){}});
+  assert.deepEqual(uploads,['product.jpg','reference.mp4']);
+  assert.deepEqual(JSON.parse(JSON.stringify(restored.jobs[0].payload.attachments)),[
+    {name:'product.mp4',purpose:'product'},{name:'product.jpg',purpose:null},{name:'reference.mp4',purpose:'reference'},
+  ]);
+  assert.equal(restored.jobs[0].payload.request_id,saved.request_id);
+});
+
+test('running task allows removing its unsent draft attachment and posting only progress words without stopping',async()=>{
+  const f=fixture({runtime:'real'}); const requests=[];
+  f.ctx.source=new File(['uploaded bytes'],'reference.mp4',{type:'video/mp4'});
+  f.ctx.fetch=async(url,options)=>{
+    requests.push({url,body:options.body instanceof FormData?'upload':JSON.parse(options.body)});
+    return {ok:true,json:async()=>({job_id:'active',job_kind:'conversation',status:'running',events:[]})};
+  };
+  f.run(`StudioComposer.setFiles('one',[source],'reference');`);
+  await f.run(`StudioComposer.upload('one',fetch)`);
+  f.run(`state.busy=true;currentJob=null;StudioComposer.render();`);
+  const remove=f.document.getElementById('chat-attachments').querySelector('[data-attachment-remove]');
+  assert.equal(remove.disabled,true,'busy upload/restoration without an active job remains locked');
+  f.run(`showJob({job_id:'active',job_kind:'conversation',status:'running',events:[]});`);
+  assert.equal(remove.disabled,false,'the actual job-state projection unlocks draft removal after reload');
+  remove.onclick();
+  assert.equal(f.run(`StudioComposer.files('one').length`),0);
+  f.run(`$('chat-input').value='现在进度怎么样？';`);
+  const result=await f.run('submit()');
+  assert.equal(result.accepted,true);
+  assert.equal(requests.length,2);
+  assert.match(requests[1].url,/\/jobs\/active\/steer$/);
+  assert.equal(requests[1].body.text,'现在进度怎么样？');
+  assert.equal(requests[1].body.attachments,undefined);
+  assert.ok(requests.every(request=>!request.url.includes('/cancel')&&request.body!=='delete'));
+  assert.equal(f.run('currentJob.status'),'running');
+});
+
+test('uploading or unresolved input keeps draft removal locked even when an older job is visible',()=>{
+  const f=fixture({runtime:'real'});
+  f.ctx.source=new File(['bytes'],'product.png',{type:'image/png'});
+  f.run(`StudioComposer.setFiles('one',[source]);state.busy=true;
+    currentJob={job_id:'active',status:'running',job_kind:'conversation'};
+    state.composerSubmissions.set('one',{stamp:1});StudioComposer.render();`);
+  const remove=f.document.getElementById('chat-attachments').querySelector('[data-attachment-remove]');
+  assert.equal(remove.disabled,true);
+  remove.onclick();assert.equal(f.run(`StudioComposer.files('one').length`),1);
+  f.run(`state.composerSubmissions.delete('one');
+    sessionStorage.setItem('studio-job-pending:one',JSON.stringify({request_id:'unknown',text:'Old input'}));syncComposerAction();`);
+  assert.equal(remove.disabled,true);
+  remove.onclick();assert.equal(f.run(`StudioComposer.files('one').length`),1);
+});

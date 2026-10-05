@@ -91,7 +91,7 @@ def build_app(
 
     def prepare_job(run_id, review=None, reference_consent=False, feedback_target=None,
                     writing_revision=None, direction_resume=None, user_input_id=None,
-                    source_user_input_id=None, role_resume=None):
+                    source_user_input_id=None, role_resume=None, reference_recovery_context=None):
         if review is not None:
             require_review_version(run_id, review)
         if writing_revision is not None:
@@ -263,7 +263,9 @@ def build_app(
                 image_observer=observe_images).send(
                     text, feedback_context=feedback_target, user_input_id=user_input_id,
                     source_user_input_id=source_user_input_id,
-                    internal_instruction=user_input_id is None)
+                    internal_instruction=user_input_id is None,
+                    **({'reference_recovery_context': reference_recovery_context}
+                       if reference_recovery_context is not None else {}))
         return run, summary
 
     jobs = JobManager(store, pipeline, ledger, prepare_job)

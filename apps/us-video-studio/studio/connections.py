@@ -19,7 +19,7 @@ from pathlib import Path
 from types import MappingProxyType
 from urllib.parse import urlsplit
 
-from .config import ROLES, Pricing, Settings
+from .config import ACTIVE_ROLES, ROLES, Pricing, Settings
 from .agents.client import SafePreflightError
 from .connection_checks import valid_deepseek_key
 
@@ -106,6 +106,15 @@ def _public(doc):
             'roles': copy.deepcopy(doc['roles'])}
 
 
+def _role_projection(doc, roles):
+    """Freeze required routes while preserving the complete saved configuration."""
+    if not roles or any(role not in ROLES for role in roles):
+        raise ValueError('A connection snapshot needs supported roles')
+    public = _public(doc)
+    public['roles'] = {role: public['roles'][role] for role in roles}
+    return public
+
+
 def _pricing(raw):
     if not isinstance(raw, dict):
         raise ValueError('Pricing must be keyed by exact model name')
@@ -153,7 +162,9 @@ class ConnectionStore:
 
     def settings(self, base: Settings) -> Settings:
         """Budget/UI projection without decrypting credentials or starting a job."""
-        return ConnectionSnapshot(json.dumps(self.public(), ensure_ascii=False), {}, self.root).settings(base)
+        with _LOCK:
+            public = _role_projection(self._read(), ACTIVE_ROLES)
+        return ConnectionSnapshot(json.dumps(public, ensure_ascii=False), {}, self.root).settings(base)
 
     def save(self, payload: dict):
         if not isinstance(payload, dict):
@@ -264,7 +275,8 @@ class ConnectionStore:
         finally:
             self._check_lock.release()
 
-    def snapshot(self, *, image_connection=None, image_model=None, expected_revision=None):
+    def snapshot(self, *, roles=None, image_connection=None, image_model=None, expected_revision=None):
+        """Only required roles may route/decrypt; retired roles require explicit scope."""
         with _LOCK:
             doc = self._read()
             if image_connection is not None:
@@ -279,15 +291,18 @@ class ConnectionStore:
                     raise ConnectionUnavailable('请填写支持图片输入的模型名称，不能包含空格。')
                 # An ephemeral binding, never a change to the saved creative team.
                 doc['roles']['material'] = {'connection': image_connection, 'model': image_model}
+            selected_roles = (('material',) if image_connection is not None
+                              else ACTIVE_ROLES if roles is None else tuple(roles))
+            public = _role_projection(doc, selected_roles)
             tokens = {}
-            used = {image_connection} if image_connection is not None else {b['connection'] for b in doc['roles'].values()}
+            used = {b['connection'] for b in public['roles'].values()}
             for c in doc['connections']:
                 if c['id'] in used and c.get('protected_key'):
                     try:
                         tokens[c['id']] = _dpapi(base64.b64decode(c['protected_key'], validate=True), decrypt=True).decode('utf-8')
                     except (ValueError, UnicodeError):
                         raise ValueError('Stored credential could not be opened by this Windows account') from None
-            return ConnectionSnapshot(json.dumps(_public(doc), ensure_ascii=False), MappingProxyType(tokens), self.root)
+            return ConnectionSnapshot(json.dumps(public, ensure_ascii=False), MappingProxyType(tokens), self.root)
 
 
 @dataclass(frozen=True)
@@ -324,13 +339,18 @@ class RoutedClient:
         self.cancel_event = cancel_event
 
     def validate_model(self, role, model):
-        if self._snapshot.public()['roles'][role]['model'] != model:
+        binding = self._snapshot.public()['roles'].get(role)
+        if binding is None:
+            raise ConnectionUnavailable("Role is outside this job's frozen connections")
+        if binding['model'] != model:
             raise ConnectionUnavailable('Model differs from the frozen role connection; start a new job to change it')
 
     def for_role(self, role: str, run_id: str):
         self.check_cancel()
         doc = self._snapshot.public()
-        binding = doc['roles'][role]
+        binding = doc['roles'].get(role)
+        if binding is None:
+            raise ConnectionUnavailable("Role is outside this job's frozen connections")
         connection = next(c for c in doc['connections'] if c['id'] == binding['connection'])
         provider = connection['provider']
         if provider == 'codex_cli':

@@ -321,13 +321,21 @@ class Dispatcher:
                               turn_scope=turn_scope, session_id=session_id)
         return self._wait_outcome(row['session_id'])
 
-    def resume_session(self, session_id, *, brief='', user_input_id=None, parent_job_id=None):
+    def resume_session(self, session_id, *, brief='', user_input_id=None, parent_job_id=None, revision_scope=None):
         with self.store.run_lock(self.run_id):
             row = self._sessions.snapshot(session_id)
+            if user_input_id:
+                from ..conversation_input import message
+                self._sessions.require_resume_input(session_id, message(self.store, self.run_id, user_input_id),
+                                                    revision_scope=revision_scope)
             if row['status'] in {'queued', 'running', 'cancelled'} or row['stop_requested']:
                 raise ToolError('Only interrupted or waiting sessions can be explicitly continued')
             saved = self._saved_outcome(session_id)
             if saved.submitted:
+                if user_input_id or self._sessions.pending(session_id):
+                    raise ToolError(self._sessions.closed_input_reason(session_id))
+                self._sessions.commit_artifact(session_id, {
+                    'stage': row['stage'], 'version': saved.artifact_version, 'sha256': saved.artifact_sha256})
                 self._sessions.finish(session_id, 'completed', artifact_receipt={
                     'stage': row['stage'], 'version': saved.artifact_version, 'sha256': saved.artifact_sha256})
                 return saved
@@ -381,9 +389,16 @@ class Dispatcher:
         if any(row['status'] == 'needs_clarification' for row in
                constraints_for_scope(constraints, stage=stage, paths=paths)):
             raise ToolError('本阶段的用户项目条件尚有冲突，须先澄清，不能沿旧条件继续派工。')
+        reference = (turn_scope or {}).get('reference_selection')
+        if reference:
+            from ..creation_mode import context as reference_context, current
+            reference_context(self.store, self.run_id, selection=reference)
+            if current(self.store, self.run_id) != reference:
+                raise ToolError('本任务绑定的参考与当前创作依据不一致，请回主制片核对，不能换用其他参考派工。')
         context = self.learning.prepare_context(
             self.run_id, role, **selection,
             purpose="message" if role == "director" else "storyboard",
+            **({'reference_selection': reference} if reference else {}),
         )
         self._emit({"type": "learning_context", "role": role, "stage": stage,
                     "snapshot_sha256": context["snapshot_sha256"], "evidence_ref": context["evidence_ref"]})
@@ -558,6 +573,9 @@ class Dispatcher:
                         limitations=args.get("limitations") or [],
                         structured=args.get("structured"), actor=f"{role}:{attempt.key}",
                     )
+                    if self._session_id:
+                        self._sessions.commit_artifact(self._session_id, {
+                            'stage': stage, 'version': artifact.version, 'sha256': artifact.sha256})
                     if revision_scope:
                         outcome.impact = record_applied(self.store, self.pipeline, self.run_id, revision_scope, artifact, changes)
                 submitted["key"] = f"{stage}-v{artifact.version}"

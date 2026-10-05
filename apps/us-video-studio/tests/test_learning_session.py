@@ -682,6 +682,8 @@ def test_learning_answer_settles_pending_question_for_id_and_plain_reply(tmp_pat
         assert len(requested) == 2
         second_qid = requested[1]['question']['id']
         assert pending_question(store, run_id)['id'] == second_qid
+        model.turns.insert(0, tool_turn('answer2', 'record_question_answer', {
+            'question_id': second_qid, 'quote': '开场更重要'}))
         fourth = client.post(f'/api/runs/{run_id}/jobs', json={
             'text': '开场更重要', 'request_id': 'q-plain-answer'})
         assert fourth.status_code == 200, fourth.text
@@ -694,8 +696,35 @@ def test_learning_answer_settles_pending_question_for_id_and_plain_reply(tmp_pat
         timeline = client.get(f'/api/runs/{run_id}/timeline').json()
         interaction = timeline.get('interaction')
         assert interaction is None or interaction.get('id') not in {first_qid, second_qid}
-
         # Answering a clarification never grants approval or generation.
         assert store.list_approvals(run_id) == []
         assert not any(e['kind'] in {'approval', 'image_approved', 'generation_authorized'}
                        for e in store.read_events(run_id))
+
+
+def test_learning_progress_query_does_not_answer_pending_preference(tmp_path):
+    from studio.interactions import pending_question
+    repo, store, settings, _ = setup(tmp_path)
+    # Keep snapshot temp-file paths below Windows MAX_PATH in nested test roots.
+    run_id = 'learn-status'
+    store.create_run(run_id, 'Study', 'Clarify expression', kind='learning')
+    question = {'question': '更关注节奏还是开场？',
+                'options': [{'label': '节奏'}, {'label': '开场'}], 'recommended': 0}
+    model = ScriptedModel([tool_turn('ask', 'ask_user', question), final_turn('等待你的选择。')],
+                          legacy_task_contracts=False)
+    app = build_app(settings, client_factory=lambda: model,
+                    learning_repository_root=repo, learning_media_root=tmp_path / 'media')
+    with TestClient(app) as client:
+        first = client.post(f'/api/runs/{run_id}/jobs', json={
+            'text': '先确认表达重点', 'request_id': 'start'})
+        assert first.status_code == 200, first.text
+        started = _wait_job(client, run_id, first.json())
+        assert started['status'] == 'succeeded', started
+        original = pending_question(store, run_id)
+        status = client.post(f'/api/runs/{run_id}/jobs', json={
+            'text': '先不要选，我只是问目前做到哪一步了？', 'request_id': 'status'})
+        assert status.status_code == 200, status.text
+        finished = _wait_job(client, run_id, status.json())
+        assert finished['status'] == 'succeeded', finished
+    assert pending_question(store, run_id)['id'] == original['id']
+    assert not any(e['kind'] == 'interaction_answered' for e in store.read_events(run_id))

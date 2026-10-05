@@ -1,6 +1,7 @@
 "use strict";
 
 const ROLE_NAMES = { orchestrator: "主制片", director: "创意导演", material: "视觉策划", writer: "编剧", reviewer: "独立审片（已停用）" };
+const ACTIVE_CONNECTION_ROLES = ["orchestrator", "director", "material", "writer"];
 const ROLE_DESCRIPTIONS = { orchestrator: "理解需求，统筹每一步", director: "找到切入点与表达方向", material: "安排画面、动作与素材", writer: "把创意写成可拍的脚本", reviewer: "保留历史配置；当前工作流不会调用" };
 const PROVIDER_NAMES = { codex_cli: "Codex · 本机登录", deepseek: "DeepSeek", openai_compat: "其他服务 · OpenAI 兼容", anthropic_compat: "其他服务 · Anthropic 兼容" };
 const DEEPSEEK_MODELS = ["deepseek-flash", "deepseek-v4-pro"];
@@ -81,8 +82,8 @@ function openConnectionDialog(config) {
       const original = config.roles[fields.role];
       if (original?.connection !== fields.connection.value || (original?.model || "") !== model
           || (row && !endpointMatches(row))) changed++;
-      if (!row || (row.provider.value !== "codex_cli" && (!model || !(row.key.value || (row.original.has_key && endpointMatches(row)))
-          || (row.provider.value !== "deepseek" && !row.baseUrl.value.trim())))) incomplete++;
+      if (ACTIVE_CONNECTION_ROLES.includes(fields.role) && (!row || (row.provider.value !== "codex_cli" && (!model || !(row.key.value || (row.original.has_key && endpointMatches(row)))
+          || (row.provider.value !== "deepseek" && !row.baseUrl.value.trim()))))) incomplete++;
       fields.priceHelp.hidden = !row || row.provider.value === "codex_cli";
       if (!row) { fields.cost.textContent = "请先选择模型服务。"; continue; }
       if (row.provider.value === "codex_cli") {
@@ -99,7 +100,7 @@ function openConnectionDialog(config) {
         fields.cost.textContent = `参考价格：输入 $${Number(price.input.value)} / 输出 $${Number(price.output.value)}，每百万 token。${price.asOf.value ? `核实于 ${price.asOf.value}。` : "核实日期未填写。"}实际账单以提供方为准。`;
       }
     }
-    teamSummary.textContent = `${Object.keys(roleInputs).length - incomplete} / ${Object.keys(roleInputs).length} 个角色配置齐全${incomplete ? ` · ${incomplete} 个角色还需模型、密钥或地址` : ""}。${changed ? `${changed} 个角色分配已修改，尚未保存。` : "角色分配未改变。"}配置齐全不代表已通过真实创作测试。`;
+    teamSummary.textContent = `${ACTIVE_CONNECTION_ROLES.length - incomplete} / ${ACTIVE_CONNECTION_ROLES.length} 个角色配置齐全${incomplete ? ` · ${incomplete} 个角色还需模型、密钥或地址` : ""}。${changed ? `${changed} 个角色分配已修改，尚未保存。` : "角色分配未改变。"}配置齐全不代表已通过真实创作测试。`;
   }
   function refreshModel(fields, value = selectedModel(fields)) {
     const row = rows.find(item => item.id === fields.connection.value);

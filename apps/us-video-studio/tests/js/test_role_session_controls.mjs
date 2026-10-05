@@ -4,10 +4,18 @@ import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import {loadApp, makeDom, webSource} from './dom-fixture.mjs';
 
-const role = (extra={}) => ({session_id:'writer-one',role:'writer',stage:'writing',
-  parent_job_id:'job-one',task_id:'attempt-one',status:'running',...extra});
+const RESUME={resume_action:'continue',text:'继续这项未完成的创作任务，保留已保存内容并先核对当前依据。'};
+const role = (extra={}) => {
+  const row={session_id:'writer-one',role:'writer',stage:'writing',
+    parent_job_id:'job-one',task_id:'attempt-one',status:'running',...extra};
+  if(['waiting','interrupted','failed'].includes(row.status)&&!row.input_closed&&!row.artifact_receipt)
+    row.resume_command={...RESUME};
+  return row;
+};
 const job = (extra={}) => ({job_id:'job-one',job_kind:'conversation',status:'running',
   goal_revision:3,cursor:9,events:[],role_sessions:[role()],...extra});
+const saved={stage:'writing',version:2,sha256:'a'.repeat(64)};
+const pendingNotice='脚本第 2 版已保存，补充未投递。请阅读当前保存版本，在新稿上重新选择具体位置并发送修改意见；旧任务不会重放。';
 
 // Runs the shipped controllers with an offline HTTP boundary. This DOM adapter
 // models modal focus and queued close events, but does not verify browser layout.
@@ -139,6 +147,116 @@ test('independent session changes refresh team controls at the same root cursor'
   }
 });
 
+test('saved running role shows closure and blocks a retained supplement control while preserving stop',async()=>{
+  const app=await page();app.run('openTeamProgress();');
+  const staleAmend=app.buttons('补充要求')[0];
+  app.ctx.__job=job({role_sessions:[role({input_closed:true,artifact_receipt:saved})]});
+  app.run('showJob(__job);');
+  assert.equal(app.buttons('补充要求').length,0);
+  assert.equal(app.buttons('停止此项').length,1);
+  assert.equal(app.buttons('查看已保存版本').length,1);
+  assert.match(app.document.querySelector('.team-dialog-body').textContent,/产物已保存，正在收尾/);
+  staleAmend.click();
+  assert.equal(app.run('state.roleTarget'),undefined);
+  assert.match(app.document.getElementById('toast').textContent,/第 2 版已保存/);
+  assert.equal(app.calls.length,0);
+});
+
+test('role feedback drafted before closure is retained without posting or converting to an ordinary job',async()=>{
+  const app=await page();
+  app.run("setRoleFeedbackTarget('one',currentJob.role_sessions[0]);$('chat-input').value='只改这份已保存脚本的结尾';");
+  app.ctx.__job=job({role_sessions:[role({input_closed:true,artifact_receipt:saved,pending_input_notice:pendingNotice})]});
+  app.run('showJob(__job);');
+  const result=await app.run('submit()');
+  assert.equal(result.accepted,false);
+  assert.equal(result.draft_restored,true);
+  assert.equal(app.document.getElementById('chat-input').value,'只改这份已保存脚本的结尾');
+  assert.equal(app.run('state.roleTarget.session_id'),'writer-one');
+  assert.match(app.document.getElementById('toast').textContent,/补充未投递/);
+  assert.equal(app.calls.length,0);
+});
+
+test('a save racing a real steer refusal keeps the precise reason and original scoped draft',async()=>{
+  const app=await page();
+  app.run("setRoleFeedbackTarget('one',currentJob.role_sessions[0]);$('chat-input').value='保存过程中发出的原话';openTeamProgress();");
+  app.ctx.__api=async(path,options)=>{
+    app.calls.push({path,body:JSON.parse(options.body)});
+    app.ctx.__job=job({role_sessions:[role({input_closed:true,artifact_receipt:saved})]});
+    app.run('showJob(__job);');
+    const error=new Error('脚本第 2 版已保存，旧任务不再接收补充。请阅读当前版本，在新稿上重新选择具体位置并发送修改意见。');
+    error.status=409;throw error;
+  };
+  const result=await app.run('submit()');
+  assert.equal(result.accepted,false);
+  assert.equal(result.draft_restored,true);
+  assert.equal(app.calls.length,1);assert.match(app.calls[0].path,/\/steer$/);
+  assert.equal(app.calls[0].body.target_session_id,'writer-one');
+  assert.equal(app.document.getElementById('chat-input').value,'保存过程中发出的原话');
+  assert.equal(app.run('state.roleTarget.session_id'),'writer-one');
+  assert.equal(app.run('currentJob.job_id'),'job-one');
+  assert.equal(app.run("readPendingSteer('one')"),null);
+  assert.match(app.document.getElementById('toast').textContent,/第 2 版已保存/);
+  assert.equal(app.buttons('补充要求').length,0);
+});
+
+test('historical saved role keeps undelivered input visible and reads its receipt without replaying',async()=>{
+  const app=await page(job({status:'failed',role_sessions:[role({status:'failed',
+    artifact_receipt:saved,pending_message_count:1,pending_input_notice:pendingNotice})]}));
+  const gets=[];
+  app.ctx.__api=async(path,options)=>{
+    assert.equal(options,undefined,'Reading saved work cannot submit a task');gets.push(path);
+    return {stage:'writing',version:2,sha256:saved.sha256,integrity_ok:true,
+      numbered:'脚本第 2 版',author:'writer',created_at:'2026-10-04',content:'Saved exact version'};
+  };
+  app.run('openTeamProgress();');
+  assert.equal(app.buttons('继续此项').length,0);
+  assert.match(app.document.querySelector('.team-dialog-body').textContent,/补充未投递/);
+  app.buttons('查看已保存版本')[0].click();app.flushClose();
+  for(let i=0;i<3;i++)await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(gets,['/api/runs/one/artifacts/writing/2']);
+  assert.equal(app.run('readerState.version'),2);
+  assert.equal(app.document.getElementById('reader-title').textContent,'脚本第 2 版');
+  assert.equal(app.run('currentJob.role_sessions[0].pending_message_count'),1);
+  assert.equal(app.calls.length,0);
+});
+
+test('new-baseline feedback opens the current script and binds the newly selected exact field',async()=>{
+  const app=await page(job({status:'failed',role_sessions:[role({status:'failed',
+    artifact_receipt:saved,pending_message_count:1,pending_input_notice:pendingNotice})]}));
+  for(const file of ['md.js','blocks.js','stage.js','workspace.js'])vm.runInContext(webSource(file),app.ctx,{filename:file});
+  app.ctx.__current={stage:'writing',label:'脚本与分镜',has_doc:true,version:3,
+    artifact_sha256:'b'.repeat(64),integrity_ok:true,stale:false,state:'done',blank:{text:''},
+    questions:[],team_issues:[],blocks:[{type:'cards',title:'逐段',cards:[{head:'0:00–0:03',
+      fields:[{label:'画面',value:'Current scene'},{label:'台词',value:'Accurate new line'}]}]}]};
+  app.run(`state.rail=[__current];state.timeline.rail=state.rail;state.activeStage='writing';
+    state.canvasTab='board';$('journey-tab-script').disabled=false;
+    $('chat-input').value='完整意见原话';state.roleTarget={run_id:'one',session_id:'writer-one'};
+    openTeamProgress();`);
+  app.buttons('在当前稿重新选择反馈')[0].click();app.flushClose();
+  assert.equal(app.run('state.canvasTab'),'plan');
+  assert.equal(app.run('state.activeStage'),'writing');
+  const line=app.document.getElementById('stage').querySelector('.creator-script-line');
+  assert.equal(line.textContent,'Accurate new line');line.listeners.click();
+  assert.equal(app.run('state.roleTarget'),null);
+  assert.equal(app.run('state.feedbackTarget.version'),3);
+  assert.equal(app.run('state.feedbackTarget.artifact_sha256'),'b'.repeat(64));
+  assert.equal(app.document.getElementById('chat-input').value,'完整意见原话');
+  assert.equal(app.calls.length,0);
+});
+
+test('a retained resume button cannot reopen a newly saved or unverified session',async()=>{
+  for(const extra of [{input_closed:true,artifact_receipt:saved},{resume_command:null}]){
+    const app=await page(job({status:'failed',role_sessions:[role({status:'failed'})]}));
+    app.run('openTeamProgress();');const stale=app.buttons('继续此项')[0];
+    app.ctx.__job=job({status:'failed',role_sessions:[{...role({status:'failed'}),...extra}]});
+    app.run('showJob(__job);');
+    assert.equal(app.buttons('继续此项').length,0);
+    await stale.click();
+    assert.equal(app.calls.length,0);
+    assert.equal(app.run("readPendingJob('one')"),null);
+  }
+});
+
 test('stop targets one session using current goal revision and never invokes root cancel',async()=>{
   const app=await page();app.run('openTeamProgress();');
   app.run('currentJob.goal_revision=4;');
@@ -146,7 +264,7 @@ test('stop targets one session using current goal revision and never invokes roo
   assert.equal(app.calls.length,1);
   assert.equal(app.calls[0].path,'/api/runs/one/jobs/job-one/steer');
   assert.deepEqual({...app.calls[0].body,request_id:'normalized'},
-    {text:'停止',request_id:'normalized',expected_goal_revision:4,target_session_id:'writer-one'});
+    {text:'停止',request_id:'normalized',expected_goal_revision:4,target_session_id:'writer-one',reference_consent:true});
 });
 
 test('stale role controls never send to a newly selected project',async()=>{
@@ -170,6 +288,8 @@ test('explicit role resume uses the session route and retries only its original 
   const first=app.calls[0];
   assert.equal(first.path,'/api/runs/one/role-sessions/writer-one/resume');
   assert.equal(first.body.expected_task_id,'attempt-one');
+  assert.equal(first.body.resume_action,'continue');
+  assert.equal(first.body.text,RESUME.text);
   assert.equal(app.run("readPendingJob('one').request_id"),first.body.request_id);
   assert.equal(app.run("readPendingJob('one').session_id"),'writer-one');
   await app.run("submitJob('one',readPendingJob('one'))");

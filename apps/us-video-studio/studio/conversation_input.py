@@ -43,7 +43,8 @@ def display_context(store, pipeline, run_id, timeline):
 
 
 def receive(store, run_id, text, request_id, display_context_id=None, *,
-            feedback_target=None, request_kind=None, question_id=None, attachments=None):
+            feedback_target=None, request_kind=None, question_id=None, attachments=None,
+            reference_consent=False, reference_target=None, reference_recovery=None):
     """Called by trusted ingress, before work/model preparation, exactly once."""
     with store.run_lock(run_id):
         events = store.read_events(run_id)
@@ -53,9 +54,13 @@ def receive(store, run_id, text, request_id, display_context_id=None, *,
             if (prior['text'] != text or prior.get('display_context_id') != display_context_id
                     or any(prior.get(key) != value for key, value in {
                         'feedback_target': feedback_target, 'request_kind': request_kind,
-                        'question_id': question_id, 'attachments': attachments}.items())):
+                        'question_id': question_id, 'attachments': attachments,
+                        'reference_target': reference_target,
+                        'reference_recovery': reference_recovery}.items())
+                    or prior.get('reference_consent', False) != reference_consent):
                 raise PipelineError('request_conflict', '这次提交标识已用于另一条消息或展示内容。')
             return prior
+        validate_media_input(store, run_id, attachments, reference_target)
         view = None
         if display_context_id:
             view = next((e for e in events if e['kind'] == 'conversation_displayed'
@@ -70,12 +75,87 @@ def receive(store, run_id, text, request_id, display_context_id=None, *,
         adjacent = bool(displayed and displayed.get('assistant')
                         and len(chat) == displayed.get('chat_entries')
                         and chat[-1] == displayed['assistant'])
+        from .interactions import pending_question
+        question = pending_question(store, run_id)
         receipt = store.append_event(run_id, 'user_message_received', role='user',
             message_id=message_id, request_id=request_id, text=text,
             display_context_id=display_context_id, displayed=displayed,
             adjacent_question=adjacent, feedback_target=feedback_target,
-            request_kind=request_kind, question_id=question_id, attachments=attachments)
+            request_kind=request_kind, question_id=question_id, attachments=attachments,
+            pending_question_id=question['id'] if question else None,
+            reference_consent=reference_consent, reference_target=reference_target,
+            reference_recovery=reference_recovery)
         return receipt
+
+
+def validate_media_input(store, run_id, attachments=None, reference_target=None):
+    """Validate user-selected media metadata without starting observation."""
+    from .materials import resolve, kind_of
+    if attachments is not None:
+        names = set()
+        for attachment in attachments:
+            name = attachment['name']
+            if name in names or resolve(store, run_id, name) is None:
+                raise PipelineError('attachment_changed', '附件引用无效或重复，请重新核对当前项目的素材。')
+            names.add(name)
+            if attachment.get('purpose') == 'reference' and kind_of(name) != 'video':
+                raise PipelineError('attachment_purpose', '参考视频入口需要实际视频文件。')
+    if reference_target is not None:
+        from .creation_mode import reference_candidate, digest
+        if reference_target['run_id'] != run_id:
+            raise PipelineError('reference_target', '这条参考不属于当前项目。')
+        try:
+            candidate = reference_candidate(store, run_id, reference_target['reference_id'])
+        except ValueError as exc:
+            raise PipelineError('reference_target', str(exc)) from None
+        if (candidate['analysis_id'] != reference_target['analysis_id']
+                or digest(candidate) != reference_target['candidate_sha256']):
+            raise PipelineError('reference_target', '参考分析已更新，请重新打开准确版本后再适配。')
+
+
+def observation_admission(store, run_id, receipt, interpretation, source, purpose, quote):
+    """Ground a video purpose in this input, never in a connection switch.
+
+    Semantic intent belongs to the model's bound interpretation. The server
+    checks its real source and lifetime, explicit UI purposes, and the absence
+    of any substantive request in a bare-link input; it does not classify intent
+    using words such as "analyze" or "reference".
+    """
+    if not receipt or not interpretation or interpretation['source_message_id'] != receipt['message_id']:
+        raise PipelineError('observation_scope', '先按本条真实原话解释任务与视频用途，再进行观察。')
+    if interpretation['task']['mode'] in {'discuss', 'status', 'stop', 'clarify'}:
+        raise PipelineError('observation_scope', '本轮只讨论、查询、停止或澄清，不能启动视频观察。')
+    _quoted(receipt['text'], quote)
+    validate_media_input(store, run_id, receipt.get('attachments'), receipt.get('reference_target'))
+    supplied = next((item for item in receipt.get('attachments') or [] if item['name'] == source), None)
+    if supplied and supplied.get('purpose') and supplied['purpose'] != purpose:
+        raise PipelineError('observation_purpose', '本条输入已标明另一种视频用途，不能由模型改成参考或商品证据。')
+    target = receipt.get('reference_target')
+    if target:
+        from .creation_mode import reference_candidate
+        candidate = reference_candidate(store, run_id, target['reference_id'])
+        exact_sources = {candidate['name']}
+        for event in store.read_events(run_id):
+            if event.get('reference_id') != target['reference_id']:
+                continue
+            recorded = event.get('source') or event.get('request') or {}
+            if recorded.get('source_url'):
+                exact_sources.add(recorded['source_url'])
+        if purpose != 'reference' or source not in exact_sources:
+            raise PipelineError('reference_target', '本次适配只能读取已绑定的准确参考，不能换来源或用途。')
+        matching = next((item for item in receipt.get('attachments') or [] if item['name'] == candidate['name']), None)
+        if matching and matching.get('purpose') not in {None, 'reference'}:
+            raise PipelineError('observation_purpose', '本条输入同时把准确参考标为商品视频，请先澄清用途。')
+        return
+    if supplied and supplied.get('purpose'):
+        return
+    use = interpretation.get('video_use')
+    if not use or use['source'] != source or use['purpose'] != purpose:
+        raise PipelineError('observation_purpose', '视频用途尚未绑定真实输入；用途不明时先问一次用于商品信息还是参考表达。')
+    # A URL alone cannot contain a request or a purpose, however the model labels it.
+    substantive = re.sub(r'https://[^\s<>"\u3000]+', '', use['quote']).strip()
+    if not substantive or not any(char.isalnum() for char in substantive):
+        raise PipelineError('observation_purpose', '只有链接，尚未明确视频用途；请先澄清用途，不开始下载或分析。')
 
 
 def accept(store, run_id, receipt):
@@ -247,6 +327,9 @@ def task_constraints(receipt):
     ) if re.search(pattern, text)]
     return {'message_id': receipt['message_id'], 'text': text,
             'request_kind': receipt.get('request_kind'), 'feedback_target': target,
+            'attachments': receipt.get('attachments'), 'reference_target': receipt.get('reference_target'),
+            'reference_recovery': receipt.get('reference_recovery'),
+            'reference_consent': receipt.get('reference_consent', False),
             'readonly': state in {'stop', 'status', 'discussion'} or analysis_only,
             'analysis_only': analysis_only, 'prompt_only': prompt_only,
             'local_only': local_only, 'format': formats[0] if len(formats) == 1 else None}
@@ -355,6 +438,18 @@ TASK_INTERPRETATION_TOOL = {
     'input_schema': {
         'type': 'object', 'additionalProperties': False,
         'properties': {
+            'reuse_artifact': {'type': 'object', 'additionalProperties': False,
+                              'description': '只有用户明确要求沿用已有文字交付时填写。绑定其指定的当前准确版本及表达沿用的原话；重新创作不能填写。默认要求本轮新交付。',
+                              'properties': {'stage': {'type': 'string', 'enum': ['intake', 'direction', 'writing']},
+                                             'version': {'type': 'integer', 'minimum': 1},
+                                             'sha256': {'type': 'string'}, 'quote': {'type': 'string'}},
+                              'required': ['stage', 'version', 'sha256', 'quote']},
+            'video_use': {'type': 'object', 'additionalProperties': False,
+                          'description': '仅自然语言明确的视频用途或当前用途回答。附件/准确参考元数据已给用途时可省略。裸链接无用途时用 clarify，不填推测用途。quote 引用本条实际表达用途或要求的原话，不只引用 URL。',
+                          'properties': {'source': {'type': 'string'},
+                                         'purpose': {'type': 'string', 'enum': ['product', 'reference']},
+                                         'quote': {'type': 'string'}},
+                          'required': ['source', 'purpose', 'quote']},
             'task': {'type': 'object', 'additionalProperties': False,
                      'properties': {
                          'quote': {'type': 'string'},
@@ -515,7 +610,8 @@ def interpreted_task_constraints(receipt, interpretation=None):
     task = interpretation['task']
     result.update({'interpretation_id': interpretation['id'], 'task_mode': task['mode'],
                    'deliverable': task['deliverable'], 'allowed_stages': task['allowed_stages'],
-                   'pause_after': task['pause_after']})
+                   'pause_after': task['pause_after'], 'video_use': interpretation.get('video_use')})
+    result['reuse_artifact'] = interpretation.get('reuse_artifact')
     result['readonly'] = result['readonly'] or task['mode'] in {'analyze', 'discuss', 'status', 'stop', 'clarify'}
     result['analysis_only'] = result['analysis_only'] or task['mode'] == 'analyze'
     if not result['format'] and task['format'] != 'none':
@@ -542,8 +638,9 @@ def record_task_interpretation(store, run_id, receipt, proposal, *, prior_user_i
         if not any(e['kind'] == 'user_message_execution_started' and e.get('message_id') == trusted['message_id']
                    for e in store.read_events(run_id)):
             raise PipelineError('task_interpretation', '尚未执行的排队消息不能影响当前任务或项目条件。')
-        if not isinstance(proposal, dict) or set(proposal) != {'task', 'constraints'}:
-            raise PipelineError('task_interpretation', '任务解释只能包含 task 与 constraints。')
+        if (not isinstance(proposal, dict) or not {'task', 'constraints'} <= set(proposal)
+                or set(proposal) - {'task', 'constraints', 'video_use', 'reuse_artifact'}):
+            raise PipelineError('task_interpretation', '任务解释只能包含 task、constraints 与可选 video_use、reuse_artifact。')
         fingerprint = _digest(proposal)
         prior = interpretation_for(store, run_id, trusted['message_id'])
         if prior:
@@ -563,6 +660,27 @@ def record_task_interpretation(store, run_id, receipt, proposal, *, prior_user_i
                 or type(task['pause_after']) is not bool):
             raise PipelineError('task_interpretation', '任务阶段和暂停范围无效。')
         guards = task_constraints(trusted)
+        reuse = proposal.get('reuse_artifact')
+        if reuse is not None:
+            if (not isinstance(reuse, dict) or set(reuse) != {'stage', 'version', 'sha256', 'quote'}
+                    or reuse['stage'] not in {'intake', 'direction', 'writing'}
+                    or reuse['stage'] != task['deliverable'] or type(reuse['version']) is not int
+                    or reuse['version'] < 1 or not isinstance(reuse['sha256'], str)):
+                raise PipelineError('task_interpretation', '沿用须绑定本轮文字交付的准确版本。')
+            _quoted(trusted['text'], reuse['quote'])
+            from .pipeline import Pipeline
+            state = Pipeline(store).stage_state(run_id, reuse['stage'])
+            if (not state.latest or state.stale or not state.integrity_ok or state.open_attempt
+                    or state.latest.version != reuse['version'] or state.latest.sha256 != reuse['sha256']):
+                raise PipelineError('task_interpretation', '指定沿用的产物已改变或不可用，请核对当前版本。')
+        video_use = proposal.get('video_use')
+        if video_use is not None:
+            if (not isinstance(video_use, dict) or set(video_use) != {'source', 'purpose', 'quote'}
+                    or video_use['purpose'] not in {'product', 'reference'}
+                    or not isinstance(video_use['source'], str) or not video_use['source'].strip()
+                    or len(video_use['source']) > 8192):
+                raise PipelineError('task_interpretation', '视频用途必须绑定实际来源及本条原话。')
+            _quoted(trusted['text'], video_use['quote'])
         if guards['readonly'] and task['mode'] in {'produce', 'revise'}:
             raise PipelineError('task_interpretation', '语义解释不能覆盖用户明确的只读要求。')
         if guards['format'] and task['format'] not in {'none', guards['format']}:
@@ -651,6 +769,10 @@ def record_task_interpretation(store, run_id, receipt, proposal, *, prior_user_i
         interpretation = {'id': _digest({'message_id': trusted['message_id'], 'proposal': proposal})[:24],
                           'source_message_id': trusted['message_id'], 'proposal_sha256': fingerprint,
                           'task': dict(task), 'constraints': new_rows}
+        if video_use is not None:
+            interpretation['video_use'] = dict(video_use)
+        if reuse is not None:
+            interpretation['reuse_artifact'] = dict(reuse)
         store.append_event(run_id, 'user_task_interpretation_recorded', source_message_id=trusted['message_id'],
                            interpretation=interpretation)
         return {**interpretation, 'project_constraints': constraints_for_inputs(store, run_id,

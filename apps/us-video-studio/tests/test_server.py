@@ -114,6 +114,26 @@ def test_project_list_uses_existing_events_for_format_and_activity(client):
     assert row['progress']['title'] == row['project_brief']['title']
 
 
+def test_timeline_and_project_list_project_the_latest_format_without_reopening(client):
+    make_run(client)
+    store = client.app.state.jobs.store
+
+    def formats():
+        row = next(run for run in client.get('/api/runs').json() if run['run_id'] == RUN)
+        current = client.get(f'/api/runs/{RUN}/timeline')
+        assert current.status_code == 200, current.text
+        return row['content_format'], current.json()['run']['content_format']
+
+    assert formats() == (None, None)
+    for selected in ('video', 'photo', 'video', 'photo'):
+        store.append_event(RUN, 'creative_context_selected', selection={'intent': 'edit', 'format': selected})
+        assert formats() == (selected, selected)
+    for intent in ('status', 'pause', 'discuss'):
+        store.append_event(RUN, 'creative_context_selected', selection={'intent': intent, 'format': 'none'})
+        assert formats() == ('photo', 'photo')
+    assert not any(row.get('kind') == 'job_created' for row in store.read_events(RUN))
+
+
 def test_unknown_run_is_404(client):
     assert client.get("/api/runs/nope/state").status_code == 404
 

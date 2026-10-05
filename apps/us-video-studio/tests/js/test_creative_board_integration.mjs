@@ -5,6 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import {webcrypto} from 'node:crypto';
 import {loadApp, makeDom, webSource} from './dom-fixture.mjs';
 
 const RUN = 'board-preview';
@@ -27,7 +28,8 @@ function stage(name, version, sha, text) {
       : [{type:'text', title:'方案', text}]};
 }
 
-function fixture({kind = 'creative', format = 'video', analysisOnly = false, readyImages = false, approvedImages = false} = {}) {
+function fixture({kind = 'creative', format = 'video', analysisOnly = false, readyImages = false, approvedImages = false,
+  approvedUpload = false} = {}) {
   const run = {run_id:RUN, kind, content_format:format, title:'Offline board',
     brief:'A US product creative fixture.'};
   const rail = [stage('direction', 3, 'd'.repeat(64), 'Current direction'),
@@ -47,6 +49,20 @@ function fixture({kind = 'creative', format = 'video', analysisOnly = false, rea
     brief:{stage:'writing', phase:'ready', execution:{active:false}}, progress:{},
     spend_sentence:'Offline usage', all_runs_sentence:'Offline totals'};
   const references = [];
+  if (approvedUpload) {
+    // The real photo HTTP projection also has no video_sequence. An approved
+    // uploaded image does not by itself create a generated-image draft.
+    production.drafts = [];
+    production.sources = [{version:4, artifact_sha256:WRITING_SHA, ready:true}];
+    production.materials = [{...materials[0], approved:true,
+      url:`/api/runs/${RUN}/materials/product%20front.jpg`}];
+    production.latest_approved_image = production.materials[0];
+    production.video_sequence = [];
+    production.visual_design_status = {ready:true, issues:[]};
+    production.shots.image = {kind:'image', total:1, complete_list:true,
+      shots:[{ordinal:1,shot_id:'shot-2',label:'Current page',stage:'unprepared',
+        stage_label:'输入尚未准备',blocker:'unprepared'}]};
+  }
   if (readyImages) {
     production.sources = [{version:4, artifact_sha256:WRITING_SHA, ready:true}];
     production.capabilities = {image:{available:true, connection_revision:7}};
@@ -89,13 +105,19 @@ async function page(options = {}) {
   const data = fixture(options), boards = [], openedProduction = [], focus = [], learning = [];
   let materialWorkspaceLoads = 0;
   const dom = makeDom({body:webSource('index.html').match(/<body[^>]*>([\s\S]*?)<\/body>/)[1]});
-  const app = loadApp({dom, routes:{
+  const app = loadApp({dom, runtime:options.realTransport?'real':'shim', routes:{
     '/material-approvals/batch/continue':() => options.videoPreparationResult,
     '/timeline':() => data.timeline,
     '/production':() => data.production,
     '/reference-videos':() => ({tasks:data.references}),
+    '/material-observations':() => ({materials:data.timeline.materials}),
+    '/image-analysis':{candidates:[]},
     '/learning/session':{session_id:'offline-learning'},
     '/api/learning':{methods:[]},
+    '/jobs/latest':null,
+    '/recovery':{},
+    '/jobs':({method})=>method==='POST'?{run_id:RUN,job_id:'offline-dialogue',job_kind:'conversation',
+      status:'succeeded',cursor:0,events:[],role_sessions:[]}:null,
     '/artifacts/material_plan/2':{stage:'material_plan', version:2,
       sha256:'e'.repeat(64), integrity_ok:true, numbered:'人物场景第 2 版',
       author:'material', created_at:'2026-10-02', content:'Exact displayed material design v2'},
@@ -106,7 +128,7 @@ async function page(options = {}) {
     initStudioNavigation:() => {}, renderProjects:() => {}, loadInspiration:() => {},
     setStudioView:() => {}, renderProjectProgress:() => {}, renderJobProgress:() => {},
     setProjectFocus:value => focus.push(value), currentJob:null,
-    setTimeout:() => 1, clearTimeout:() => {},
+    crypto:webcrypto, setTimeout:() => 1, clearTimeout:() => {},
     loadMaterialWorkspace:() => {materialWorkspaceLoads++;},
     StudioCreativeBoard:{
       render:(host, context, callbacks) => {
@@ -118,7 +140,10 @@ async function page(options = {}) {
     __submitJob:() => {throw new Error('Navigation cannot request a model job');},
     __submitSteer:() => {throw new Error('Navigation cannot change running work');},
   }});
-  for (const file of ['md.js', 'blocks.js', 'stage.js', 'production.js', 'reference-video.js', 'creator-view.js', 'journey.js'])
+  for (const file of ['md.js', 'blocks.js', 'stage.js', 'production.js', 'reference-video.js', 'creator-view.js',
+    ...(options.realWorkspace?['workspace.js']:[]),
+    ...(options.realBoard?['creative-board.js','materials.js','image-analysis.js','image-workspace.js','material-workspace.js']:[]),
+    ...(options.realTransport?[]:['journey.js'])])
     vm.runInContext(webSource(file), app.ctx, {filename:file});
   // Navigation must run for real; the drawer boundary is observed without
   // mounting its separate editor/authorization flow.
@@ -142,6 +167,90 @@ function noWrites(app) {
   assert.deepEqual(app.observed.filter(call => call.method !== 'GET'), []);
   assert.equal(app.observed.some(call => /\/jobs|\/actions|authoriz|approval|\/generate/.test(call.path)), false);
 }
+
+test('polling a cached video project updates home, top action and board to the current photo format',async()=>{
+  const app=await page({format:'video',approvedUpload:true,realBoard:true,realWorkspace:true});
+  assert.equal(app.read('state.creatorView.format'),'video');
+  assert.equal(app.document.getElementById('journey-tab-video').hidden,false);
+  // Replace only the latest HTTP response; the already loaded project card is
+  // intentionally still video, exactly like a format change in an open page.
+  app.data.timeline.run={...app.data.run,content_format:'photo'};
+  await app.ctx.refreshTimeline();
+  app.read('renderJourneyStatus()');
+  assert.equal(app.read('state.runs[0].content_format'),'photo');
+  assert.equal(app.read('state.creatorView.format'),'photo');
+  assert.match(app.document.getElementById('project-grid').textContent,/带货图片与文案/);
+  assert.equal(app.document.getElementById('journey-tab-script').textContent,'图文方案');
+  assert.equal(app.document.getElementById('journey-tab-video').hidden,true);
+  const next=app.document.getElementById('project-progress').querySelector('[data-creator-next]');
+  assert.equal(next.textContent,'准备画面输入');
+  next.click();
+  await settle();
+  assert.equal(app.read('state.canvasTab'),'storyboard');
+  assert.match(app.document.getElementById('journey-storyboard').textContent,/图文图片（1）/);
+  assert.match(app.document.getElementById('journey-storyboard').textContent,/目标 1 页/);
+  assert.match(app.document.getElementById('journey-storyboard').textContent,/第 01 页/);
+  assert.doesNotMatch(app.document.getElementById('journey-storyboard').textContent,/分镜首帧|面镜头|这一镜/);
+  app.ctx.showJourneyTab('board');
+  assert.match(app.document.getElementById('creative-board').textContent,/图文方案|逐页画面与文案/);
+  assert.equal(app.document.getElementById('creative-board').querySelector('[data-board-action="history:video"]'),null);
+  noWrites(app);
+});
+
+test('a fresh photo with an approved uploaded image offers usable image actions in every project surface',async()=>{
+  const app=await page({format:'photo',approvedUpload:true,realBoard:true,realWorkspace:true});
+  assert.equal(app.read("StudioProduction.currentProductionWork(state.productionData,'video',state.runId).phase"),'prepare');
+  assert.equal(app.read('state.creatorView.action.tab'),'storyboard');
+  app.read('renderJourneyStatus()');
+  app.document.getElementById('project-progress').querySelector('[data-creator-next]').click();
+  await settle();
+  assert.equal(app.read('state.canvasTab'),'storyboard');
+  app.ctx.showJourneyTab('board');
+  const action=app.document.getElementById('production-action');
+  assert.match(action.textContent,/画面制作输入待准备/);
+  assert.doesNotMatch(action.textContent,/准备.*视频/);
+  action.querySelector('button').click();
+  assert.deepEqual(app.openedProduction.at(-1),{kind:'image'});
+  app.document.getElementById('creative-board').querySelector('[data-board-action="history:image"]').click();
+  assert.equal(app.read('state.canvasTab'),'storyboard');
+  noWrites(app);
+});
+
+test('photo conversation cannot open a new video batch from historical video records',async()=>{
+  const app=await page({format:'photo',readyImages:true,approvedImages:true,realTransport:true});
+  assert.ok(app.read("StudioProduction.videoSequenceState(state.productionData,state.runId).length")>1);
+  app.read("openProductionBatch('choose')");
+  const action=app.document.getElementById('production-action');
+  assert.doesNotMatch(action.textContent,/准备整组视频|生成.*段视频|拼接成片/);
+  app.read('saveBatchIntent(null)');
+  const result=await app.ctx.send('准备全部视频输入');
+  assert.equal(result.accepted,true);
+  assert.equal(app.read('currentBatchIntent()'),null);
+  const posts=app.observed.filter(call=>call.method==='POST');
+  assert.equal(posts.length,1);
+  assert.equal(posts[0].path,`/api/runs/${RUN}/jobs`);
+  assert.equal(posts[0].body.text,'准备全部视频输入');
+  assert.equal(app.observed.some(call=>/batch\/continue|batch-generate|\/assemble/.test(call.path)),false);
+});
+
+test('switching to photo clears only unsent video confirmations and preserves uncertain original submissions',async()=>{
+  const app=await page({readyImages:true,approvedImages:true});
+  app.read("openProductionBatch('video_prepare')");
+  const original=app.read('currentBatchIntent().request_id');
+  app.data.timeline.run={...app.data.run,content_format:'photo'};
+  await app.ctx.refreshTimeline();
+  assert.equal(app.read('currentBatchIntent()'),null);
+  app.data.timeline.run={...app.data.run,content_format:'video'};
+  await app.ctx.refreshTimeline();
+  app.read("openProductionBatch('video_prepare');currentBatchIntent().uncertain=true;saveBatchIntent(currentBatchIntent())");
+  const uncertain=app.read('currentBatchIntent().request_id');
+  assert.notEqual(uncertain,original);
+  app.data.timeline.run={...app.data.run,content_format:'photo'};
+  await app.ctx.refreshTimeline();
+  assert.equal(app.read('currentBatchIntent().request_id'),uncertain);
+  assert.equal(app.document.getElementById('production-action').querySelector('[data-batch-confirm]').textContent,'核实同一请求');
+  noWrites(app);
+});
 
 test('the default board exposes the ready image set and prepares its exact confirmation without submitting', async () => {
   const app = await page({readyImages:true});
@@ -384,5 +493,37 @@ test('the analysis-only reference node opens the saved analysis despite its hidd
   assert.match(app.document.getElementById('stage').textContent, /Existing analysis observation/);
   assert.equal(app.document.getElementById('stage').querySelector('video').getAttribute('src'),
     `/api/runs/${RUN}/materials/reference%20clip.mp4`);
+  noWrites(app);
+});
+
+test('real board and material drawer read the selected saved reference from the actual timeline API shape',async()=>{
+  const app=await page({analysisOnly:true,realBoard:true});
+  assert.equal('reference' in app.data.timeline,false);
+  assert.equal('analysis' in app.data.timeline,false);
+  const board=app.document.getElementById('creative-board');
+  assert.match(board.textContent,/Saved reference report/);
+  assert.match(board.querySelector('[data-board-node="brief"]').textContent,/本轮分析范围/);
+  assert.doesNotMatch(board.querySelector('[data-board-node="brief"]').textContent,/方向尚未准备|创意方向/);
+  assert.match(board.textContent,/参考处理已完成/);
+  assert.equal(board.querySelector('[data-board-node="results"]'),null);
+  const older=app.data.references[0];
+  app.data.references.push({...older,reference_id:'second-ref',name:'other.mp4',report:'Other saved report',
+    status:'stale',execution_status:'failed',failure_reason:'Reference changed'});
+  vm.runInContext(`state.referenceSelectedId='analysis-only-ref';`,app.ctx);
+  await app.ctx.refreshTimeline();
+  assert.match(board.textContent,/Saved reference report/);
+  assert.doesNotMatch(board.textContent,/Other saved report/);
+  vm.runInContext(`state.materialsOpen=true;`,app.ctx);
+  await app.ctx.loadMaterialWorkspace();
+  const drawer=app.document.getElementById('reference-video-results');
+  drawer.querySelector('[data-reference-view="second-ref"]').click();
+  assert.equal(app.read('state.canvasTab'),'plan');
+  assert.equal(app.document.getElementById('stage').hidden,false);
+  assert.equal(board.hidden,true);
+  assert.equal(app.document.getElementById('stage').querySelector('[data-reference-breakdown]').dataset.referenceBreakdown,'second-ref');
+  assert.match(app.document.getElementById('stage').textContent,/来源已变化/);
+  app.ctx.showJourneyTab('board');
+  assert.match(board.textContent,/Other saved report/);
+  assert.match(board.textContent,/Reference changed/);
   noWrites(app);
 });

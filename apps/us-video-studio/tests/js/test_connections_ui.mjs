@@ -358,7 +358,7 @@ test('capability guidance uses the declared image, audio and generation boundari
   assert.match(text,/用户在制作工作区确认实际生成/);
   assert.doesNotMatch(text,/尚未接入视频声画理解/);
   assert.match(text,/不改变正在运行的任务，也不会重写已有稿件/);
-  assert.match(text,/5 \/ 5 个角色配置齐全/);
+  assert.match(text,/4 \/ 4 个角色配置齐全/);
   assert.match(visible(role(h.body,'material').row),/使用本机 Codex 额度/);
   assert.equal(h.calls.length,0);
 });
@@ -367,15 +367,29 @@ test('role completeness follows explicit model choice and credential identity wi
   const h=harness(), writer=role(h.body,'writer'), card=h.card('ds');
   writer.connection.value='ds';writer.connection.onchange();
   assert.equal(writer.model().value,'');
-  assert.match(visible(h.body),/4 \/ 5 个角色配置齐全/);
+  assert.match(visible(h.body),/3 \/ 4 个角色配置齐全/);
   writer.model().value='deepseek-flash';writer.model().onchange();
-  assert.match(visible(h.body),/4 \/ 5 个角色配置齐全/);
+  assert.match(visible(h.body),/3 \/ 4 个角色配置齐全/);
   const key=labeled(card,'API Key');key.value='synthetic-key';key.oninput();
   assert.match(visible(card),/密钥已填写 · 尚未保存/);
-  assert.match(visible(h.body),/5 \/ 5 个角色配置齐全/);
+  assert.match(visible(h.body),/4 \/ 4 个角色配置齐全/);
   assert.match(visible(h.body),/1 个角色分配已修改，尚未保存/);
   assert.match(visible(h.body),/配置齐全不代表已通过真实创作测试/);
   assert.equal(h.calls.length,0);
+});
+
+test('retired reviewer credentials do not reduce active team readiness and historical binding stays saved', async () => {
+  const initial=config();
+  initial.roles.reviewer={connection:'ds',model:'deepseek-flash'};
+  const h=harness(initial, async()=>({...initial, revision:8}));
+  assert.match(visible(h.body),/4 \/ 4 个角色配置齐全/);
+  assert.match(visible(role(h.body,'reviewer').row),/独立审片（已停用）/);
+  const key=labeled(h.card('ds'),'API Key');key.value='synthetic-key';key.oninput();
+  assert.match(visible(h.body),/4 \/ 4 个角色配置齐全/);
+  assert.equal(h.calls.length,0);
+  await h.submit();
+  assert.deepEqual(h.calls[0].body.roles.reviewer,initial.roles.reviewer);
+  assert.equal(Object.keys(h.calls[0].body.roles).length,5);
 });
 
 test('price coverage is exact to connection and model and never fills missing rates with zero', () => {
@@ -412,7 +426,7 @@ test('changing provider clears obsolete role model choices and marks old prices 
   writer.model().value='deepseek-flash';writer.model().oninput();
   assert.match(visible(writer.row),/服务已更换.*清空旧价格/);
   assert.doesNotMatch(visible(writer.row),/参考价格/);
-  assert.match(visible(h.body),/4 \/ 5 个角色配置齐全/);
+  assert.match(visible(h.body),/3 \/ 4 个角色配置齐全/);
   writer.connection.value='codex';writer.connection.onchange();
   writer.connection.value='ds';writer.connection.onchange();
   assert.equal(writer.model().value,'deepseek-flash'); // Explicit selection is kept for this draft service.
@@ -426,21 +440,21 @@ test('generic role stays incomplete until its service address is present', () =>
   initial.roles.writer={connection:'generic',model:'text-model'};
   const h=harness(initial),card=h.card('generic');
   const key=labeled(card,'API Key');key.value='synthetic-key';key.oninput();
-  assert.match(visible(h.body),/4 \/ 5 个角色配置齐全/);
+  assert.match(visible(h.body),/3 \/ 4 个角色配置齐全/);
   const address=labeled(card,'服务地址（不含具体接口路径）');address.value='https://fixture.invalid/v1';address.oninput();
-  assert.match(visible(h.body),/5 \/ 5 个角色配置齐全/);
+  assert.match(visible(h.body),/4 \/ 4 个角色配置齐全/);
   assert.equal(h.calls.length,0);
 });
 
 test('changing the service behind unchanged empty Codex bindings marks every affected role unsaved', () => {
   const h=harness(),card=h.card('codex'),provider=labeled(card,'选择服务');
   provider.value='deepseek';provider.onchange();
-  assert.match(visible(h.body),/0 \/ 5 个角色配置齐全/);
+  assert.match(visible(h.body),/0 \/ 4 个角色配置齐全/);
   assert.match(visible(h.body),/5 个角色分配已修改，尚未保存/);
   assert.doesNotMatch(visible(h.body),/角色分配未改变/);
   provider.value='codex_cli';provider.onchange();
   assert.match(visible(h.body),/角色分配未改变/);
-  assert.match(visible(h.body),/5 \/ 5 个角色配置齐全/);
+  assert.match(visible(h.body),/4 \/ 4 个角色配置齐全/);
   assert.equal(h.calls.length,0);
 });
 

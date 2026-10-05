@@ -14,6 +14,7 @@ const TEAM_TOOLS = {
   start_role:['安排角色工作','角色任务已启动'], wait_role:['等待角色交付','已读取角色回执'],
   message_role:['传递本次补充','补充已送到对应角色'], cancel_role:['停止指定任务','已要求停止指定任务'],
   resume_role:['继续角色任务','角色任务已返回'], propose_task_interpretation:['核对本次要求与范围','已绑定本次要求与范围'],
+  record_question_answer:['确认本条回答','回答已记录'],
   finish_review:['记录审核结论','已记录审核结论'],
   read_method_document:['查阅创作方法','已查阅创作方法'],
   read_learning_cases:['阅读参考案例','已阅读参考案例'],
@@ -36,6 +37,7 @@ function teamAction(event, completed = false) {
   }
   if (event.tool === 'request_review')
     return `独立审片${completed ? event.ok === false ? '未能完成检查' : '已完成检查' : '正在检查'}${stage ? ` · ${stage}` : ''}`;
+  if (event.tool === 'record_question_answer' && completed && event.ok === false) return '本条回答未能记录';
   let text = (TEAM_TOOLS[event.tool] || ['处理项目操作','项目操作已返回'])[completed ? 1 : 0];
   if (stage) text += ` · ${stage}`;
   if (completed && event.ok === false) return `${text.replace(/^已/, '')} · 未完成`;
@@ -103,7 +105,10 @@ function teamProgress(job) {
       failed:event.ok === false, stage:event.ok && ['write_stage','submit_stage'].includes(event.tool)
         ? event.args?.stage || event.stage : null});
   }
-  const participants = Object.entries(TEAM_ROLES).map(([role,name]) => {
+  const participants = Object.entries(TEAM_ROLES).filter(([role]) => role !== 'reviewer' ||
+    events.some(event => event.role === 'reviewer') ||
+    (job.role_sessions || []).some(session => session.role === 'reviewer' && session.parent_job_id === job.job_id))
+    .map(([role,name]) => {
     const sessions = (job.role_sessions || []).filter(row => row.role === role && row.parent_job_id === job.job_id);
     const working = active && sessions.some(row => ['queued','running'].includes(row.status) && !row.stop_requested);
     return {role,name,status:role === currentRole || working ? '处理中'
@@ -124,6 +129,15 @@ function teamTime(at) {
 
 let teamDialog = null;
 let teamDialogKey = '';
+function roleInputClosed(session) {
+  return session?.input_closed === true || Boolean(session?.artifact_receipt);
+}
+function roleInputClosedMessage(session) {
+  if (session?.pending_input_notice) return session.pending_input_notice;
+  const receipt = session?.artifact_receipt;
+  const saved = `${TEAM_STAGES[receipt?.stage] || '本项产物'}${Number.isInteger(receipt?.version) ? `第 ${receipt.version} 版` : ''}`;
+  return `${saved}已保存，旧任务不再接收补充。请阅读当前稿，在新稿上重新选择具体位置并发送修改意见。`;
+}
 function openTeamProgress() {
   if (teamDialog) { teamDialog.close(); return; }
   const dialog = box('dialog','team-dialog');
@@ -171,16 +185,39 @@ function updateTeamDialog() {
     const labels = {queued:'等待执行',running:'正在执行',waiting:'等待明确继续',completed:'已交回',cancelled:'已停止',failed:'未完成',interrupted:'服务中断，未自动重跑'};
     card.append(box('strong','',TEAM_ROLES[session.role] || '创作角色'),
       box('span','',session.stop_requested && ['queued','running'].includes(session.status)
-        ? '正在停止此项' : labels[session.status] || '状态待核实'));
+        ? '正在停止此项' : roleInputClosed(session) && session.status === 'running'
+          ? '产物已保存，正在收尾' : labels[session.status] || '状态待核实'));
     if (session.reason) card.append(box('p','muted',session.reason));
     const liveSession = () => state.runId === runId && currentJob?.job_id === job.job_id
       ? currentJob.role_sessions?.find(row => row.session_id === session.session_id) : null;
+    if (roleInputClosed(session)) {
+      card.append(box('p','muted',roleInputClosedMessage(session)));
+      const receipt = session.artifact_receipt;
+      if (TEAM_STAGES[receipt?.stage] && Number.isInteger(receipt.version) && receipt.version > 0) {
+        const read = box('button','ghost small','查看已保存版本');
+        read.onclick = () => {
+          if (!liveSession()) return;
+          dialogCloseTeam();
+          openReader(receipt.stage, receipt.version).catch(err => toast(err.message, true));
+        };
+        card.append(read);
+        const feedback = box('button','ghost small','在当前稿重新选择反馈');
+        feedback.onclick = () => {
+          if (!liveSession()) return;
+          dialogCloseTeam();showJourneyTab('plan',{stage:receipt.stage});setProjectFocus('canvas');
+        };
+        card.append(feedback);
+      }
+    }
     if (session.parent_job_id === job.job_id && canSteerJob(job) && !session.stop_requested && ['queued','running'].includes(session.status)) {
-      const amend = box('button','ghost small','补充要求');
-      amend.onclick = () => {
-        if (!setRoleFeedbackTarget(runId, liveSession())) return;
-        teamDialog.roleFeedbackRunId=runId;dialogCloseTeam();$('chat-input').focus();
-      };
+      if (!roleInputClosed(session)) {
+        const amend = box('button','ghost small','补充要求');
+        amend.onclick = () => {
+          if (!setRoleFeedbackTarget(runId, liveSession())) return;
+          teamDialog.roleFeedbackRunId=runId;dialogCloseTeam();$('chat-input').focus();
+        };
+        card.append(amend);
+      }
       const stop = box('button','ghost small','停止此项');
       stop.onclick = async () => {
         const live = liveSession();
@@ -191,17 +228,25 @@ function updateTeamDialog() {
         catch (err) { if (state.runId === runId) toast(err.message, true); }
         finally { stop.disabled = false; }
       };
-      card.append(amend,stop);
-    } else if (!JOB_ACTIVE.has(job.status) && !session.stop_requested && ['waiting','interrupted','failed'].includes(session.status)) {
+      card.append(stop);
+    } else if (!JOB_ACTIVE.has(job.status) && !session.stop_requested && !roleInputClosed(session) && ['waiting','interrupted','failed'].includes(session.status)) {
+      if (session.resume_command?.resume_action !== 'continue' || !session.resume_command.text) {
+        card.append(box('p','muted','继续入口尚未核实，请刷新任务状态后再试。'));
+        host.append(card);
+        continue;
+      }
       const resume = box('button','ghost small','继续此项');
       resume.onclick = async () => {
         const live = liveSession();
-        if (!live || live.stop_requested || JOB_ACTIVE.has(currentJob.status)
+        if (!live || live.stop_requested || roleInputClosed(live) || JOB_ACTIVE.has(currentJob.status)
             || !['waiting','interrupted','failed'].includes(live.status)) return;
+        if (live.resume_command?.resume_action !== 'continue' || !live.resume_command.text) {
+          toast('继续入口已变化，请刷新任务状态后再试。', true);return;
+        }
         resume.disabled = true;
         try { await submitJob(runId, {request_kind:'role_resume',session_id:session.session_id,
           expected_task_id:live.task_id,request_id:crypto.randomUUID(),
-          text:'继续这项未完成的创作任务，保留已保存内容并先核对当前依据。'}); }
+          resume_action:live.resume_command.resume_action,text:live.resume_command.text}); }
         catch (err) { if (state.runId === runId) toast(err.message, true); }
         finally { resume.disabled = false; }
       };
@@ -233,4 +278,4 @@ function updateTeamDialog() {
 }
 function dialogCloseTeam() { teamDialog?.close(); }
 
-if (typeof module !== 'undefined') module.exports = {teamAction, teamProgress, modelWaiting};
+if (typeof module !== 'undefined') module.exports = {teamAction, teamProgress, modelWaiting, roleInputClosed, roleInputClosedMessage};

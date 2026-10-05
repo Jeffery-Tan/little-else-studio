@@ -59,6 +59,8 @@ const state = {
   creatorView: null,
   canvasTouched: false,
   feedbackTarget: null,
+  referenceTarget: null,
+  referenceRecovery: null,
   feedbackPresentation: null,
   composerRequestKind: null,
   composerSubmissions: new Map(),
@@ -165,6 +167,8 @@ async function loadRuns() {
 function composerDraft() {
   return {text:$('chat-input').value, feedbackTarget:state.feedbackTarget,
     ...(state.roleTarget ? {roleTarget:state.roleTarget} : {}),
+    ...(state.referenceTarget ? {referenceTarget:state.referenceTarget} : {}),
+    ...(state.referenceRecovery ? {referenceRecovery:state.referenceRecovery} : {}),
     feedbackPresentation:state.feedbackPresentation, requestKind:state.composerRequestKind,
     clarification:state.clarificationChoices.get(state.runId) || null};
 }
@@ -208,11 +212,13 @@ function settleComposerRequest(runId, requestId, accepted) {
   if (record?.frozen?.requestId !== requestId) return;
   const restore = !accepted && !record.draft.text && (!record.draft.feedbackTarget ||
     JSON.stringify(record.draft.feedbackTarget) === JSON.stringify(record.frozen.draft.feedbackTarget))
-    && (!record.draft.roleTarget || JSON.stringify(record.draft.roleTarget) === JSON.stringify(record.frozen.draft.roleTarget));
+    && (!record.draft.roleTarget || JSON.stringify(record.draft.roleTarget) === JSON.stringify(record.frozen.draft.roleTarget))
+    && (!record.draft.referenceTarget || JSON.stringify(record.draft.referenceTarget) === JSON.stringify(record.frozen.draft.referenceTarget))
+    && (!record.draft.referenceRecovery || JSON.stringify(record.draft.referenceRecovery) === JSON.stringify(record.frozen.draft.referenceRecovery));
   const draft = restore ? record.frozen.draft : record.draft;
   storeComposerDraft(runId, draft, null);
   if (restore && state.runId === runId && !state.composerSubmissions.has(runId)
-      && !$('chat-input').value && !state.feedbackTarget && !state.roleTarget) restoreComposerDraft(draft);
+      && !$('chat-input').value && !state.feedbackTarget && !state.roleTarget && !state.referenceTarget && !state.referenceRecovery) restoreComposerDraft(draft);
 }
 
 function restoreComposerDraft(draft) {
@@ -225,6 +231,8 @@ function restoreComposerDraft(draft) {
   // Legacy drafts could retain the previous role after selecting a work
   // result. The selected result remains the destination on draft recovery.
   state.roleTarget = state.feedbackTarget ? null : draft?.roleTarget || null;
+  state.referenceTarget = state.feedbackTarget || state.roleTarget ? null : draft?.referenceTarget || null;
+  state.referenceRecovery = state.feedbackTarget || state.roleTarget ? null : draft?.referenceRecovery || null;
   state.feedbackPresentation = draft?.feedbackPresentation || null;
   state.composerRequestKind = draft?.requestKind || null;
   if (draft?.clarification) state.clarificationChoices.set(state.runId, draft.clarification);
@@ -317,7 +325,11 @@ async function refreshTimeline() {
   state.projectBrief = tl.brief;
   state.productionData = production;
   state.referenceTasks = references?.tasks || [];
-  const run = state.runs.find(item => item.run_id === runId) || tl.run || {};
+  const project = state.runs.find(item => item.run_id === runId);
+  const run = {...(project || {}), ...(tl.run || {})};
+  // The timeline carries the current explicit format. Update the project card
+  // and detail views together without waiting for a separate project-list load.
+  if (project) Object.assign(project, tl.run || {});
   state.learningSession=learningSession;
   state.learningCatalog=learningCatalog;
   if (run.kind==='learning') {
@@ -336,7 +348,6 @@ async function refreshTimeline() {
   if (typeof configureJourneyTabs === 'function') configureJourneyTabs();
   if (!state.canvasTouched && state.creatorView.tab === 'plan' && state.creatorView.stage)
     state.activeStage = state.creatorView.stage;
-  const project = state.runs.find(run => run.run_id === runId);
   if (project) {
     project.creator_view = state.creatorView;
     project.project_brief = tl.brief;
@@ -519,6 +530,8 @@ function renderPane() {
 function clearFeedbackTarget(persist = true) {
   state.feedbackTarget = null;
   state.roleTarget = null;
+  state.referenceTarget = null;
+  state.referenceRecovery = null;
   state.feedbackPresentation = null;
   state.composerRequestKind = null;
   const chip = $('feedback-target');
@@ -529,12 +542,14 @@ function clearFeedbackTarget(persist = true) {
   if (persist) persistComposerDraft();
 }
 
-function switchFeedbackTarget({feedbackTarget = null, roleTarget = null,
+function switchFeedbackTarget({feedbackTarget = null, roleTarget = null, referenceTarget = null, referenceRecovery = null,
     feedbackPresentation = null, requestKind = null} = {}) {
   // Selecting a work result or a role is one composer action. Keep the text
   // and frozen request untouched, but never submit both destinations.
   state.feedbackTarget = feedbackTarget;
   state.roleTarget = feedbackTarget ? null : roleTarget;
+  state.referenceTarget = feedbackTarget || roleTarget ? null : referenceTarget;
+  state.referenceRecovery = feedbackTarget || roleTarget ? null : referenceRecovery;
   state.feedbackPresentation = feedbackPresentation;
   state.composerRequestKind = requestKind;
   state.clarificationChoices.delete(state.runId);
@@ -543,6 +558,17 @@ function switchFeedbackTarget({feedbackTarget = null, roleTarget = null,
 }
 
 function renderFeedbackTarget(persist = true) {
+  if (state.referenceTarget || state.referenceRecovery) {
+    const chip = $('feedback-target');
+    chip.replaceChildren(box('span', '', state.feedbackPresentation?.label || '正在适配所选参考'));
+    const clear = box('button', 'ghost small', state.referenceRecovery ? '取消接续' : '取消参考');
+    clear.type = 'button'; clear.onclick = () => { updatesComposerVersion(); clearFeedbackTarget(); };
+    chip.append(clear); chip.hidden = false;
+    $('chat-input').placeholder = '说明这条参考要借鉴什么…';
+    if (typeof syncComposerAction === 'function') syncComposerAction();
+    if (persist) persistComposerDraft();
+    return;
+  }
   if (state.roleTarget) {
     const role = state.roleTarget;
     const chip = $('feedback-target');
@@ -580,6 +606,9 @@ function renderFeedbackTarget(persist = true) {
 
 function setRoleFeedbackTarget(runId, session) {
   const live = currentJob?.role_sessions?.find(row => row.session_id === session?.session_id);
+  if (state.runId === runId && live && roleInputClosed(live)) {
+    toast(roleInputClosedMessage(live), true); return false;
+  }
   if (state.runId !== runId || !session?.session_id || !canSteerJob(currentJob)
       || !live || live.parent_job_id !== currentJob.job_id || live.stop_requested
       || !['queued','running'].includes(live.status)) {
@@ -2065,16 +2094,16 @@ async function send(text, requestKind = null, clarificationId = null) {
     return {accepted: false, uncertain: true, reason: pendingMessage,
             rejected_text: text, run_id: state.runId};
   }
-  const batchKind=!state.busy&&!requestKind&&!clarificationId&&!state.feedbackTarget&&!state.roleTarget&&
+  const batchKind=!state.busy&&!requestKind&&!clarificationId&&!state.feedbackTarget&&!state.roleTarget&&!state.referenceTarget&&!state.referenceRecovery&&
     typeof StudioProduction!=='undefined'&&
     !(typeof StudioComposer!=='undefined'&&StudioComposer.files(state.runId).length)
     &&typeof productionBatchCommand==='function'?productionBatchCommand(text,{
       generate:StudioProduction.batchGenerationDrafts(state.productionData,state.runId).length,
       approve:StudioProduction.batchApprovalImages(state.productionData,state.runId).length,
-      video_prepare:(()=>{const shots=StudioProduction.videoSequenceState(state.productionData,state.runId);
+      video_prepare:state.creatorView?.format==='photo'?0:(()=>{const shots=StudioProduction.videoSequenceState(state.productionData,state.runId);
         return shots.length>1&&shots.every(shot=>shot.approved)&&shots.some(shot=>!shot.draft)?1:0;})(),
-      video_generate:StudioProduction.videoBatchGenerationDrafts(state.productionData,state.runId).length,
-      assemble:state.productionData.edit_plan&&StudioProduction.assemblyClips(state.productionData,state.runId).length&&
+      video_generate:state.creatorView?.format==='photo'?0:StudioProduction.videoBatchGenerationDrafts(state.productionData,state.runId).length,
+      assemble:state.creatorView?.format!=='photo'&&state.productionData.edit_plan&&StudioProduction.assemblyClips(state.productionData,state.runId).length&&
         !StudioProduction.currentAssembly(state.productionData,state.runId)?1:0,
     }):null;
   if(batchKind&&typeof openProductionBatch==='function')
@@ -2084,8 +2113,12 @@ async function send(text, requestKind = null, clarificationId = null) {
   const runId=state.runId;
   try {
     const target = state.feedbackTarget;
+    const referenceTarget = state.referenceTarget;
+    const referenceRecovery = state.referenceRecovery;
     const roleTarget = state.roleTarget;
     const targetSession = roleTarget && currentJob?.role_sessions?.find(row => row.session_id === roleTarget.session_id);
+    if (roleTarget && targetSession && roleInputClosed(targetSession))
+      throw Error(roleInputClosedMessage(targetSession));
     if (roleTarget && (roleTarget.run_id !== runId || !state.busy || !canSteerJob(currentJob)
         || !targetSession || targetSession.parent_job_id !== currentJob.job_id || targetSession.stop_requested
         || !['queued','running'].includes(targetSession.status)))
@@ -2105,6 +2138,21 @@ async function send(text, requestKind = null, clarificationId = null) {
           throw Error('稿件版本已变化。意见已保留，请重新选择当前版本中的句子。');
       }
     }
+    if (referenceTarget) {
+      const reference = (state.referenceTasks || []).find(row => row.reference_id === referenceTarget.reference_id);
+      if (referenceTarget.run_id !== runId || !reference?.candidate || reference.status === 'stale' ||
+          reference.candidate.analysis_id !== referenceTarget.analysis_id ||
+          reference.candidate.candidate_sha256 !== referenceTarget.candidate_sha256)
+        throw Error('参考分析已变化。原话已保留，请重新选择当前参考。');
+    }
+    if (referenceRecovery) {
+      const task = (state.referenceTasks || []).find(row => row.reference_id === referenceRecovery.reference_id);
+      const recovery = task?.recovery;
+      if (!recovery?.allowed || ['reference_id','parent_job_id','source_user_input_id','interpretation_id']
+          .some(key => referenceRecovery[key] !== recovery[key]))
+        throw Error('原任务已变化。原话已保留，请刷新后重新选择接续。');
+      if (state.busy) throw Error('请等本轮结束后再接续原任务；原话已保留。');
+    }
     if (requestKind === 'writing_revision' && currentJob && JOB_ACTIVE.has(currentJob.status))
       throw Error('直接修改需要等本轮任务结束后再发送；原话、目标和直接修改模式已保留。');
     if (state.busy && canSteerJob(currentJob)) {
@@ -2114,6 +2162,7 @@ async function send(text, requestKind = null, clarificationId = null) {
         expected_goal_revision:currentJob.goal_revision || 0,
         ...(roleTarget ? {target_session_id:roleTarget.session_id} : {}),
         ...(target ? {feedback_target:target} : {}),
+        ...(referenceTarget ? {reference_target:referenceTarget} : {}),
         ...(state.timeline?.display_context_id ? {display_context_id:state.timeline.display_context_id} : {}),
         ...(clarificationId ? {question_id:clarificationId} : {})};
       const adjusted = await submitSteer(runId, currentJob.job_id, adjustment);
@@ -2122,6 +2171,7 @@ async function send(text, requestKind = null, clarificationId = null) {
       if (!adjusted || adjusted.ok !== false) {
         if (roleTarget && JSON.stringify(state.roleTarget) === JSON.stringify(roleTarget)) clearFeedbackTarget();
         if (target && JSON.stringify(state.feedbackTarget) === JSON.stringify(target)) clearFeedbackTarget();
+        if (referenceTarget && JSON.stringify(state.referenceTarget) === JSON.stringify(referenceTarget)) clearFeedbackTarget();
         return {accepted: true};
       }
       if (adjusted.reason === 'job_not_active') {
@@ -2153,16 +2203,21 @@ async function send(text, requestKind = null, clarificationId = null) {
       state.busy = false;
     }
     const attachedFiles = typeof StudioComposer !== 'undefined' ? [...StudioComposer.files(runId)] : [];
+    let attachments = [];
     if(attachedFiles.length){
       if(StudioComposer.missingVideoUse(runId))throw Error('请先为每段视频选择用途：补全商品信息或拆解参考表达。');
       state.busy=true;$('send').disabled=true;StudioComposer.render();
       const names=await StudioComposer.upload(runId,fetch);
       if(state.runId!==runId)throw Error('项目已切换，未发送对话。');
       text += '\n本次附上的素材：'+StudioComposer.describe(runId,names);
+      attachments=StudioComposer.attachmentMetadata(runId,names);
       state.busy=false;StudioComposer.render();
     }
     const payload = {text, request_id:crypto.randomUUID(),
       ...(target ? {feedback_target:target} : {}),
+      ...(referenceTarget ? {reference_target:referenceTarget} : {}),
+      ...(referenceRecovery ? {reference_recovery:referenceRecovery} : {}),
+      ...(attachments.length ? {attachments} : {}),
       ...(requestKind ? {request_kind:requestKind} : {}),
       ...(clarificationId ? {question_id:clarificationId} : {})};
     // The result is passed through, not overwritten. `runtime.submitJob` is the

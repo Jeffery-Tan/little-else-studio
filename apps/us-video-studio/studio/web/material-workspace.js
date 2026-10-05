@@ -15,16 +15,23 @@ async function loadMaterialWorkspace() {
     attachImageActions(grid, runId, data, images);
     const referenceList=$('reference-video-results');
     if(referenceList) {
-      referenceList.innerHTML=references?StudioReferenceVideo.tasks({...references,runId}):'';
+      referenceList.innerHTML=references?StudioReferenceVideo.tasks({...references,runId,busy:state.busy}):'';
       for(const button of referenceList.querySelectorAll('[data-reference-resume]')) button.onclick=()=>
         openReferenceVideo(runId,references.tasks.find(t=>t.reference_id===button.dataset.referenceResume),button).catch(err=>toast(err.message,true));
+      for(const button of referenceList.querySelectorAll('[data-reference-continue]')) button.onclick=()=>{
+        if(state.runId!==runId||state.busy)return;
+        const task=references.tasks.find(item=>item.reference_id===button.dataset.referenceContinue);
+        if(!task)return;
+        if(!task.recovery){openReferenceVideo(runId,task,button).catch(err=>toast(err.message,true));return;}
+        toggleMaterials(false);composeReferenceContinuation(task);
+      };
       for(const button of referenceList.querySelectorAll('[data-reference-view]')) button.onclick=()=>{
         state.referenceSelectedId=button.dataset.referenceView;
         toggleMaterials(false);
         setProjectFocus('canvas');
         if(state.runs.find(run=>run.run_id===runId)?.kind==='learning'){
           renderPane();$('stage').querySelector('[data-reference-breakdown="'+button.dataset.referenceView+'"]')?.scrollIntoView({block:'start'});
-        }else if(state.creatorView?.analysisOnly){renderReferenceAnalysis();}
+        }else if(state.creatorView?.analysisOnly){showJourneyTab('plan');}
         else showJourneyTab('reference');
       };
     }

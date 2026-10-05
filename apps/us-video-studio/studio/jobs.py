@@ -454,7 +454,8 @@ class JobManager:
 
     def steer(self, run_id, job_id, text, request_id, expected_goal_revision,
               feedback_target=None, validate_target=None, *, display_context_id=None,
-              question_id=None, target_session_id=None):
+              question_id=None, target_session_id=None, reference_consent=False,
+              attachments=None, reference_target=None):
         """Durably accept an in-flight message, then decide if work must stop.
 
         The message is persisted first, always. What happens to the running turn
@@ -482,7 +483,10 @@ class JobManager:
                         or prior.get('feedback_target') != feedback_target
                         or prior.get('display_context_id') != display_context_id
                         or prior.get('question_id') != question_id
-                        or prior.get('target_session_id') != target_session_id):
+                        or prior.get('target_session_id') != target_session_id
+                        or prior.get('reference_consent', False) != reference_consent
+                        or prior.get('attachments') != attachments
+                        or prior.get('reference_target') != reference_target):
                     raise PipelineError('request_conflict', '相同 request_id 对应另一条调整指令。')
                 failed = next((row for row in self.store.read_events(run_id)
                                if row.get('kind') == 'job_steer_delivery_failed'
@@ -503,9 +507,8 @@ class JobManager:
                 sessions = AgentSessions(self.store, run_id)
                 session = next((row for row in sessions.sessions()
                                 if row['session_id'] == target_session_id), None)
-                if (not session or session.get('parent_job_id') != job_id
-                        or session.get('status') not in {'queued', 'running'}):
-                    raise PipelineError('session_scope', '这项角色任务已经结束或不属于本轮，请刷新后明确恢复。')
+                if not session or session.get('parent_job_id') != job_id:
+                    raise PipelineError('session_scope', '这项角色任务不属于本轮，请刷新后核对准确对象。')
                 if feedback_target or question_id:
                     raise PipelineError('session_scope', '定向角色补充不能同时绑定另一个作品或待决问题。')
             if len(rows) >= 8 or sum(len(r['text']) for r in rows) + len(text) > 12000:
@@ -519,7 +522,9 @@ class JobManager:
                 check_answer(self.store, run_id, question_id)
             from .conversation_input import receive, accept
             receipt = receive(self.store, run_id, text, request_id, display_context_id,
-                              feedback_target=feedback_target, question_id=question_id)
+                              feedback_target=feedback_target, question_id=question_id,
+                              reference_consent=reference_consent, attachments=attachments,
+                              reference_target=reference_target)
             targeted = target_session_id and classification['class'] != 'status'
             if targeted:
                 classification = {'class': 'role_stop' if classification['class'] == 'stop' else 'role_message',
@@ -542,6 +547,8 @@ class JobManager:
                                        user_input_id=receipt['message_id'],
                                        display_context_id=display_context_id, question_id=question_id,
                                        target_session_id=target_session_id,
+                                       reference_consent=reference_consent, attachments=attachments,
+                                       reference_target=reference_target,
                                        steer_class=classification['class'],
                                        steer_reason=classification['reason'])
                 accept(self.store, run_id, receipt)
@@ -554,7 +561,7 @@ class JobManager:
                                 or selected['status'] not in {'queued', 'running'}
                                 or selected['stop_requested']):
                             raise PipelineError('session_closed',
-                                '这项角色任务已经结束，补充未投递。原话已保存；请刷新后重新选择要处理的对象。')
+                                sessions.closed_input_reason(target_session_id))
                         if classification['class'] == 'role_stop':
                             from .conversation_input import start_execution
                             start_execution(self.store, run_id, receipt)
@@ -650,6 +657,10 @@ class JobManager:
         row = {'text': receipt['text'], 'feedback_target': receipt.get('feedback_target')}
         payload = {'pending_user_inputs': pending[1:], 'steer_original': original,
                    'steer_job_kind': original_kind}
+        payload.update({key: receipt[key] for key in ('attachments', 'reference_target')
+                        if receipt.get(key) is not None})
+        if receipt.get('reference_consent', False):
+            payload['reference_consent'] = True
         return self.submit(run_id, _continuation_text(original, [row], original_kind),
                            f'steer:{current["job_id"]}', parent_job_id=current['job_id'],
                            payload=payload, user_input_id=receipt['message_id'],

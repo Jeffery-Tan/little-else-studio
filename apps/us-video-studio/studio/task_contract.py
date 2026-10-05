@@ -91,7 +91,7 @@ def _shot_coverage(store, pipeline, run_id, kind, require_media, *, state=None):
 
 
 def evaluate(store, pipeline, run_id, goal, *, revision_scope=None, analysis_completed=False,
-             production_kind=None, media_kind=None, turn_id=None):
+             production_kind=None, media_kind=None, turn_id=None, reuse_artifact=None):
     if goal is None:
         return {'goal': None, 'status': 'unspecified', 'missing': [], 'note': '',
                 'target_shots': None, 'repeat_key': '["unspecified"]'}
@@ -109,6 +109,23 @@ def evaluate(store, pipeline, run_id, goal, *, revision_scope=None, analysis_com
         state = pipeline.stage_state(run_id, goal)
         if not state.latest or state.stale or not state.integrity_ok or state.open_attempt:
             missing.append(f'{goal} 当前准确版本')
+        elif turn_id:
+            scope = next((e for e in reversed(store.read_events(run_id))
+                          if e.get('kind') == 'agent_turn_scope_started'
+                          and e.get('turn_id') == turn_id), None)
+            baseline = (scope or {}).get('artifact_baseline', {}).get(goal)
+            if reuse_artifact:
+                if (reuse_artifact.get('stage') != goal
+                        or reuse_artifact.get('version') != state.latest.version
+                        or reuse_artifact.get('sha256') != state.latest.sha256):
+                    missing.append(f'{goal} 用户指定沿用的准确版本')
+            elif not scope or 'artifact_baseline' not in scope:
+                missing.append(f'{goal} 本轮可核对的交付基线')
+            elif baseline and state.latest.version <= baseline['version']:
+                missing.append(f'{goal} 本轮准确新版本（旧稿仅供参考）')
+            elif (revision_scope and revision_scope.get('stage') == goal
+                  and revision_scope.get('mode') == 'local'):
+                missing.append(f'{goal} 完整新交付（当前仅完成局部补丁）')
     elif goal in MEDIA_EXPECTATION:
         writing = pipeline.stage_state(run_id, 'writing')
         if (not writing.latest or writing.stale or not writing.integrity_ok

@@ -1,4 +1,5 @@
 """Offline connection routing; all keys below are synthetic test strings."""
+import base64
 import copy
 import json
 import os
@@ -6,7 +7,7 @@ from dataclasses import replace
 
 import pytest
 
-from studio.config import Pricing, Settings, ROLES
+from studio.config import ACTIVE_ROLES, Pricing, Settings, ROLES
 from studio.connections import (ConnectionConflict, ConnectionSnapshot, ConnectionStore,
                                 ConnectionUnavailable, _dpapi, validate_base_url)
 from studio.agents.budget import BudgetedClient
@@ -52,7 +53,9 @@ def test_default_is_codex_for_every_role_without_reading_environment_or_legacy(t
     assert all(b == {'connection': 'codex', 'model': ''} for b in public['roles'].values())
     snapshot = store.snapshot()
     settings = snapshot.settings(Settings(tmp_path, 'https://legacy.invalid'))
-    assert all(settings.model_for(role) == '' for role in ROLES)
+    assert all(settings.model_for(role) == '' for role in ACTIVE_ROLES)
+    assert set(settings.connection_by_role) == set(ACTIVE_ROLES)
+    assert set(public['roles']) == set(ROLES)
     assert not (tmp_path / 'connections.json').exists()
     assert legacy.read_bytes() == original
     assert 'do-not-import-this' not in repr(snapshot)
@@ -134,7 +137,7 @@ def test_role_factory_routes_independently_and_does_not_require_unassigned_keys(
         def __init__(self, **kwargs):
             seen.append(kwargs)
     monkeypatch.setitem(sys.modules, 'studio.agents.codex_client', SimpleNamespace(CodexClient=FakeCodex))
-    snapshot = store.snapshot()
+    snapshot = store.snapshot(roles=ROLES)
     router = snapshot.client()
     for role in ROLES:
         router.for_role(role, 'run-fixture')
@@ -142,6 +145,107 @@ def test_role_factory_routes_independently_and_does_not_require_unassigned_keys(
     assert all(item['run_id'] == 'run-fixture' and item['data_root'] == tmp_path for item in seen)
     assert snapshot.settings(Settings(tmp_path, '')).model_for('reviewer') == 'reviewer-specific-model'
     assert store.settings(Settings(tmp_path, '')).pricing.source.startswith('per-connection')
+
+
+def _synthetic_broken_reviewer(store):
+    """Represent an unreadable historical record without touching real credentials."""
+    from studio.connections import _default
+    doc = _default()
+    doc['connections'].append({'id': 'retired-review', 'name': 'Historical review',
+        'provider': 'openai_compat', 'base_url': 'https://fixture.invalid/v1', 'pricing': {},
+        'protected_key': base64.b64encode(b'corrupted-synthetic-only').decode('ascii')})
+    doc['roles']['reviewer'] = {'connection': 'retired-review', 'model': 'historical-model'}
+    store.path.write_text(json.dumps(doc), encoding='utf-8')
+    return doc
+
+
+def test_active_job_snapshot_preserves_retired_config_without_opening_its_key(tmp_path, monkeypatch):
+    store = ConnectionStore(tmp_path)
+    _synthetic_broken_reviewer(store)
+    before = store.path.read_bytes()
+    opened = []
+    def unavailable(value, **_):
+        opened.append(value)
+        raise ValueError('Synthetic unavailable encrypted record')
+    monkeypatch.setattr('studio.connections._dpapi', unavailable)
+    snapshot = store.snapshot()
+    assert set(snapshot.public()['roles']) == set(ACTIVE_ROLES)
+    assert opened == []
+    assert store.public()['roles']['reviewer']['connection'] == 'retired-review'
+    assert store.path.read_bytes() == before
+    with pytest.raises(ConnectionUnavailable, match='outside'):
+        snapshot.client().for_role('reviewer', 'fixture')
+    with pytest.raises(ConnectionUnavailable, match='outside'):
+        snapshot.client().validate_model('reviewer', 'historical-model')
+    with pytest.raises(ValueError, match='could not be opened'):
+        store.snapshot(roles=('reviewer',))
+    assert opened == [b'corrupted-synthetic-only']
+
+
+def test_corrupt_active_connection_remains_a_blocker(tmp_path, monkeypatch):
+    store = ConnectionStore(tmp_path)
+    doc = _synthetic_broken_reviewer(store)
+    doc['roles']['writer'] = doc['roles']['reviewer'].copy()
+    store.path.write_text(json.dumps(doc), encoding='utf-8')
+    def unavailable(*_args, **_kw):
+        raise ValueError('Synthetic failure')
+    monkeypatch.setattr('studio.connections._dpapi', unavailable)
+    with pytest.raises(ValueError, match='could not be opened'):
+        store.snapshot()
+
+
+def test_explicit_image_snapshot_opens_only_image_connection_and_freezes_material(tmp_path, monkeypatch):
+    store = ConnectionStore(tmp_path)
+    doc = _synthetic_broken_reviewer(store)
+    doc['roles']['writer'] = doc['roles']['reviewer'].copy()
+    doc['connections'].append({'id': 'vision', 'name': 'Image fixture',
+        'provider': 'openai_compat', 'base_url': 'https://fixture.invalid/v1', 'pricing': {},
+        'protected_key': base64.b64encode(b'synthetic-vision-only').decode('ascii')})
+    store.path.write_text(json.dumps(doc), encoding='utf-8')
+    opened = []
+    def decrypt(value, **_):
+        assert value == b'synthetic-vision-only'
+        opened.append(value)
+        return value
+    monkeypatch.setattr('studio.connections._dpapi', decrypt)
+    snapshot = store.snapshot(image_connection='vision', image_model='vision-fixture', expected_revision=0)
+    assert snapshot.public()['roles'] == {'material': {'connection': 'vision', 'model': 'vision-fixture'}}
+    assert opened == [b'synthetic-vision-only']
+    assert store.public()['roles']['material']['connection'] == 'codex'
+
+
+def test_active_pricing_projection_excludes_retired_role_but_explicit_scope_is_checked(tmp_path):
+    store = ConnectionStore(tmp_path)
+    payload = api_payload(store)
+    del payload['connections'][1]['api_key']
+    for role in ACTIVE_ROLES:
+        payload['roles'][role] = {'connection': 'test-api', 'model': 'custom-model'}
+    store.save(payload)
+    base = Settings(tmp_path, '', budget_limit_usd=10)
+    assert store.settings(base).usd_cap_is_enforceable
+    assert store.snapshot().settings(base).usd_cap_is_enforceable
+    assert not store.snapshot(roles=ROLES).settings(base).usd_cap_is_enforceable
+    assert store.snapshot(roles=('writer',)).settings(base).usd_cap_is_enforceable
+
+
+def test_ordinary_http_job_starts_with_unreadable_retired_credential(tmp_path, monkeypatch):
+    from fakes import ScriptedModel, final_turn
+    from local_http import TestClient
+    from studio.server import build_app
+    from test_server import RUN, settings_for
+    store = Store(tmp_path)
+    store.create_run(RUN, 'Offline fixture', 'Synthetic only')
+    connections = ConnectionStore(tmp_path)
+    _synthetic_broken_reviewer(connections)
+    monkeypatch.setattr('studio.connections._dpapi', lambda *_a, **_k: pytest.fail('Retired key must remain unopened'))
+    model = ScriptedModel([final_turn('目前还没有保存方案。')])
+    monkeypatch.setattr('studio.connections.RoutedClient.for_role', lambda *_a, **_k: model)
+    with TestClient(build_app(settings_for(tmp_path))) as http:
+        response = http.post(f'/api/runs/{RUN}/jobs', json={
+            'text': '现在进度怎么样？', 'request_id': 'active-team-only'})
+        assert response.status_code == 200, response.text
+        assert any(event['kind'] == 'job_created' for event in store.read_events(RUN))
+        assert set(response.json()['model_config']['roles']) == set(ACTIVE_ROLES)
 
 
 @pytest.mark.parametrize('url', ['http://api.example.com', 'https://key@example.com',

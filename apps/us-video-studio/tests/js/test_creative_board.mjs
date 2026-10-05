@@ -250,7 +250,7 @@ test('unavailable timeline or production data remains readable without crashing'
 
 test('analysis mode shows need and report nodes, without plans or generation placeholders', () => {
   const {host} = dom(), input = fixture(), calls = [];
-  input.analysisOnly = true; input.timeline.reference = {report: 'Synthetic mechanism report'};
+  input.analysisOnly = true; input.referenceTasks = [{reference_id:'analysis-ref',status:'completed',report: 'Synthetic mechanism report'}];
   Board.render(host, input, {openReference: () => calls.push('reference')});
   assert.equal(host.querySelectorAll('[data-board-node]').length, 2);
   assert.equal(host.querySelector('[data-board-node="plan"]'), null);

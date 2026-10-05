@@ -469,7 +469,8 @@ class LearningService:
         doc["methods"] = [m for m in doc["methods"] if set(m.get("supports", []) + m.get("counterexamples", [])) <= refs]
         return doc
 
-    def context(self, run_id, role, intent="new", format="video", tags=(), case_ids=None, purpose="message"):
+    def context(self, run_id, role, intent="new", format="video", tags=(), case_ids=None, purpose="message",
+                reference_selection=None):
         if not isinstance(tags, (list, tuple)) or any(not isinstance(t, str) for t in tags):
             raise ValueError("Tags must be a text list")
         if case_ids is not None and (not isinstance(case_ids, (list, tuple, set)) or any(not isinstance(cid, str) for cid in case_ids)):
@@ -549,7 +550,7 @@ class LearningService:
                     card['source'] = spec['source']
                     method_cards.append(card)
         from .creation_mode import context as creation_context
-        creation = creation_context(self.store, run_id) if active else None
+        creation = creation_context(self.store, run_id, selection=reference_selection) if active else None
         if creation and creation['mode'] in ('recreate', 'inspiration') and format == 'video':
             skills.append(self._text('reference-adaptation', '指定参考的视频改编方法',
                 self.repository_root / '.agents/skills/us-creator-video/reference-adaptation.md'))

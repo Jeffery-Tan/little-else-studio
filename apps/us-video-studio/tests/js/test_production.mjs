@@ -52,6 +52,21 @@ test('storyboard shows every saved image input and labels uploaded photos as ref
  assert.match(html,/data-feedback-image-draft="evening"/);
  assert.doesNotMatch(html,/data-review-image-draft/);
 });
+
+test('photo canvas uses page wording while retaining server target count and stable identities',()=>{
+ const image={...draft,kind:'image',draft_id:'photo-page-2',shot_id:'source-page-2',prompt:'Current page image',attempts:[]};
+ const shown={...data,capabilities:{...data.capabilities,image:{available:true}},drafts:[image],
+  shots:{image:{total:4,complete_list:true,shots:[
+   {ordinal:2,shot_id:'source-page-2',draft_id:'photo-page-2',stage:'input_ready',stage_label:'输入已准备'},
+   {ordinal:4,shot_id:'source-page-4',stage:'unprepared',stage_label:'输入尚未准备',blocker:'unprepared'}]}}};
+ const html=ui.canvasHtml(shown,'image','demo',[],'photo');
+ assert.match(html,/图文图片（4）/);
+ assert.match(html,/目标 4 页，已准备输入 1 页，已生成 0 张/);
+ assert.match(html,/第 02 页/);assert.match(html,/第 04 页/);
+ assert.match(html,/data-shot-id="source-page-2"/);assert.match(html,/data-shot-id="source-page-4"/);
+ assert.match(html,/这一页还没有制作输入/);
+ assert.doesNotMatch(html,/分镜首帧|面镜头|这一镜|镜头 0/);
+});
 test('one batch review pins every eligible shot and shows exact images before approval',()=>{
  const image={...draft,kind:'image',draft_id:'first',prompt:'First <frame>',estimate:{amount:2,currency:'CNY',notice:'Fixture'},attempts:[]};
  const second={...image,draft_id:'second',prompt:'Second frame'};

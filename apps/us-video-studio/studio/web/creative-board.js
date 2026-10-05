@@ -94,7 +94,8 @@
     });
   }
 
-  function projectBoard({runId, run = {}, timeline = {}, production = {}, materials = [], format, analysisOnly = false} = {}) {
+  function projectBoard({runId, run = {}, timeline = {}, production = {}, materials = [], format,
+    analysisOnly = false, referenceTasks = [], referenceSelectedId = null} = {}) {
     run = run || {}; timeline = timeline || {}; production = production || {}; materials = materials || [];
     const id = runId || run.run_id || '', writing = stage(timeline, 'writing'), direction = stage(timeline, 'direction');
     const material = stage(timeline, 'material_plan'), intake = stage(timeline, 'intake');
@@ -120,6 +121,12 @@
     else if (writing && !adopted(writing)) writingIssue = '这版方案尚未采用；镜头清单只供阅读，不代表可以生成。';
     const historyCount = list(production.drafts).filter(draft => draft.is_current === false ||
       !sourceMatches(draft, writing) || draft.source_ready === false).length;
+    const selectedReference = referenceSelectedId
+      ? list(referenceTasks).find(task => task.reference_id === referenceSelectedId) : list(referenceTasks).at(-1);
+    const reference = selectedReference ? {reference_id:selectedReference.reference_id, name:selectedReference.name,source_url:selectedReference.source_url,
+      title:selectedReference.title, report:selectedReference.report, status:selectedReference.status,
+      execution_status:selectedReference.execution_status, job_id:selectedReference.job_id,
+      failure_reason:selectedReference.failure_reason} : null;
     return {runId: id, photo, analysisOnly: Boolean(analysisOnly), title: text(run.title) || '当前作品',
       brief: text(run.brief) || text(timeline.brief?.goal) || '需求尚未保存，可以在右侧对话里说明想做什么。',
       intake, direction, directionId, directionTitle: selected ? field(selected, '标题', '方向名') || text(selected.head) : '',
@@ -128,7 +135,7 @@
         adopted(direction) && !directionId ? '已采用方向，旧记录未注明具体选项。' : '',
       thumbs, material, design: designProjection(material, production), writing, writingIssue, rows, media, historyCount,
       caption: text(list(writing?.blocks).find(block => block.type === 'text' && block.title === '发布文案')?.text),
-      analysis: text(timeline.reference?.report) || text(timeline.analysis?.report) || ''};
+      reference, analysis: text(reference?.report)};
   }
 
   const clamp = value => Math.max(.35, Math.min(1.6, value));
@@ -252,14 +259,19 @@
       body.append(el('h3', 'creative-board-work-title', data.title), brief);
       if (data.intake) body.append(button('查看完整需求', 'intake', () => call('openStage', 'intake', data.intake.version)));
       const direction = el('section', 'creative-board-direction');
-      direction.append(el('h3', '', data.directionId ? `已采用方向 ${data.directionId}` : '创意方向'));
-      if (data.directionId) { const summary = note(data.directionSummary); summary.setAttribute('data-board-scroll', '');
-        direction.append(el('strong', '', data.directionTitle || `方向 ${data.directionId}`), summary); }
-      else direction.append(note(data.directionIssue || (data.direction ? '方向方案已保存，当前决定请看右侧对话。' : '方向尚未准备好，先从需求开始。')));
-      if (data.directionIssue && data.directionId) direction.append(note(data.directionIssue));
-      if (data.direction) direction.append(button('查看方向', 'direction', () => call('openStage', 'direction', data.direction.version)));
+      if (data.analysisOnly) {
+        direction.append(el('h3', '', '本轮分析范围'),
+          note('本轮只拆解参考视频，分析报告与任务状态见参考节点。若要继续创作，请在对话中说明新的作品要求。'));
+      } else {
+        direction.append(el('h3', '', data.directionId ? `已采用方向 ${data.directionId}` : '创意方向'));
+        if (data.directionId) { const summary = note(data.directionSummary); summary.setAttribute('data-board-scroll', '');
+          direction.append(el('strong', '', data.directionTitle || `方向 ${data.directionId}`), summary); }
+        else direction.append(note(data.directionIssue || (data.direction ? '方向方案已保存，当前决定请看右侧对话。' : '方向尚未准备好，先从需求开始。')));
+        if (data.directionIssue && data.directionId) direction.append(note(data.directionIssue));
+        if (data.direction) direction.append(button('查看方向', 'direction', () => call('openStage', 'direction', data.direction.version)));
+      }
       body.append(direction);
-      const shelf = el('section', 'creative-board-materials'); shelf.append(el('h3', '', '商品素材'));
+      const shelf = el('section', 'creative-board-materials'); shelf.append(el('h3', '', data.analysisOnly ? '项目素材' : '商品素材'));
       const grid = el('div', 'creative-board-thumbnails');
       for (const item of data.thumbs) {
         const thumb = button('', `material:${item.name}`, () => call('openMedia', item.name), 'creative-board-thumbnail');
@@ -366,7 +378,13 @@
     }
     function analysisNode() {
       const body = node('分析报告', '02', 'analysis', 420, 600);
-      const report = note(data.analysis || '这是只分析项目。参考与已保存报告可在原分析视图中查看。'); report.setAttribute('data-board-scroll', '');
+      const report = note(data.analysis || '尚未保存分析报告；已保存的原片与任务状态可在参考详情查看。'); report.setAttribute('data-board-scroll', '');
+      if(data.reference){
+        body.append(el('strong','',data.reference.title||data.reference.name||data.reference.source_url||'当前参考'));
+        const status=root.StudioReferenceVideo?.taskPresentation(data.reference);
+        if(status)body.append(note(status.label));
+        if(data.reference.failure_reason)body.append(el('p','creative-board-warning',data.reference.failure_reason));
+      }
       body.append(el('h3', '', '参考的表达与可借鉴之处'), report,
         button('查看参考分析', 'reference', () => call('openReference')));
     }

@@ -22,7 +22,8 @@ test('saved video resume pins source and intent while failed download permits fi
   assert.doesNotMatch(failed,/select|textarea|name="consent"/);
   const downloaded=ui.form({connection:{}},{sha256:'abc',name:'same.mp4'});
   assert.match(downloaded,/type="file"[^>]*disabled/);
-  assert.match(downloaded,/已完成的分析会复用/);
+  assert.match(downloaded,/原片已保存，声画分析尚未完成/);
+  assert.match(ui.form({connection:{}},{sha256:'abc',name:'same.mp4',analysis_id:'saved'}),/已完成的分析会复用/);
 });
 
 test('reference text is escaped and completed tasks have no resume action',()=>{
@@ -101,4 +102,66 @@ test('an uncertain prompt save retries the same request identity',async()=>{
   assert.equal(ids.length,2);
   assert.equal(ids[0],ids[1]);
   assert.equal(task.prompt.text,'new prompt');
+});
+
+test('reference cards distinguish completed steps from the owning job and only resume safe incomplete work',()=>{
+  const failed={reference_id:'failed-ref',intent:'analyze',status:'downloaded',name:'clip.mp4',
+    execution_status:'failed',failure_reason:'观察失败 <script>raw error</script>'};
+  let html=ui.tasks({runId:'run',tasks:[failed]});
+  assert.match(html,/原片已保存，声画分析尚未完成/);
+  assert.match(html,/本轮任务失败/);
+  assert.match(html,/观察失败 &lt;script&gt;/);
+  assert.doesNotMatch(html,/<script>/);
+  assert.match(html,/data-reference-resume/);
+  for(const execution_status of ['queued','running','cancelling','unknown']){
+    html=ui.tasks({runId:'run',tasks:[{...failed,execution_status}]});
+    assert.doesNotMatch(html,/data-reference-resume|data-reference-continue/);
+    if(execution_status==='unknown')assert.match(html,/结果待核实/);
+  }
+  assert.doesNotMatch(ui.tasks({runId:'run',busy:true,tasks:[failed]}),/data-reference-resume/);
+  assert.match(ui.tasks({runId:'run',tasks:[{reference_id:'historic',status:'started'}]}),/历史任务状态未记录/);
+  for(const status of ['analyzed','completed']){
+    html=ui.tasks({runId:'run',tasks:[{...failed,status,analysis_id:'saved',report:'Saved report',candidate:{}}]});
+    assert.match(html,/后续任务失败/);
+    assert.match(html,/data-reference-continue/);
+    assert.doesNotMatch(html,/data-reference-resume/,'a saved analysis must never be re-analyzed');
+  }
+});
+
+test('conversation recovery binds the original job and receipt without treating observation scope as the task',()=>{
+  const task={reference_id:'reference-A',intent:'analyze',status:'downloaded',execution_status:'failed',
+    instruction:'Only the opening mechanism',recovery:{reference_id:'reference-A',parent_job_id:'original-job',
+      source_user_input_id:'original-receipt',interpretation_id:'frozen-contract',deliverable:'writing',
+      original_text:'Write the complete product plan',reference_scope:'Only the opening mechanism',
+      allowed:true,requires_observation:true}};
+  const payload=ui.recoveryPayload(task,'Continue the original task; keep this real new instruction');
+  assert.deepEqual(payload.reference_recovery,{reference_id:'reference-A',parent_job_id:'original-job',
+    source_user_input_id:'original-receipt',interpretation_id:'frozen-contract'});
+  assert.equal(payload.text,'Continue the original task; keep this real new instruction');
+  assert.equal(payload.reference_consent,true);
+  assert.doesNotMatch(JSON.stringify(payload),/Only the opening|deliverable|reference_scope/);
+  const html=ui.form({connection:{}},task);
+  assert.match(html,/继续完整方案/);
+  assert.match(html,/Write the complete product plan/);
+  assert.doesNotMatch(html,/继续视频分析/);
+});
+
+test('cached conversation recovery has no new observation admission and unknown original tasks have no restore controls',()=>{
+  const task={reference_id:'reference-A',intent:'analyze',status:'completed',execution_status:'blocked',candidate:{},
+    recovery:{allowed:true,requires_observation:false,reference_id:'reference-A',parent_job_id:'original-job',
+      source_user_input_id:'original-receipt',interpretation_id:'frozen-contract',deliverable:'reference_prompt'}};
+  assert.equal(ui.recoveryPayload(task,'Continue').reference_consent,false);
+  assert.match(ui.tasks({runId:'run',tasks:[task]}),/本品提示词/);
+  task.recovery={allowed:false,reason:'Original receipt cannot be verified'};
+  assert.throws(()=>ui.recoveryPayload(task,'Continue'),/Original receipt cannot be verified/);
+  assert.doesNotMatch(ui.tasks({runId:'run',tasks:[task]}),/data-reference-resume|data-reference-continue/);
+});
+
+test('only explicit original-file fallback adds a byte-bound reference attachment to recovery',()=>{
+  const task={recovery:{allowed:true,requires_observation:true,reference_id:'reference-A',parent_job_id:'original-job',
+    source_user_input_id:'original-receipt',interpretation_id:'frozen-contract'}};
+  const payload=ui.recoveryPayload(task,'Continue original task',{name:'original.mp4',sha256:'a'.repeat(64)});
+  assert.deepEqual(payload.attachments,[{name:'original.mp4',purpose:'reference'}]);
+  assert.equal(payload.reference_recovery.name,'original.mp4');
+  assert.equal(payload.reference_recovery.expected_sha256,'a'.repeat(64));
 });

@@ -12,6 +12,36 @@ const base={run,timeline:{rail:[direction,writing],brief:{phase:'ready',executio
   imageWork:{kind:'image',phase:'needs_plan',draft:null},videoWork:{kind:'video',phase:'needs_plan',draft:null}};
 const withVideo=(phase,other={})=>({kind:'video',phase,draft:{draft_id:'v1'},...other});
 
+test('the live timeline format takes precedence over a cached project format',()=>{
+  const photo=creatorProjectView({...base,timeline:{...base.timeline,run:{content_format:'photo'}},
+    videoWork:withVideo('completed')});
+  assert.equal(photo.format,'photo');
+  assert.equal(photo.goal,'带货图片与文案');
+  assert.equal(photo.action.tab,'storyboard');
+  const video=creatorProjectView({...base,run:{...run,content_format:'photo'},
+    timeline:{...base.timeline,run:{content_format:'video'}}});
+  assert.equal(video.format,'video');
+  const legacy=creatorProjectView({...base,timeline:{...base.timeline,run:{title:'Older server'}}});
+  assert.equal(legacy.format,'video');
+});
+
+test('photo preparation and saved images never select historical video work',()=>{
+  const photo={...base,run:{...run,content_format:'photo'}};
+  const preparing=creatorProjectView({...photo,
+    imageWork:{kind:'image',phase:'prepare',draft:null},
+    videoWork:{kind:'video',phase:'prepare',draft:null}});
+  assert.equal(preparing.current,'脚本已确认，下一步准备画面');
+  assert.equal(preparing.action.label,'准备画面输入');
+  assert.equal(preparing.action.tab,'storyboard');
+  for(const phase of ['ready','completed','unknown','failed','prepare']){
+    const saved=creatorProjectView({...photo,
+      imageWork:{kind:'image',phase:'completed',draft:{draft_id:'image-v1'}},videoWork:withVideo(phase)});
+    assert.equal(saved.current,'图片已取回，核对实际内容');
+    assert.equal(saved.action.tab,'storyboard');
+    assert.doesNotMatch(saved.action.label,/视频/);
+  }
+});
+
 test('direction choice and adopted direction keep a creative destination',()=>{
   const pending=creatorProjectView({...base,timeline:{rail:[direction],pending:{stage:'direction'},brief:{execution:{active:false}}}});
   assert.equal(pending.current,'正在选择创意方向；采用后会继续准备脚本');

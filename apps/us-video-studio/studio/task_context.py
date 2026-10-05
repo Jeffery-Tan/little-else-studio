@@ -69,6 +69,16 @@ def assemble_role_task(store, pipeline, learning, run_id, workspace: Workspace,
                   '原话里的条件在本阶段范围内同样适用；派工摘要不得删改这些条件。'
                   '只完成本阶段，不重新记录决定，不扩大局部范围，也不授予媒体或费用执行权限。'
                   '原话与本阶段或已采用版本冲突时说明冲突，不自行更换方向或重做其他阶段。', '']
+        recovery = (turn_scope or {}).get('reference_recovery') or {}
+        recovery_message_id = recovery.get('recovery_message_id')
+        if recovery_message_id and recovery_message_id != user_input_id:
+            continuation = message(store, run_id, recovery_message_id)
+            source = {'kind': 'user_message', 'message_id': recovery_message_id,
+                      'sha256': hashlib.sha256(continuation['text'].encode('utf-8')).hexdigest()}
+            sources += (source,)
+            parts += ['# 用户这次明确接续及补充的原话',
+                      json.dumps({'source': source, 'text': continuation['text']}, ensure_ascii=False),
+                      '保留原任务最终交付；本次补充不能扩大任务权限或代替用户决定。', '']
     if stage == 'direction':
         from .active_brief import compile_active_brief
         active = compile_active_brief(store, run_id)
@@ -79,7 +89,8 @@ def assemble_role_task(store, pipeline, learning, run_id, workspace: Workspace,
                   '每个可供采用的方向都要在 satisfies 中标明 goal.primary 和实际满足的条款；不能把未确认信息写成事实。', '']
     # A producing role receives facts once. Keep alternate layout and unrelated
     # direction options out of the specialist request.
-    parts += [workspace.render_context(stage, versions=versions, include_layout=False), '']
+    parts += [workspace.render_context(stage, versions=versions, include_layout=False,
+        reference_selection=(turn_scope or {}).get('reference_selection')), '']
     if stage == 'writing' and visible.get('material_plan'):
         # Legacy dual-written artifacts may have a short prose body. The
         # versioned design object remains authoritative and must reach the

@@ -179,6 +179,7 @@ function canSteerJob(job) {
     (job.status === 'running' || (job.status === 'cancelling' && job.steer_status === 'received')));
 }
 function syncComposerAction(job = currentJob) {
+  if (typeof StudioComposer !== 'undefined') StudioComposer.syncControls?.();
   const active = Boolean(job && JOB_ACTIVE.has(job.status));
   const canInsert = canSteerJob(job);
   const directRevision = state.composerRequestKind === 'writing_revision';
@@ -620,6 +621,13 @@ async function restoreJob(runId) {
 }
 
 async function submitSteer(runId, jobId, payload) {
+  // A busy input has the same observation connection admission as an idle
+  // input. It belongs to this receipt, never to the original running job.
+  // Legacy pending receipts predate this field; retry their frozen payload
+  // unchanged rather than granting an admission that was never submitted.
+  const frozenSteer = readPendingSteer(runId);
+  if (!frozenSteer || frozenSteer.request_id !== payload.request_id)
+    payload = jobWirePayload(runId, payload);
   if (runId !== state.runId || steerPosting) return {ok:false, reason:'busy'};
   // An adjustment whose answer is still unknown owns this run's marker. A
   // second identity must neither go out nor overwrite that record — the
@@ -681,18 +689,20 @@ async function submitSteer(runId, jobId, payload) {
 
 async function submitJob(runId, payload, options = {}) {
   if (runId !== state.runId) return {accepted:false,error:new Error('项目已切换，请重新打开当前项目。')};
+  const unresolved = readPendingJob(runId);
   // Bind new conversation messages to the exact view already rendered. Saved
   // retries retain their original receipt rather than silently rebasing.
-  if (!readPendingJob(runId) && !payload.request_kind
+  if (!unresolved && !payload.request_kind
       && !Object.hasOwn(payload, 'display_context_id') && state.timeline?.display_context_id)
     payload = {...payload, display_context_id:state.timeline.display_context_id};
-  // Compare the exact wire payload, including the default reference scope.
-  payload = jobWirePayload(runId, payload);
+  // A saved receipt predates any defaults added since it was sent. Retry that
+  // exact payload; only a new input receives current connection admission.
+  if (!unresolved || unresolved.request_id !== payload.request_id)
+    payload = jobWirePayload(runId, payload);
   // One unresolved submission identity per project (U2). A new request_id must
   // not displace — or silently replace — the record whose outcome is still
   // unknown; the confirm entry for that original identity stays on screen.
-  const unresolved = readPendingJob(runId);
-  if (unresolved && !samePendingPayload(jobWirePayload(runId, unresolved), payload)) {
+  if (unresolved && !samePendingPayload(unresolved, payload)) {
     showUncertainSubmission(runId, unresolved, readPendingJobOptions(runId, unresolved));
     return {accepted:false, uncertain:true, pending_kind:'job',
             error:new Error('上一次发送的结果还没有确认；请先在任务状态里确认提交。'),

@@ -2,20 +2,57 @@
 (function(root){
   'use strict';
   const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const recoveryGoal=task=>({analysis:'参考拆解',reference_prompt:'本品提示词',intake:'需求方案',direction:'创意方向',
+    writing:'完整方案',production_input:'整套制作输入',production_media:'原制作目标',revision:'原作品修改'})[task?.recovery?.deliverable]||'原任务';
+  function recoveryPayload(task,text,{name=null,sha256=null}={}){
+    const recovery=task?.recovery;
+    if(!recovery?.allowed)throw Error(recovery?.reason||'原任务已变化，请刷新后再继续。');
+    const target=Object.fromEntries(['reference_id','parent_job_id','source_user_input_id','interpretation_id']
+      .map(key=>[key,recovery[key]]));
+    if(name){target.name=name;target.expected_sha256=sha256;}
+    const payload={text,reference_recovery:target,reference_consent:recovery.requires_observation===true};
+    if(name)payload.attachments=[{name,purpose:'reference'}];
+    return payload;
+  }
   function form(data, task=null){
-    if(!data.connection) return '<p>请先配置现有百炼北京连接，再开始参考视频任务。</p>';
+    if(!data.connection&&(!task?.recovery||task.recovery.requires_observation)) return '<p>请先配置现有百炼北京连接，再开始参考视频任务。</p>';
     if(!task)return '<p>在对话里说想做什么，附上视频或 TK 链接即可。</p>';
     const pinned=task.sha256;
-    return `<form class="material-observation-editor" data-reference-form><p>继续${task.intent==='recreate'?'参考复刻':'视频分析'}。${pinned?'已完成的分析会复用。':task.source_url?'不选文件会重新获取原链接；也可以选择原视频上传，已保存的目标无需重填。':'选择原视频继续，已保存的目标无需重填。'}</p>${pinned?`<p>使用：${esc(task.name)}</p>`:''}<label>原视频${task.source_url&&!pinned?'（可选）':''}<input name="file" type="file" accept=".mp4,.mov,.m4v,.webm" ${pinned?'disabled':''}></label><p class="muted">继续会按需进行百炼声画分析；已完成分析不重复调用。复刻的后续文字策划按当前团队连接计费。</p><p role="alert" data-reference-error></p><button type="submit" class="primary">继续处理</button></form>`;
+    const savedAnalysis=Boolean(task.analysis_id||task.candidate||task.report);
+    return `<form class="material-observation-editor" data-reference-form><p>继续${task.recovery?esc(recoveryGoal(task)):task.intent==='recreate'?'参考复刻':'视频分析'}。${pinned?(savedAnalysis?'已完成的分析会复用。':'原片已保存，声画分析尚未完成。'):task.source_url?'不选文件会重新获取原链接；也可以选择原视频上传，已保存的目标无需重填。':'选择原视频继续，已保存的目标无需重填。'}</p>${task.recovery?.original_text?`<details><summary>原来的要求</summary><p>${esc(task.recovery.original_text)}</p></details>`:''}${pinned?`<p>使用：${esc(task.name)}</p>`:''}<label>原视频${task.source_url&&!pinned?'（可选）':''}<input name="file" type="file" accept=".mp4,.mov,.m4v,.webm" ${pinned?'disabled':''}></label><p class="muted">继续会按需进行百炼声画分析；已完成分析不重复调用。复刻的后续文字策划按当前团队连接计费。</p><p role="alert" data-reference-error></p><button type="submit" class="primary">继续处理</button></form>`;
   }
 
+  function taskPresentation(task,{busy=false}={}){
+    const hasAnalysis=Boolean(task?.analysis_id||task?.candidate||task?.report);
+    const step=({started:'原片尚未获取',downloaded:'原片已保存，声画分析尚未完成',
+      analyzed:'声画分析已保存',completed:'参考处理已完成',stale:'参考来源已变化'})[task?.status]||'参考步骤无法核对';
+    const execution=({queued:'任务已排队',running:'任务正在执行',cancelling:'正在停止本轮',
+      waiting:'等待继续',succeeded:'本轮任务已结束',failed:'本轮任务失败',blocked:'本轮任务受阻',
+      cancelled:'本轮任务已停止',interrupted:'本轮任务已中断',
+      ...(hasAnalysis?{failed:'后续任务失败',blocked:'后续任务受阻'}:{})})[task?.execution_status]||
+      (task?.job_id||task?.execution_status?'本轮任务结果待核实':'历史任务状态未记录');
+    const stopped=['failed','blocked','cancelled','interrupted'].includes(task?.execution_status);
+    const active=['queued','running','cancelling','waiting'].includes(task?.execution_status);
+    const historical=!task?.job_id&&!task?.execution_status;
+    const recoverable=!task?.recovery||task.recovery.allowed===true;
+    return {step,execution,label:`${step} · ${execution}`,reason:task?.failure_reason||'',
+      canResume:recoverable&&!busy&&!hasAnalysis&&!['stale','completed'].includes(task?.status)&&!active&&(stopped||historical),
+      canContinue:recoverable&&!busy&&hasAnalysis&&Boolean(task?.candidate)&&task?.status!=='stale'&&stopped};
+  }
   function tasks(data){
-    return (data.tasks||[]).slice().reverse().map(t=>`<article class="analysis-candidate"><strong>${t.intent==='recreate'?'参考复刻':'视频分析'}</strong><p>${esc(t.title||t.name||t.source_url)}</p>`+
+    return (data.tasks||[]).slice().reverse().map(t=>{
+      const presentation=taskPresentation(t,{busy:data.busy===true});
+      return `<article class="analysis-candidate"><strong>${t.recovery?esc(recoveryGoal(t)):t.intent==='recreate'?'参考复刻':'视频分析'}</strong><p>${esc(t.title||t.name||t.source_url)}</p>`+
+      `<p class="reference-task-state">${esc(presentation.label)}</p>`+
+      (presentation.reason?`<p role="alert">${esc(presentation.reason)}</p>`:'')+
+      (t.recovery?.reason?`<p class="muted">${esc(t.recovery.reason)}</p>`:'')+
       (t.name?`<video controls preload="none" style="max-width:100%;max-height:240px" src="${esc('/api/runs/'+encodeURIComponent(data.runId)+'/materials/'+encodeURIComponent(t.name))}"></video>`:'')+
       (t.candidate?`<button type="button" class="ghost small" data-reference-view="${esc(t.reference_id)}">查看逐段拆解 ↗</button>`:
         t.report?`<details><summary>查看分析报告</summary><pre style="white-space:pre-wrap;font:inherit">${esc(t.report)}</pre></details>`:'')+
       (t.report?'<p class="muted">模型观察未经人工核对。</p>':'')+
-      (!['completed','stale'].includes(t.status)?`<button class="ghost small" data-reference-resume="${esc(t.reference_id)}">继续 / 上传原视频</button>`:'')+`</article>`).join('');
+      (presentation.canResume?`<button class="ghost small" data-reference-resume="${esc(t.reference_id)}">继续 / 上传原视频</button>`:'')+
+      (presentation.canContinue?`<button class="ghost small" data-reference-continue="${esc(t.reference_id)}">交给主制片继续 ↗</button>`:'')+`</article>`;
+    }).join('');
   }
 
   const stamp=value=>Number.isFinite(Number(value))?`${Number(value).toFixed(1)}s`:'时间未定';
@@ -94,7 +131,7 @@
       };
     }
   }
-  root.StudioReferenceVideo={form,tasks,breakdownHtml,mountBreakdowns};
+  root.StudioReferenceVideo={form,tasks,taskPresentation,breakdownHtml,mountBreakdowns,recoveryPayload};
   if(typeof module!=='undefined') module.exports=root.StudioReferenceVideo;
 })(typeof window!=='undefined'?window:globalThis);
 
@@ -139,7 +176,9 @@ async function openReferenceVideo(runId, task=null, opener=null){
         }
       }
       if(state.runId!==runId)throw Error('项目已切换；文件已留在原项目，未开始分析。');
-      const payload={request_kind:'reference_video',request_id:requestId,reference_id:referenceId,
+      const payload=task.recovery?{request_id:requestId,...StudioReferenceVideo.recoveryPayload(task,
+        '请恢复这项未完成的原任务，先补齐参考观察，再按原来的交付继续。',
+        {name:file?name:null,sha256:file?sha:null})}:{request_kind:'reference_video',request_id:requestId,reference_id:referenceId,
         intent:task.intent,instruction:task.instruction||'',
         name,expected_sha256:sha,source_url:name?null:link,consent:true,
         expected_revision:data.revision,expected_endpoint:data.connection.base_url};

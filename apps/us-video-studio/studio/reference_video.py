@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from .agents import bailian_omni
-from .agents.client import SafePreflightError
+from .agents.client import SafePreflightError, ModelError, JobCancelled
 from .audiovisual_observation import prepare_video
 from .image_analysis import AnalysisIn, prepare_analysis, candidates, confirm_candidate
 from .material_observations import _manifest, ObservationError
@@ -69,20 +69,28 @@ def task_state(store, run_id):
             items[rid].update(analysis_id=event['analysis_id'], report=event['report'], status='analyzed')
         elif rid in items and event['kind'] == 'reference_video_completed':
             items[rid]['status'] = 'completed'
-    job_references = {}
+    owners, executions, failures = {}, {}, {}
     for event in events:
-        if event['kind'] == 'job_created' and event.get('job_kind') == 'reference_video':
-            rid = event.get('job_payload', {}).get('reference_id')
-            job_references[event['job_id']] = rid
-            if rid in items:
-                items[rid]['execution_status'] = 'queued'
-                items[rid].pop('failure_reason', None)
+        if event['kind'] == 'job_created':
+            executions[event['job_id']] = {'status': 'queued'}
+            if event.get('job_kind') == 'reference_video':
+                rid = (event.get('job_payload') or {}).get('reference_id')
+                if rid in items:
+                    owners[rid] = event['job_id']
+        elif event['kind'] == 'reference_video_execution':
+            if event.get('reference_id') in items:
+                owners[event['reference_id']] = event['job_id']
+        elif event['kind'] == 'reference_video_step_failed':
+            failures[(event['reference_id'], event.get('job_id'))] = event['reason']
         elif event['kind'] == 'job_status':
-            rid = job_references.get(event.get('job_id'))
-            if rid in items:
-                items[rid]['execution_status'] = event['status']
-                if event['status'] in {'failed', 'blocked', 'cancelled', 'interrupted'}:
-                    items[rid]['failure_reason'] = event.get('reason', '')
+            executions[event['job_id']] = {'status': event['status'],
+                                            'reason': event.get('reason', '')}
+    for rid, job_id in owners.items():
+        execution = executions.get(job_id, {'status': 'unknown'})
+        items[rid].update(job_id=job_id, execution_status=execution['status'])
+        failure = failures.get((rid, job_id))
+        if failure or execution['status'] in {'failed', 'blocked', 'cancelled', 'interrupted'}:
+            items[rid]['failure_reason'] = failure or execution.get('reason', '')
     all_candidates = {c['analysis_id']: c for c in candidates(store, run_id)}
     for item in items.values():
         c = all_candidates.get(item.get('analysis_id'))
@@ -99,7 +107,147 @@ def task_state(store, run_id):
                               'revision': event['seq'], 'saved_at': event['at'],
                               'actor': event.get('actor', 'model'),
                               'analysis_id': event.get('analysis_id')}
+    for item in items.values():
+        recovery = recovery_for(store, run_id, item, events=events)
+        if recovery is not None:
+            item['recovery'] = recovery
     return list(items.values())
+
+
+def recovery_for(store, run_id, task, *, events=None):
+    """Derive a conversation dependency's original task, never from its scope."""
+    from .conversation_input import interpretation_for, message
+    events = events if events is not None else store.read_events(run_id)
+    jobs = {e['job_id']: e for e in events if e['kind'] == 'job_created'}
+    owner = jobs.get(task.get('job_id'))
+    if owner is None or owner.get('job_kind') == 'reference_video':
+        return None
+    payload = owner.get('job_payload') or {}
+    saved = payload.get('reference_recovery') or {}
+    source_id = saved.get('source_user_input_id') or owner.get('user_input_id')
+    unavailable = {'allowed': False, 'reason': '原任务的真实消息与交付无法核对，请在对话中说明新的任务。'}
+    if not source_id:
+        return unavailable
+    try:
+        receipt = message(store, run_id, source_id)
+    except PipelineError:
+        return unavailable
+    interpretation = interpretation_for(store, run_id, source_id)
+    if not interpretation or interpretation['task']['mode'] not in {'produce', 'revise', 'analyze'}:
+        return unavailable
+    aliases = {task.get('source_url'), task.get('name')}
+    requested = None
+    cursor, visited = owner['job_id'], set()
+    while cursor in jobs and cursor not in visited:
+        visited.add(cursor)
+        for event in reversed(events):
+            if event.get('job_id') != cursor:
+                continue
+            if (event['kind'] == 'reference_observation_requested'
+                    and event.get('source_user_input_id') == source_id
+                    and event.get('source') in aliases):
+                requested = event
+                break
+            # Historical conversation Jobs retained the actual tool arguments.
+            progress = event.get('event') or {}
+            args = progress.get('args') or {}
+            if (event['kind'] == 'job_progress' and progress.get('type') == 'agent_tool'
+                    and progress.get('tool') == 'observe_reference' and args.get('source') in aliases):
+                requested = args
+                break
+        if requested:
+            break
+        prior = (jobs[cursor].get('job_payload') or {}).get('reference_recovery') or {}
+        cursor = prior.get('parent_job_id')
+    from .creation_mode import reference_candidate
+    try:
+        reference_candidate(store, run_id, task['reference_id'])
+        requires_observation = False
+    except ValueError:
+        requires_observation = True
+    return {'reference_id': task['reference_id'], 'parent_job_id': owner['job_id'],
+            'source_user_input_id': source_id, 'interpretation_id': interpretation['id'],
+            'deliverable': interpretation['task']['deliverable'], 'original_text': receipt['text'],
+            'action': (requested or {}).get('action', 'analyze'),
+            'reference_scope': (requested or {}).get('scope', task.get('instruction', '')),
+            'requires_observation': requires_observation,
+            'allowed': task.get('execution_status') in {'failed', 'blocked', 'cancelled', 'interrupted'}
+                       and task['status'] != 'stale'}
+
+
+def validate_recovery(store, run_id, receipt):
+    """The explicit recovery selects an owner and original frozen interpretation."""
+    from .conversation_input import task_constraints
+    selected = receipt.get('reference_recovery') or {}
+    task = next((t for t in task_state(store, run_id)
+                 if t['reference_id'] == selected.get('reference_id')), None)
+    recovery = (task or {}).get('recovery') or {}
+    keys = ('reference_id', 'parent_job_id', 'source_user_input_id', 'interpretation_id')
+    if not recovery.get('allowed') or any(selected.get(key) != recovery.get(key) for key in keys):
+        raise PipelineError('reference_recovery', '参考所属任务或原要求已变化，请刷新后明确恢复准确任务。')
+    limits = task_constraints(receipt)
+    from .steer_intent import classify
+    if (classify(receipt['text'])['class'] in {'stop', 'status', 'discussion'}
+            or limits['analysis_only'] and recovery['deliverable'] != 'analysis'
+            or limits['prompt_only'] and recovery['deliverable'] != 'reference_prompt'):
+        raise PipelineError('reference_recovery', '本条消息要求停止、只读或改变交付，不能同时恢复旧任务；请作为新的对话发送。')
+    if receipt.get('feedback_target') or receipt.get('question_id'):
+        raise PipelineError('reference_recovery', '恢复原任务不能同时绑定其他作品修改或问题回答。')
+    target = receipt.get('reference_target')
+    if target and target['reference_id'] != selected['reference_id']:
+        raise PipelineError('reference_recovery', '恢复任务与所选参考不一致，请重新核对。')
+    matching = next((a for a in receipt.get('attachments') or [] if a['name'] == task.get('name')), None)
+    if matching and matching.get('purpose') not in {None, 'reference'}:
+        raise PipelineError('reference_recovery', '本条消息将原参考标为商品视频，请先澄清用途。')
+    name, sha = selected.get('name'), selected.get('expected_sha256')
+    if bool(name) != bool(sha):
+        raise PipelineError('reference_recovery', '上传原视频须同时绑定准确文件与指纹。')
+    if name:
+        if task.get('sha256'):
+            raise PipelineError('reference_recovery', '原片已保存，恢复不能替换来源。')
+        path = resolve(store, run_id, name)
+        attachment = next((a for a in receipt.get('attachments') or [] if a['name'] == name), None)
+        if (path is None or kind_of(name) != 'video' or hashlib.sha256(path.read_bytes()).hexdigest() != sha
+                or not attachment or attachment.get('purpose') != 'reference'):
+            raise PipelineError('reference_recovery', '上传原视频的附件用途或字节已变化，请重新核对。')
+    if recovery['requires_observation'] and not receipt.get('reference_consent', False):
+        raise PipelineError('reference_recovery', '本次恢复尚需视频观察，请明确开启本次观察连接后发送。')
+    return task, recovery
+
+
+def _execution_job_id(store, run_id):
+    """Use the active task's exact owner, never infer it from the latest Job."""
+    from .agent_runtime import current_task_id
+    task_id = current_task_id()
+    if task_id is None:
+        return None
+    events = store.read_events(run_id)
+    task = next((event['task'] for event in events
+                 if event['kind'] == 'agent_runtime_task_created'
+                 and event.get('task_id') == task_id), {})
+    job_id = task.get('parent_job_id') or task_id
+    return job_id if any(event['kind'] == 'job_created' and event['job_id'] == job_id
+                         for event in events) else None
+
+
+def reuse_analysis(store, run_id, reference_id):
+    """Read one valid saved analysis and bind its use to the actual Job."""
+    from .creation_mode import reference_candidate
+    with store.run_lock(run_id):
+        candidate = reference_candidate(store, run_id, reference_id)
+        report = report_for(candidate)
+        job_id = _execution_job_id(store, run_id)
+        if job_id:
+            store.append_event(run_id, 'reference_video_execution',
+                               reference_id=reference_id, job_id=job_id)
+        task = next(t for t in task_state(store, run_id) if t['reference_id'] == reference_id)
+        needs_report = task.get('analysis_id') != candidate['analysis_id']
+        if needs_report:
+            store.append_event(run_id, 'reference_video_ready', reference_id=reference_id,
+                               analysis_id=candidate['analysis_id'], report=report)
+        if needs_report or task['status'] != 'completed':
+            store.append_event(run_id, 'reference_video_completed', reference_id=reference_id)
+    return {'reference_id': reference_id, 'report': report, 'reused': True}
 
 
 def report_for(candidate):
@@ -180,14 +328,19 @@ def install_reference_video_routes(app, jobs, require_run, connections, settings
         # read later if the user changes connections while the reference runs.
         creative = prepare_creative_job(run_id) if payload.intent == 'recreate' and not observe_only else None
 
-        def run(_text, emit, check_cancel):
+        def run_steps(_text, emit, check_cancel):
             check_cancel()
             current = next((t for t in task_state(store, run_id) if t['reference_id'] == payload.reference_id), None)
             if current and current['status'] == 'completed':
+                reuse_analysis(store, run_id, payload.reference_id)
                 return SimpleNamespace(text='该参考任务已完成，请查看已保存的分析和方案。', stopped_because='done', rounds=0, used_tools=[])
             request = payload.model_dump(exclude={'request_id', 'consent', 'expected_endpoint', 'expected_revision'})
             if not current:
                 store.append_event(run_id, 'reference_video_started', reference_id=payload.reference_id, request=request)
+            job_id = _execution_job_id(store, run_id)
+            if job_id:
+                store.append_event(run_id, 'reference_video_execution',
+                                   reference_id=payload.reference_id, job_id=job_id)
             name = current.get('name') if current else None
             sha = current.get('sha256') if current else None
             if not sha:
@@ -261,6 +414,23 @@ def install_reference_video_routes(app, jobs, require_run, connections, settings
             store.append_event(run_id, 'reference_video_completed', reference_id=payload.reference_id)
             return result
 
+        def run(_text, emit, check_cancel):
+            try:
+                return run_steps(_text, emit, check_cancel)
+            except Exception as exc:
+                # Preserve the actionable step error even if the conversation
+                # catches a tool failure and its final Job reason is generic.
+                reason = (str(exc) if isinstance(exc, (PipelineError, ModelError,
+                           SafePreflightError, ObservationError, JobCancelled)) else
+                          '参考处理失败；已保存的原片和观察保留，请查看当前任务记录。')
+                if isinstance(exc, PipelineError):
+                    reason = reason.removeprefix(f'[{exc.rule}] ')
+                store.append_event(run_id, 'reference_video_step_failed',
+                                   reference_id=payload.reference_id,
+                                   job_id=_execution_job_id(store, run_id),
+                                   reason=reason, error_kind=type(exc).__name__)
+                raise
+
         return run, {'observer': frozen[2], 'intent': payload.intent, 'reference_id': payload.reference_id,
                      'creative': creative[1] if creative else None}
 
@@ -295,8 +465,7 @@ def install_reference_video_routes(app, jobs, require_run, connections, settings
             previous = None
         if previous:
             try:
-                c = reference_candidate(store, run_id, previous['reference_id'])
-                return {'reference_id': previous['reference_id'], 'report': report_for(c), 'reused': True}
+                return reuse_analysis(store, run_id, previous['reference_id'])
             except ValueError:
                 pass
         # An explicit new turn may retry a failed download/analysis. Keep the old
@@ -311,3 +480,57 @@ def install_reference_video_routes(app, jobs, require_run, connections, settings
         return {'reference_id': rid, 'report': report_for(c), 'reused': False}
 
     app.state.observe_reference = observe
+
+    def prepare_recovery(run_id, receipt):
+        task, recovery = validate_recovery(store, run_id, receipt)
+        hook = {'parent_job_id': recovery['parent_job_id'],
+                'recovery_message_id': receipt['message_id'], 'action': recovery['action'],
+                'reference_scope': recovery['reference_scope']}
+        dependency, dependency_config = None, None
+        if recovery['requires_observation']:
+            connection = bailian_omni.connection_info()
+            if not connection:
+                raise PipelineError('reference_connection', '参考观察连接未就绪，请检查当前百炼连接。')
+            selected = receipt['reference_recovery']
+            if selected.get('name'):
+                fields = {'name': selected['name'], 'expected_sha256': selected['expected_sha256']}
+            elif task.get('name') and (task.get('sha256') or task.get('expected_sha256')):
+                fields = {'name': task['name'], 'expected_sha256': task.get('sha256') or task['expected_sha256']}
+            else:
+                fields = {'source_url': task.get('source_url')}
+            payload = ReferenceIn(request_id=receipt['message_id'], reference_id=task['reference_id'],
+                intent=task['intent'], instruction=task.get('instruction', ''), consent=True,
+                expected_revision=connections.public()['revision'], expected_endpoint=connection['base_url'], **fields)
+            dependency, dependency_config = prepare(run_id, payload, observe_only=True)
+        # Freeze the original team's routing before any observation is started.
+        creative = prepare_creative_job(run_id, user_input_id=receipt['message_id'],
+            source_user_input_id=recovery['source_user_input_id'],
+            reference_consent=receipt.get('reference_consent', False),
+            reference_recovery_context=hook)
+
+        def run(text, emit, check_cancel):
+            from .conversation_input import start_execution
+            from .creation_mode import reference_candidate, digest
+            start_execution(store, run_id, receipt)
+            check_cancel()
+            store.append_event(run_id, 'reference_recovery_started',
+                reference_id=task['reference_id'], job_id=_execution_job_id(store, run_id),
+                parent_job_id=recovery['parent_job_id'], recovery_message_id=receipt['message_id'],
+                source_user_input_id=recovery['source_user_input_id'],
+                interpretation_id=recovery['interpretation_id'], deliverable=recovery['deliverable'])
+            if dependency:
+                dependency('', emit, check_cancel)
+            reuse_analysis(store, run_id, task['reference_id'])
+            candidate = reference_candidate(store, run_id, task['reference_id'])
+            hook['reference_target'] = {'run_id': run_id, 'reference_id': task['reference_id'],
+                'analysis_id': candidate['analysis_id'], 'candidate_sha256': digest(candidate)}
+            check_cancel()
+            return creative[0](text, emit, check_cancel)
+
+        return run, {'reference_recovery': {
+            'reference_id': task['reference_id'], 'parent_job_id': recovery['parent_job_id'],
+            'source_user_input_id': recovery['source_user_input_id'],
+            'interpretation_id': recovery['interpretation_id'], 'deliverable': recovery['deliverable']},
+            'observer': dependency_config, 'creative': creative[1]}
+
+    app.state.prepare_reference_recovery = prepare_recovery

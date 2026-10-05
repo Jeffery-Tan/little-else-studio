@@ -3,6 +3,30 @@ import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 const {teamProgress, teamAction, modelWaiting} = createRequire(import.meta.url)('../../studio/web/team-progress.js');
 
+test('current team has four active roles and preserves only an evidenced historical reviewer',()=>{
+  const current=teamProgress({job_id:'current',status:'running',events:[],role_sessions:[]});
+  assert.deepEqual(current.participants.map(row=>row.role),['orchestrator','director','material','writer']);
+  const historical=teamProgress({job_id:'old',status:'succeeded',events:[{type:'agent_tool',role:'reviewer',tool:'read_artifact',ok:true}]});
+  assert.equal(historical.participants.find(row=>row.role==='reviewer').status,'本轮已参与');
+  const session=teamProgress({job_id:'old',status:'interrupted',events:[],
+    role_sessions:[{session_id:'old-review',parent_job_id:'old',role:'reviewer',status:'failed'}]});
+  assert.equal(session.participants.find(row=>row.role==='reviewer').status,'本轮已参与');
+  const other=teamProgress({job_id:'current',status:'running',events:[],
+    role_sessions:[{session_id:'old-review',parent_job_id:'old',role:'reviewer',status:'failed'}]});
+  assert.equal(other.participants.some(row=>row.role==='reviewer'),false);
+});
+
+test('question answer operation shows the real outcome without exposing submitted arguments',()=>{
+  const event={type:'agent_tool',role:'orchestrator',tool:'record_question_answer',
+    args:{answer:'private answer',user_input_id:'private identity'},result:'private output',ok:true};
+  assert.equal(teamAction(event),'确认本条回答');
+  assert.equal(teamAction(event,true),'回答已记录');
+  assert.equal(teamAction({...event,ok:false},true),'本条回答未能记录');
+  const history=teamProgress({status:'succeeded',events:[event]}).history;
+  assert.equal(history[0].text,'回答已记录');
+  assert.doesNotMatch(JSON.stringify(history),/private/);
+});
+
 test('role handoff follows the newest start event, including return to producer',()=>{
   const events = [{type:'agent_activity',role:'director',phase:'thinking',stage:'direction'}];
   let view = teamProgress({status:'running',events});

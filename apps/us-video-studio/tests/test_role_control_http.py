@@ -28,7 +28,7 @@ def test_explicit_role_resume_after_status_turn_keeps_scope_and_is_idempotent(en
     with TestClient(build_app(settings, client_factory=lambda: model)) as http:
         path = f'/api/runs/{REVISION_RUN}/role-sessions/{first.session_id}/resume'
         payload = {'request_id': 'explicit-role-resume', 'expected_task_id': first.task_id,
-                   'text': '继续这项未完成的创作任务，保留已保存内容并先核对当前依据。'}
+                   **sessions.snapshot(first.session_id)['resume_command']}
         response = http.post(path, json=payload)
         assert response.status_code == 200, response.text
         job_id = response.json()['job_id']

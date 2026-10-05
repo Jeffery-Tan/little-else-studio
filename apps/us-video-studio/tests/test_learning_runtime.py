@@ -7,7 +7,7 @@ import shutil
 
 import pytest
 
-from fakes import ScriptedModel, final_turn, tool_turn
+from fakes import ScriptedModel, final_turn, tool_turn, fixture_task_interpretation
 from studio.agents.orchestrator import Orchestrator
 from studio.agents.reviewer import run_review
 from studio.config import Settings, Pricing
@@ -55,6 +55,16 @@ def orchestrator(env, model):
 def submit(pipeline, stage, content="Current product evidence"):
     attempt = pipeline.start_attempt(RUN, stage)
     return pipeline.submit(RUN, stage, attempt.token, content=content, summary=stage)
+
+
+def compile_existing_route(text, artifact, format):
+    """Declare that these compiler fixtures keep the exact existing intake."""
+    interpretation = fixture_task_interpretation(text, intent='continue', format=format,
+                                                 deliverable='intake')
+    interpretation['reuse_artifact'] = {'stage': 'intake', 'version': artifact.version,
+        'sha256': artifact.sha256, 'quote': text}
+    return tool_turn('route', 'prepare_creative_context', {'intent': 'continue',
+        'format': format, 'deliverable': 'intake', 'task_interpretation': interpretation})
 
 
 def route(store, format="video", intent="new"):
@@ -248,13 +258,14 @@ def test_model_reads_contract_and_compiles_real_local_video_pack(runtime):
         source=f"artifact:intake-v1#{artifact.sha256}")
     args = {"format": "video", "stage": "intake", "version": 1,
             "artifact_sha256": artifact.sha256, "manifest": manifest}
+    text = "把当前已保存策划编译成视频输入包。"
     model = ScriptedModel([
         tool_turn("read", "read_artifact", {"stage": "intake"}),
         tool_turn("contract", "read_method_document", {"name": "creative-package-contract"}),
-        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video", "deliverable": "intake"}),
+        compile_existing_route(text, artifact, 'video'),
         tool_turn("compile", "compile_creative_package", args), final_turn("编译包已保存，未生成媒体。"),
     ])
-    result = orchestrator(runtime, model).send("把当前已保存策划编译成视频输入包。")
+    result = orchestrator(runtime, model).send(text)
     assert not result.failed_tools
     assert artifact.sha256 in model.calls[1]["messages"][-1]["content"][0]["content"]
     method = json.loads(model.calls[2]["messages"][-1]["content"][0]["content"])
@@ -283,12 +294,13 @@ def test_photo_contract_example_compiles_through_agent_without_generating_images
     manifest["publish_caption"] = "Offline fixture caption"
     for i, page in enumerate(manifest["pages"]):
         page["overlay_text"] = f"Offline page {i + 1}"
+    text = "编译当前已保存的图文策划，保留原稿，不生成图片。"
     model = ScriptedModel([
-        tool_turn("route", "prepare_creative_context", {"intent": "new", "format": "photo", "deliverable": "intake"}),
+        compile_existing_route(text, artifact, 'photo'),
         tool_turn("compile", "compile_creative_package", {"format": "photo", "stage": "intake", "version": 1,
             "artifact_sha256": artifact.sha256, "manifest": manifest}), final_turn("只有策划包。"),
     ])
-    result = orchestrator(runtime, model).send("编译图文策划，不生成图片。")
+    result = orchestrator(runtime, model).send(text)
     assert not result.failed_tools
     package = json.loads(model.calls[2]["messages"][-1]["content"][0]["content"])
     root = store.run_dir(RUN) / "creative-packages" / package["package_id"]
@@ -302,10 +314,11 @@ def test_photo_contract_example_compiles_through_agent_without_generating_images
 def test_malformed_compile_inputs_are_tool_errors_and_do_not_crash_job(runtime, manifest):
     store, pipeline, settings, ledger, learning = runtime
     artifact = submit(pipeline, "intake")
-    model = ScriptedModel([tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video", "deliverable": "intake"}), tool_turn("bad", "compile_creative_package", {
+    text = "校验当前已保存需求的待编译输入，保留原稿。"
+    model = ScriptedModel([compile_existing_route(text, artifact, 'video'), tool_turn("bad", "compile_creative_package", {
         "format": "video", "stage": "intake", "version": 1, "artifact_sha256": artifact.sha256,
         "manifest": manifest}), final_turn("输入不合格，保留原产物。")])
-    result = orchestrator(runtime, model).send("校验这个待编译输入。")
+    result = orchestrator(runtime, model).send(text)
     assert result.failed_tools[0]["tool"] == "compile_creative_package"
     assert len(model.calls) == 3
     assert not any(e["kind"] == "creative_package_created" for e in store.read_events(RUN))

@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from fakes import ScriptedModel, final_turn, tool_turn
+from fakes import ScriptedModel, final_turn, tool_turn, fixture_task_interpretation
 from studio.agents.orchestrator import Orchestrator
 from studio.agents.reviewer import run_review
 from studio.config import Settings
@@ -75,12 +75,18 @@ def test_a_feedback_scope_can_widen_when_the_message_is_actually_a_correction(en
 
 def test_even_same_orchestrator_cannot_inherit_previous_production_scope(env):
     store, pipeline, settings, ledger = env
-    model = ScriptedModel([route(), final_turn("Ready"),
+    baseline = submit(pipeline, "intake", "Existing fixture intake")
+    text = "沿用当前需求，不重新写，先准备继续。"
+    interpretation = fixture_task_interpretation(text, intent='continue', deliverable='intake')
+    interpretation['reuse_artifact'] = {'stage': 'intake', 'version': baseline.version,
+        'sha256': baseline.sha256, 'quote': text}
+    model = ScriptedModel([
+        tool_turn('route', 'prepare_creative_context', {'intent': 'continue', 'format': 'video',
+            'deliverable': 'intake', 'task_interpretation': interpretation}), final_turn("Ready"),
         tool_turn("write", "write_stage", {"stage": "intake", "content": "forbidden", "summary": "s"}),
         final_turn("Only status")])
     main = Orchestrator(store, pipeline, settings, model, ledger, RUN)
-    baseline = submit(pipeline, "intake", "Existing fixture intake")
-    main.send("准备继续")
+    assert main.send(text).deliverable['status'] == 'complete'
     result = main.send("目前进度怎样")
     assert "本轮工作范围" in result.failed_tools[0]["result"]
     assert store.latest_artifact(RUN, "intake").sha256 == baseline.sha256

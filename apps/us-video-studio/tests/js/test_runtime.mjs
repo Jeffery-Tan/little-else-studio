@@ -614,9 +614,67 @@ test('steering uses one stable request receipt and does not start a concurrent j
   h.context.showJob({job_id:'j1', job_kind:'conversation', status:'running', cursor:5, events:[]});
   const payload = {text:'只缩短口播', request_id:'same-id', expected_goal_revision:0};
   await h.context.submitSteer('run-a','j1',payload);
-  assert.deepEqual(calls, [['/api/runs/run-a/jobs/j1/steer', payload]]);
+  assert.deepEqual(calls, [['/api/runs/run-a/jobs/j1/steer', {...payload,reference_consent:true}]]);
   assert.equal(h.storage.size, 0);
   assert.equal(vm.runInContext('currentJob.steer_status', h.context), 'received');
+});
+
+test('busy input carries its own media purpose and exact reference target', async () => {
+  const calls=[];
+  const h=harness(async(url,options)=>{
+    calls.push({url,body:JSON.parse(options.body)});
+    return {job_id:'busy',job_kind:'conversation',status:'cancelling',events:[]};
+  });
+  const target={run_id:'run-a',reference_id:'ref',analysis_id:'analysis',candidate_sha256:'a'.repeat(64)};
+  const payload={text:'用这条参考',request_id:'media-input',expected_goal_revision:0,
+    attachments:[{name:'reference.mp4',purpose:'reference'}],reference_target:target};
+  h.context.showJob({job_id:'busy',job_kind:'conversation',status:'running',events:[]});
+  await h.context.submitSteer('run-a','busy',payload);
+  assert.deepEqual(calls[0].body,{...payload,reference_consent:true});
+  await h.context.submitSteer('run-a','busy',{...payload,request_id:'no-admission',reference_consent:false});
+  assert.equal(calls[1].body.reference_consent,false);
+});
+
+test('legacy uncertain steer keeps frozen payload without adding observation admission', async () => {
+  const calls=[];
+  const h=harness(async(url,options)=>{
+    calls.push({url,body:JSON.parse(options.body)});
+    return {job_id:'busy',job_kind:'conversation',status:'cancelling',events:[]};
+  });
+  const payload={text:'旧的待核实输入',request_id:'legacy-input',expected_goal_revision:0};
+  h.storage.set('studio-steer-pending:run-a',JSON.stringify({...payload,job_id:'busy'}));
+  h.context.showJob({job_id:'busy',job_kind:'conversation',status:'running',events:[]});
+  const result=await h.context.submitSteer('run-a','busy',payload);
+  assert.equal(result.ok,true);
+  assert.deepEqual(calls[0].body,payload);
+  assert.equal(Object.hasOwn(calls[0].body,'reference_consent'),false);
+});
+
+test('legacy uncertain idle input retries its exact envelope without new metadata or current view defaults',async()=>{
+  const calls=[];
+  const h=harness(async(url,options)=>{
+    if(!options)return {revision:'r',can_continue:true};
+    calls.push({url,body:JSON.parse(options.body)});
+    return {job_id:'old-job',job_kind:'conversation',status:'succeeded',events:[]};
+  });
+  const payload={text:'旧的待核实输入',request_id:'legacy-idle'};
+  h.storage.set('studio-job-pending:run-a',JSON.stringify(payload));
+  h.context.state.runs=[{run_id:'run-a',kind:'creative'}];
+  h.context.state.timeline={display_context_id:'new-display'};
+  const result=await h.context.submitJob('run-a',payload);
+  assert.equal(result.accepted,true);
+  assert.deepEqual(calls,[{url:'/api/runs/run-a/jobs',body:payload}]);
+  assert.equal(h.storage.has('studio-job-pending:run-a'),false);
+});
+
+test('legacy idle frozen input refuses added metadata and preserves its original retry entry',async()=>{
+  const h=harness(async()=>{throw Error('changed retry must not reach HTTP');});
+  const payload={text:'旧的待核实输入',request_id:'legacy-idle'};
+  h.storage.set('studio-job-pending:run-a',JSON.stringify(payload));
+  const result=await h.context.submitJob('run-a',{...payload,reference_consent:true,attachments:[]});
+  assert.equal(result.accepted,false);assert.equal(result.uncertain,true);
+  assert.deepEqual(JSON.parse(h.storage.get('studio-job-pending:run-a')),payload);
+  assert.equal(h.nodes.get('job-status').children.at(-1).text,'确认提交状态');
 });
 
 test('saved adjustment stays visible after interruption and resumes only on click', async () => {

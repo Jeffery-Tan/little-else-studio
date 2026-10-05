@@ -5,7 +5,7 @@ import json
 from .evidence import evidence_snapshot
 
 
-def creative_evidence(store, run_id, *, source=None):
+def creative_evidence(store, run_id, *, source=None, reference_selection=None, include_reference=True):
     source = source if source is not None else evidence_snapshot(store, run_id)
     result = {'product_observations': [], 'reference_observations': [], 'unclassified_observations': [], 'gaps': [],
               'manifest_sha256': source['manifest_sha256'], 'errors': source['errors'],
@@ -38,10 +38,12 @@ def creative_evidence(store, run_id, *, source=None):
                     'observed_modes': sorted(modes), 'owner': 'team'})
     from .creation_mode import context
     try:
-        selected = context(store, run_id)
+        selected = context(store, run_id, selection=reference_selection) if include_reference else None
         if selected:
             result['creation_mode'] = {k: v for k, v in selected.items() if k != 'observation'}
             result['reference_observations'] = [selected['observation']] if 'observation' in selected else []
+        elif not include_reference:
+            result['reference_observations'] = []
     except ValueError as exc:
         result['reference_observations'] = []
         result['errors'] = [*result['errors'], str(exc)]

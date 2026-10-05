@@ -7,6 +7,23 @@
   const frozen=new Map();
   const loaded=new Set();
   function isVideo(file){return String(file.type||'').startsWith('video/')||/\.(mp4|mov|m4v|webm)$/i.test(file.name);}
+  function validateFiles(selected){
+    if(selected.length>24)throw Error('一次最多附上 24 个文件，请移除多余附件后再发送。');
+    const names=new Set();
+    for(const file of selected){
+      const name=String(file.name||'');
+      if(!name||[...name].length>120||name!==name.trim()||/[ .]$/.test(name)||name.startsWith('.')||
+          /[\\/:<>"|?*\x00-\x1f]/.test(name)||/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name))
+        throw Error(`「${name}」的文件名不能使用，请改为不超过 120 字的普通文件名后重新选择。`);
+      if(!/\.(jpg|jpeg|png|webp|gif|avif|bmp|mp4|webm|mov|m4v)$/i.test(name))
+        throw Error(`「${name}」不是支持的图片或视频格式，请重新选择。`);
+      const key=name.toLowerCase();
+      if(names.has(key))throw Error(`「${name}」重复附上了，请保留一项并核对用途后再发送。`);
+      names.add(key);
+      if(file.size===0)throw Error(`「${name}」是空文件，请重新选择。`);
+      if(file.size>64*1024*1024)throw Error(`「${name}」超过 64 MB，请移除并选择较小的原文件。`);
+    }
+  }
   function decode(items){
     const selected=[],uses={},receipts=new Set();
     for(const item of Array.isArray(items)?items:[]){
@@ -49,10 +66,21 @@
     videoUses.set(runId,Object.fromEntries(selected.flatMap((file,index)=>isVideo(file)&&['product','reference'].includes(use)?[[index,use]]:[])));
     persist(runId);
   }
+  function appendFiles(runId,value,use){
+    const current=files(runId),uses=videoUses.get(runId)||{};
+    const added=[...value];
+    for(const [index,file] of added.entries()){
+      if(isVideo(file)&&['product','reference'].includes(use))uses[current.length+index]=use;
+    }
+    drafts.set(runId,[...current,...added]);videoUses.set(runId,uses);
+    persist(runId);
+  }
   function setVideoUse(runId,index,use){
     load(runId);
-    if(!['product','reference'].includes(use))return;
-    const uses=videoUses.get(runId)||{};uses[index]=use;videoUses.set(runId,uses);
+    if(use&&!['product','reference'].includes(use))return;
+    const uses=videoUses.get(runId)||{};
+    if(use)uses[index]=use;else delete uses[index];
+    videoUses.set(runId,uses);
     persist(runId);
   }
   function missingVideoUse(runId){return files(runId).some((file,index)=>isVideo(file)&&!videoUses.get(runId)?.[index]);}
@@ -62,6 +90,10 @@
       const use=videoUses.get(runId)?.[index];
       return name+(use==='product'?'（商品视频，用于补全商品信息）':use==='reference'?'（参考视频，用于拆解表达）':'');
     }).join('、');
+  }
+  function attachmentMetadata(runId,names){
+    load(runId);
+    return names.map((name,index)=>({name,purpose:videoUses.get(runId)?.[index]||null}));
   }
   function clear(runId,expectedFiles){
     load(runId);
@@ -100,6 +132,7 @@
   async function upload(runId,request){
     const names=[];
     const selected=files(runId);
+    validateFiles(selected);
     const missing=selected.find(file=>file.needsReselection);
     if(missing)throw Error(`「${missing.name}」尚未上传，刷新后需重新选择原文件；已保留标注用途。`);
     const receipts=uploaded.get(runId)||new Set();uploaded.set(runId,receipts);
@@ -115,6 +148,18 @@
       names.push(file.name);
     }
     return names;
+  }
+  function canRemoveDraft(runId){
+    const job=typeof currentJob!=='undefined'?currentJob:state.currentJob;
+    // Draft removal does not change project materials or the running Job. Keep
+    // controls locked while this composer itself is uploading/submitting.
+    if(state.composerSubmissions?.has(runId)||
+        (typeof pendingSubmission==='function'&&pendingSubmission(runId)))return false;
+    return !state.busy||Boolean(job&&['queued','running','cancelling'].includes(job.status));
+  }
+  function syncControls(){
+    const tray=document.getElementById('chat-attachments');if(!tray)return;
+    for(const button of tray.querySelectorAll('[data-attachment-remove]'))button.disabled=!canRemoveDraft(state.runId);
   }
   function render(){
     const tray=document.getElementById('chat-attachments');if(!tray)return;
@@ -142,9 +187,11 @@
         select.onchange=()=>setVideoUse(state.runId,i,select.value);
         chip.append(select);
       }
-      remove.type='button';remove.disabled=state.busy;
+      remove.type='button';remove.disabled=!canRemoveDraft(runId);remove.dataset.attachmentRemove='';
+      remove.title='仅从这份草稿移除；已上传素材仍保留在项目里。';
       remove.onclick=()=>{
-        const runId=state.runId,next=[...files(runId)],uses=videoUses.get(runId)||{};
+        if(!canRemoveDraft(runId)||state.runId!==runId)return;
+        const next=[...files(runId)],uses=videoUses.get(runId)||{};
         next.splice(i,1);drafts.set(runId,next);
         videoUses.set(runId,Object.fromEntries(Object.entries(uses).filter(([key])=>Number(key)!==i).map(([key,use])=>[Number(key)>i?Number(key)-1:Number(key),use])));
         persist(runId);
@@ -159,6 +206,6 @@
       restore.onclick=()=>{restoreFrozen(state.runId);render();};tray.append(restore);
     }
   }
-  root.StudioComposer={files,setFiles,setVideoUse,missingVideoUse,describe,clear,upload,render,freeze,settle,replaceMissingFile};
+  root.StudioComposer={files,setFiles,appendFiles,setVideoUse,missingVideoUse,describe,attachmentMetadata,clear,upload,render,freeze,settle,replaceMissingFile,validateFiles,syncControls};
   if(typeof module!=='undefined')module.exports=root.StudioComposer;
 })(typeof window!=='undefined'?window:globalThis);

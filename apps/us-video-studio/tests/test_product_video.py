@@ -3,7 +3,7 @@ import copy
 import hashlib
 import json
 
-from fakes import tool_turn, final_turn
+from fakes import tool_turn, final_turn, fixture_task_interpretation
 from studio.agents.client import Turn, Usage
 from studio.creative_evidence import creative_evidence
 from studio.image_analysis import candidates
@@ -75,7 +75,7 @@ def test_explicit_repeat_reuses_saved_product_analysis(native, monkeypatch):
 def test_bare_link_cannot_trigger_product_download(native, monkeypatch):
     downloads = downloader(monkeypatch, video_bytes(audio=True))
     scripted(native, monkeypatch, [product_tool(quote=URL), final_turn('这条视频是用于补全商品信息还是拆解参考表达？')])
-    assert chat(native, URL)['status'] == 'succeeded'
+    assert chat(native, URL)['status'] == 'blocked'
     assert downloads == []
     assert not candidates(native[1], RUN)
 
@@ -98,8 +98,12 @@ def test_clarified_product_purpose_uses_previous_user_link(native, monkeypatch):
 def test_product_link_cannot_be_misrouted_to_reference(native, monkeypatch):
     downloads = reference_downloader(monkeypatch, video_bytes(audio=True))
     quote = '用这条商品视频补全商品信息'
-    scripted(native, monkeypatch, [inspect('analyze', source=URL, quote=quote), final_turn('请按商品用途观察。')])
-    assert chat(native, quote + ' ' + URL)['status'] == 'succeeded'
+    turn = inspect('analyze', source=URL, quote=quote)
+    proposal = fixture_task_interpretation(quote + ' ' + URL, deliverable='analysis')
+    proposal['video_use'] = dict(source=URL, purpose='product', quote=quote)
+    turn.tool_calls[0].input['task_interpretation'] = proposal
+    scripted(native, monkeypatch, [turn, final_turn('请按商品用途观察。')])
+    assert chat(native, quote + ' ' + URL)['status'] == 'blocked'
     assert downloads == []
     assert not candidates(native[1], RUN)
 
@@ -108,7 +112,7 @@ def test_product_link_without_observation_consent_stays_unfetched(native, monkey
     downloads = downloader(monkeypatch, video_bytes(audio=True))
     scripted(native, monkeypatch, [product_tool(), final_turn('本轮未启用声画观察。')])
     assert chat(native, '用这条商品视频补全商品信息 ' + URL,
-                request_id='product-no-consent', consent=False)['status'] == 'succeeded'
+                request_id='product-no-consent', consent=False)['status'] == 'blocked'
     assert downloads == []
     assert not candidates(native[1], RUN)
 
@@ -117,7 +121,7 @@ def test_failed_product_analysis_reuses_download_only_after_new_request(native, 
     downloads = downloader(monkeypatch, video_bytes(audio=True))
     bad = Turn(text='bad json', stop_reason='end_turn', model=MODEL, usage=Usage(100, 20))
     scripted(native, monkeypatch, [product_tool(), bad, final_turn('本次观察失败，请稍后明确要求重试。')])
-    assert chat(native, '用这条商品视频补全商品信息 ' + URL)['status'] == 'succeeded'
+    assert chat(native, '用这条商品视频补全商品信息 ' + URL)['status'] == 'blocked'
     assert not candidates(native[1], RUN)
     scripted(native, monkeypatch, [product_tool(quote='重试补全商品信息'), product_result()])
     assert chat(native, '重试补全商品信息', request_id='product-retry')['status'] == 'succeeded'

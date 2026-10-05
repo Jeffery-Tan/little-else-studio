@@ -230,13 +230,13 @@
   // A shot whose latest attempt is settled but whose result is not readable is
   // the one place where "already generated" and "not retrieved yet" must not be
   // blurred: one is money already spent, the other is money not yet spent.
-  function shotCause(row){
+  function shotCause(row,photo=false){
     if(!row)return '';
     const parts=[];
     if(row.reason)parts.push(row.reason);
     if(row.blocker==='attempt_unresolved')parts.push('这次提交的结果还没有核实，先查询原任务，不要重新提交。');
     if(row.blocker==='stale_source')parts.push('这版依据已经变化，需要按当前脚本重新保存输入。');
-    if(row.blocker==='unprepared')parts.push('这面镜头还没有制作输入。');
+    if(row.blocker==='unprepared')parts.push(photo?'这一页还没有制作输入。':'这面镜头还没有制作输入。');
     return parts.join(' ');
   }
   function shotBadge(row,work){
@@ -433,7 +433,8 @@
       `<ol>${items.join('')}</ol><button type="button" class="primary" data-batch-confirm>${generation?`确认并生成 ${items.length} ${video?'段':'张'}`:`确认这 ${items.length} 张图片`}</button>`+
       `<button type="button" class="ghost small" data-batch-dismiss>继续修改</button><p role="status" data-batch-status></p></section>`;
   }
-  function canvasHtml(data,kind,runId,rail){
+  function canvasHtml(data,kind,runId,rail,contentFormat=data?.content_format){
+    const photo=contentFormat==='photo';
     if(kind==='image'){
       const rows=shotRows(data,'image'),coverage=shotCoverage(data,'image');
       // A revision replaces its shot's input. Showing the replaced one next to it
@@ -453,11 +454,11 @@
           // coverage for this project (older payload, or a legacy script with no
           // readable shot list). An empty label would read as a rendering fault.
           const ordinal=row?.ordinal??(index+1);
-          const cause=shotCause(row);
+          const cause=shotCause(row,photo);
           const badge=shotBadge(row,work);
           const shotKey=row?.shot_id||draft.shot_id||draft.draft_id;
           const revision=row?.revision&&row.revision>1?`第 ${row.revision} 版输入`:'';
-          return `<details class="production-shot" data-draft-id="${esc(draft.draft_id)}" data-shot-id="${esc(shotKey)}"><summary><strong>镜头 ${String(ordinal).padStart(2,'0')}</strong><span>${esc(shortScene)}</span><small>${esc(badge)}</small></summary>`+
+          return `<details class="production-shot" data-draft-id="${esc(draft.draft_id)}" data-shot-id="${esc(shotKey)}"><summary><strong>${photo?`第 ${String(ordinal).padStart(2,'0')} 页`:`镜头 ${String(ordinal).padStart(2,'0')}`}</strong><span>${esc(shortScene)}</span><small>${esc(badge)}</small></summary>`+
             `<div class="production-shot-body">`+
             `<p class="production-shot-stage">${esc(badge)}${row?.blocker?` · ${esc(row.blocker)}`:''}${revision?` · ${esc(revision)}`:''}</p>`+
             (cause?`<p class="production-shot-cause" role="status">${esc(cause)}</p>`:'')+
@@ -465,7 +466,7 @@
             designBindingHtml(draft)+
             `<p class="production-prompt">${esc(description||'暂无出图描述')}</p>`+
             (generationPrompt(draft)!==description?`<details class="production-confirm-prompt"><summary>查看实际发送的完整画面描述</summary><p class="production-prompt">${esc(generationPrompt(draft))}</p></details>`:'')+
-            (work.outputUrl?`<figure class="production-shot-output"><img src="${esc(work.outputUrl)}" alt="镜头 ${ordinal} 的生成结果"><figcaption>这面镜头的生成结果</figcaption></figure>`:'')+
+            (work.outputUrl?`<figure class="production-shot-output"><img src="${esc(work.outputUrl)}" alt="${photo?`第 ${ordinal} 页`:`镜头 ${ordinal}`}的生成结果"><figcaption>${photo?'本页':'这面镜头'}的生成结果</figcaption></figure>`:'')+
             referencesHtml(draft,data,runId)+
             `<button type="button" class="ghost small" data-feedback-image-draft="${esc(draft.draft_id)}">对这条描述提意见</button>`+
             (work.outputUrl&&work.displayAttempt?`<button type="button" class="ghost small" data-feedback-image-attempt="${esc(work.displayAttempt.attempt_id)}">批注这张生成图</button>`:'')+
@@ -475,20 +476,20 @@
         // six-shot storyboard with three inputs silently looks like a three-shot
         // storyboard.
         const blanks=(coverage?.shots||[]).filter(row=>!drafts.some(draft=>draft.draft_id===row.draft_id))
-          .map(row=>`<details class="production-shot production-shot-empty" data-shot-id="${esc(row.shot_id)}"><summary><strong>镜头 ${String(row.ordinal).padStart(2,'0')}</strong><span>${esc(row.label||'')}</span><small>${esc(row.stage_label||'')}</small></summary>`+
+          .map(row=>`<details class="production-shot production-shot-empty" data-shot-id="${esc(row.shot_id)}"><summary><strong>${photo?`第 ${String(row.ordinal).padStart(2,'0')} 页`:`镜头 ${String(row.ordinal).padStart(2,'0')}`}</strong><span>${esc(row.label||'')}</span><small>${esc(row.stage_label||'')}</small></summary>`+
             `<div class="production-shot-body"><p class="production-shot-stage">${esc(row.stage_label||'')}</p>`+
-            (shotCause(row)?`<p class="production-shot-cause" role="status">${esc(shotCause(row))}</p>`:'')+
-            `<p class="production-shot-next">这面镜头还没有制作输入。</p></div></details>`).join('');
+            (shotCause(row,photo)?`<p class="production-shot-cause" role="status">${esc(shotCause(row,photo))}</p>`:'')+
+            `<p class="production-shot-next">${photo?'这一页':'这面镜头'}还没有制作输入。</p></div></details>`).join('');
         const total=coverage?.total??(drafts.length+superseded.length);
         const countLine=coverage?.complete_list===false
-          ? `${coverage.notice||'目标镜头清单不可读'}`
+          ? `${coverage.notice||(photo?'目标页清单不可读':'目标镜头清单不可读')}`
           : coverage?.complete_list
-            ? `目标 ${total} 面镜头，已准备输入 ${(coverage.shots||[]).filter(item=>item.stage!=='unprepared').length} 面，已生成 ${generated} 张。`
-            : `已准备输入 ${drafts.length} 面，已生成 ${generated} 张。`;
+            ? `目标 ${total} ${photo?'页':'面镜头'}，已准备输入 ${(coverage.shots||[]).filter(item=>item.stage!=='unprepared').length} ${photo?'页':'面'}，已生成 ${generated} 张。`
+            : `已准备输入 ${drafts.length} ${photo?'页':'面'}，已生成 ${generated} 张。`;
         const supersededLine=superseded.length
           ? `<details class="production-shot-history"><summary>已被替换的历史输入 · ${superseded.length}</summary><ul>${superseded.map(draft=>`<li>${esc(String(draft.prompt||'').slice(0,80))} · 已被 ${esc(draft.superseded_by||'新版本')} 替换</li>`).join('')}</ul><p class="form-note">历史输入保留可读，不会和当前输入一起生成。</p></details>`
           : '';
-        return `<article class="production-canvas production-storyboard"><header><span class="creator-kicker">画面</span><h2>分镜首帧（${total}）</h2><p>${esc(countLine)} 点开一条查看这一镜的状态、共享设计、出图描述与参考图用途。</p></header><div class="production-shot-list">${items}${blanks}</div>${supersededLine}</article>`;
+        return `<article class="production-canvas production-storyboard"><header><span class="creator-kicker">${photo?'图片':'画面'}</span><h2>${photo?'图文图片':'分镜首帧'}（${total}）</h2><p>${esc(countLine)} 点开一条查看${photo?'这一页':'这一镜'}的状态、共享设计、出图描述与参考图用途。</p></header><div class="production-shot-list">${items}${blanks}</div>${supersededLine}</article>`;
       }
     }
     if(kind==='video'&&(data?.video_sequence||[]).length>1){

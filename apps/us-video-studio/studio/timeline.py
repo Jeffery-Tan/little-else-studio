@@ -27,7 +27,7 @@ from .materials import list_materials
 from .store import Store
 from .structured import direction_options, open_questions, view
 from .progress import project_progress
-from .project_brief import project_brief
+from .project_brief import project_brief, content_format
 
 #: Sort tiebreak when a note and a card share a timestamp: the note announced the
 #: work, so it goes above the work.
@@ -92,7 +92,7 @@ def build_timeline(
             and progress['action'] == 'draft'):
         progress.update(action='stage_command', label=direction_action['label'], prompt='')
     return {
-        "run": state.get("run"),
+        "run": {**(state.get("run") or {}), "content_format": content_format(events)},
         "interaction": interaction,
         "progress": progress,
         "brief": project_brief(state, job, chat, direction_action=direction_action,

@@ -1593,7 +1593,7 @@ class Production:
         if not payload.consent:
             raise ValueError('请确认使用审核模型检查这份准确方案，可能产生文字模型费用。')
         d = self.get_draft(run_id, draft_id, payload.expected_sha256, True)
-        snapshot = None if frozen else self.connections.snapshot()
+        snapshot = None if frozen else self.connections.snapshot(roles=('reviewer',))
         settings = frozen[0] if frozen else snapshot.settings(self.settings)
         ledger = Ledger(self.store, settings)
         ledger.ensure_within_budget()

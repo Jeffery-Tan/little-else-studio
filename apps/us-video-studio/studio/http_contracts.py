@@ -2,6 +2,7 @@
 from __future__ import annotations
 from typing import Any, Literal
 from pydantic import BaseModel, Field
+from .agent_sessions import ROLE_RESUME_TEXT
 from .product_cards import CardBinding
 
 
@@ -75,11 +76,35 @@ class ProductionDraftFeedbackTarget(BaseModel):
     attempt_id: str | None = Field(default=None, min_length=1, max_length=160)
 
 
+class ConversationAttachment(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    purpose: Literal['product', 'reference'] | None = None
+
+
+class ReferenceTarget(BaseModel):
+    run_id: str = Field(min_length=1, max_length=64)
+    reference_id: str = Field(min_length=1, max_length=100)
+    analysis_id: str = Field(min_length=1, max_length=100)
+    candidate_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+class ReferenceRecovery(BaseModel):
+    reference_id: str = Field(min_length=1, max_length=100)
+    parent_job_id: str = Field(min_length=1, max_length=160)
+    source_user_input_id: str = Field(min_length=1, max_length=160)
+    interpretation_id: str = Field(min_length=1, max_length=100)
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    expected_sha256: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
+
+
 class JobIn(MessageIn):
     request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
     display_context_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
     question_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
     reference_consent: bool = Field(default=False, strict=True)
+    attachments: list[ConversationAttachment] | None = Field(default=None, max_length=24)
+    reference_target: ReferenceTarget | None = None
+    reference_recovery: ReferenceRecovery | None = None
     feedback_target: FeedbackTarget | MediaFeedbackTarget | ProductionDraftFeedbackTarget | None = None
 
 
@@ -94,13 +119,17 @@ class SteerIn(MessageIn):
     display_context_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
     question_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
     target_session_id: str | None = Field(default=None, min_length=1, max_length=160)
+    reference_consent: bool = Field(default=False, strict=True)
+    attachments: list[ConversationAttachment] | None = Field(default=None, max_length=24)
+    reference_target: ReferenceTarget | None = None
     feedback_target: FeedbackTarget | MediaFeedbackTarget | ProductionDraftFeedbackTarget | None = None
 
 
 class RoleResumeIn(BaseModel):
     request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
     expected_task_id: str | None = Field(default=None, max_length=200)
-    text: str = Field(default='继续这项未完成的创作任务，保留已保存内容并先核对当前依据。', min_length=1, max_length=4000)
+    text: str = Field(default=ROLE_RESUME_TEXT, min_length=1, max_length=4000)
+    resume_action: Literal['continue'] | None = None
 
 
 class ReviewActionIn(BaseModel):

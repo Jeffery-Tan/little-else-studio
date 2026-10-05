@@ -929,6 +929,6 @@ def test_pending_clarification_is_tagged_on_exactly_one_turn(env):
 
     # After answering, the tag disappears with the pending interaction.
     from studio.interactions import answer
-    answer(store, RUN, "自然")
+    answer(store, RUN, "自然", question_id=question['id'])
     assert timeline(store, pipeline, ledger)["interaction"] is None
     assert not any(t.get("pending_clarification_id") for t in timeline(store, pipeline, ledger)["turns"])

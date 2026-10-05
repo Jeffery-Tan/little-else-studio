@@ -30,7 +30,8 @@ def reference_candidate(store, run_id, reference_id):
     raise ValueError('这条参考尚未完成分析，请先读取参考任务或观察指定视频。')
 
 
-def select(store, run_id, mode, reference_id=None, scope=''):
+def selection_for_reference(store, run_id, mode, reference_id=None, scope=''):
+    """Build the exact selection without changing the project mode."""
     if mode not in MODES:
         raise ValueError('未知创作方式。')
     selection = {'mode': mode, 'reference_id': None, 'scope': ''}
@@ -42,6 +43,11 @@ def select(store, run_id, mode, reference_id=None, scope=''):
                          sha256=c['sha256'], analysis_id=c['analysis_id'], candidate_sha256=digest(c))
     elif reference_id or scope:
         raise ValueError('自主创作不能同时绑定指定参考。')
+    return selection
+
+
+def select(store, run_id, mode, reference_id=None, scope=''):
+    selection = selection_for_reference(store, run_id, mode, reference_id, scope)
     if current(store, run_id) != selection:
         store.append_event(run_id, 'creation_mode_selected', selection=selection)
     return selection
@@ -61,8 +67,8 @@ def select_for_turn(store, run_id, *, intent, mode, reference_id=None, scope='')
     return select(store, run_id, mode, reference_id, scope)
 
 
-def context(store, run_id):
-    selection = current(store, run_id)
+def context(store, run_id, *, selection=None):
+    selection = selection if selection is not None else current(store, run_id)
     if not selection:
         return None
     result = {**selection, 'notice': '当前作品方式不是本轮执行、采用或生成授权。'}
@@ -72,8 +78,12 @@ def context(store, run_id):
                 or digest(c) != selection['candidate_sha256']):
             raise ValueError('指定参考分析版本已变化，请重新明确采用的参考。')
         result['observation'] = {k: c[k] for k in ('name', 'sha256', 'analysis_id', 'findings', 'limitations',
-            'timeline', 'reference_methods', 'audiovisual', 'observed_at')}
-        result['observation'].update(level='audiovisual_review', purpose='reference',
+            'timeline', 'reference_methods', 'audiovisual', 'observed_at') if k in c}
+        complete_observation = 'timeline' in c and 'audiovisual' in c
+        if not complete_observation:
+            result['observation']['limitations'] = [*c.get('limitations', []),
+                '历史记录缺少逐段画面或声音数据；只能回看已保存文字，不能宣称已完成完整声画观察。']
+        result['observation'].update(level='audiovisual_review' if complete_observation else 'existence_only', purpose='reference',
             source_kind='requested_model_reference', reference_task_id=selection['reference_id'],
             method='本次明确指定的模型参考观察，未经人工核对，不是商品事实',
             observation_ref='reference:' + selection['analysis_id'])

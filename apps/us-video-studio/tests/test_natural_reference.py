@@ -4,7 +4,7 @@ import hashlib
 
 import pytest
 
-from fakes import tool_turn, final_turn, upgrade_fixture_task_contract
+from fakes import tool_turn, final_turn, upgrade_fixture_task_contract, fixture_task_interpretation, _fixture_current_input
 from studio.agents.client import Turn, Usage
 from studio.creation_mode import current, select, select_for_turn
 
@@ -46,8 +46,29 @@ def scripted(native, monkeypatch, turns):
     model=native[2]
     original=model.__class__.complete.__get__(model)
     queue=iter(turns)
+    observer = next((call for turn in turns for call in turn.tool_calls
+                     if call.name in {'observe_reference', 'observe_product_video'}), None)
+    endpoint = next((call.input['deliverable'] for turn in turns for call in turn.tool_calls
+                     if call.name == 'prepare_creative_context' and 'deliverable' in call.input), None)
+    declared = None
     def complete(**kwargs):
-        model.turn=upgrade_fixture_task_contract(next(queue), kwargs.get('system', ''))
+        nonlocal declared
+        turn = next(queue)
+        source = _fixture_current_input(kwargs.get('system', ''))
+        if observer and source and declared is None:
+            action = observer.input.get('action', 'analyze')
+            goal = endpoint or ('analysis' if action == 'analyze' else 'reference_prompt' if action == 'prompt' else 'intake')
+            declared = observer.input.get('task_interpretation') or fixture_task_interpretation(source, deliverable=goal)
+            if goal == 'analysis':
+                declared['task'].update(mode='analyze', allowed_stages=[])
+            declared.setdefault('video_use', {'source': observer.input['source'],
+                'purpose': 'product' if observer.name == 'observe_product_video' else 'reference',
+                'quote': observer.input['quote']})
+        if declared and source:
+            for call in turn.tool_calls:
+                if call.name in {'observe_reference', 'observe_product_video', 'prepare_creative_context'}:
+                    call.input.setdefault('task_interpretation', declared)
+        model.turn=upgrade_fixture_task_contract(turn, kwargs.get('system', ''))
         return original(**kwargs)
     monkeypatch.setattr(model,'complete',complete)
 
@@ -156,7 +177,8 @@ def test_product_video_attachment_cannot_be_reinterpreted_as_reference(native,mo
         final_turn('请在素材区选择商品用途，分析后再补全商品信息。'),
     ])
     job=chat(native,'分析这个商品视频\n本次附上的素材：product.mp4（商品视频，用于补全商品信息）')
-    assert job['status']=='succeeded',job
+    assert job['status']=='blocked',job
+    assert job['deliverable']['status']=='incomplete'
     assert len(native[2].calls)==2
     assert not any(e['kind']=='video_analysis_candidate' for e in native[1].read_events(RUN))
     assert not any('参考视频分析' in r.get('text','') for r in native[1].read_chat(RUN))
@@ -188,7 +210,10 @@ def test_selected_reference_cannot_silently_change_version(native,monkeypatch,ch
     from studio.creation_mode import context, reference_candidate
     from studio.materials import resolve
     accept_upload(native[1],RUN,'local.mp4',video_bytes(audio=True))
-    scripted(native,monkeypatch,[inspect('recreate',quote='照这条做'),observation(),final_turn('已读取')])
+    scripted(native,monkeypatch,[inspect('recreate',quote='照这条做'),observation(),
+        tool_turn('route','prepare_creative_context',dict(intent='new',format='video',deliverable='intake')),
+        tool_turn('intake','write_stage',dict(stage='intake',content='按指定参考整理改编需求',summary='离线需求')),
+        final_turn('已读取')])
     assert chat(native,'照这条做')['status']=='succeeded'
     selected=current(native[1],RUN)
     candidate=reference_candidate(native[1],RUN,selected['reference_id'])

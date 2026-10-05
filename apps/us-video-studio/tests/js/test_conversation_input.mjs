@@ -35,3 +35,47 @@ test('failed upload keeps attachments and creates no conversation request',async
   assert.equal(ui.files('failed').length,1);
   assert.ok(calls.every(url=>url.includes('/materials?')));ui.clear('failed');
 });
+
+test('adding reference keeps product uses and uploaded receipts, including removal and an unset use',async()=>{
+  const product=new File(['product'],'product.mp4',{type:'video/mp4'});
+  const reference=new File(['reference'],'reference.mp4',{type:'video/mp4'});
+  ui.setFiles('append',[product],'product');
+  const calls=[];
+  const request=async(url)=>{calls.push(url);return {ok:true};};
+  await ui.upload('append',request);
+  ui.appendFiles('append',[reference],'reference');
+  assert.deepEqual(ui.files('append').map(file=>file.name),['product.mp4','reference.mp4']);
+  assert.deepEqual(ui.attachmentMetadata('append',await ui.upload('append',request)),[
+    {name:'product.mp4',purpose:'product'},{name:'reference.mp4',purpose:'reference'},
+  ]);
+  assert.equal(calls.length,2,'the product receipt is retained instead of uploading twice');
+  ui.setVideoUse('append',1,'');
+  assert.equal(ui.missingVideoUse('append'),true);
+  ui.setVideoUse('append',1,'product');
+  assert.equal(ui.missingVideoUse('append'),false);
+  assert.equal(ui.attachmentMetadata('append',['product.mp4','reference.mp4'])[1].purpose,'product');
+  ui.clear('append');
+});
+
+test('attachment preflight rejects duplicates, limits and filenames before any upload',async()=>{
+  const valid=new File(['bytes'],'product.png',{type:'image/png'});
+  const cases=[
+    [[valid,new File(['different'],'Product.PNG')],/重复附上/],
+    [Array.from({length:25},(_,i)=>new File(['bytes'],`file-${i}.png`)),/24/],
+    [[{name:'large.mp4',size:64*1024*1024+1}],/64 MB/],
+    [[new File([],'empty.png')],/空文件/],
+    [[new File(['bytes'],'CON.mp4')],/文件名/],
+    [[new File(['bytes'],'a'.repeat(117)+'.png')],/文件名/],
+    [[new File(['bytes'],'bad:name.mp4')],/文件名/],
+    [[new File(['bytes'],'trailing.png ')],/文件名/],
+    [[new File(['bytes'],'unsupported.heic')],/格式/],
+  ];
+  let calls=0;
+  for(const [files,error] of cases){
+    ui.setFiles('preflight',files);
+    await assert.rejects(ui.upload('preflight',async()=>{calls++;return {ok:true};}),error);
+  }
+  assert.equal(calls,0);
+  assert.doesNotThrow(()=>ui.validateFiles([new File(['bytes'],'家庭 种草.mp4')]));
+  ui.clear('preflight');
+});
