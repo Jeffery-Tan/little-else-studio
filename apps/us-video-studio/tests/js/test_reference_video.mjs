@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
-import {makeDom} from './dom-fixture.mjs';
+import vm from 'node:vm';
+import {makeDom,webSource} from './dom-fixture.mjs';
 const require=createRequire(import.meta.url);
 const ui=require('../../studio/web/reference-video.js');
 const images=require('../../studio/web/image-analysis.js');
@@ -24,6 +25,92 @@ test('saved video resume pins source and intent while failed download permits fi
   assert.match(downloaded,/type="file"[^>]*disabled/);
   assert.match(downloaded,/原片已保存，声画分析尚未完成/);
   assert.match(ui.form({connection:{}},{sha256:'abc',name:'same.mp4',analysis_id:'saved'}),/已完成的分析会复用/);
+});
+
+test('reference resume names the selected service and does not hard-code the legacy provider',()=>{
+  const html=ui.form({connection:{name:'MiMo <unsafe>',has_key:true}},{sha256:'abc',name:'same.mp4'});
+  assert.match(html,/通过 MiMo &lt;unsafe&gt; 进行声画分析/);
+  assert.match(html,/已有有效分析会复用，不重复调用/);
+  assert.doesNotMatch(html,/百炼|<unsafe>|type="submit"[^>]*disabled/);
+  const missing=ui.form({connection:{name:'MiMo',has_key:false}},{source_url:'https://vm.tiktok.com/test/'});
+  assert.match(missing,/为 MiMo 填写 API Key/);
+  assert.match(missing,/不会自动改用其他服务/);
+  assert.match(missing,/type="submit"[^>]*disabled/);
+  assert.doesNotMatch(ui.form({connection:null}),/百炼/);
+});
+
+test('valid existing reference analysis can be reused without a current video service or key',()=>{
+  const task={sha256:'abc',name:'same.mp4',status:'failed',candidate:{analysis_id:'analysis',status:'accepted'}};
+  assert.equal(ui.canReuseAnalysis(task),true);
+  for(const data of [{connection:null},{connection:{name:'MiMo',has_key:false}}]){
+    const html=ui.form(data,task);
+    assert.match(html,/已有有效分析直接复用，不发起新的视频理解调用/);
+    assert.doesNotMatch(html,/填写 API Key|type="submit"[^>]*disabled/);
+  }
+});
+
+test('saved bytes and stale analysis never bypass the selected video key requirement',()=>{
+  const data={connection:{name:'MiMo',has_key:false}};
+  for(const task of [
+    {sha256:'abc',name:'same.mp4',status:'failed'},
+    {sha256:'abc',name:'same.mp4',status:'failed',candidate:{status:'stale'}},
+    {sha256:'abc',name:'same.mp4',status:'stale',candidate:{status:'accepted'}},
+  ]){
+    assert.equal(ui.canReuseAnalysis(task),false);
+    const html=ui.form(data,task);
+    assert.match(html,/填写 API Key/);
+    assert.match(html,/type="submit"[^>]*disabled/);
+    assert.doesNotMatch(html,/已有有效分析直接复用/);
+    assert.doesNotMatch(ui.form({connection:null},task),/<form/);
+  }
+});
+
+async function referenceController(connection,task){
+  const {document}=makeDom();
+  const create=document.createElement.bind(document);
+  document.createElement=tag=>{
+    const element=create(tag);
+    if(tag==='dialog'){
+      element.showModal=()=>{};
+      element.close=()=>element.remove();
+    }
+    return element;
+  };
+  const jobs=[],context=vm.createContext({document,state:{runId:'run',busy:false,decisionBusy:false},
+    crypto:{randomUUID:()=> 'fixture-request'},
+    api:async()=>({connection,revision:7}),
+    toggleMaterials(){},setProjectFocus(){},
+    submitJob:async(runId,payload)=>jobs.push({runId,payload}),
+  });
+  vm.runInContext(webSource('reference-video.js'),context);
+  await context.openReferenceVideo('run',task);
+  const form=document.querySelector('form');
+  if(form)form.elements={file:form.querySelector('[name="file"]')};
+  return {document,form,jobs};
+}
+
+test('the mounted resume handler submits existing analysis even when the video key or service is absent',async()=>{
+  for(const connection of [null,{name:'MiMo',has_key:false,base_url:'https://api.xiaomimimo.com/v1'}]){
+    const task={reference_id:'reference',intent:'analyze',sha256:'abc',name:'same.mp4',status:'failed',
+      candidate:{analysis_id:'analysis',status:'accepted'}};
+    const h=await referenceController(connection,task);
+    assert.equal(h.form.querySelector('[type="submit"]').disabled,false);
+    await h.form.onsubmit({preventDefault(){}});
+    assert.equal(h.jobs.length,1);
+    assert.equal(h.jobs[0].payload.reference_id,'reference');
+    assert.equal(h.jobs[0].payload.expected_endpoint,connection?.base_url||'');
+    assert.equal(h.jobs[0].payload.expected_sha256,'abc');
+  }
+});
+
+test('the mounted resume handler rechecks stale candidates before permitting a keyless continuation',async()=>{
+  const task={reference_id:'reference',intent:'analyze',sha256:'abc',name:'same.mp4',status:'failed',
+    candidate:{analysis_id:'analysis',status:'accepted'}};
+  const h=await referenceController({name:'MiMo',has_key:false},task);
+  task.candidate.status='stale';
+  await h.form.onsubmit({preventDefault(){}});
+  assert.equal(h.jobs.length,0);
+  assert.match(h.form.querySelector('[data-reference-error]').textContent,/填写.*API Key/);
 });
 
 test('reference text is escaped and completed tasks have no resume action',()=>{

@@ -34,6 +34,7 @@ class Totals:
     unknown_calls: int = 0
     unknown_cost_calls: int = 0
     pending_calls: int = 0
+    incomplete_projects: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -43,6 +44,8 @@ class Totals:
             "known_estimated_usd": round(self.known_estimated_usd, 6),
             "unknown_calls": self.unknown_calls, "unknown_cost_calls": self.unknown_cost_calls,
             "pending_calls": self.pending_calls,
+            "summary_complete": not self.incomplete_projects,
+            "incomplete_projects": list(self.incomplete_projects),
         }
 
 
@@ -163,9 +166,17 @@ class Ledger:
         stable synthetic IDs let an operator reconcile them without rewriting.
         """
         if run_id is None:
-            return [r for run in self.store.list_runs() for r in self.entries(run.run_id)]
+            # A damaged event/chat/metadata file does not erase readable costs.
+            # Unreadable ledgers are explicitly marked by totals(), never zero.
+            return [r for item in self.store.project_catalog() if item['ledger_complete']
+                    for r in self.entries(item['run_id'])]
+        return self.project_entries(self.store, run_id)
+
+    @staticmethod
+    def project_entries(store, run_id: str) -> list[LedgerEntry]:
+        """Read the same effective journal without a service or new settings."""
         effective: dict[str, LedgerEntry] = {}
-        for index, row in enumerate(self.store.read_ledger(run_id)):
+        for index, row in enumerate(store.read_ledger(run_id)):
             key = row.call_id or f"legacy-{index + 1}"
             usage_status = row.usage_status
             if usage_status == "legacy":
@@ -214,6 +225,7 @@ class Ledger:
         return entry
 
     def begin_call(self, run_id: str, *, role: str, stage: str, model: str) -> str:
+        self.store.require_healthy(run_id)
         with self._locked():
             self.store.read_run(run_id)
             self.ensure_within_budget()
@@ -268,6 +280,7 @@ class Ledger:
         """Same journal and budget guard; media never invents token measurements."""
         if usage_unit not in {'images', 'video_seconds'}:
             raise ValueError('invalid media unit')
+        self.store.require_healthy(run_id)
         with self._locked():
             self.ensure_within_budget()
             self.store.read_run(run_id)
@@ -312,6 +325,16 @@ class Ledger:
             return row
 
     def totals(self, run_id: str | None = None) -> Totals:
+        if run_id is None:
+            catalog = self.store.project_catalog()
+            rows = [row for item in catalog if item['ledger_complete']
+                    for row in self.entries(item['run_id'])]
+            totals = _totals(rows)
+            incomplete = tuple(item['run_id'] for item in catalog
+                               if not item['ledger_complete'])
+            if incomplete:
+                totals = replace(totals, estimated_usd=None, incomplete_projects=incomplete)
+            return totals
         return _totals(self.entries(run_id))
 
     def spent_usd(self, run_id: str | None = None) -> float | None:
@@ -329,7 +352,7 @@ class Ledger:
         if limit is None:
             return None
         totals = self.totals()
-        if totals.unknown_calls:
+        if totals.unknown_calls or totals.incomplete_projects:
             return None
         return max(0, limit - totals.input_tokens - totals.output_tokens)
 
@@ -377,6 +400,8 @@ class Ledger:
         if token_limit is None and usd_limit is None:
             return
         totals = self.totals()
+        if totals.incomplete_projects:
+            raise BudgetExceeded('部分项目的费用台账无法读取，无法核对已配置额度；原件保留，请先修复资料错误。')
         tokens = totals.input_tokens + totals.output_tokens
         if token_limit is not None and tokens >= token_limit:
             raise BudgetExceeded(f"{tokens} tokens reached the soft cap of {token_limit}; refusing a new call.")

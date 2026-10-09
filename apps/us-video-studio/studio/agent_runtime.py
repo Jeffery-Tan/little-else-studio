@@ -322,6 +322,26 @@ class AgentRuntime:
                                 for message in task['messages']]
         return {'run_id': self.run_id, 'tasks': tasks}
 
+    def agent_snapshot(self):
+        """Keep every task's outcome, without repeated historical capabilities."""
+        snapshot = self.snapshot()
+        owner = current_task_id()
+        keys = {'task_id', 'session_id', 'role', 'stage', 'parent_task_id',
+                'parent_job_id', 'source_message_id', 'status', 'reason',
+                'artifact_receipt', 'stop_requested', 'stop_reason', 'created_at',
+                'updated_at', 'event_seq', 'pending_message_count'}
+        rows = []
+        for task in snapshot['tasks']:
+            row = {key: deepcopy(value) for key, value in task.items() if key in keys}
+            if owner is not None and (task['task_id'] == owner or task['parent_job_id'] == owner):
+                for key in ('allowed_tools', 'context_refs', 'expected_result'):
+                    if key in task:
+                        row[key] = deepcopy(task[key])
+            rows.append(row)
+        return {'run_id': self.run_id, 'view': 'task_status_index',
+                'current_task_id': owner, 'tasks': rows,
+                'notice': '全部任务状态与准确交付回执保留；历史能力与上下文引用不重复传入，也不赋予当前执行权限。'}
+
     def interrupt_open_tasks(self, *, parent_job_id=None,
                              reason='Service restarted; explicit continuation required'):
         """Recovery records interruption only; it never replays a model or inbox."""

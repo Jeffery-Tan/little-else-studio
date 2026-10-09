@@ -50,6 +50,37 @@ function turn(overrides = {}) {
   };
 }
 
+test('failure bubbles remove known internal class prefixes while technical notes keep original evidence',()=>{
+  const p=page(),raw='这一轮没能做完：NonRetryableStageError: ModelError: 工具参数不是有效 JSON。已保存内容保留，不会自动重试。';
+  const tl={turns:[turn({reply:null,items:[{kind:'note',failure:true,text:raw}]})],rail:[],questions:[],progress:{},pending:null};
+  const before=JSON.stringify(tl);p.ctx.__tl=tl;
+  p.read('state.busy=false;state.machineDetail=true;state.timeline=globalThis.__tl;renderConversation(globalThis.__tl)');
+  const host=p.el('conversation-body'),alert=host.querySelector('.turn-failure');
+  assert.match(alert.textContent,/这一轮没能做完：工具参数不是有效 JSON/);
+  assert.match(alert.textContent,/已保存内容保留，不会自动重试/);
+  assert.doesNotMatch(alert.textContent,/NonRetryableStageError|ModelError/);
+  assert.match(host.querySelector('.turn-work').textContent,/NonRetryableStageError: ModelError:/);
+  assert.equal(JSON.stringify(tl),before);
+});
+
+test('marked failure replies use the same display boundary without changing successful or business text',()=>{
+  const p=page();
+  for(const [raw,expected] of [
+    ['NonRetryableStageError: ModelError: 原模型连接中断','原模型连接中断'],
+    ['后续任务未完成：SafePreflightError: 当前配置已变化','后续任务未完成：当前配置已变化'],
+    ['VIPAccessError: 该账户无访问权限','VIPAccessError: 该账户无访问权限'],
+    ['服务返回的说明中包含 ModelError: 原文仍可追溯','服务返回的说明中包含 ModelError: 原文仍可追溯'],
+  ]) {
+    p.ctx.__tl={turns:[turn({reply:{text:raw,failure:true}})],rail:[],questions:[],progress:{},pending:null};
+    p.read('state.timeline=globalThis.__tl;renderConversation(globalThis.__tl)');
+    assert.equal(p.el('conversation-body').querySelector('.turn-failure').textContent,expected);
+    assert.equal(p.ctx.__tl.turns[0].reply.text,raw);
+  }
+  p.ctx.__tl={turns:[turn({reply:{text:'ModelError: 这是你要求查看的名称说明'}})],rail:[],questions:[],progress:{},pending:null};
+  p.read('state.timeline=globalThis.__tl;renderConversation(globalThis.__tl)');
+  assert.match(p.el('conversation-body').querySelector('.msg.assistant').textContent,/ModelError:/);
+});
+
 const CLARIFICATION = {
   id: 'q-1',
   question: '要补充哪一版？',
@@ -77,6 +108,27 @@ test('direction choice remains in the conversation when its draft also asks a qu
   assert.equal(host.querySelectorAll('input[name="direction-choice"]').length,3);
   assert.ok(host.querySelector('[data-act="approve"]'));
   assert.ok(host.querySelector('[data-send-artifact-answer]'));
+});
+
+test('the same exact draft updates its decision copy after its source job ends blocked',()=>{
+  const p=page();
+  vm.runInContext(webSource('stage.js'),p.ctx,{filename:'stage.js'});
+  p.ctx.__tl={turns:[],interaction:null,questions:[],rail:[{stage:'writing',version:1,blocks:[]}],
+    pending:{stage:'writing',version:1,artifact_sha256:'a'.repeat(64),stage_label:'脚本',
+      passed:true,headline:'脚本已保存，等你决定',findings:[]}};
+  p.read('state.busy=false;state.timeline=globalThis.__tl;renderJourneyDecision()');
+  const host=p.el('journey-decision');assert.match(host.textContent,/确认当前脚本并继续/);
+  p.ctx.__tl.pending.source_execution={job_id:'source',status:'blocked',notice:'草稿已保存，检查或交付未完成；请先查看或修改。'};
+  p.ctx.__tl.pending.headline='「脚本」草稿已保存，检查或交付未完成。';
+  p.ctx.__tl.pending.body='请先查看或修改；采用只记录用户决定，不代表检查完成。';
+  p.read('renderJourneyDecision()');
+  assert.match(host.textContent,/当前草稿.*请先查看/);
+  assert.match(host.textContent,/草稿已保存，检查或交付未完成/);
+  assert.match(host.textContent,/不代表检查完成/);
+  assert.doesNotMatch(host.textContent,/确认当前脚本并继续|看完后，在这里选择继续/);
+  assert.ok(host.querySelector('[data-view-plan]'));
+  assert.equal(host.querySelector('[data-act="approve"]').textContent,'采用当前草稿');
+  assert.ok(host.querySelector('[data-act="reject"]'));
 });
 
 test('stale direction exposes one typed resume command instead of a copied prompt', async () => {
@@ -140,6 +192,48 @@ test('creator conversation hides internal artifact handles without rewriting his
   assert.match(host.querySelector('.turn-progress').textContent, /我在检查 创意方向，先核对 创作需求/);
   assert.match(host.querySelector('.turn-work').textContent, /技术记录：direction-v2/);
   assert.equal(saved.reply.text, raw, 'the persisted reply is unchanged');
+});
+
+test('same-source continuation receipt and conclusion render without changing the historical reply', () => {
+  const p = page();
+  const raw = '已采用方向 A。下一步已记录，待本轮结束后启动；实际进展会显示在任务状态。';
+  const saved = turn({reply:{text:raw},replies:[
+    {text:raw,display_text:'已采用方向 A。正在按你的要求继续处理后续任务。'},
+    {text:'素材方案已保存，脚本草稿请在方案区核对。'},
+  ]});
+  p.ctx.__tl = {turns:[saved],rail:[],questions:[],progress:{},pending:null};
+  p.read('state.timeline = globalThis.__tl; renderConversation(globalThis.__tl)');
+  const bubbles = p.el('conversation-body').querySelectorAll('.msg.assistant');
+  assert.equal(bubbles.length,2);
+  assert.match(bubbles[0].textContent,/正在按你的要求继续/);
+  assert.match(bubbles[1].textContent,/脚本草稿请在方案区核对/);
+  assert.doesNotMatch(p.el('conversation-body').textContent,/待本轮结束后启动/);
+  assert.equal(saved.reply.text,raw);
+  assert.equal(saved.replies[0].text,raw);
+});
+
+test('exact continuation failure is visible even when the parent saved an adoption acknowledgment', () => {
+  const p = page();
+  const reason = 'DeepSeek 连接中断，本次结果未完成。已保存内容保留，没有自动重试。';
+  const raw = '已采用方向 A。下一步已记录，待本轮结束后启动；实际进展会显示在任务状态。';
+  p.ctx.__tl = {turns:[turn({reply:{text:raw},replies:[
+    {text:raw,display_text:`已采用方向 A。后续任务未完成。${reason}`,failure:true},
+  ]})],rail:[],questions:[],progress:{},pending:null};
+  p.read('state.busy = false; state.timeline = globalThis.__tl; renderConversation(globalThis.__tl)');
+  const alert = p.el('conversation-body').querySelector('[role="alert"]');
+  assert.ok(alert);
+  assert.match(alert.textContent,/DeepSeek 连接中断.*没有自动重试/);
+  assert.doesNotMatch(p.el('conversation-body').textContent,/待本轮结束后启动|本轮没有留下结论/);
+});
+
+test('an identity-bound receipt remains readable when the parent left no final reply', () => {
+  const p = page();
+  p.ctx.__tl = {turns:[turn({reply:null,decision_continuation:{
+    separate:true,status:'cancelled',text:'已采用方向 A。后续任务已停止，已保存内容保留。',
+  }})],rail:[],questions:[],progress:{},pending:null};
+  p.read('state.timeline = globalThis.__tl; renderConversation(globalThis.__tl)');
+  assert.match(p.el('conversation-body').textContent,/后续任务已停止/);
+  assert.doesNotMatch(p.el('conversation-body').textContent,/本轮没有留下结论/);
 });
 
 test('a finished round with no reply says so instead of leaving the assistant side blank', () => {
@@ -312,4 +406,58 @@ test('the title bar action disappears while the team is working', () => {
   assert.equal(p.el('project-progress').querySelector('[data-creator-next]'), null,
     'in-progress state belongs to the status row, not to a second action');
   assert.equal(p.el('project-progress').hidden, true);
+});
+
+test('a UI approval owns its exact failed continuation and fresh preparation request', async () => {
+  const p = page();
+  p.ctx.payloads=[];
+  p.ctx.item={kind:'approval',approval_id:'approval-exact',stage:'writing',stage_label:'脚本',version:2,
+    sentence:'已采用。',continuation:{status:'blocked',text:'后续准备未完成。',reason:'Exact scope failure',
+      retry:{stage:'writing',expected_version:2,expected_artifact_sha256:'a'.repeat(64),failed_job_id:'failed-exact'}}};
+  p.read(`state.busy=false; state.recoveryBlocked=false; state.decisionBusy=false;
+    api=async(path,options)=>{if(!options)return null;payloads.push({path,body:JSON.parse(options.body)});throw new Error('Offline connection lost');};
+    refreshTimeline=async()=>true;
+    document.getElementById('conversation-body').append(renderApproval(item));`);
+  const card=p.el('conversation-body').querySelector('.approval');
+  assert.match(card.querySelector('[role="alert"]').textContent,/Exact scope failure/);
+  assert.equal(card.querySelectorAll('.msg.user').length,0,'no synthetic user message is introduced');
+  const retry=card.querySelector('button');
+  assert.equal(retry.textContent,'重新准备分镜输入');
+  await retry.onclick();
+  await p.read('restoreJob("run-1")');
+  await retry.onclick();
+  assert.equal(p.ctx.payloads.length,2);
+  assert.equal(p.ctx.payloads[0].path,'/api/runs/run-1/decision-preparation');
+  assert.deepEqual(p.ctx.payloads[0].body,p.ctx.payloads[1].body,'lost response keeps the same new identity');
+  assert.equal(p.ctx.payloads[0].body.failed_job_id,'failed-exact');
+  assert.equal(p.ctx.payloads[0].body.expected_version,2);
+  assert.ok(p.ctx.payloads[0].body.request_id);
+});
+
+test('continuation terminal and live state is displayed without inventing a retry', () => {
+  const p=page();
+  for(const status of ['running','succeeded','cancelled','interrupted']) {
+    p.ctx.receipt={stage:'writing',stage_label:'脚本',version:2,sentence:'已采用。',
+      continuation:{status,text:`Exact ${status}`,reason:''}};
+    const card=p.read('renderApproval(receipt)');
+    assert.match(card.textContent,new RegExp(`Exact ${status}`));
+    assert.equal(card.querySelector('button'),null);
+    assert.equal(card.querySelector('[role="alert"]')!==null,['cancelled','interrupted'].includes(status));
+  }
+});
+
+test('preparation refuses to post without durable request identity and releases the composer', async () => {
+  const p=page();p.ctx.posted=0;
+  p.ctx.receipt={stage:'writing',stage_label:'脚本',version:2,sentence:'已采用。',approval_id:'exact',
+    continuation:{status:'blocked',text:'准备失败。',reason:'Exact',
+      retry:{stage:'writing',expected_version:2,expected_artifact_sha256:'a'.repeat(64),failed_job_id:'old'}}};
+  p.read(`state.busy=false;state.decisionBusy=false;state.recoveryBlocked=false;
+    localStorage.setItem=()=>{throw new Error('Request identity cannot be saved');};
+    api=async()=>{posted++;};`);
+  const card=p.read('renderApproval(receipt)');
+  await card.querySelector('button').onclick();
+  assert.equal(p.ctx.posted,0);
+  assert.equal(p.read('state.decisionBusy'),false);
+  assert.equal(p.el('send').disabled,false);
+  assert.match(card.querySelector('[role="alert"]').textContent,/identity cannot be saved/);
 });

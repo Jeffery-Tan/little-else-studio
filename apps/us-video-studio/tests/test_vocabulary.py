@@ -522,3 +522,15 @@ def test_direction_rail_exposes_the_recorded_choice_without_parsing_approval_pro
     undecided = v.build_rail([_stage("direction", latest={"version": 1})], None)[0]
     assert undecided["approval_decision"] is None
     assert undecided["selected_option_id"] is None
+
+
+def test_legacy_schema_failure_is_explained_without_claiming_a_specific_historical_cause():
+    note = v.failure_note('ModelError: model endpoint returned 200: invalid Chat Completions response; received usage retained')
+    assert '格式校验' in note and '未注明具体失败字段' in note
+    assert 'Chat Completions' not in note and 'ModelError' not in note
+
+
+def test_submission_normalization_does_not_claim_a_script_is_saved_or_problems_are_resolved():
+    note = v.describe_event({'type': 'agent_submission_normalized'})
+    assert '待复核' in note and '没有重新调用模型' in note
+    assert '已保存' not in note and '没有问题' not in note

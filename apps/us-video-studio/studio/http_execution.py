@@ -8,6 +8,7 @@ from typing import Any, Iterator, Literal
 from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 from .connection_checks import ConnectionCheckError
+from .agents.client import SafePreflightError
 from .connections import ConnectionConflict
 from .http_contracts import DeepSeekCheckIn, ReviewActionIn, JobIn, DirectionResumeIn, MessageIn, SteerIn, RoleResumeIn, WritingRevisionIn, MediaFeedbackTarget, ProductionDraftFeedbackTarget, redact_http_event
 from .models import PipelineError
@@ -89,7 +90,10 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
                 redact_http_event(event)
                 event["say"] = vocabulary.describe_event(event)
             from .direction_command import available as direction_command
-            job['brief'] = project_brief(pipeline.state(job['run_id']).to_dict(),
+            state = job.pop('_project_state', None)
+            if state is None:
+                state = pipeline.state(job['run_id']).to_dict()
+            job['brief'] = project_brief(state,
                 latest_execution(store, job['run_id']), store.read_chat(job['run_id']),
                 direction_action=direction_command(store, pipeline, job['run_id']),
                 store=store, run_id=job['run_id'])
@@ -175,6 +179,8 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
                            json.dumps(stage.latest.structured, ensure_ascii=False))
                 if not any(quote in re.sub(r'\s+', ' ', source) for source in sources):
                     raise ValueError('所选句子不在当前脚本中，请重新选择。')
+        from .production_feedback import bind_target
+        bind_target(store, rid, feedback_context)
         return feedback_context
 
     def prepare_input(rid, receipt):
@@ -248,13 +254,13 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
             return present_job(jobs.submit(run_id, message, payload.request_id,
                 payload={**target_meta, **media_meta, **({'reference_consent': True} if payload.reference_consent else {})} or None,
                 prepare=prepare_target, user_input_id=receipt['message_id']))
-        except (PipelineError, ValueError) as exc:
+        except (PipelineError, ValueError, SafePreflightError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @app.get("/api/runs/{run_id}/jobs/latest")
     def latest_job(run_id: str, after_seq: int = 0):
         require_run(run_id)
-        return present_job(jobs.latest(run_id, max(0, after_seq)))
+        return present_job(jobs.latest(run_id, max(0, after_seq), include_project_state=True))
 
     @app.get('/api/runs/{run_id}/agent-runtime')
     def agent_runtime(run_id: str):
@@ -312,7 +318,7 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
     def get_job(run_id: str, job_id: str, after_seq: int = 0):
         require_run(run_id)
         try:
-            return present_job(jobs.get(run_id, job_id, max(0, after_seq)))
+            return present_job(jobs.get(run_id, job_id, max(0, after_seq), include_project_state=True))
         except PipelineError as exc:
             raise HTTPException(404, str(exc)) from exc
 

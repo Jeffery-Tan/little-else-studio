@@ -171,6 +171,8 @@ def evidence_snapshot(store: Store, run_id: str) -> dict[str, Any]:
                     raise ValueError(f"{key} must be an array of strings")
             from .video_observation import record_details
             details = record_details(record)
+            from .observation_image_input import record_details as image_input_details
+            details.update(image_input_details(record))
             material["observations"].append({
                 key: record[key] for key in ("level", "observer", "method", "coverage", "observed_at", "findings", "limitations")
             })
@@ -267,11 +269,25 @@ def evidence_generation(store: Store, run_id: str) -> int:
     """
     events = store.read_events(run_id)
     derived = derived_outputs(events)
+    registered_outputs: set[tuple[str, str]] = set()
     generation = 0
     for event in events:
         kind = event.get("kind")
+        if kind == "production_output":
+            registered_outputs.update(derived_outputs([event]))
         if kind == "material_uploaded" and (event.get("name"), event.get("sha256")) in derived:
             continue
+        if kind == "agent_images_observed":
+            rows = event.get("observations")
+            # Only a fully identified batch of this run's own outputs is
+            # derived at observation time. Later output registration must not
+            # retroactively exclude an unidentified historical observation.
+            if (isinstance(rows, list) and rows and all(
+                    isinstance(row, dict) and isinstance(row.get("name"), str)
+                    and isinstance(row.get("sha256"), str)
+                    and (row["name"], row["sha256"]) in registered_outputs
+                    for row in rows)):
+                continue
         if kind not in EVIDENCE_GENERATION_KINDS:
             continue
         if kind == "creation_mode_selected":

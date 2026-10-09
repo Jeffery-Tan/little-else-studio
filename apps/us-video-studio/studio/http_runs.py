@@ -4,7 +4,8 @@ import hashlib
 from typing import Any
 from fastapi import HTTPException
 from .http_contracts import RunIn, JobIn, redact_http_event, redact_http_events
-from .models import PipelineError, STAGE_SPEC
+from .models import PipelineError, Run, STAGE_SPEC, valid_run_id
+from .project_integrity import ProjectDataError, public_diagnostic
 from .product_cards import create_with_card
 from .project_brief import project_brief, latest_execution, content_format
 from .project_title import derive_project_title
@@ -21,7 +22,19 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
     @app.get("/api/runs")
     def list_runs() -> list[dict[str, Any]]:
         out = []
-        for run in store.list_runs():
+        for item in store.project_catalog():
+            if not item['available']:
+                metadata = item['metadata'] or {'run_id': item['run_id'], 'title': item['run_id'],
+                                               'brief': '', 'market': None, 'kind': None, 'created_at': ''}
+                out.append({**metadata, 'integrity': public_diagnostic(item), 'updated_at': metadata['created_at'],
+                            'spend': (ledger.totals(item['run_id']).to_dict() if item['ledger_complete'] else
+                                      {'estimated_usd': None, 'summary_complete': False,
+                                       'incomplete_projects': [item['run_id']]}),
+                            'progress': {'title': '项目资料损坏，已暂停', 'detail': '原件已保留，其他项目可正常使用。'},
+                            'project_brief': {'phase': 'unavailable', 'title': '项目资料损坏，已暂停',
+                                              'detail': '此项目不能继续变更或调用。'}, 'content_format': None})
+                continue
+            run = Run(**item['metadata'])
             if store.deletion_state(run.run_id):
                 continue
             totals = ledger.totals(run.run_id)
@@ -47,6 +60,14 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
                         'updated_at': rows[-1]['at'] if rows else run.created_at,
                         'content_format': content_format(rows)})
         return sorted(out, key=lambda r: r['updated_at'], reverse=True)
+
+    @app.get('/api/runs/{run_id}/integrity')
+    def project_integrity(run_id: str):
+        if not valid_run_id(run_id):
+            raise HTTPException(400, 'invalid run id')
+        if not store.run_dir(run_id).is_dir():
+            raise HTTPException(404, 'no such run')
+        return public_diagnostic(store.project_integrity(run_id))
 
     @app.get('/api/trash')
     def list_deleted_projects():
@@ -80,6 +101,8 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
                     raise ValueError('学习记录不能创建生产商品卡。')
                 run = (create_with_card(store, payload) if payload.product_card
                        else store.create_run(payload.run_id, payload.title, payload.brief, kind=payload.kind))
+        except ProjectDataError:
+            raise
         except (ValueError, PipelineError) as exc:
             raise HTTPException(400, str(exc)) from exc
         return run.to_dict()
@@ -95,7 +118,10 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
             raise HTTPException(422, '先说说你想做什么，也可以附上参考素材。')
         run_id = 'chat-' + hashlib.sha256(payload.request_id.encode()).hexdigest()[:24]
         with jobs.lock:
-            existing = next((r for r in store.list_runs() if r.run_id == run_id), None)
+            existing = None
+            if store.run_dir(run_id).exists():
+                require_run(run_id)
+                existing = store.read_run(run_id)
             if existing:
                 require_run(run_id)
                 if existing.brief != text:
@@ -136,8 +162,11 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
     @app.get("/api/runs/{run_id}/artifacts")
     def artifacts(run_id: str, stage: str | None = None) -> list[dict[str, Any]]:
         require_run(run_id)
+        active = {(a.stage, a.version, a.sha256) for a in store.active_artifacts(run_id, stage)}
         return [
-            {**a.to_dict(), "version_label": vocabulary.version_label(a.version)}
+            {**a.to_dict(), "withdrawn": (a.stage, a.version, a.sha256) not in active,
+             "version_label": vocabulary.version_label(a.version) + (
+                 '（已停用）' if (a.stage, a.version, a.sha256) not in active else '')}
             for a in store.list_artifacts(run_id, stage)
         ]
 
@@ -153,11 +182,13 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
         # the way he says them. The frontend holds no wording of its own.
         return {
             **record.to_dict(),
+            "withdrawn": record not in store.active_artifacts(run_id, stage),
             "content": text,
             "integrity_ok": store.verify_artifact(run_id, stage, version),
             "stage_label": vocabulary.stage_label(stage),
             "numbered": vocabulary.numbered_stage(stage),
-            "version_label": vocabulary.version_label(version),
+            "version_label": vocabulary.version_label(version) + (
+                '（已停用）' if record not in store.active_artifacts(run_id, stage) else ''),
             "author": vocabulary.role_label(record.author_role),
             # The same blocks the conversation card carries, so opening a version
             # shows the same layout as reading it in the stream. Built here rather

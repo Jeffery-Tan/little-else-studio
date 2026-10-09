@@ -4,6 +4,58 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const source = fs.readFileSync(new URL('../../studio/web/team-progress.js', import.meta.url), 'utf8') + '\n' + fs.readFileSync(new URL('../../studio/web/runtime.js', import.meta.url), 'utf8');
+const appSource = fs.readFileSync(new URL('../../studio/web/app.js', import.meta.url), 'utf8');
+const boundedReadSource = appSource.slice(appSource.indexOf('async function boundedProjectRead('),appSource.indexOf('async function loadProjectView('));
+test('production prerequisite shows its exact next action without generic retry copy',()=>{
+  const h=harness(async()=>{throw Error('render must not execute');});
+  const note='当前方案缺共同设计。请打开「补齐制作设计，保留原脚本」确认。';
+  const job={job_id:'blocked-production',job_kind:'conversation',status:'blocked',events:[],
+    reason:note,deliverable:{goal:'production_input',status:'incomplete',missing:[note],blocker:{note}},
+    brief:{title:'旧采用方案已恢复',detail:'保留原输入',phase:'ready',
+      execution:{active:false,status:'blocked',project_restored:true}}};
+  assert.equal(h.context.jobGuidance(job),note);
+  h.context.showJob(job);
+  const copy=visibleText(h.nodes.get('job-status'));
+  assert.match(copy,/补齐制作设计/);
+  assert.doesNotMatch(copy,/交付还缺|请查看准确版本后继续|。。|旧采用方案已恢复/);
+  assert.equal(descendants(h.nodes.get('job-status'),node=>node.attributes?.role==='alert').length,1);
+});
+test('unresolved original media guidance keeps the shot-specific action and identity',()=>{
+  const h=harness(async()=>{throw Error('render must not execute');});
+  const note='第 3 镜的原图片任务结果未核实。请打开该镜头原任务核实，不要重新提交。';
+  const job={status:'blocked',deliverable:{goal:'production_media',status:'unknown',
+    blocker:{note,next_action:{action:'check_original_task',attempt_id:'original-3'}}}};
+  assert.equal(h.context.jobGuidance(job),note);
+  assert.equal(job.deliverable.blocker.next_action.attempt_id,'original-3');
+});
+test('cancelled interrupted and failed outcomes outrank a retained production blocker',()=>{
+  const h=harness(async()=>{throw Error('render must not execute');});
+  for(const deliveryState of ['unknown','incomplete']){
+    const deliverable={status:deliveryState,missing:['共同设计'],blocker:{note:'请打开设计补充确认。'}};
+    for(const status of ['cancelled','interrupted','failed']){
+      const copy=h.context.jobGuidance({status,job_kind:'conversation',deliverable});
+      assert.doesNotMatch(copy,/设计补充|查询原任务|交付还缺/);
+      assert.match(copy,status==='cancelled'?/已停止/:status==='interrupted'?/中断/:/未完成/);
+    }
+  }
+});
+test('design upgrade uses one durable identity and replays its exact dedicated request after uncertainty',async()=>{
+  const calls=[];
+  const h=harness(async(url,options)=>{
+    if(!options)return {can_continue:true,revision:'r'};
+    calls.push({url,body:JSON.parse(options.body)});
+    if(calls.length===1)throw new TypeError('offline');
+    return {job_id:'design',request_id:'same-design',job_kind:'design_upgrade',status:'succeeded',events:[]};
+  });
+  const payload={request_kind:'design_upgrade',request_id:'same-design',expected_context_sha256:'a'.repeat(64),expected_connection_revision:0,consent:true};
+  await h.context.submitJob('run-a',payload);
+  await h.nodes.get('job-status').children.at(-1).onclick();
+  assert.equal(calls.length,2);
+  assert.ok(calls.every(c=>c.url==='/api/runs/run-a/production/design-upgrade/propose'));
+  assert.deepEqual(calls[0].body,calls[1].body);
+  assert.equal(calls[0].body.request_kind,undefined);
+  assert.match(visibleText(h.nodes.get('job-status')),/补充已准备好/);
+});
 test('received discussion keeps the current task running and describes a read-only successor',()=>{
   const h=harness(async()=>{throw Error('render must not execute');});
   h.context.showJob({job_id:'discussion',job_kind:'conversation',status:'running',
@@ -325,10 +377,60 @@ test('uncertain image submission retains the same payload and image route',async
 });
 test('an ended model turn surfaces the concrete missing deliverable', () => {
   const h = harness(async () => ({}));
-  const job = {status:'blocked',reason:'交付未完成',deliverable:{goal:'writing',status:'incomplete',missing:['writing 当前准确版本']}};
+  h.context.state.timeline = {run:{run_id:'run-a',content_format:'video'}};
+  const job = {run_id:'run-a',status:'blocked',reason:'交付未完成',deliverable:{goal:'writing',status:'incomplete',missing:['writing 当前准确版本']}};
   assert.match(h.context.jobGuidance(job), /脚本当前准确版本/);
   assert.doesNotMatch(h.context.jobGuidance(job), /writing/);
   assert.doesNotMatch(h.context.jobGuidance(job), /已完成本轮/);
+});
+
+test('photo job guidance uses the trusted matching project format and keeps original outcomes', () => {
+  const h = harness(async () => { throw Error('presentation must not submit'); });
+  h.context.state.timeline = {run:{run_id:'run-a',content_format:'photo'}};
+  const missing = {job_id:'photo-writing-missing',run_id:'run-a',cursor:1,status:'blocked',events:[],reason:'交付未完成',
+    deliverable:{goal:'writing',status:'incomplete',missing:['writing 当前准确版本']}};
+  const original = JSON.stringify(missing);
+  h.context.showJob(missing);
+  assert.match(visibleText(h.nodes.get('job-status')), /图文方案当前准确版本/);
+  assert.doesNotMatch(visibleText(h.nodes.get('job-status')), /脚本|writing/);
+  assert.equal(JSON.stringify(missing), original);
+  assert.match(h.context.jobGuidance({...missing,job_kind:'writing_revision',
+    revision_result:{change_status:'saved'}}), /图文方案新版已保存/);
+  assert.match(h.context.jobGuidance({...missing,status:'succeeded',job_kind:'design_upgrade'}), /原图文方案与图片保留/);
+  assert.match(h.context.jobGuidance({...missing,deliverable:{status:'input_ready'}}), /逐页图片输入已齐备/);
+});
+
+test('unknown or mismatched projects cannot supply a job format from titles or raw requests', () => {
+  const h = harness(async () => { throw Error('presentation must not submit'); });
+  const job = {run_id:'run-a',status:'blocked',reason:'做视频',
+    deliverable:{goal:'writing',status:'incomplete',missing:['writing 当前准确版本']}};
+  for (const project of [undefined,{run_id:'run-a',content_format:null},
+    {run_id:'other-run',content_format:'photo'},{run_id:'run-a',content_format:'unexpected'}]) {
+    h.context.state.timeline = {run:project};
+    assert.match(h.context.jobGuidance(job), /创作方案当前准确版本/);
+    assert.doesNotMatch(h.context.jobGuidance(job), /脚本|图文方案/);
+  }
+  h.context.state.timeline = {run:{run_id:'run-a',content_format:'photo'}};
+  assert.match(h.context.jobGuidance({...job,run_id:'other-run'}), /创作方案当前准确版本/);
+  assert.match(h.context.jobGuidance({...job,run_id:undefined}), /创作方案当前准确版本/);
+});
+
+test('verified project recovery replaces the old missing-script banner without changing job or media status', () => {
+  const h = harness(async () => { throw new Error('presentation must not start work'); });
+  const job = {job_id:'restored',job_kind:'conversation',status:'blocked',events:[],
+    deliverable:{status:'incomplete',missing:['已确认的当前完整方案']},
+    brief:{title:'原采用方案已恢复',detail:'已保留分镜制作输入与修改意见',phase:'ready',
+      execution:{active:false,status:'blocked',project_restored:true}}};
+  h.context.showJob(job);
+  const copy = visibleText(h.nodes.get('job-status'));
+  assert.match(copy, /原采用方案已恢复/);
+  assert.doesNotMatch(copy, /交付还缺|本轮完成/);
+  assert.equal(job.status, 'blocked');
+  assert.equal(h.context.state.busy, false);
+  assert.match(h.context.jobGuidance({...job,brief:{...job.brief,
+    execution:{...job.brief.execution,project_restored:false}}}), /交付还缺/);
+  assert.match(h.context.jobGuidance({...job,job_kind:'production_group',reason:'uncertain submission',
+    deliverable:null}), /暂停/);
 });
 
 test('historical job no longer tells the user to finish retired review', () => {
@@ -348,26 +450,26 @@ test('historical reviewer outcome does not block a saved writing revision', () =
     deliverable:{goal:'revision',status:'incomplete',missing:['修订新版的独立审核通过记录']}};
   h.context.showJob(job);
   const status = visibleText(h.nodes.get('job-status'));
-  assert.match(status, /脚本新版已保存/);
+  assert.match(status, /创作方案新版已保存/);
   assert.doesNotMatch(status, /审核退回|审核未完成/);
   assert.match(status, /请阅读并决定是否采用/);
   const nav=[];
   h.context.showJourneyTab = tab => nav.push(`tab:${tab}`);
   h.context.selectStage = stage => nav.push(`stage:${stage}`);
   h.context.setProjectFocus = focus => nav.push(`focus:${focus}`);
-  descendants(h.nodes.get('job-status'), node => node.text === '查看脚本并决定')[0].onclick();
+  descendants(h.nodes.get('job-status'), node => node.text === '查看创作方案并决定')[0].onclick();
   assert.deepEqual(nav, ['tab:plan','stage:writing','focus:canvas']);
   h.context.showJob({...job,job_id:'edit-2',revision_result:{...job.revision_result,review_status:'pending'},
     status:'failed',deliverable:null,reason:'独立审核调用失败'});
   const pending = visibleText(h.nodes.get('job-status'));
-  assert.match(pending, /脚本新版已保存/);
+  assert.match(pending, /创作方案新版已保存/);
   assert.doesNotMatch(pending, /审核退回/);
-  assert.equal(descendants(h.nodes.get('job-status'), node => node.text === '查看脚本并决定').length, 1);
+  assert.equal(descendants(h.nodes.get('job-status'), node => node.text === '查看创作方案并决定').length, 1);
   h.context.showJob({...job,job_id:'edit-3',revision_result:null});
-  assert.doesNotMatch(visibleText(h.nodes.get('job-status')), /脚本新版已保存/);
+  assert.doesNotMatch(visibleText(h.nodes.get('job-status')), /创作方案新版已保存/);
   h.context.showJob({...job,job_id:'edit-4',revision_result:null,deliverable:null,reason:'模型调用失败'});
-  assert.doesNotMatch(visibleText(h.nodes.get('job-status')), /脚本新版已保存/);
-  assert.equal(descendants(h.nodes.get('job-status'), node => node.text === '查看脚本并决定').length, 0);
+  assert.doesNotMatch(visibleText(h.nodes.get('job-status')), /创作方案新版已保存/);
+  assert.equal(descendants(h.nodes.get('job-status'), node => node.text === '查看创作方案并决定').length, 0);
 });
 
 test('uncertain video observation retries acceptance identity without becoming a conversation job',async()=>{
@@ -411,12 +513,88 @@ function harness(api) {
     box: (tag, className, text) => Object.assign(node(), { tag, className, text }),
     sessionStorage: { getItem: (key) => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key) },
     setTimeout: (fn) => { timers.push(fn); return timers.length; }, clearTimeout() {},
-    refreshTimeline: async () => {}, toast() {}, api,
+    refreshTimeline: async () => {}, projectReadStatus() {}, toast() {}, api,
   });
+  vm.runInContext(boundedReadSource,context);
   vm.runInContext(source, context);
   context.syncComposerActionForTest = () => vm.runInContext('syncComposerAction()', context);
   return { context, nodes, storage, timers, body };
 }
+
+const savedStageEvent = (seq = 12) => ({seq, type:'agent_tool', role:'material',
+  stage:'material_plan', tool:'submit_stage', ok:true, args:{stage:'material_plan'}});
+
+test('running job refreshes saved stage content once across repeated progress polls', async () => {
+  const h = harness(async () => {});
+  let refreshes = 0;
+  h.context.refreshTimeline = async () => { refreshes++; return true; };
+  const job = {job_id:'save-1',status:'running',cursor:12,events:[savedStageEvent()]};
+  await h.context.watchJob('run-a',job,0);
+  assert.equal(refreshes,1);
+  assert.equal(h.context.state.busy,true);
+  await h.context.watchJob('run-a',{...job,cursor:30,events:[...job.events,
+    {seq:30,type:'agent_narration',text:'正在继续写稿',role:'writer'}]},0);
+  assert.equal(refreshes,1);
+  await h.context.watchJob('run-a',{...job,cursor:40,events:[...job.events,savedStageEvent(40)]},0);
+  assert.equal(refreshes,2);
+});
+
+test('tokens and failed or skipped persistence calls do not refresh the timeline', async () => {
+  const h = harness(async () => {});
+  let refreshes = 0;
+  h.context.refreshTimeline = async () => { refreshes++; };
+  const events = [
+    {seq:1,type:'agent_narration_preview',text:'partial'},
+    {seq:2,type:'agent_narration',text:'saved according to model'},
+    {seq:3,type:'agent_activity',tool:'submit_stage'},
+    {...savedStageEvent(4),ok:false}, {...savedStageEvent(5),skipped:true},
+    {...savedStageEvent(6),tool:'read_artifact'}, {...savedStageEvent(7),seq:null},
+  ];
+  await h.context.refreshSavedArtifacts('run-a',{job_id:'no-save',events},0);
+  assert.equal(refreshes,0);
+});
+
+test('a failed or superseded refresh retries the same saved receipt on a later poll', async () => {
+  const h = harness(async () => {});
+  let refreshes = 0;
+  h.context.refreshTimeline = async () => {
+    refreshes++;
+    if (refreshes === 1) throw Error('offline');
+    return refreshes > 2;
+  };
+  const job = {job_id:'save-retry',events:[savedStageEvent()]};
+  for(let i=0;i<4;i++) await h.context.refreshSavedArtifacts('run-a',job,0);
+  assert.equal(refreshes,3);
+});
+
+test('concurrent SSE and polling refresh share the same saved receipt', async () => {
+  const h = harness(async () => {});
+  let release, refreshes = 0;
+  h.context.refreshTimeline = () => { refreshes++; return new Promise(resolve => {release=resolve;}); };
+  const job = {job_id:'concurrent-save',events:[savedStageEvent()]};
+  const first = h.context.refreshSavedArtifacts('run-a',job,0);
+  const second = h.context.refreshSavedArtifacts('run-a',job,0);
+  assert.equal(refreshes,1);
+  release(true);
+  await Promise.all([first,second]);
+  assert.equal(refreshes,1);
+});
+
+test('project switch during artifact refresh cannot acknowledge a stale receipt or attach old polling', async () => {
+  const h = harness(async () => {});
+  let release, refreshes = 0;
+  h.context.refreshTimeline = () => {refreshes++; return new Promise(resolve => {release=resolve;});};
+  const job = {job_id:'old-save',status:'running',events:[savedStageEvent()]};
+  const pending = h.context.watchJob('run-a',job,0);
+  h.context.state.runId = 'run-b';
+  h.context.detachProjectJob();
+  release(true);
+  await pending;
+  assert.equal(h.timers.length,0);
+  assert.equal(vm.runInContext('savedArtifactRefreshes.size',h.context),0);
+  await h.context.refreshSavedArtifacts('run-a',job,0);
+  assert.equal(refreshes,1);
+});
 
 test("ended job does not keep the composer locked for a new prompt", () => {
   const h = harness(async () => {});
@@ -897,4 +1075,72 @@ test('continue after recovery only prepares a draft and never sends it', async (
   descendants(h.nodes.get('job-status'), (node) => node.text === '准备继续创作')[0].onclick();
   assert.match(draft, /检查已保存的内容/);
   assert.ok(calls.every((call) => !call.options));
+});
+
+
+test('direct field edit composer names only its matching explicit project format',()=>{
+  const h=harness(async()=>{throw Error('copy cannot send');});
+  h.context.state.composerRequestKind='writing_revision';
+  h.context.state.feedbackTarget={kind:'writing',run_id:'run-a',path:['segments',1,'line'],version:2};
+  for(const [format,label] of [['photo','图文方案'],['video','脚本'],[null,'创作方案']]) {
+    h.context.state.timeline={run:{run_id:'run-a',content_format:format}};
+    h.context.syncComposerAction(null);
+    assert.equal(h.nodes.get('send').attributes['aria-label'],`按意见直接修改${label}`);
+    assert.equal(h.nodes.get('send').dataset.mode,'send');
+  }
+  h.context.state.timeline={run:{run_id:'another-project',content_format:'photo'}};
+  h.context.syncComposerAction(null);
+  assert.equal(h.nodes.get('send').attributes['aria-label'],'按意见直接修改创作方案');
+  assert.deepEqual(h.context.state.feedbackTarget.path,['segments',1,'line']);
+});
+
+
+test('saved field revision status and review action follow only the exact project format',()=>{
+  const h=harness(async()=>{throw Error('display cannot send');});
+  const job={job_id:'edit',run_id:'run-a',job_kind:'writing_revision',status:'succeeded',events:[],
+    revision_result:{change_status:'saved',version:2}};
+  for (const [format,label] of [['photo','图文方案'],['video','脚本'],[null,'创作方案']]) {
+    h.context.state.timeline={run:{run_id:'run-a',content_format:format}};
+    h.context.showJob(job);
+    const text=visibleText(h.nodes.get('job-status'));
+    assert.match(text,new RegExp(`${label}新版已保存`));
+    assert.match(text,new RegExp(`查看${label}并决定`));
+  }
+  h.context.state.timeline={run:{run_id:'other-project',content_format:'photo'}};
+  assert.equal(h.context.jobPresentation(job).label,'创作方案新版已保存');
+});
+
+
+test('batch progress accepts exact photo status without inferring completion or altering records',()=>{
+  const h=harness(async()=>{throw Error('read-only progress');});
+  const job={job_kind:'production_batch_generation',status:'running',events:[{type:'status',message:'正在生成第 2/3页图片。'}]};
+  const before=JSON.stringify(job);
+  assert.equal(h.context.mediaJobProgress(job),'正在生成第 2/3页图片。');
+  assert.equal(JSON.stringify(job),before);
+  for(const message of ['正在生成第 4/3页图片。','正在生成第 2/99页图片。','3页图片已生成并保存。','模型说正在生成第 2/3页图片。']){
+    assert.equal(h.context.mediaJobProgress({...job,events:[{type:'status',message}]}),'');
+  }
+  assert.equal(h.context.mediaJobProgress({...job,status:'succeeded'}),'');
+  assert.equal(h.context.mediaJobProgress({...job,events:[{type:'status',message:'正在生成第 2/3 个首帧。'}]}),'正在生成第 2/3 个首帧。');
+});
+
+
+test('photo subset progress separates source page identity from bounded batch counts',()=>{
+  const h=harness(async()=>{throw Error('read-only progress');});
+  const job={job_kind:'production_batch_generation',status:'running',events:[]};
+  const valid=['正在生成第 02 页图片（本次 1/1 张）。','正在生成第 18 页图片（本次 2/3 张）。',
+    '正在生成图文图片（本次 1/1 张）。'];
+  for(const message of valid){
+    const current={...job,events:[{type:'status',message}]},before=JSON.stringify(current);
+    assert.equal(h.context.mediaJobProgress(current),message);
+    assert.equal(JSON.stringify(current),before);
+    assert.equal(h.context.mediaJobProgress({...current,status:'succeeded'}),'');
+  }
+  for(const message of ['正在生成第 00 页图片（本次 1/1 张）。','正在生成第 02 页图片（本次 2/1 张）。',
+    '正在生成第 02 页图片（本次 1/99 张）。','正在生成第 02 页图片（本次 0/1 张）。',
+    '正在生成第 10000 页图片（本次 1/1 张）。','模型说正在生成第 02 页图片（本次 1/1 张）。',
+    '本次 1 张图文图片已生成并保存。']){
+    assert.equal(h.context.mediaJobProgress({...job,events:[{type:'status',message}]}),'');
+  }
+  assert.equal(h.context.mediaJobProgress({...job,events:[{type:'tool_call',message:valid[0]}]}),'');
 });

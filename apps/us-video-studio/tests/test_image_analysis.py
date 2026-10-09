@@ -73,6 +73,26 @@ def submit(scene, **over):
     return http.post(f'/api/runs/{RUN}/image-analysis', json={**payload, **over})
 
 
+def test_mimo_image_entry_uses_existing_candidate_and_accounting_flow(scene):
+    http, store, model, payload, _, settings = scene
+    connections = ConnectionStore(store.root)
+    config = connections.public()
+    config['expected_revision'] = config['revision']
+    config['connections'].append({'id': 'mimo', 'provider': 'mimo', 'name': 'Synthetic MiMo',
+                                 'api_key': 'synthetic-only', 'pricing': {}})
+    saved = connections.save(config)
+    available = http.get(f'/api/runs/{RUN}/image-analysis').json()
+    assert any(c['id'] == 'mimo' for c in available['connections'])
+    response = submit(scene, connection_id='mimo', model='mimo-v2.6-flash', expected_revision=saved['revision'])
+    assert response.status_code == 200
+    job = wait_job(http, response.json())
+    assert job['status'] == 'succeeded' and len(model.calls) == 1
+    assert model.calls[0]['model'] == 'mimo-v2.6-flash'
+    entry = Ledger(store, settings).entries(RUN)[0]
+    assert entry.provider == 'mimo' and entry.connection_id == 'mimo' and entry.usage_status == 'known'
+    assert store.latest_artifact(RUN, 'intake') is None
+
+
 def wait_job(http, job):
     for _ in range(300):
         current = http.get(f"/api/runs/{RUN}/jobs/{job['job_id']}").json()
@@ -132,6 +152,29 @@ def test_actual_image_input_candidate_selection_and_provenance(scene):
     assert wire['source']['data'] not in journal
     assert 'synthetic-credential-only' not in journal
     assert ConnectionStore(store.root).public()['roles']['material']['connection'] == 'codex'
+
+
+def test_manual_large_image_observation_compresses_and_keeps_source_binding(scene):
+    from test_observation_image_input import noisy_png
+    from studio.materials import resolve
+    http, store, model, _, _, _ = scene
+    raw = noisy_png()
+    accept_upload(store, RUN, 'large.png', raw)
+    response = submit(scene, name='large.png', expected_sha256=hashlib.sha256(raw).hexdigest())
+    assert response.status_code == 200, response.text
+    assert wait_job(http, response.json())['status'] == 'succeeded'
+    wire = model.calls[0]['messages'][0]['content'][0]['source']
+    sent = base64.b64decode(wire['data'])
+    assert wire['media_type'] == 'image/jpeg' and len(sent) < len(raw)
+    assert resolve(store, RUN, 'large.png').read_bytes() == raw
+    c = candidate(http)
+    assert c['sha256'] == hashlib.sha256(raw).hexdigest()
+    assert c['image_input']['input_sha256'] == hashlib.sha256(sent).hexdigest()
+    adopted = confirm(http, c)
+    assert adopted.status_code == 200
+    material = next(m for m in adopted.json()['materials'] if m['name'] == 'large.png')
+    observation = material['observations'][0]
+    assert observation['image_input'] == c['image_input']
 
 
 def test_duplicate_submission_busy_and_reconnect_do_not_repeat_calls(scene):
@@ -246,8 +289,8 @@ def test_protocols_receive_image_bytes_on_single_http_attempt(monkeypatch):
         captured.append(json.loads(request.content))
         return httpx.Response(200,json={'model':'vision', 'choices':[{'message':{'content':'observed'},'finish_reason':'stop'}],
                                        'usage':{'prompt_tokens':4,'completion_tokens':2}})
-    real=httpx.Client
-    monkeypatch.setattr(openai_compat.httpx,'Client',lambda **kw:real(transport=httpx.MockTransport(handle),**kw))
+    real=httpx.AsyncClient
+    monkeypatch.setattr(openai_compat.httpx,'AsyncClient',lambda **kw:real(transport=httpx.MockTransport(handle),**kw))
     OpenAICompatClient('https://fixture.invalid/v1','synthetic').complete(model='vision',system='',messages=messages,tools=[])
     assert len(captured)==1
     image=captured[0]['messages'][0]['content'][0]

@@ -11,6 +11,7 @@ import pytest
 
 from studio.agents.client import JobCancelled, ModelError
 from studio.agents.deepseek_client import DeepSeekClient
+from studio.agents.mimo_client import MiMoClient
 
 PARAMS = dict(model='deepseek-flash', system='fixture',
               messages=[{'role': 'user', 'content': 'fixture'}], tools=[])
@@ -73,6 +74,28 @@ def test_deadline_covers_headers_and_cancels_request_without_retry(monkeypatch, 
     assert 'usage unconfirmed' in caught.value.message and '未自动重试' in caught.value.message
 
 
+@pytest.mark.parametrize('stop', ['cancel', 'deadline'])
+def test_nonstream_progress_closes_incomplete_body_and_keeps_unknown_usage(monkeypatch, stop):
+    cancel = threading.Event()
+    body = WaitingBody(first=b'{"choices": [', cancel=cancel if stop == 'cancel' else None)
+
+    async def handler(_):
+        return httpx.Response(200, stream=body, headers={'content-type': 'application/json'})
+
+    requests = install_transport(monkeypatch, handler)
+    events = []
+    client = DeepSeekClient('synthetic-only', progress_stream=False, cancel_event=cancel,
+        request_timeout=.12, progress_interval=.025)
+    with pytest.raises(JobCancelled if stop == 'cancel' else ModelError) as caught:
+        client.complete_with_progress(**PARAMS, on_progress=events.append)
+    assert len(requests) == 1 and json.loads(requests[0].content)['stream'] is False
+    assert body.closed
+    assert caught.value.usage.input_tokens is None and caught.value.usage.output_tokens is None
+    if stop == 'deadline':
+        waiting = [event for event in events if event['type'] == 'agent_activity']
+        assert len(waiting) >= 2 and all(event['transport_state'] == 'waiting' for event in waiting)
+
+
 @pytest.mark.parametrize('first,state', [
     (b': keep-alive\n\n', 'waiting'),
     (delta({'reasoning_content': 'private-secret'}), 'receiving'),
@@ -92,7 +115,10 @@ def test_keepalive_does_not_extend_deadline_or_expose_private_data(monkeypatch, 
         DeepSeekClient('synthetic-only', request_timeout=.12, progress_interval=.025
             ).complete_with_progress(**PARAMS, on_progress=events.append)
     assert len(requests) == 1 and body.closed
-    assert caught.value.usage_status == 'unknown'  # A partial usage chunk is not final.
+    has_usage = b'"prompt_tokens"' in first
+    assert caught.value.usage_status == ('partial' if has_usage else 'unknown')
+    if has_usage:
+        assert (caught.value.usage.input_tokens, caught.value.usage.output_tokens) == (4, 6)
     waiting = [row for row in events if row['type'] == 'agent_activity']
     assert len(waiting) >= 2 and waiting[0]['transport_state'] == 'waiting'
     assert waiting[-1]['transport_state'] == state
@@ -150,6 +176,55 @@ def test_late_stop_retains_complete_final_usage(monkeypatch):
     assert len(requests) == 1
     assert caught.value.usage_final
     assert (caught.value.usage.input_tokens, caught.value.usage.output_tokens) == (4, 6)
+
+
+@pytest.mark.parametrize('client_class', [DeepSeekClient, MiMoClient])
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('stopped', [False, True])
+def test_late_complete_response_respects_deadline_and_stop_with_final_usage(
+        monkeypatch, client_class, stream, stopped):
+    cancel = threading.Event()
+    if stream:
+        raw = delta({'content': 'synthetic complete'}, finish='stop',
+                    usage={'prompt_tokens': 12, 'completion_tokens': 18}) + b'data: [DONE]\n\n'
+    else:
+        raw = json.dumps({'choices': [{'index': 0, 'finish_reason': 'stop',
+            'message': {'role': 'assistant', 'content': 'synthetic complete'}}],
+            'usage': {'prompt_tokens': 12, 'completion_tokens': 18}}).encode()
+
+    class CompleteBody(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            yield raw
+
+        async def aclose(self):
+            self.closed = True
+            if stopped:
+                cancel.set()  # Stop wins even when the completed call is late.
+
+    body = CompleteBody()
+
+    async def handler(_):
+        # Synchronous decoding/cleanup can occupy the event loop past its wait.
+        time.sleep(.07)
+        return httpx.Response(200, stream=body, headers={
+            'content-type': 'text/event-stream' if stream else 'application/json'})
+
+    requests = install_transport(monkeypatch, handler)
+    client = client_class('synthetic-only', cancel_event=cancel)
+    client.request_timeout = .04
+    with pytest.raises(JobCancelled if stopped else ModelError) as caught:
+        (client.complete_with_progress if stream else client.complete)(**PARAMS)
+    assert len(requests) == 1 and body.closed
+    assert (caught.value.usage.input_tokens, caught.value.usage.output_tokens) == (12, 18)
+    if stopped:
+        assert caught.value.usage_final
+        assert caught.value.transport_diagnostic['transport_failure'] == 'cancelled'
+    else:
+        assert caught.value.usage_status == 'known' and caught.value.retryable is False
+        assert caught.value.response_diagnostic['code'] == 'request_deadline_exceeded'
+        assert caught.value.transport_diagnostic['transport_failure'] == 'total_deadline'
 
 
 def test_stop_before_request_has_no_provider_attempt(monkeypatch):
@@ -234,10 +309,18 @@ def test_real_loopback_socket_is_closed_on_deadline(monkeypatch, phase):
     monkeypatch.setattr('studio.agents.deepseek_client.ENDPOINT',
                         f'http://127.0.0.1:{server.server_port}/fixture')
     try:
+        transport = DeepSeekClient('synthetic-only', request_timeout=.8)
+        # This case checks cancellation of a connected socket. Build HTTPX's
+        # TLS context before its short deadline; slow Windows certificate
+        # loading must not consume the budget before the request reaches us.
+        client = httpx.AsyncClient(timeout=transport.timeout,
+                                  follow_redirects=False, trust_env=False)
+        monkeypatch.setattr(httpx, 'AsyncClient', lambda **_: client)
         with pytest.raises(ModelError, match='未自动重试'):
-            DeepSeekClient('synthetic-only', request_timeout=.8).complete_with_progress(**PARAMS)
+            transport.complete_with_progress(**PARAMS)
         assert requests == ['/fixture']
         assert peer_closed.wait(1)
+        assert client.is_closed
     finally:
         stop.set()
         server.shutdown()

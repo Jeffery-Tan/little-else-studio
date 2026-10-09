@@ -195,10 +195,10 @@ test('an explicit missing shared design projection names the gap before any new 
 // image load/error events and the API boundary remain explicit in each test.
 Object.defineProperty(El.prototype,'isConnected',{get(){return Boolean(this.parentNode);}});
 Object.defineProperty(El.prototype,'elements',{get(){return {namedItem:name=>this.querySelector(`[name="${name}"]`)};}});
-async function controller(shown={...data,sources:[{version:4,artifact_sha256:scriptHash,ready:true}]}){
+async function controller(shown={...data,sources:[{version:4,artifact_sha256:scriptHash,ready:true}]},timeline){
   const {document}=makeDom(),mount=new El('section'),requests=[];
   document.body.append(mount);
-  const ctx={document,sessionStorage:makeStorage(),state:{runId:'design-demo',rail:[],creatorView:{format:'video'}},
+  const ctx={document,sessionStorage:makeStorage(),state:{runId:'design-demo',rail:[],creatorView:{format:'video'},timeline},
     crypto:{randomUUID:()=>`fixture-${requests.length+1}`},setTimeout:()=>1,clearTimeout:()=>{},
     $:()=>null,toast:()=>{},restoreJob:()=>{},showJourneyTab:()=>{},
     FormData:class{constructor(form){this.rows=form.querySelectorAll('input,select,textarea').filter(el=>el.getAttribute('name')&&!el.disabled).map(el=>[el.getAttribute('name'),el.value]);} [Symbol.iterator](){return this.rows[Symbol.iterator]();}},
@@ -347,3 +347,87 @@ for(const problem of ['missing_reference','changed_reference','missing_bytes','s
     assert.notEqual(app.body.parentNode.querySelector('[data-error]').textContent,'');
   });
 }
+
+
+for(const projection of ['known','missing_ordinal','ambiguous_ordinal','other_project','unknown_format']){
+  test(`single photo controller names only the verified page and keeps consent: ${projection}`,async()=>{
+    const rows=[{draft_id:image.draft_id,shot_id:image.shot_id,ordinal:2}];
+    if(projection==='missing_ordinal')delete rows[0].ordinal;
+    if(projection==='ambiguous_ordinal')rows.push({...rows[0]});
+    const shown={...data,sources:[{version:4,artifact_sha256:scriptHash,ready:true}],
+      shots:{image:{complete_list:true,shots:rows}}};
+    const timeline={run:{run_id:projection==='other_project'?'another-project':'design-demo',
+      content_format:projection==='unknown_format'?undefined:'photo'}};
+    const before=structuredClone(shown);
+    const {body,confirm,requests}=await controller(shown,timeline);
+    const photo=!['other_project','unknown_format'].includes(projection);
+    if(photo){
+      assert.match(body.innerHTML,/本页图片待生成|图文方案第 4 版/);
+      assert.doesNotMatch(body.innerHTML,/首帧待生成|本镜采用的共享设计/);
+      assert.match(body.innerHTML,projection==='known'?/第 02 页图片/:/图文图片（页序未提供）/);
+    }else{
+      assert.match(body.innerHTML,/首帧 02/);
+      assert.match(body.innerHTML,/首帧待生成|脚本第 4 版/);
+    }
+    body.listeners.click({target:body.querySelector('[data-generate]')});
+    assert.match(confirm.innerHTML,photo?projection==='known'?/生成第 02 页图片/:/生成图文图片/:/启动一个生成任务/);
+    assert.match(confirm.innerHTML,photo?/本页采用的共享设计/:/本镜采用的共享设计/);
+    assert.equal(confirm.querySelector('[data-authorize]').disabled,true);
+    assert.equal(confirm.querySelectorAll('.production-reference-input img').length,4);
+    assert.deepEqual(shown,before);
+    assert.ok(requests.every(request=>request.method==='GET'));
+  });
+}
+
+test('photo labels leave historical inputs, video consent and original prompts unchanged',()=>{
+  const original=structuredClone(image),shown={...data,content_format:'photo',shots:{image:{shots:[{draft_id:image.draft_id,ordinal:2}]}}};
+  assert.match(ui.confirmationHtml(image,shown,'design-demo'),/生成第 02 页图片/);
+  assert.match(ui.draftHtml(image,shown,'design-demo'),/本页图片待生成/);
+  assert.match(ui.confirmationHtml({...image,is_current:false},shown,'design-demo'),/启动一个生成任务/);
+  assert.match(ui.draftHtml({...image,is_current:false},shown,'design-demo'),/首帧待生成/);
+  assert.match(ui.confirmationHtml(video,{...shown,drafts:[video]},'design-demo'),/脚本第 4 版/);
+  assert.doesNotMatch(ui.confirmationHtml(video,{...shown,drafts:[video]},'design-demo'),/生成图文图片|本页采用/);
+  assert.deepEqual(image,original);
+});
+
+
+test('photo reuse shows distinct original pixels and input versions for multiple results of one page',()=>{
+  const shown=reuseProjection();
+  const first=shown.reuse_candidates[0];first.output={name:'old-picture.png',sha256:'a'.repeat(64)};
+  shown.materials.push({kind:'image',...first.output,url:'/api/runs/design-demo/materials/old-picture.png'});
+  const second={...first,source_draft_id:'newer-input',source_attempt_id:'newer-result',output:{name:'newer-picture.png',sha256:'b'.repeat(64)}};
+  shown.reuse_candidates.push(second);shown.drafts.push({...shown.drafts[0],draft_id:'newer-input',source_version:3});
+  shown.materials.push({kind:'image',...second.output,url:'/api/runs/design-demo/materials/newer-picture.png'});
+  const html=ui.reuseCandidatesHtml(shown,'image','design-demo','photo');
+  assert.match(html,/沿用未受修改影响的页面图片/);
+  assert.match(html,/第 03 页图片/);assert.match(html,/原图文方案第 4 版/);assert.match(html,/原图文方案第 3 版/);
+  for(const name of ['old-picture.png','newer-picture.png'])assert.ok(html.includes(`src="/api/runs/design-demo/materials/${name}"`));
+  for(const id of ['old-input','newer-input'])assert.ok(html.includes(id));
+  for(const id of ['old-result','newer-result'])assert.ok(html.includes(`data-reuse-attempt="${id}"`));
+  assert.equal((html.match(/沿用这张图片/g)||[]).length,2);
+  assert.match(html,/图片确认和生成授权不会沿用/);
+});
+
+test('reuse previews require exact output bytes and same project URLs',()=>{
+  for(const problem of ['hash','other-run','duplicate']){
+    const shown=reuseProjection(),row=shown.reuse_candidates[0];
+    row.output={name:'old.png',sha256:'a'.repeat(64)};
+    const material={kind:'image',...row.output,url:'/api/runs/design-demo/materials/old.png'};
+    if(problem==='hash')material.sha256='b'.repeat(64);
+    if(problem==='other-run')material.url='/api/runs/other-demo/materials/old.png';
+    shown.materials.push(material);if(problem==='duplicate')shown.materials.push({...material});
+    const html=ui.reuseCandidatesHtml(shown,'image','design-demo','photo');
+    assert.doesNotMatch(html,/<img|<a href=/);assert.match(html,/预览暂不可核对/);
+  }
+});
+
+test('reuse photo labels require unique trusted current page order and keep original values escaped',()=>{
+  const shown=reuseProjection();shown.targets.image.shots.push({...shown.targets.image.shots[0]});
+  shown.reuse_candidates[0].output={name:'<private>.png',sha256:'a'.repeat(64)};
+  shown.drafts[0].draft_id='<old-input>';shown.reuse_candidates[0].source_draft_id='<old-input>';
+  const html=ui.reuseCandidatesHtml(shown,'image','design-demo','photo');
+  assert.match(html,/原图片（当前页序未核对）/);assert.doesNotMatch(html,/第 03 页/);
+  assert.match(html,/&lt;private&gt;\.png/);assert.match(html,/&lt;old-input&gt;/);
+  const generic=ui.reuseCandidatesHtml(reuseProjection(),'image','design-demo',undefined);
+  assert.match(generic,/第 3 镜/);assert.doesNotMatch(generic,/图文方案|第 03 页/);
+});

@@ -14,8 +14,10 @@ import json
 from typing import Any
 
 from ..ledger import Ledger
-from .client import JobCancelled, ModelClient, ModelError, SafePreflightError, Turn, Usage
-from .requests import encode, save_request
+from .client import (JobCancelled, ModelClient, ModelError, SafePreflightError, Turn, Usage,
+                     prepare_strict_writer_execution)
+from .requests import (encode, save_request, record_response_rejection,
+                       record_response_normalization, record_model_transport, save_writer_root_closure)
 
 
 class BudgetedClient:
@@ -84,10 +86,12 @@ class BudgetedClient:
             self.ledger.settle_call(self.run_id, call_id, input_tokens=0, output_tokens=0,
                                    usage_status='known', ok=False, error='cancelled before provider invocation')
             raise
+        turn = None
         try:
             progress_call = getattr(target, 'complete_with_progress', None)
             turn = (progress_call(**request, on_progress=self.public_progress)
                     if callable(progress_call) else target.complete(**request))
+            prepare_strict_writer_execution(turn, request['tools'])
         except Exception as exc:
             if isinstance(exc, ModelError):
                 usage, usage_status = exc.usage, exc.usage_status
@@ -107,6 +111,25 @@ class BudgetedClient:
                 ok=False,
                 error=str(exc)[:300] if isinstance(exc, ModelError) else f"{type(exc).__name__}: call failed; usage unconfirmed",
             )
+            if isinstance(exc, ModelError) and isinstance(exc.response_diagnostic, dict):
+                try:
+                    record_response_rejection(self.ledger.store, self.run_id, call_id,
+                                              role=self.role, stage=self.stage, diagnostic=exc.response_diagnostic,
+                                              tools=request['tools'])
+                except (OSError, ValueError):
+                    # Accounting is already durable. Preserve the actual model
+                    # failure, but make a diagnostic-write failure inspectable.
+                    exc.add_note('Response diagnostic could not be saved; call settlement was retained.')
+            diagnostic = getattr(exc, 'transport_diagnostic', None)
+            if diagnostic is None and turn is not None:
+                diagnostic = turn.transport_diagnostic
+            if isinstance(diagnostic, dict):
+                try:
+                    record_model_transport(self.ledger.store, self.run_id, call_id,
+                                           role=self.role, stage=self.stage, diagnostic=diagnostic,
+                                           tools=request['tools'])
+                except (OSError, ValueError):
+                    exc.add_note('Transport diagnostic could not be saved; call settlement was retained.')
             raise
         self.ledger.settle_call(
             self.run_id, call_id,
@@ -117,4 +140,27 @@ class BudgetedClient:
             usage_status="known" if turn.usage.input_tokens is not None and turn.usage.output_tokens is not None else "unknown",
             ok=True,
         )
+        # A cancellation arriving with a complete response retains real usage,
+        # but must not persist/execute this exceptional format-processing path.
+        if turn.writer_root_closure is not None and cancel:
+            cancel()
+        try:
+            if isinstance(turn.transport_diagnostic, dict):
+                record_model_transport(self.ledger.store, self.run_id, call_id,
+                                       role=self.role, stage=self.stage, diagnostic=turn.transport_diagnostic,
+                                       tools=request['tools'])
+        except (OSError, ValueError):
+            raise SafePreflightError('模型诊断记录未能保存，本轮未执行返回工具；已收到的模型用量保留。') from None
+        try:
+            for diagnostic in turn.response_normalizations:
+                if diagnostic.get('code') == 'root_object_closed':
+                    save_writer_root_closure(self.ledger.store, self.run_id, call_id,
+                                            role=self.role, stage=self.stage, closure=turn.writer_root_closure)
+                else:
+                    record_response_normalization(self.ledger.store, self.run_id, call_id,
+                                                  role=self.role, stage=self.stage, diagnostic=diagnostic)
+        except (OSError, ValueError):
+            raise SafePreflightError('提交格式处理记录未能保存，本轮未执行返回工具；已收到的模型用量保留。') from None
+        if turn.response_normalizations and self.public_progress:
+            self.public_progress({'type': 'agent_submission_normalized'})
         return turn

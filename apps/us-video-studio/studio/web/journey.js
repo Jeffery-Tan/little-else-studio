@@ -6,6 +6,7 @@
 function journeyStatus(brief, pending, interaction) {
   if (brief?.execution?.active) return '团队正在处理';
   if (interaction) return '有一个问题想和你确认';
+  if (pending?.source_execution?.notice) return pending.source_execution.notice;
   if (pending) return pending.stage === 'direction' ? '选一个你想继续的方向' : '完整方案等你确认';
   if (brief?.questions?.length) return '有一个细节想和你确认';
   if (brief?.phase === 'review_failed') return '方案已保存，内部检查未完成';
@@ -42,6 +43,29 @@ function artifactQuestionHtml(q) {
     `<p role="status" data-feedback></p></section>`;
 }
 
+function directionDesignSupplementQuestion(question, pending) {
+  return pending?.stage === 'direction' && Number.isInteger(pending.version) && pending.version > 0
+    && /^[a-f0-9]{64}$/.test(pending.artifact_sha256 || '')
+    && question?.kind === 'local_design' && question.owner === 'user'
+    && question.stage === pending.stage && question.version === pending.version
+    && question.artifact_sha256 === pending.artifact_sha256;
+}
+
+function artifactQuestionKey(question) {
+  return JSON.stringify([question.stage,question.version,question.artifact_sha256,
+    question.question_id,question.question]);
+}
+
+function directionDesignSupplementHtml(questions) {
+  if (!questions.length) return '';
+  return `<details class="direction-design-supplement" data-direction-design-supplement>` +
+    `<summary>这版方向的设计补充 · ${questions.length}</summary>` +
+    '<p class="muted">保留本版的设计事项，采用与修改仍使用上方决定入口。</p>' +
+    questions.map(question=>`<section class="direction-design-note"><p>${escapeHtml(question.question)}</p>` +
+      (question.reason?`<p class="muted">${escapeHtml(question.reason)}</p>`:'') +
+      (question.blocks?`<p class="muted">涉及：${escapeHtml(question.blocks)}</p>`:'') + '</section>').join('') + '</details>';
+}
+
 function bindArtifactQuestion(host, q) {
   const button = host.querySelector('[data-send-artifact-answer]');
   const input = host.querySelector('[data-artifact-answer]');
@@ -53,7 +77,7 @@ function bindArtifactQuestion(host, q) {
     const answer = input.value.trim();
     if (!answer) { feedback.textContent = '说说目前知道的情况；不确定也可以直接说明。'; input.focus(); return; }
     const current = (state.timeline?.questions || []).some(item =>
-      item.stage === q.stage && item.version === q.version && item.question === q.question);
+      artifactQuestionKey(item) === artifactQuestionKey(q));
     if (!current) { feedback.textContent = '这个问题已更新，请刷新当前项目再回答。'; return; }
     button.disabled = true;
     // The prose answer format is accepted by both the current and earlier
@@ -152,22 +176,23 @@ function renderJourneyStatus() {
 
 function configureJourneyTabs() {
   const run=(state.runs || []).find(item=>item.run_id===state.runId);
-  const photo=(state.creatorView?.format||run?.content_format)==='photo';
+  const format=state.creatorView?.format||run?.content_format;
+  const photo=format==='photo', video=format==='video';
   const analysis=Boolean(state.creatorView?.analysisOnly);
   $('journey-tab-plan').textContent=analysis?'分析与参考':'创意方向';
   $('journey-tab-assets').hidden=analysis;
   $('journey-tab-reference').hidden=analysis||!(state.referenceTasks||[]).some(task=>task.candidate);
   $('journey-tab-script').hidden=analysis;
-  $('journey-tab-script').textContent=photo?'图文方案':'脚本';
+  $('journey-tab-script').textContent=photo?'图文方案':video?'脚本':'创作方案';
   const hasWriting=(state.timeline?.rail||[]).some(step=>step.stage==='writing'&&step.has_doc);
   const hasMedia=Boolean(state.productionData?.drafts?.length);
   $('journey-tab-script').disabled=!hasWriting;
   $('journey-tab-storyboard').textContent=photo?'图片':'画面';
   $('journey-tab-storyboard').hidden=analysis;
   $('journey-tab-storyboard').disabled=!hasWriting&&!hasMedia;
-  $('journey-tab-video').hidden=photo||analysis;
+  $('journey-tab-video').hidden=!video||analysis;
   $('journey-tab-video').disabled=!hasWriting&&!hasMedia;
-  if (((photo || analysis) && state.canvasTab === 'video') ||
+  if (((!video || analysis) && state.canvasTab === 'video') ||
       (analysis && ['storyboard','assets','reference'].includes(state.canvasTab)) ||
       (state.canvasTab==='reference'&&$('journey-tab-reference').hidden))
     showJourneyTab('plan');
@@ -191,6 +216,7 @@ function renderCreativeBoard() {
   if(!host || typeof StudioCreativeBoard==='undefined')return;
   const run=(state.runs||[]).find(row=>row.run_id===state.runId)||state.timeline?.run||{};
   const boundRun=state.runId;
+  const boundStages=new Map((state.rail||[]).map(step=>[step.stage,{...step}]));
   const boundWriting=(state.rail||[]).find(step=>step.stage==='writing');
   const boundSource=boundWriting&&{version:boundWriting.version,sha256:boundWriting.artifact_sha256};
   StudioCreativeBoard.render(host,{runId:boundRun,run,timeline:state.timeline,
@@ -201,6 +227,17 @@ function renderCreativeBoard() {
     analysisOnly:Boolean(state.creatorView?.analysisOnly)}, {
     openStage(stage,version){
       if(state.runId!==boundRun)return;
+      const displayed=boundStages.get(stage);
+      const current=(state.rail||[]).find(step=>step.stage===stage);
+      if(stage==='writing' && displayed?.has_doc && current?.has_doc &&
+          displayed.version===version && current.version===version &&
+          /^[a-f0-9]{64}$/.test(displayed.artifact_sha256||'') &&
+          current.artifact_sha256===displayed.artifact_sha256 &&
+          !current.stale && current.integrity_ok!==false) {
+        showJourneyTab('plan',{stage});
+        setProjectFocus('canvas');$('stage').scrollTop=0;
+        return;
+      }
       openReader(stage,version).catch(error=>toast(`方案暂时无法打开：${error.message||error}`,true));
     },
     openMaterials(){if(state.runId===boundRun)toggleMaterials(true);},
@@ -244,14 +281,22 @@ function renderCreativeBoard() {
 function renderJourneyDecision() {
   const host=$('journey-decision'),tl=state.timeline;
   if (!host || !tl) return;
-  const q=tl.interaction, artifactQuestion=tl.questions?.[0], pending=tl.pending, continuation=tl.pending_continuation;
+  const questions=Array.isArray(tl.questions)?tl.questions.filter(question=>question&&typeof question==='object'):[];
+  const q=tl.interaction, artifactQuestion=questions[0], pending=tl.pending, continuation=tl.pending_continuation;
   const briefRedo=tl.pending_brief_redo, nextAction=tl.next_action;
-  const key=JSON.stringify([state.runId,q?.id,artifactQuestion?.stage,artifactQuestion?.version,artifactQuestion?.question,
-    pending?.version,pending?.artifact_sha256,
+  const key=JSON.stringify([state.runId,q?.id,questions.map(question=>[question.stage,question.version,
+    question.artifact_sha256,question.kind,question.owner,question.question_id,question.question,question.reason,question.blocks]),
+    pending?.stage,pending?.version,pending?.artifact_sha256,pending?.source_execution,
     continuation?.expected_version,continuation?.expected_artifact_sha256,
     briefRedo?.amendment_id,nextAction?.expected_context_sha256,Boolean(state.busy)]);
   if(host.dataset.key===key)return;
   host.dataset.key=key;
+  // Preserve unsent answers only for the same exact still-displayed question.
+  const answerDrafts=host.dataset.questionRunId===state.runId
+    ? new Map(Array.from(host.querySelectorAll('[data-artifact-question-key]'),node=>
+      [node.getAttribute('data-artifact-question-key'),node.querySelector('[data-artifact-answer]')?.value||'']))
+    : new Map();
+  host.dataset.questionRunId=state.runId;
   host.innerHTML='';
   if (state.busy) return;
   if (briefRedo) {
@@ -290,12 +335,23 @@ function renderJourneyDecision() {
     bindQuestionChoices(host, q);
   } else if (pending) {
     const step=(tl.rail || []).find(row => row.stage === pending.stage && row.version === pending.version);
-    host.innerHTML=`<div class="conversation-decision"><p>当前作品已放在左侧工作区。看完后，在这里选择继续或说明修改意见。</p>` +
-      `<button type="button" class="ghost small" data-view-plan>查看当前作品 ↗</button>${gateHtml(pending, step)}</div>` +
-      (artifactQuestion ? artifactQuestionHtml(artifactQuestion) : '');
+    const instruction = pending.source_execution?.notice
+      ? '当前草稿已放在左侧工作区。请先查看，或说明要修改的内容。'
+      : '当前作品已放在左侧工作区。看完后，在这里选择继续或说明修改意见。';
+    const supplements=questions.filter(question=>directionDesignSupplementQuestion(question,pending));
+    const independent=pending.stage==='direction'
+      ? questions.filter(question=>!directionDesignSupplementQuestion(question,pending)) : questions.slice(0,1);
+    host.innerHTML=`<div class="conversation-decision"><p>${instruction}</p>` +
+      `<button type="button" class="ghost small" data-view-plan>查看当前作品 ↗</button>${gateHtml(pending, step)}` +
+      directionDesignSupplementHtml(supplements) + '</div>' + independent.map(question=>
+        `<div data-artifact-question-key="${escapeHtml(artifactQuestionKey(question))}">${artifactQuestionHtml(question)}</div>`).join('');
     host.querySelector('[data-view-plan]').onclick=()=>{showJourneyTab('plan',{stage:pending.stage});setProjectFocus('canvas');};
     wireGate(host);
-    if (artifactQuestion) bindArtifactQuestion(host, artifactQuestion);
+    Array.from(host.querySelectorAll('[data-artifact-question-key]')).forEach((questionHost,index)=>{
+      const question=independent[index],input=questionHost.querySelector('[data-artifact-answer]');
+      if(input&&answerDrafts.has(artifactQuestionKey(question)))input.value=answerDrafts.get(artifactQuestionKey(question));
+      bindArtifactQuestion(questionHost,question);
+    });
   } else if (artifactQuestion) {
     host.innerHTML=artifactQuestionHtml(artifactQuestion);
     bindArtifactQuestion(host, artifactQuestion);
@@ -337,8 +393,8 @@ function openProductionBatch(kind){
   if(!runId||!data||data.active||state.busy||state.timeline?.pending||state.timeline?.interaction){
     toast('当前任务结束后再核对整组画面。',true);return false;
   }
-  if(kind==='generate'&&StudioProduction.batchBlocker(data,runId)){
-    toast('整组中仍有首帧任务待核实，请先处理原任务。',true);return false;
+  if(['generate','video_generate'].includes(kind)&&StudioProduction.batchBlocker(data,runId)){
+    toast('仍有制作任务待核实，请先处理原任务。',true);return false;
   }
   const target=state.canvasTab==='board'?'board'
     :['video_prepare','video_generate','assemble'].includes(kind)?'video':'storyboard';
@@ -382,6 +438,10 @@ function openProductionBatch(kind){
 function shotReference(shot){return {name:shot.reference.name,sha256:shot.reference.sha256};}
 async function submitProductionBatch(){
   const intent=currentBatchIntent();if(!intent||intent.submitting||state.runId!==intent.runId)return;
+  if(!intent.uncertain&&['generate','video_generate'].includes(intent.kind)&&
+      StudioProduction.batchBlocker(state.productionData,intent.runId)){
+    saveBatchIntent(null);renderProductionAction();toast('先核实原任务，再核对新的生成范围。',true);return;
+  }
   intent.submitting=true;intent.error='';renderProductionAction();
   const path=intent.kind==='approve'?'/material-approvals/batch'
     :intent.kind==='video_prepare'?'/material-approvals/batch/continue'
@@ -397,9 +457,18 @@ async function submitProductionBatch(){
     const result=await api(`/api/runs/${encodeURIComponent(intent.runId)}/production${path}`,
       {method:'POST',body:JSON.stringify(body)});
     if(state.runId!==intent.runId)return;
-    saveBatchIntent(null);
-    if(result.job_id||result.continuation?.job_id)void restoreJob(intent.runId);
-    await refreshTimeline();
+    const accepted=result.job_id?result:result.continuation?.job_id
+      ?{job_id:result.continuation.job_id,status:result.continuation.job_status||'running',events:[]}:null;
+    if(['generate','video_generate','assemble'].includes(intent.kind)&&!accepted)
+      throw new TypeError('未收到可核实的制作任务回执，请核实原请求。');
+    if(accepted){
+      if(!trackAcceptedJob(intent.runId,accepted))throw new TypeError('制作任务回执无法与本项目核对，请核实原请求。');
+      if(JOB_ACTIVE.has(state.currentJob?.status)&&state.productionData)state.productionData.active=true;
+    }
+    saveBatchIntent(null);renderProductionAction();
+    void refreshTimeline().catch(()=>{
+      if(state.runId===intent.runId)toast('操作已接收，画布暂时未刷新；正在继续跟踪原任务。',true);
+    });
     if(intent.kind==='video_prepare'){
       const continuation=result.continuation;
       const started=continuation?.status==='started';
@@ -411,7 +480,7 @@ async function submitProductionBatch(){
     }
     toast(intent.kind==='approve'?`已一次确认 ${result.approved} 张生成图。${result.continuation?.status==='started'?'团队正在准备视频输入。':''}`
       :intent.kind==='assemble'?'本地拼接已启动。'
-      :`整组生成已启动；将按顺序处理 ${intent.drafts.length} ${intent.kind==='video_generate'?'段':'张'}。`);
+      :`本次生成已启动；将按顺序处理 ${intent.drafts.length} ${intent.kind==='video_generate'?'段':'张'}。`);
   }catch(error){
     if(state.runId!==intent.runId)return;
     intent.submitting=false;
@@ -459,6 +528,13 @@ function productionBatchCommand(text,available={}){
   if(/(生成|出图|开始制作)/.test(value))return 'generate';
   return null;
 }
+function appendDesignUpgradeAction(host,data,primary=false){
+  if(typeof openDesignUpgrade!=='function'||!data?.design_upgrade_action&&!data?.design_upgrade_proposal)return false;
+  const runId=state.runId,proposal=data.design_upgrade_proposal;
+  const button=box('button',primary?'primary':'ghost',proposal?'查看设计补充方案':data.design_upgrade_action.label);
+  button.type='button';button.setAttribute('data-design-upgrade','');
+  button.onclick=()=>{if(state.runId===runId)openDesignUpgrade(runId,data);};host.append(button);return true;
+}
 function renderProductionAction(){
   const host=$('production-action');
   if(!host)return;
@@ -474,27 +550,55 @@ function renderProductionAction(){
     ?intent?(['video_prepare','video_generate','assemble'].includes(intent.kind)?'video':'storyboard')
       :state.creatorView?.tab
     :state.canvasTab;
-  if(!['storyboard','video'].includes(tab)||!state.productionData||
-      state.timeline?.pending||state.timeline?.interaction)return;
-  const blocker=tab==='storyboard'
-    ?StudioProduction.batchBlocker(state.productionData,state.runId):null;
-  if(blocker&&intent?.kind==='generate'&&!intent.uncertain&&!intent.submitting)saveBatchIntent(null);
-  if(blocker&&(!intent||intent.kind==='generate'&&!intent.uncertain&&!intent.submitting)){
-    const drafts=(state.productionData.drafts||[]).filter(d=>d.kind==='image'&&d.source_ready!==false);
-    const after=drafts.slice(blocker.index+1).filter(d=>!(d.attempts||[]).length).length;
-    const position=String(blocker.index+1).padStart(2,'0');
-    const retryAvailable=(state.productionData.recovery_modes||[]).includes('retry_with_unknown_cost');
-    host.append(box('strong',null,`整组暂停在${photo?'图片':'首帧'} ${position}`),
-      box('p',null,blocker.work.phase==='unknown'
-        ?`这张图的提交结果还未确认；${after} 张后续首帧没有提交。先核实原任务，不能跳过这张直接生成其余图片。`
-        :`这张图仍在处理中；${after} 张后续首帧尚未提交。`));
-    if(blocker.work.phase==='unknown'&&!retryAvailable)host.append(
-      box('p',null,'当前服务仍是旧版；接受未知费用后继续的入口，需服务更新后才能使用。'));
-    const button=box('button','primary',blocker.work.phase==='unknown'?'核实这次图片任务':'查看这次图片任务');
-    button.type='button';button.onclick=()=>openProduction({kind:'image',focusDraft:blocker.draft.draft_id});
-    host.append(button);
+  const mediaJob=state.currentJob;
+  if(!intent&&mediaJob?.run_id===state.runId&&JOB_ACTIVE.has(mediaJob.status)
+      &&['production_generation','production_batch_generation','production_refresh'].includes(mediaJob.job_kind)){
+    const stopping=mediaJob.status==='cancelling';
+    host.append(box('strong',null,stopping?'正在停止本次制作':mediaJob.status==='queued'?'本次制作等待执行':'本次制作正在执行'),
+      box('p',null,stopping?(mediaJob.reason||'正在等待当前调用返回；提供方可能仍在处理与计费。')
+        :mediaJobProgress(mediaJob)||'生成任务已接收，正在处理已确认的制作输入。'));
+    const stop=box('button','ghost',stopping?'正在停止…':'停止本次制作');
+    stop.type='button';stop.disabled=stopping;
+    stop.onclick=()=>{if(state.runId===mediaJob.run_id&&state.currentJob?.job_id===mediaJob.job_id)void stopCurrentJob();};
+    host.append(stop);return;
+  }
+  if(!state.productionData||state.timeline?.pending||state.timeline?.interaction)return;
+  const blocker=StudioProduction.batchBlocker(state.productionData,state.runId);
+  // An accepted batch request whose response was lost keeps its frozen identity.
+  // Querying that same request is still safe when its original task now blocks
+  // new generation, or its input has since become stale.
+  if(blocker&&(intent?.uncertain||intent?.submitting)){
+    host.append(box('strong',null,'上次整组请求的结果待确认'),
+      box('p',null,'原请求身份与输入已保留；核实同一请求，不会重新发起生成。'));
+    const retry=box('button','primary',intent.submitting?'正在核实同一请求':'核实同一请求');
+    retry.type='button';retry.setAttribute('data-batch-confirm','');retry.disabled=Boolean(intent.submitting);
+    retry.onclick=submitProductionBatch;host.append(retry);
+    if(intent.error)host.append(box('p',null,intent.error));
+    appendDesignUpgradeAction(host,state.productionData);
     return;
   }
+  if(blocker&&intent?.kind==='generate'&&!intent.uncertain&&!intent.submitting)saveBatchIntent(null);
+  if(blocker){
+    const kind=blocker.work.kind,media=kind==='video'?'视频':'图片';
+    const label=blocker.ordinal?`${photo&&kind==='image'?'第':'镜头'} ${String(blocker.ordinal).padStart(2,'0')}${photo&&kind==='image'?' 页':''}`:'这次任务';
+    host.append(box('strong',null,`${label}${blocker.work.phase==='unknown'?`的${media}结果待确认`:`正在生成${media}`}`),
+      box('p',null,blocker.work.phase==='unknown'
+        ?'已有图片仍可查看。先核实原任务的结果，再继续制作；输入已替换或需补设计，也不会跳过这条任务。'
+        :`原${media}任务仍在处理；先查询这次任务，完成后再继续制作。`));
+    const button=box('button','primary',blocker.work.phase==='unknown'?`核实这次${media}任务`:`查看这次${media}任务`);
+    button.type='button';button.onclick=()=>openProduction({kind,
+      ...(blocker.draft?{focusDraft:blocker.draft.draft_id}:{}),
+      ...(blocker.attempt?.attempt_id?{focusAttempt:blocker.attempt.attempt_id}:{})});
+    host.append(button);
+    appendDesignUpgradeAction(host,state.productionData);
+    return;
+  }
+  if(!intent&&(state.productionData.design_upgrade_action||state.productionData.design_upgrade_proposal)){
+    host.append(box('strong',null,state.productionData.design_upgrade_proposal?'制作设计补充待核对':'原脚本已采用，制作设计待补齐'),
+      box('p',null,state.productionData.design_upgrade_action?.notice||'查看共同人物、场景与逐镜绑定，核对后保存新版本；新版仍须你采用。'));
+    if(appendDesignUpgradeAction(host,state.productionData,true))return;
+  }
+  if(!['storyboard','video'].includes(tab))return;
   if(intent){
     if(intent.kind==='choose'){
       host.append(box('strong',null,'“批准全部”需要明确范围'),
@@ -515,7 +619,7 @@ function renderProductionAction(){
         const button=box('button','ghost','拼接成片');button.onclick=()=>openProductionBatch('assemble');host.append(button);}
       return;
     }
-    const html=StudioProduction.batchConfirmationHtml(intent,state.productionData,state.runId);
+    const html=StudioProduction.batchConfirmationHtml(intent,state.productionData,state.runId,state.creatorView?.format);
     if(!html){host.append(box('p',null,'本次核对的版本已变化。请刷新后重新选择整组画面。'));
       const reset=box('button','ghost small','重新选择');reset.onclick=()=>{saveBatchIntent(null);renderProductionAction();};
       host.append(reset);return;}
@@ -572,13 +676,15 @@ function renderProductionAction(){
     }
   }
   const kind=tab==='storyboard'?'image':'video';
-  const imageDrafts=kind==='image'?(state.productionData.drafts||[]).filter(d=>d.kind==='image'&&d.source_ready!==false):[];
+  const imageGroup=kind==='image'?StudioProduction.imageGroupSummary(state.productionData,state.runId):null;
+  const imageDrafts=imageGroup?.drafts||[];
   if(imageDrafts.length>1){
-    const generated=imageDrafts.filter(d=>StudioProduction.currentProductionWork({...state.productionData,drafts:[d]},'image',state.runId).outputUrl).length;
+    const generated=imageGroup.generated;
     const unmade=StudioProduction.batchGenerationDrafts(state.productionData,state.runId).length;
     const unapproved=StudioProduction.batchApprovalImages(state.productionData,state.runId).length;
-    host.append(box('strong',null,`${imageDrafts.length} 张${photo?'图片':'首帧'}方案`),
-      box('p',null,`已生成 ${generated} 张。要修改哪条，点画面区的“提意见”后直接在这里说。`));
+    const targetLabel=imageGroup.total===null?'':`目标 ${imageGroup.total} ${photo?'页':'镜'} · `;
+    host.append(box('strong',null,`${targetLabel}当前 ${imageDrafts.length} 张${photo?'图片':'首帧'}方案`),
+      box('p',null,`已准备输入 ${imageGroup.readyDrafts.length} 张${imageGroup.needsUpdate?`，需更新 ${imageGroup.needsUpdate} 张`:''}；当前已生成 ${generated} 张${imageGroup.pending?`，待生成 ${imageGroup.pending} 张`:''}。${generated ? '要修改生成结果，打开画布图片，点“批注这张生成图”后在这里说。' : '尚未生成图片。要修改制作输入，直接在这里说明页码和修改要求。'}`));
     if(unmade){const button=box('button','primary',`核对并一次生成 ${unmade} 张`);
       button.type='button';button.onclick=()=>openProductionBatch('generate');host.append(button);}
     if(unapproved){const button=box('button','ghost',`一次确认 ${unapproved} 张生成图`);
@@ -611,7 +717,7 @@ function showJourneyTab(tab, options={}) {
     const learning=(state.runs||[]).find(run=>run.run_id===state.runId)?.kind==='learning';
     $('canvas-detail-nav').hidden=tab==='board'||learning;
     if($('canvas-detail-title'))$('canvas-detail-title').textContent=tab==='plan'
-      ? ((state.rail||[]).find(step=>step.stage===options.stage)?.label||'方案详情')
+      ? (stageDisplayLabel((state.rail||[]).find(step=>step.stage===options.stage),state.creatorView?.format)||'方案详情')
       : ({assets:'素材与参考',reference:'参考拆解',storyboard:'画面与制作记录',video:'成片与制作记录'}[tab]||'');
   }
   $('stage').hidden=tab!=='plan';
@@ -626,7 +732,7 @@ function showJourneyTab(tab, options={}) {
       || (state.rail||[]).find(s=>s.stage==='direction'&&s.has_doc)?.stage || 'intake';
     selectStage(candidate);
     renderPane();
-    if($('canvas-detail-title'))$('canvas-detail-title').textContent=(state.rail||[]).find(step=>step.stage===candidate)?.label||'方案详情';
+    if($('canvas-detail-title'))$('canvas-detail-title').textContent=stageDisplayLabel((state.rail||[]).find(step=>step.stage===candidate),state.creatorView?.format)||'方案详情';
   } else if(tab==='assets') renderCanvasMaterials();
   else if(tab==='reference') renderProjectReference();
   else {
@@ -664,6 +770,18 @@ function wireReferenceAnalysis(host) {
 }
 function renderReferenceAnalysis() {
   const host=$('stage');
+  const analysis=state.timeline?.brief?.analysis;
+  const hasCreativeArtifact=(state.timeline?.rail||[]).some(row=>row.has_doc&&
+    ['direction','material_plan','writing'].includes(row.stage));
+  if(analysis?.kind==='image'&&analysis.analysis_only===true&&!hasCreativeArtifact){
+    host.innerHTML='<article class="artifact-prose" data-image-analysis-report>'+
+      `<h1>${escapeHtml(analysis.goal||'图片分析')}</h1>`+
+      `<p>${escapeHtml(analysis.title||'图片分析')}</p>`+
+      (analysis.report?`<p>${escapeHtml(analysis.detail||'')}</p>${renderMarkdown(analysis.report)}`
+        :`<p>${escapeHtml(analysis.detail||'本轮尚无已保存的图片分析回复。')}</p>`)+
+      '</article>';
+    return;
+  }
   const selected=(state.referenceTasks||[]).find(task=>task.reference_id===state.referenceSelectedId)
     ||state.creatorView?.reference;
   host.innerHTML=referenceAnalysisHtml(selected,state.materials);

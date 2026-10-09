@@ -12,6 +12,55 @@ const base={run,timeline:{rail:[direction,writing],brief:{phase:'ready',executio
   imageWork:{kind:'image',phase:'needs_plan',draft:null},videoWork:{kind:'video',phase:'needs_plan',draft:null}};
 const withVideo=(phase,other={})=>({kind:'video',phase,draft:{draft_id:'v1'},...other});
 
+test('pure image analysis consumes the server state and never switches the creative format',()=>{
+  for(const status of ['complete','incomplete','working','stopped']){
+    const projection={kind:'image',analysis_only:true,goal:'图片分析',status,
+      title:status==='complete'?'图片分析已完成':`图片分析 ${status}`,
+      detail:'本轮固定 2 张图片，已核对 2 张观察。',job_id:'exact-analysis',report:'可见结构；材质未知。'};
+    const view=creatorProjectView({run:{...run,brief:'不要视频'},
+      timeline:{rail:[],run:{content_format:'video'},brief:{analysis:projection,execution:{active:status==='working'}}}});
+    assert.equal(view.goal,'图片分析');
+    assert.equal(view.current,projection.title);
+    assert.equal(view.detail,projection.detail);
+    assert.equal(view.format,'video');
+    assert.equal(view.analysisOnly,true);
+    assert.equal(view.imageAnalysis,projection);
+    assert.equal(view.action.kind,'navigate');
+    assert.equal(view.action.label,'阅读分析结果');
+  }
+});
+
+test('words and historical analysis cannot hide existing creative works or media',()=>{
+  const projection={kind:'image',analysis_only:true,goal:'图片分析',title:'图片分析已完成'};
+  const creative=creatorProjectView({...base,timeline:{...base.timeline,brief:{analysis:projection}}});
+  assert.equal(creative.imageAnalysis,null);
+  assert.equal(creative.goal,'商品视频与发布文案');
+  const untrusted=creatorProjectView({run:{brief:'图片分析已完成，所有图片已看'},timeline:{rail:[]}});
+  assert.equal(untrusted.imageAnalysis,null);
+  assert.equal(untrusted.analysisOnly,false);
+  assert.equal(untrusted.goal,'交付形式待确认');
+  const existingMedia=creatorProjectView({...base,timeline:{rail:[],brief:{analysis:projection}},
+    videoWork:withVideo('completed')});
+  assert.equal(existingMedia.imageAnalysis,null);
+});
+
+test('an exact saved draft with unfinished handoff leads to reading or editing without a quality verdict',()=>{
+  const pending={stage:'writing',version:2,artifact_sha256:'a'.repeat(64),passed:true,
+    headline:'「脚本」草稿已保存，检查或交付未完成。',
+    source_execution:{job_id:'original',status:'blocked',notice:'草稿已保存，检查或交付未完成；请先查看或修改。'}};
+  const view=creatorProjectView({...base,timeline:{...base.timeline,pending}});
+  assert.equal(view.current,pending.headline);
+  assert.equal(view.action.label,'查看或修改草稿');
+  assert.equal(view.action.stage,'writing');
+  assert.equal(view.detail,pending.source_execution.notice);
+  const active=creatorProjectView({...base,timeline:{...base.timeline,pending,brief:{execution:{active:true}}}});
+  assert.equal(active.action,null);
+  assert.equal(active.current,'团队正在处理当前任务');
+  const unrelated=creatorProjectView({...base,timeline:{...base.timeline,pending:{stage:'writing'}},
+    currentJob:{run_id:'demo',job_id:'foreign-failure',status:'blocked',reason:'max_rounds'}});
+  assert.equal(unrelated.current,'脚本已准备好，等待你阅读和决定');
+});
+
 test('the live timeline format takes precedence over a cached project format',()=>{
   const photo=creatorProjectView({...base,timeline:{...base.timeline,run:{content_format:'photo'}},
     videoWork:withVideo('completed')});
@@ -30,7 +79,7 @@ test('photo preparation and saved images never select historical video work',()=
   const preparing=creatorProjectView({...photo,
     imageWork:{kind:'image',phase:'prepare',draft:null},
     videoWork:{kind:'video',phase:'prepare',draft:null}});
-  assert.equal(preparing.current,'脚本已确认，下一步准备画面');
+  assert.equal(preparing.current,'图文方案已确认，下一步准备画面');
   assert.equal(preparing.action.label,'准备画面输入');
   assert.equal(preparing.action.tab,'storyboard');
   for(const phase of ['ready','completed','unknown','failed','prepare']){
@@ -234,4 +283,60 @@ test('critical material gap asks for a plan adjustment before a full script',()=
   assert.match(view.current,/素材方案有关键缺口/);
   assert.equal(view.action.label,'调整素材方案');
   assert.equal(view.stage,'material_plan');
+});
+
+
+test('direction summary names the next deliverable from the live trusted format, never cached wording',()=>{
+  for(const [format,name,goal] of [
+    ['photo','图文方案','带货图片与文案'],
+    ['video','脚本','商品视频'],
+    [null,'创作方案','交付形式待确认'],
+  ]) {
+    const input={run:{run_id:'format-case',content_format:format==='video'?'photo':'video',
+      brief:'讨论图文和视频措辞，不据此声明交付形式。'},
+      timeline:{run:{content_format:format},rail:[direction],pending:{stage:'direction',passed:true},
+        brief:{execution:{active:false}}}};
+    const before=JSON.stringify(input),view=creatorProjectView(input);
+    assert.equal(view.format,format);
+    assert.equal(view.goal,goal);
+    assert.equal(view.current,`正在选择创意方向；采用后会继续准备${name}`);
+    assert.deepEqual(view.action,{kind:'navigate',label:'选择创意方向',tab:'plan',stage:'direction'});
+    assert.equal(JSON.stringify(input),before);
+  }
+});
+
+test('writing and adopted-direction summaries keep the same format-specific name and existing destinations',()=>{
+  const saved={stage:'writing',has_doc:true,version:2,blocks:[]};
+  for(const [format,name] of [['photo','图文方案'],['video','脚本'],[null,'创作方案']]) {
+    const input={run:{run_id:'format-case',content_format:'video',brief:'Synthetic topic'},
+      timeline:{run:{content_format:format},rail:[direction,saved],brief:{execution:{active:false}}}};
+    const cases=[
+      [{pending:{stage:'writing'}},`${name}已准备好，等待你阅读和决定`,'navigate',`阅读并决定${name}`,'plan','writing'],
+      [{pending:{stage:'writing',passed:false}},`${name}新版已保存，但审核提出修改意见`,'navigate',`查看${name}与审核`,'plan','writing'],
+      [{brief:{action:{kind:'review_stage',label:'核对当前稿',stage:'writing'}}},`${name}已保存，内部审核未完成`,'review_stage','核对当前稿',undefined,'writing'],
+      [{rail:[direction,{...saved,stale:true}]},`当前${name}的来源或文件已变化`,'navigate','核对稿件变化','plan','writing'],
+      [{rail:[direction,{...saved,approval_decision:'approved'}]},`${name}已确认，下一步准备实际画面`,'navigate','准备当前画面','storyboard',undefined],
+      [{},`当前${name}可阅读和修改`,'navigate',`阅读并修改${name}`,'plan','writing'],
+      [{rail:[direction]},`已采用方向 B，下一份${name}尚未准备好`,'chat',`讨论下一份${name}`,undefined,undefined],
+      [{brief:{phase:'needs_resolution'}},`素材方案有关键缺口，完整${name}暂不继续`,'chat','调整素材方案',undefined,undefined],
+    ];
+    for(const [change,current,kind,label,tab,stage] of cases) {
+      const value={...input,timeline:{...input.timeline,...change}},before=JSON.stringify(value);
+      const view=creatorProjectView(value);
+      assert.equal(view.current,current);
+      assert.equal(view.action.kind,kind);
+      assert.equal(view.action.label,label);
+      assert.equal(view.action.tab,tab);
+      assert.equal(view.action.stage,stage);
+      assert.equal(JSON.stringify(value),before);
+    }
+    if(format==='photo') {
+      const preparing={...input,timeline:{...input.timeline,rail:[]},
+        imageWork:{kind:'image',phase:'prepare',draft:null}};
+      const before=JSON.stringify(preparing),view=creatorProjectView(preparing);
+      assert.equal(view.current,'图文方案已确认，下一步准备画面');
+      assert.deepEqual(view.action,{kind:'prepare',label:'准备画面输入',tab:'storyboard'});
+      assert.equal(JSON.stringify(preparing),before);
+    }
+  }
 });

@@ -5,7 +5,8 @@ from studio.task_contract import evaluate
 
 
 def stage(version=1, sha='exact', verdict=None):
-    latest = SimpleNamespace(version=version, sha256=sha)
+    latest = SimpleNamespace(version=version, sha256=sha,
+                             structured={'segments': [{'picture': 'Synthetic complete shot'}]})
     review = SimpleNamespace(verdict=verdict, artifact_sha256=sha) if verdict else None
     return SimpleNamespace(latest=latest, stale=False, integrity_ok=True, open_attempt=None, review=review)
 

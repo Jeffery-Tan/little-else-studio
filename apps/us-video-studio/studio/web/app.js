@@ -81,6 +81,8 @@ const state = {
   // earlier can never overwrite what the user typed since (R5).
   composerVersion: 0,
   refreshSerial: 0,
+  projectReadIntegrity: null,
+  projectReadNotices: new Map(),
   machineDetail: false,
   materialsOpen: false,
   // The conversation keeps the full project context available for reading.
@@ -99,14 +101,24 @@ const state = {
 /* ------------------------------------------------------------------ api -- */
 
 async function api(path, options) {
-  const res = await fetch(path, { headers: { "content-type": "application/json" }, ...options });
+  let res;
+  try { res = await fetch(path, { headers: { "content-type": "application/json" }, ...options }); }
+  catch (cause) {
+    const error = new Error(cause?.message || '无法连接工作台服务。');
+    error.name = cause?.name || 'Error';
+    if (Number.isInteger(cause?.status)) error.status = cause.status;
+    error.network = error.name !== 'AbortError' && !(error.status >= 100 && error.status <= 599);
+    throw error;
+  }
   if (!res.ok) {
-    let detail = res.statusText;
+    let detail = res.statusText, payload;
     try {
-      detail = (await res.json()).detail || detail;
+      payload = await res.json(); detail = payload.detail || detail;
     } catch (_) { /* non-JSON body */ }
     const error = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
     error.status = res.status;
+    error.integrity = payload?.integrity || null;
+    error.serviceClosing = !error.integrity && res.status === 409 && typeof detail === 'string' && detail.startsWith('[closing] ');
     throw error;
   }
   return res.json();
@@ -138,13 +150,14 @@ function toast(message, isError) {
 /* ----------------------------------------------------------- projects -- */
 
 async function loadRuns() {
-  const runs = await api("/api/runs");
-  state.runs = runs;
+  const catalog = await api("/api/runs");
+  state.runs = catalog;
+  const runs = catalog.filter(run => run.integrity?.available !== false);
   const select = $("run-select");
   select.innerHTML = "";
   if (!runs.length) {
     const opt = document.createElement("option");
-    opt.textContent = "还没有项目";
+    opt.textContent = catalog.length ? "暂无可打开项目" : "还没有项目";
     opt.value = "";
     select.appendChild(opt);
     state.runId = null;
@@ -245,6 +258,10 @@ function restoreComposerDraft(draft) {
 }
 
 async function selectRun(runId) {
+  if (state.runs.find(run => run.run_id === runId)?.integrity?.available === false) {
+    toast('项目资料损坏，已暂停。请在首页查看资料错误；原文件已保留。', true);
+    return false;
+  }
   if (state.decisionBusy) { $('run-select').value = state.runId; return false; }
   toggleMaterials(false);
   $('reader').hidden = true;
@@ -274,6 +291,9 @@ async function selectRun(runId) {
     if (submission && submission.stamp === state.composerVersion) submission.savedDraft = draft;
   }
   state.runId = runId;
+  state.projectReadIntegrity = null;
+  state.projectReadNotices.clear();
+  if ($('project-read-status')) $('project-read-status').hidden = true;
   $('run-select').value = runId;
   restoreComposerDraft(state.chatDrafts.get(runId) || readComposerRecord(runId)?.draft);
   state.timeline = null;
@@ -309,18 +329,93 @@ async function selectRun(runId) {
   return state.runId === runId;
 }
 
+function projectReadStatus(runId, serial, error, waiting, options = {}) {
+  const current = options.current || (() => runId === state.runId && serial === state.refreshSerial);
+  if (runId !== state.runId || !current()) return;
+  const key = options.key || 'project', previous = state.projectReadNotices.get(key);
+  if (error) state.projectReadNotices.set(key,{runId,error,waiting,
+    integrity:error.integrity || previous?.integrity,current,refresh:options.refresh,
+    noun:key==='recovery'?'恢复状态':'项目内容'});
+  else state.projectReadNotices.delete(key);
+  state.projectReadIntegrity = [...state.projectReadNotices.values()]
+    .find(record=>record.runId===state.runId && record.integrity)?.integrity || null;
+  if (typeof syncComposerAction === 'function') syncComposerAction();
+  const host = $('project-read-status');
+  if (!host) return;
+  host.replaceChildren();
+  for (const [source,record] of state.projectReadNotices) {
+    if (record.runId !== state.runId || (!record.current() && !record.integrity)) continue;
+    const {error,waiting,noun} = record,copy = box('div','job-copy');
+    const sentence = waiting ? error.serviceClosing
+      ? `服务正在更新，正在重新读取${noun}…`
+      : `连接暂时断开，正在重新读取${noun}…`
+      : record.integrity ? `项目资料损坏，已暂停：${creatorFailureText(error.message)}`
+      : `${noun}暂时未同步：${creatorFailureText(error.message)}`;
+    const notice = box('span',waiting ? 'muted' : 'job-warning',sentence);
+    notice.setAttribute('role',waiting ? 'status' : 'alert'); copy.append(notice);
+    if (!waiting) {
+      const retry = box('button','ghost small',source==='recovery'?'刷新恢复状态':'刷新已保存内容'); retry.type = 'button';
+      retry.onclick = async () => {
+        if (record.runId !== state.runId || !record.current()) return;
+        retry.disabled = true;
+        try { await (record.refresh || refreshTimeline)(); }
+        catch (_) { /* This read keeps its own visible error. */ }
+      };
+      copy.append(retry);
+    }
+    host.append(copy);
+  }
+  host.hidden = !host.children.length;
+}
+
+async function boundedProjectRead(read, current, report) {
+  const delays = [1000,2000,4000,8000];
+  for (let attempt = 0; ; attempt++) {
+    if (!current()) return null;
+    try {
+      const value = await read();
+      return current() ? {value} : null;
+    } catch (error) {
+      if (!current()) return null;
+      const retry = !error.integrity && (error.network || error.serviceClosing) && attempt < delays.length;
+      report(error,retry);
+      if (!retry) throw error;
+      await new Promise(resolve => setTimeout(resolve,delays[attempt]));
+    }
+  }
+}
+
+async function loadProjectView(runId, serial, runKind) {
+  const current = () => runId === state.runId && serial === state.refreshSerial;
+  const optional = (request, fallback = () => null) => request.catch(error => {
+    if (error.network || error.serviceClosing || error.integrity || error.status === 409) throw error;
+    return fallback(error);
+  });
+  const loaded = await boundedProjectRead(async () => {
+      const reads = await Promise.allSettled([
+        api(`/api/runs/${runId}/timeline`),
+        runKind==='learning'?Promise.resolve(null):optional(api(`/api/runs/${runId}/production`)),
+        optional(api(`/api/runs/${runId}/reference-videos`)),
+        runKind==='learning'?optional(api(`/api/runs/${runId}/learning/session`),error=>({load_error:error.message})):Promise.resolve(null),
+        runKind==='learning'?optional(api('/api/learning'),error=>({load_error:error.message})):Promise.resolve(null),
+      ]);
+      const errors = reads.filter(read=>read.status==='rejected').map(read=>read.reason);
+      if (errors.length) throw errors.find(error=>error.integrity)
+        || errors.find(error=>!error.network && !error.serviceClosing) || errors[0];
+      return reads.map(read=>read.value);
+  },current,(error,waiting)=>projectReadStatus(runId,serial,error,waiting));
+  return loaded?.value || null;
+}
+
 async function refreshTimeline() {
-  if (!state.runId) return;
+  if (!state.runId) return false;
   const runId = state.runId, serial = ++state.refreshSerial;
   const runKind=state.runs.find(item=>item.run_id===runId)?.kind;
-  const [tl, production, references, learningSession, learningCatalog] = await Promise.all([
-    api(`/api/runs/${runId}/timeline`),
-    runKind==='learning'?Promise.resolve(null):api(`/api/runs/${runId}/production`).catch(() => null),
-    api(`/api/runs/${runId}/reference-videos`).catch(() => null),
-    runKind==='learning'?api(`/api/runs/${runId}/learning/session`).catch(error=>({load_error:error.message})):Promise.resolve(null),
-    runKind==='learning'?api('/api/learning').catch(error=>({load_error:error.message})):Promise.resolve(null),
-  ]);
-  if (state.runId !== runId || serial !== state.refreshSerial) return;
+  const loaded = await loadProjectView(runId,serial,runKind);
+  if (!loaded) return false;
+  const [tl, production, references, learningSession, learningCatalog] = loaded;
+  if (state.runId !== runId || serial !== state.refreshSerial) return false;
+  projectReadStatus(runId,serial,null,false);
   state.timeline = tl;
   state.projectBrief = tl.brief;
   state.productionData = production;
@@ -337,7 +432,7 @@ async function refreshTimeline() {
     state.materials=tl.materials||[];
     $('rail').innerHTML='';
     renderPane();renderConversation(tl);renderDraft();renderSpend(tl);renderMaterials();renderProjects();
-    return;
+    return true;
   }
   const imageWork = production && typeof StudioProduction?.currentProductionWork === 'function'
     ? StudioProduction.currentProductionWork(production, 'image', runId) : null;
@@ -377,6 +472,7 @@ async function refreshTimeline() {
   renderProjects();
   if (state.canvasTab!=='board' && !state.canvasTouched && state.creatorView?.tab && state.creatorView.tab !== state.canvasTab)
     showJourneyTab(state.creatorView.tab, {automatic:true});
+  return true;
 }
 
 /* --------------------------------------------------------------- header -- */
@@ -630,6 +726,12 @@ function feedbackShotOrdinal(draft) {
   return Number.isInteger(row?.ordinal) && row.ordinal > 0 ? row.ordinal : null;
 }
 
+function feedbackImageLabel(runId, ordinal) {
+  const number=String(ordinal).padStart(2,'0');
+  return state.timeline?.run?.run_id===runId&&state.timeline.run.content_format==='photo'
+    ?`第 ${number} 页`:`首帧 ${number} `;
+}
+
 function setMediaFeedbackTarget(runId, attempt, kind, atSeconds) {
   if (state.runId !== runId || !attempt?.attempt_id ||
       !/^[a-f0-9]{64}$/.test(attempt.output?.sha256 || '')) {
@@ -642,7 +744,7 @@ function setMediaFeedbackTarget(runId, attempt, kind, atSeconds) {
     .find(row=>row.kind==='image'&&row.draft_id===attempt.draft_id):null;
   const ordinal=feedbackShotOrdinal(draft);
   const label = kind === 'video' ? `正在反馈视频 ${target.at_seconds.toFixed(1)} 秒`
-    :ordinal!=null?`正在批注首帧 ${String(ordinal).padStart(2,'0')} 的生成图`:'正在反馈这张图片';
+    :ordinal!=null?`正在批注${feedbackImageLabel(runId,ordinal)}的生成图`:'正在反馈这张图片';
   switchFeedbackTarget({feedbackTarget:target, feedbackPresentation:{label, placeholder:kind === 'video'
     ? '说说这个时间点哪里需要调整…' : '说说这张图哪里需要调整…'}});
   setProjectFocus('chat'); setConversationOpen(true); $('chat-input').focus();
@@ -667,7 +769,7 @@ function setProductionFeedbackTarget(runId, draft, attempt) {
   }
   const ordinal=draft.kind==='image'?feedbackShotOrdinal(draft):null;
   const label = ordinal!=null
-    ?`正在修改首帧 ${String(ordinal).padStart(2,'0')} 的出图描述`
+    ?`正在修改${feedbackImageLabel(runId,ordinal)}的出图描述`
     :`正在说明这版${draft.kind === 'video' ? '视频' : '图片'}制作的问题`;
   switchFeedbackTarget({feedbackTarget:target,
     feedbackPresentation:{label, placeholder:'说说哪里需要调整，团队会核对这版作品和本次问题…'}});
@@ -1073,6 +1175,31 @@ document.addEventListener("click", (e) => {
 
 /* One material, big. Clicking a photo must not take him off the screen he is
  * already reading — the same reason the artifact reader is an overlay. */
+function viewerGeneratedImageTarget(runId, material) {
+  if (state.runId !== runId || material?.kind !== 'image' || !material.usable) return null;
+  const current = materialByName(material.name);
+  const writing = (state.rail || []).find(row => row.stage === 'writing');
+  if (!current?.usable || current.kind !== 'image' || current.bytes !== material.bytes ||
+      !writing?.has_doc || writing.stale || writing.integrity_ok === false ||
+      !/^[a-f0-9]{64}$/.test(writing.artifact_sha256 || '')) return null;
+  const matches = [];
+  for (const draft of state.productionData?.drafts || []) {
+    if (draft.kind !== 'image' || draft.is_current !== true || draft.source_ready !== true ||
+        !/^[a-f0-9]{64}$/.test(draft.draft_sha256 || '') ||
+        draft.source_version !== writing.version || draft.source_sha256 !== writing.artifact_sha256) continue;
+    for (const attempt of draft.attempts || []) {
+      if (!attempt.attempt_id || !['succeeded', 'completed'].includes(attempt.status) ||
+          attempt.output_available !== true || attempt.output?.name !== material.name ||
+          !/^[a-f0-9]{64}$/.test(attempt.output.sha256 || '')) continue;
+      // /materials lists file metadata without a hash. This verified production
+      // output is the hash authority; bind_target still rechecks bytes on send.
+      matches.push({attempt_id:attempt.attempt_id, draft_id:draft.draft_id,
+        draft_sha256:draft.draft_sha256, output:{name:material.name, sha256:attempt.output.sha256}});
+    }
+  }
+  return matches.length === 1 ? matches[0] : null;
+}
+
 function openViewer(m) {
   $("viewer-name").textContent = `${m.name} · ${humanBytes(m.bytes)}`;
   const body = $("viewer-body");
@@ -1090,12 +1217,42 @@ function openViewer(m) {
     img.alt = m.name;
     body.appendChild(img);
   }
-  $("viewer").hidden = false;
+  const analyze = $('viewer-analysis');
+  if (analyze) {
+    analyze.hidden = m.kind !== 'video' || !m.usable;
+    const runId = state.runId;
+    analyze.onclick = () => {
+      closeViewer();
+      return openMaterialAnalysis(runId, m, analyze);
+    };
+  }
+  const viewer = $('viewer');
+  viewer.querySelector('[data-viewer-feedback]')?.remove();
+  const runId = state.runId;
+  const material = {name:m.name, kind:m.kind, bytes:m.bytes, usable:m.usable};
+  const target = viewerGeneratedImageTarget(runId, material);
+  const actions = viewer.querySelector('.viewer-actions');
+  if (target && actions) {
+    const feedback = box('button', 'ghost small', '批注这张生成图');
+    feedback.type = 'button'; feedback.setAttribute('data-viewer-feedback', '');
+    feedback.setAttribute('aria-label', `批注这张生成图：${material.name}`);
+    feedback.onclick = () => {
+      if (viewer.hidden || viewer.querySelector("[data-viewer-feedback]") !== feedback ||
+          JSON.stringify(viewerGeneratedImageTarget(runId, material)) !== JSON.stringify(target)) {
+        toast('这张生成图或所属输入已变化，请重新打开当前作品后反馈。', true); return;
+      }
+      closeViewer();
+      setMediaFeedbackTarget(runId, target, 'image');
+    };
+    actions.prepend(feedback);
+  }
+  viewer.hidden = false;
 }
 
 function closeViewer() {
   // Emptied rather than hidden, so a playing video actually stops.
   $("viewer-body").innerHTML = "";
+  $("viewer").querySelector("[data-viewer-feedback]")?.remove();
   $("viewer").hidden = true;
 }
 
@@ -1152,7 +1309,7 @@ function renderCanvasMaterials() {
   copy.append(box("span", "creator-kicker", "PROJECT MATERIALS"),
     box("h2", "", "项目素材"),
     box("p", "muted", list.length
-      ? `${usable.length} 个可用文件 · 共 ${list.length} 个。点开可查看原图或视频。`
+      ? `${usable.length} 个可用文件 · 共 ${list.length} 个。点开可查看原图或视频；视频卡片可直接分析。`
       : "这里会持续显示项目的图片和视频。添加素材本身不会启动创作或生成。"));
   const add = box("button", "ghost small", "添加素材 ↗");
   add.type = "button";
@@ -1168,14 +1325,11 @@ function renderCanvasMaterials() {
 
 function materialTile(m) {
   const tile = box("div", "tile" + (m.usable ? "" : " unusable"));
+  const preview = box(m.usable ? 'button' : 'div', 'tile-preview');
   if (m.usable) {
-    tile.setAttribute("role", "button");
-    tile.tabIndex = 0;
-    tile.setAttribute("aria-label", `查看素材：${m.name}`);
-    tile.onclick = event => { if (!event.target.closest("[data-media]")) openViewer(m); };
-    tile.onkeydown = event => {
-      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openViewer(m); }
-    };
+    preview.type = 'button';
+    preview.setAttribute("aria-label", `查看素材：${m.name}`);
+    preview.onclick = event => { if (!event.target.closest("[data-media]")) openViewer(m); };
   }
   const thumb = box("span", "tile-thumb");
   if (m.usable) {
@@ -1186,11 +1340,20 @@ function materialTile(m) {
     thumb.classList.add("tile-nope");
     thumb.textContent = "?";
   }
-  tile.appendChild(thumb);
-  tile.appendChild(box("span", "tile-name", m.name));
-  tile.appendChild(
+  preview.appendChild(thumb);
+  preview.appendChild(box("span", "tile-name", m.name));
+  preview.appendChild(
     box("span", "tile-meta", m.usable ? humanBytes(m.bytes) : "不是图片也不是视频")
   );
+  tile.appendChild(preview);
+  if (m.usable && m.kind === 'video') {
+    const runId = state.runId;
+    const analyze = box('button', 'ghost small tile-analysis', '分析视频');
+    analyze.type = 'button';
+    analyze.setAttribute('aria-label', `分析视频：${m.name}`);
+    analyze.onclick = () => openMaterialAnalysis(runId, m, analyze);
+    tile.appendChild(analyze);
+  }
   return tile;
 }
 
@@ -1335,6 +1498,14 @@ function creatorReplyText(value) {
       (_, stage) => names[stage.toLowerCase()]);
 }
 
+function creatorFailureText(value) {
+  // Display-only: leave the stored reply, failed job and technical notes intact.
+  const text = String(value || '');
+  const internal = /^(?:(?:NonRetryableStageError|ModelError|SafePreflightError|RemoteProtocolError|IncompleteResponse):\s*)+/u;
+  const label = internal.test(text) ? '' : text.match(/^[^:\n：]*[:：]\s*/u)?.[0] || '';
+  return label + text.slice(label.length).replace(internal,'');
+}
+
 function renderTurn(turn, live = false) {
   const wrap = box("div", "turn");
 
@@ -1400,18 +1571,30 @@ function renderTurn(turn, live = false) {
   // replace it (else-if), hiding the very answer the user asked for — mature
   // chat UIs treat the question as an additional card *after* the reply, not
   // instead of it.
-  if (turn.reply) {
-    const bubble = box("div", "msg assistant");
-    const who = box("div", "who", "制片团队");
-    const body = box("div", "body");
-    const reply = creatorReplyText(turn.reply.text);
-    body.innerHTML = renderMarkdown(reply);
-    if(reply.length > 1400) {
-      const full=box('details','reply-full');
-      full.append(box('summary','','展开完整回复'),body);
-      bubble.append(who,box('p','muted','这条回复较长。本轮进展见上方，方案可从本轮成果打开。'),full);
-    } else bubble.append(who, body);
-    wrap.appendChild(bubble);
+  const replies = turn.replies?.length ? [...turn.replies] : turn.reply ? [turn.reply] : [];
+  if (turn.decision_continuation?.separate) replies.unshift({
+    text: turn.decision_continuation.text,
+    failure: ['blocked','failed','interrupted'].includes(turn.decision_continuation.status),
+  });
+  if (replies.length) {
+    for (const answer of replies) {
+      const bubble = box("div", "msg assistant");
+      const who = box("div", "who", "制片团队");
+      const body = box("div", "body");
+      const original = answer.display_text ?? answer.text;
+      const reply = creatorReplyText(answer.failure ? creatorFailureText(original) : original);
+      body.innerHTML = renderMarkdown(reply, {scrollTables:true});
+      if (answer.failure) {
+        body.classList.add('turn-failure');
+        body.setAttribute('role', 'alert');
+      }
+      if(reply.length > 1400) {
+        const full=box('details','reply-full');
+        full.append(box('summary','','展开完整回复'),body);
+        bubble.append(who,box('p','muted','这条回复较长。本轮进展见上方，方案可从本轮成果打开。'),full);
+      } else bubble.append(who, body);
+      wrap.appendChild(bubble);
+    }
   } else if ((!state.busy || !live) && (turn.user?.text || work.length || progress.children.length)) {
     // A finished round that produced no reply still answers — honest silence
     // was read as the assistant never coming back. Only the LIVE (last) turn
@@ -1421,7 +1604,7 @@ function renderTurn(turn, live = false) {
     const bubble = box("div", "msg assistant");
     const body = box("div", "body");
     const failure = work.findLast(item => item.kind === 'note' && item.failure);
-    const explanation = failure?.text || (work.length || progress.children.length
+    const explanation = (failure ? creatorFailureText(failure.text) : '') || (work.length || progress.children.length
       ? "本轮没有留下结论回复；过程与原因见本轮进展和「本轮工作记录」。"
       : "本轮没有留下结论回复。");
     const note = box("p", failure ? "turn-failure" : "muted", explanation);
@@ -1563,6 +1746,49 @@ function renderApproval(item) {
   const version = Number.isInteger(item.version) && item.version > 0 ? `第 ${item.version} 版` : '';
   card.append(box("div", "card-title", `你的决定 · ${item.stage_label}${version}`));
   card.appendChild(box("p", "card-summary", item.sentence));
+  const continuation=item.continuation;
+  if(continuation) {
+    const failed=['blocked','failed','cancelled','interrupted'].includes(continuation.status);
+    const result=box('p',failed?'turn-failure':'card-summary',
+      continuation.text + (continuation.reason ? ' ' + creatorFailureText(continuation.reason) : ''));
+    result.setAttribute('role',failed?'alert':'status');
+    card.append(result);
+    if(continuation.retry) {
+      const target=continuation.retry, runId=state.runId;
+      const retry=box('button','ghost small',target.stage==='writing'?'重新准备分镜输入':'重新准备素材与脚本');
+      retry.disabled=state.busy || state.decisionBusy || state.recoveryBlocked;
+      retry.onclick=async()=>{
+        if(runId!==state.runId || state.busy || state.decisionBusy || state.recoveryBlocked)return;
+        retry.disabled=true;
+        state.decisionBusy=true;
+        $('run-select').disabled=true; $('send').disabled=true;
+        let posted=false;
+        try {
+          const key=`studio-decision-preparation:${runId}:${item.approval_id}:${target.failed_job_id}`;
+          let requestId=localStorage.getItem(key);
+          if(!requestId){requestId=crypto.randomUUID();localStorage.setItem(key,requestId);}
+          posted=true;
+          await api(`/api/runs/${encodeURIComponent(runId)}/decision-preparation`,{
+            method:'POST',body:JSON.stringify({...target,request_id:requestId})});
+          if(runId!==state.runId)return;
+          result.textContent='新的准备请求已收到，正在同步准确任务状态。';
+          try {await refreshTimeline();} finally {void restoreJob(runId);}
+        } catch(err) {
+          if(runId!==state.runId)return;
+          result.textContent=creatorFailureText(err.message);result.setAttribute('role','alert');
+          retry.disabled=false;
+          if(posted)void restoreJob(runId);
+        } finally {
+          if(runId===state.runId){
+            state.decisionBusy=false;
+            $('run-select').disabled=false;
+            $('send').disabled=Boolean(state.busy || state.recoveryBlocked);
+          }
+        }
+      };
+      card.append(retry);
+    }
+  }
   return card;
 }
 
@@ -1877,7 +2103,7 @@ function wireGate(host) {
       try { localStorage.removeItem(key); localStorage.removeItem(legacyJourneyKey); } catch {}
       startedJob = result.continuation?.status === 'started';
       state.canvasTouched = false;
-      toast(startedJob ? "决定已保存，团队正在继续。" : "决定已保存，下一步尚未启动。请检查连接后点击继续。", !startedJob);
+      toast(startedJob ? "决定已保存，正在同步后续任务状态。" : "决定已保存，下一步尚未启动。请检查连接后点击继续。", !startedJob);
       try { await refreshTimeline(); }
       catch { toast("决定已保存，但页面暂时无法刷新。请重新打开项目查看接续状态。", true); }
     } catch (err) {

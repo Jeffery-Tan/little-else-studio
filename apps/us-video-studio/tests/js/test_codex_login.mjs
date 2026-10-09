@@ -91,7 +91,8 @@ test('saving team settings prevents parallel login actions',async()=>{
 
 test('index loads login controller before settings UI',()=>{
   const html=fs.readFileSync(new URL('../../studio/web/index.html',import.meta.url),'utf8');
-  assert.ok(html.indexOf('/static/codex-login.js?') < html.indexOf('/static/connections.js?'));
+  const login=html.indexOf('/static/codex-login.js'),connections=html.indexOf('/static/connections.js');
+  assert.ok(login>=0);assert.ok(connections>login);
 });
 
 test('old backend prompts service restart instead of repeated authorization',async()=>{

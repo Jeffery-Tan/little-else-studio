@@ -10,6 +10,7 @@ inside the deliverables follows the requested locale, defaulting to en-US.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from ..models import STAGE_SPEC, Run
@@ -64,6 +65,43 @@ read_method_document 补读；专业角色通过 submit_stage 提交，主制片
 """
 
 
+def _writing_submission_contract(format: str) -> str:
+    """Show the envelope from the same schema used by the complete writer tool."""
+    from ..tools.registry import _writing_submission_schema
+
+    schema = _writing_submission_schema(format)
+
+    def empty_example(node):
+        kind = node['type']
+        if kind == 'object':
+            return {key: empty_example(child) for key, child in node['properties'].items()}
+        if kind == 'array':
+            return []
+        if kind == 'string':
+            return ''
+        raise ValueError('unsupported writing example schema type')
+
+    example = empty_example(schema)
+    structured = schema['properties']['structured']
+    row = structured['properties']['segments']['items']
+    example['structured']['segments'] = [empty_example(row)]
+    root_fields = '、'.join(f'`{key}`' for key in schema['properties'])
+    script_fields = '、'.join(f'`{key}`' for key in structured['properties'])
+    new_identities = '、'.join(f'`{key}=""`' for key in ('shot_id', 'page_id')
+                             if key in row['properties'])
+    return (
+        '# 完整写稿的提交层级\n\n'
+        f'submit_stage 参数是一个完整 JSON 根对象，外层字段为 {root_fields}。'
+        '`summary` 是提交摘要，与 `structured` 同级，不放进 `structured`。'
+        f'`structured` 只容纳本次工具 schema 的稿件字段：{script_fields}。\n'
+        f'新增镜头或页面传 {new_identities}，由服务器分配身份；已有身份照抄，不得自造或改号。'
+        '没有使用真实来源素材时传 `file=""`，有来源时照抄 list_materials 文件名。\n'
+        '下面仅示意字段层级和空值写法，不是可提交稿；实际段数遵守本次任务，'
+        '稿件内容按真实方向与素材填写。完整闭合各层对象后再结束提交。\n'
+        '```json\n' + json.dumps(example, ensure_ascii=False, indent=2) + '\n```'
+    )
+
+
 @dataclass(frozen=True)
 class Role:
     name: str
@@ -72,11 +110,12 @@ class Role:
     readable: tuple[str, ...]
     instructions: str
 
-    def system(self, run: Run, extra: str = "", format: str = "video") -> str:
+    def system(self, run: Run, extra: str = "", format: str = "video", *, local_revision: bool = False) -> str:
         parts = [COMMON]
         instructions = self.instructions
         if format == "photo":
-            instructions = PHOTO_INSTRUCTIONS.get(self.name, instructions)
+            instructions = (instructions + "\n" + PHOTO_INSTRUCTIONS[self.name]
+                            if self.name == "orchestrator" else PHOTO_INSTRUCTIONS.get(self.name, instructions))
             parts.append("本次交付明确为图文：用页面与 caption 表达，不强制视频时码、台词、声音或总时长。")
         parts.append(f"# 你的角色：{self.title}\n\n{instructions}")
         parts.append(f"# 当前项目\n\n标题：{run.title}\n\n需求原话：\n\n{run.brief}")
@@ -91,11 +130,18 @@ class Role:
             # Appended here rather than written into each `instructions` block so
             # a stage cannot end up with a prompt describing a shape the
             # validator does not know.
-            shape = ("图文 writing 正文包括逐页任务、画面证据、图内文案、制作提示与独立 caption。"
-                     " structured 可省略；如用 segments，tc 写页码，picture 写画面、line 写图内文案；不要填 duration 或 total_duration。"
-                     if format == "photo" and self.owns == "writing" else structure_brief(self.owns))
+            shape = ('' if self.name == 'writer' and local_revision else
+                     "图文 writing 正文包括逐页任务、画面证据、图内文案、制作提示与独立 caption。"
+                     " 完整稿只写 structured，content 传空字符串。segments 中 tc 写页码，picture 写画面与制作提示，line 写图内文案；caption 单列。不要填 duration 或 total_duration。"
+                     if format == "photo" and self.owns == "writing" else
+                     structure_brief(self.owns, canonical_only=self.name == 'writer'))
             if shape:
                 parts.append(shape)
+            if self.name == 'writer' and not local_revision:
+                parts.append(_writing_submission_contract(format))
+                parts.append('完整交付按本次 submit_stage 参数层级提交；稿件只写 structured，外层提交说明另填，content 必须为空；不要再写第二份正文。'
+                             '无内容的字段用空字符串或空数组，不编造问题或素材名。'
+                             '读取产物时复制本任务提供的准确 stage/version；局部修订按本次 submit_patch 范围执行。')
         if extra:
             parts.append(extra)
         return "\n\n".join(parts)
@@ -333,6 +379,7 @@ ORCHESTRATOR = Role(
 ROLES: dict[str, Role] = {r.name: r for r in (ORCHESTRATOR, DIRECTOR, MATERIAL, WRITER, REVIEWER)}
 
 PHOTO_INSTRUCTIONS = {
+    "orchestrator": "图文采用后的 image 输入是完整静态页面，不是视频首帧。每页按准确 writing 段落保留画面、图内英文 line、scene_id、商品参考与商品事实边界；line 是图内文案，不是口播。实际出图须在已规划文案区逐字呈现采用版本的图内文案，保留换行并检查手机阅读；禁止把已采用文案一并作为厂商标签移除。工作台尚无静态图后期叠字执行链，不得承诺先生成无字底图再自动叠字，也不把文字留在对话或 HTML 里当作已交付图片。caption 与 alt text 属发布配套，不直接印在图内。生成后逐页核对商品结构、数量、配件、文案与整组推进，未核对不称可发布。图文不接续视频输入、音频、时长或 MP4。",
     "director": "给图文交付提出可比较的主张与 US 受众购买处境、证据和视觉方向，明确推荐及取舍。audience_moment 写具体处境与当前替代；story 概括说话者关系和日常环境概念，人物与地域设计标为创作假设。无人出镜时说明纯商品或手部画面如何承载购买理由。只概括阅读推进与商品为何必要，不提前逐页写画面和图内文案。推荐不等于用户采用；不规定固定页数或视频时长。",
     "material": "按已选图文方向负责具体人物、场景、服装道具和跨页连续性，在 material_plan.structured.visual_design 保存 schema_version=1、market=US、audience、everyday_context、localization、style、product_appearance、characters[{id,label,relationship,appearance,wardrobe,performance}]、scenes[{id,label,location,layout,props,lighting,local_details}]、continuity[]、assumptions[]。characters=[] 明确不出现人物、只展示商品细节，scenes 至少一条；手部出镜可设计为人物实体，不强制完整面孔。纯商品与桌面画面仍需环境设计；中性棚拍可说明为何适合本次受众，不强行美国街景。美国市场不等于默认白人，人物与地域细节标为创作假设，不冒充用户事实。逐页列出画面需求、购买作用、使用哪些设计 ID、现有素材是否覆盖及缺口。标明已有/需要拍/需要生成/无法获得，不假装观察过素材，不调用生成，不让用户逐项审批内部设计。",
     "writer": "基于已选方向、material_plan 的 visual_design 与已知商品事实写完整图文策划：逐页目的、画面与证据、图内文案、制作提示及独立发布 caption。每段显式写 character_ids，用逗号分隔已有设计的人物 ID，无人物时用空字符串；scene_id 必须引用已有场景。保持人物、服装、空间与商品形态的跨页一致性，不自行另造设计；设计缺失由主制片交素材统筹补齐再写。caption 有理由和态度而非逐字重复图内文案。不得引入上游无依据的商品主张；标明待核实项。不要强迫视频时码、台词、音频、时长或 MP4；不要生成媒体。",

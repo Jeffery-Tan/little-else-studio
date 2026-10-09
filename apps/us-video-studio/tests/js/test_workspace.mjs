@@ -3,9 +3,32 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { makeDom } from './dom-fixture.mjs';
 const require = createRequire(import.meta.url);
 globalThis.escapeHtml = require('../../studio/web/md.js').escapeHtml;
 const { filterProjects, inspirationCases, projectCardHtml, referenceCardHtml, shortTitle, studioDateTime, projectOptionLabel } = require('../../studio/web/workspace.js');
+
+test('initial home card uses the exact pure-analysis summary without a cached creator view',()=>{
+  const run={run_id:'analysis-run',title:'用户命名保持原样',brief:'不生成视频',content_format:null,
+    project_brief:{title:'图片分析已完成',analysis:{kind:'image',analysis_only:true,goal:'图片分析',status:'complete'}}};
+  const card=projectCardHtml(run,null);
+  assert.match(card,/图片分析已完成/);
+  assert.match(card,/目标：图片分析/);
+  assert.match(card,/分析项目/);
+  assert.match(card,/用户命名保持原样/);
+  assert.doesNotMatch(card,/交付形式待确认|等待继续创作|参考视频拆解报告/);
+  const cached=projectCardHtml({...run,creator_view:{goal:'商品视频',current:'等待继续创作'}},null);
+  assert.match(cached,/图片分析已完成/);
+  assert.doesNotMatch(cached,/等待继续创作|目标：商品视频/);
+  const partial=projectCardHtml({...run,project_brief:{title:'图片分析未完成',
+    analysis:{kind:'image',analysis_only:true,goal:'图片分析',status:'incomplete'}}},null);
+  assert.match(partial,/图片分析未完成/);
+  assert.doesNotMatch(partial,/图片分析已完成/);
+  const creative=projectCardHtml({...run,content_format:'video',project_brief:{
+    title:'图片分析已完成',analysis:{kind:'image',analysis_only:false,goal:'图片分析'}}},null);
+  assert.match(creative,/目标：商品视频/);
+  assert.doesNotMatch(creative,/图片分析已完成|分析项目/);
+});
 
 test('project search preserves identity and supports trimmed mixed case queries', () => {
   const projects = [{run_id:'one', title:'US 午餐包'}, {run_id:'two', title:'通勤内容'}];
@@ -106,4 +129,33 @@ test('home has one creation composer; empty project list stays out of the way an
   vm.runInContext('renderProjects()', context);
   assert.match(grid.innerHTML, /还没有找到这个项目/);
   assert.doesNotMatch(grid.innerHTML, /新建创作项目|data-create-format/);
+});
+
+
+test('home mounts the real creator-view summary using photo, video or an undecided deliverable name',()=>{
+  const {creatorProjectView}=require('../../studio/web/creator-view.js');
+  for(const [format,name,goal] of [
+    ['photo','图文方案','带货图片与文案'],
+    ['video','脚本','商品视频'],
+    [null,'创作方案','交付形式待确认'],
+  ]) {
+    const input={run:{run_id:'home-format-case',title:'Synthetic current project',
+      brief:'在意见里提到视频与图文，不因此改变交付形式。',content_format:format==='video'?'photo':'video'},
+      timeline:{run:{content_format:format},rail:[],pending:{stage:'direction',passed:true},
+        brief:{execution:{active:false}}}};
+    const before=JSON.stringify(input),view=creatorProjectView(input);
+    const card={...input.run,content_format:format,creator_view:view};
+    const cardBefore=JSON.stringify(card),html=projectCardHtml(card,null);
+    const {document}=makeDom({body:html});
+    const current=document.querySelector('.project-next');
+    assert.equal(current.textContent,`正在选择创意方向；采用后会继续准备${name}`);
+    assert.ok(document.body.textContent.includes(`目标：${goal}`));
+    assert.equal(document.querySelector('[data-open-project]').dataset.openProject,'home-format-case');
+    if(format==='photo') {
+      assert.ok(document.body.textContent.includes('图文项目'));
+      assert.doesNotMatch(current.textContent,/脚本|视频/);
+    } else if(format===null) assert.doesNotMatch(current.textContent,/脚本|视频|图文方案/);
+    assert.equal(JSON.stringify(input),before);
+    assert.equal(JSON.stringify(card),cardBefore);
+  }
 });

@@ -34,6 +34,8 @@ does: one copy, testable, and the same on the live stream as on reload.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -46,6 +48,7 @@ MAX_CELL = 4000
 #: Most rows kept per list field. A model that emits 400 shots has misunderstood
 #: something, and the sidecar should not grow to match.
 MAX_ROWS = 200
+MAX_CANONICAL_FIELD_ISSUES = 16
 QUESTION_COLUMNS = ("question", "blocks", "owner", "timing", "reason", "kind")
 #: How a user-facing question must be answered. ``brief_amendment`` is never
 #: an ask_user blank — it means the brief itself has to change (see amend_brief).
@@ -127,7 +130,8 @@ SHAPES: dict[str, Shape] = {
     )),
     "material_plan": Shape("material_plan", (
         Field("visual_design", "visual_design"),
-        # One row per shot, carrying its availability. `status` is one of the
+        # One row per required material; a shot/page may use several rows.
+        # `status` is one of the
         # five the role is told to use — see `MATERIAL_STATUSES`. `file` is a
         # filename in `runs/<id>/materials/`; it is the one field the role
         # cannot invent, which is why it has a read tool (`list_materials`) and
@@ -203,7 +207,7 @@ BRIEF: dict[str, str] = {
   schema_version=1、market=US；明确 audience、everyday_context、localization、style、product_appearance。
   characters 与 scenes 使用稳定英文 id，逐项设计人物关系、外观、服装、表演及场景布局、道具、光线、生活细节。
   continuity[] 写跨镜保持项，assumptions[] 标明创作假设；无人时 characters=[]，仍须设计至少一个场景。
-- `items`：一个镜头或一段一行。`shot` 是什么画面，`purpose` 它证明或传达什么，
+- `items`：当前方案实际需要的素材一项一行，同一页或镜头可有多项来源。`shot` 是什么画面，`purpose` 它证明或传达什么，
   `status` 五选一（已有 / 需要拍 / 需要生成 / 无法获得 / 不确定），`note` 补充。
   **不确定就写不确定，不要往「已有」上靠。**
   `file`：**这个镜头用 `materials/` 里的哪个文件**，必须先调 `list_materials`
@@ -217,12 +221,13 @@ BRIEF: dict[str, str] = {
 - `segments`：一段一行。`tc` 时码，`picture` 画面（拍什么/显示什么），
   `line` 台词或字幕原文，`sound` 声音，`duration` 时长。
   现有镜头修改、复制到新版或重排须照抄原 `shot_id`（图文也保留 `page_id`）；
-  新增或复制成另一个镜头时省略身份，由服务器分配。身份不代表顺序，不得自造或改号。
+  新增或复制成另一个镜头时传 `shot_id=""`，由服务器分配；图文的新 `page_id` 也传空字符串。
+  身份不代表顺序，不得自造或改号。
   `character_ids` 明确引用共同设计中的人物 id（逗号分隔，无人镜头写空字符串）；
   `scene_id` 引用共同设计中的场景 id。不得在自由画面描述中另造人物或更换场景身份。
   `duration` 是假设就写成假设的样子（「约 3 秒」）。
   `file`：这一段用 `materials/` 里的哪个文件，**先调 `list_materials` 再照抄
-  文件名**；没有就先别填——这一段还没到能配画面的地步。
+  文件名**；没有使用真实来源素材时传 `file=""`，不编造文件名。
   `tc` 请写成 `0:00–0:03` 这样的区间，界面按它画时间条的长度。
 - `total_duration`：总时长，要和各段对得上。
 - `caption`：可直接用于美国平台发布的英文文案；只写稿件支持的商品事实，缺少依据时留空。
@@ -230,7 +235,39 @@ BRIEF: dict[str, str] = {
 }
 
 
-def brief(stage: str) -> str:
+def intake_submission_contract() -> str:
+    """Describe the existing intake reader's types from its source of truth."""
+    fields = SHAPES['intake']
+    facts = fields.field('facts')
+    constraints = fields.field('constraints')
+    questions = fields.field('open_questions')
+    return (
+        f"Intake structured fields are {', '.join(field.name for field in fields.fields)}. "
+        f"{facts.name} is an array of rows with string cells {', '.join(facts.columns)}. "
+        f"{constraints.name} is an array of strings, never objects or nested arrays. "
+        f"{questions.name} is an array of rows with cells {', '.join(QUESTION_COLUMNS)}; "
+        f"all non-null cells, including blocks, are strings. blocks describes affected work as one string, not an array. "
+        f"Each string cell allows at most {MAX_CELL} Unicode characters after trimming; each list allows at most {MAX_ROWS} rows. "
+        "Use only these fields, preserve actual facts and conditions, and do not invent questions to fill the list."
+    )
+
+
+def material_plan_submission_contract() -> str:
+    """Shared material scope semantics; it never changes submitted statuses."""
+    return (
+        "For material_plan, items lists only materials actually needed by the current selected plan; "
+        "one shot or page may need several material rows, so row count is not shot/page count. "
+        "Items statuses remain " + '/'.join(MATERIAL_STATUSES) + ". "
+        "An item with status 无法获得 blocks writing, even when its note says it is excluded. "
+        "Do not put evidence, claims or pictures already excluded from this plan into items as unavailable needs. "
+        "Preserve those unknowns and exclusions in prose or gaps with blocking=可后补, explaining why "
+        "the current plan does not rely on them; this does not claim the evidence exists. "
+        "Genuinely necessary unavailable material stays in items, and any critical gap stays blocking=阻塞; "
+        "never downgrade it to make writing proceed."
+    )
+
+
+def brief(stage: str, *, canonical_only: bool = False) -> str:
     """The structure instruction appended to the system prompt of ``stage``'s role.
 
     Returns ``""`` for a stage with no shape, so adding a stage without one
@@ -239,11 +276,15 @@ def brief(stage: str) -> str:
     text = BRIEF.get(stage)
     if not text:
         return ""
+    authoring = ("完整稿件内容只写在 `structured`，`content` 必须传空字符串。程序从同一份内容生成正文与创作板，"
+                 "不要再写第二份正文；本次完整提交不接受非空 content。\n\n" if canonical_only else
+                 "优先只在 `structured` 中写完整产物，`content` 传空字符串。程序从同一份内容生成正文与创作板，"
+                 "不要再写第二份重复正文。不能用现有结构完整表达的产物可以使用非空 content 正文，但必须保持展示一致。\n\n")
     return (
         "# 一份内容，多种展示\n\n"
-        "优先只在 `structured` 中写完整产物，`content` 传空字符串。程序从同一份内容生成正文与创作板，"
-        "不要再写第二份重复正文。不能用现有结构完整表达的产物可以使用非空 content 正文，但必须保持展示一致。\n\n"
-        f"{text}\n"
+        + authoring +
+        f"{text}\n" + (intake_submission_contract() + '\n' if stage == 'intake' else '') +
+        (material_plan_submission_contract() + '\n' if stage == 'material_plan' else '') +
         "- `open_questions`：仅保留实际未决事项，可以为空。每条包含 question、blocks、owner、timing、reason、kind。"
         "owner 为 user 或 team；timing 为 now 或 later；reason 说明为什么必须由该责任人处理。"
         "kind 四选一：`fact`（缺事实）、`product_choice`（产品二选一）、`local_design`（本版局部设计）、"
@@ -447,25 +488,50 @@ def open_questions(structured: dict[str, Any], stage: str) -> list[dict[str, str
 
 
 def question_answers(chat: list[dict[str, Any]] | None, question: str,
-                     since: str = "") -> list[dict[str, str]]:
+                     since: str = "", *, responses=None, stage=None,
+                     version=None, artifact_sha256=None) -> list[dict[str, str]]:
     """Exact user replies to one saved question, with their source time."""
-    if not chat or not question:
+    if not question:
         return []
     pattern = re.compile(r"(?:^|\n)(?:\d+\.\s*)?(?:回答|关于)「" + re.escape(question)
                          + r"」[：:][ \t]*(\S[^\n]*)")
     answers = []
-    for row in chat:
+    for row in chat or []:
         if not isinstance(row, dict) or row.get("role") != "user" or (since and row.get("at", "") < since):
             continue
         for match in pattern.finditer(str(row.get("text") or "")):
             answers.append({"question": question, "answer": match.group(1).strip(),
                             "at": str(row.get("at") or "")})
+    row = question_response(responses, question, stage=stage, version=version,
+                            artifact_sha256=artifact_sha256)
+    if row and (not since or row.get('at', '') >= since):
+        if row['answer_status'] == 'needs_clarification':
+            answers = [answer for answer in answers if answer['at'] > row['at']]
+        else:
+            answers.append({'question': question, 'answer': row['quote'], 'at': row['at'],
+                            'answer_status': row['answer_status'],
+                            'source_message_id': row['source_message_id']})
+    answers.sort(key=lambda row: row['at'])
     return answers
 
 
-def question_answered(chat: list[dict[str, Any]] | None, question: str, since: str = "") -> bool:
+def question_answered(chat: list[dict[str, Any]] | None, question: str, since: str = "", **binding) -> bool:
     """Whether the user answered this exact artifact question after it was saved."""
-    return bool(question_answers(chat, question, since))
+    return bool(question_answers(chat, question, since, **binding))
+
+
+def artifact_question_id(stage, version, artifact_sha256, question):
+    """A question is one row of one immutable, exactly displayed artifact."""
+    value = [stage, version, artifact_sha256, question]
+    return 'artifact-question:' + hashlib.sha256(json.dumps(
+        value, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+
+
+def question_response(responses, question, *, stage, version, artifact_sha256):
+    target = {'stage': stage, 'version': version, 'artifact_sha256': artifact_sha256}
+    identity = artifact_question_id(stage, version, artifact_sha256, question)
+    return next((row for row in reversed(responses or []) if row.get('target') == target
+                 and row.get('question_id') == identity and row.get('question') == question), None)
 
 
 def material_blockers(structured: dict[str, Any]) -> list[str]:
@@ -530,9 +596,100 @@ def is_canonical_document(stage: str, data: dict, text: str) -> bool:
         return False
 
 
+def _canonical_field_issue(path: list, rule: str, value, expected: str, **counts) -> dict:
+    actual = ('null' if value is None else
+              {str: 'string', dict: 'object', list: 'array', bool: 'boolean',
+               int: 'integer', float: 'number'}.get(type(value), 'other'))
+    return {'path': path, 'rule': rule, 'expected_type': expected, 'actual_type': actual, **counts}
+
+
+def canonical_field_diagnostic(stage: str, payload: dict) -> dict | None:
+    """Bounded fixed paths/types for errors the canonical reader rejects.
+
+    This is feedback, not a replacement schema or a normalizer. Null row cells
+    retain the existing check_text allowance; null list items still drop a row
+    and are rejected. Unknown names/values never enter a diagnostic path.
+    """
+    shape = SHAPES[stage]
+    if not isinstance(payload, dict):
+        return None  # The existing dropped/core checks retain this boundary.
+    issues = []
+    examined = 0
+    capped = False
+
+    def visit():
+        nonlocal examined, capped
+        examined += 1
+        if examined > 2048:
+            capped = True
+            return False
+        return True
+
+    def add(path, rule, value, expected, **counts):
+        issues.append(_canonical_field_issue(path, rule, value, expected, **counts))
+
+    def text(value, path, *, nullable=True):
+        if value is None and nullable:
+            return
+        if not isinstance(value, str):
+            add(path, 'wrong_type', value, 'string')
+        elif len(value.strip()) > MAX_CELL:
+            add(path, 'max_chars', value, 'string', actual_chars=len(value.strip()), max_chars=MAX_CELL)
+
+    for key, value in payload.items():
+        if not visit():
+            break
+        field = shape.field(key)
+        if field is None:
+            if value:
+                add(['structured'], 'extra_field', value, 'defined_field')
+            continue
+        path = ['structured', field.name]
+        if field.kind == 'text':
+            text(value, path)
+        elif field.kind in {'texts', 'rows'} and value is not None:
+            if not isinstance(value, list):
+                add(path, 'wrong_type', value, 'array')
+                continue
+            if len(value) > MAX_ROWS:
+                add(path, 'max_rows', value, 'array', actual_rows=len(value), max_rows=MAX_ROWS)
+            for index, item in enumerate(value):
+                if not visit():
+                    break
+                row_path = [*path, index]
+                if field.kind == 'texts':
+                    text(item, row_path, nullable=False)
+                elif not isinstance(item, dict):
+                    add(row_path, 'wrong_type', item, 'object')
+                else:
+                    for column, cell in item.items():
+                        if not visit():
+                            break
+                        identity = stage == 'writing' and key == 'segments' and column in {'shot_id', 'page_id'}
+                        if column not in field.columns and not identity:
+                            if cell:
+                                add(row_path, 'extra_field', cell, 'defined_field')
+                            elif column != 'options' and cell is not None and not isinstance(cell, str):
+                                add(row_path, 'wrong_type', cell, 'string')
+                            continue
+                        if column != 'options':  # The existing boolean-map validator remains authoritative.
+                            text(cell, [*row_path, column])
+    if not issues:
+        return None
+    return {'code': 'canonical_field_errors', 'issues': issues[:MAX_CANONICAL_FIELD_ISSUES],
+            'remaining_errors': max(0, len(issues) - MAX_CANONICAL_FIELD_ISSUES), 'scan_capped': capped}
+
+
 def validate_canonical_input(stage: str, payload: dict) -> None:
     """Single-source authoring cannot silently truncate or drop source content."""
     shape = SHAPES[stage]
+    def extra_field(path, value):
+        # The bounded preflight may not reach this item. Keep the original
+        # rejection and report this actual finding, without unknown names or
+        # unobserved aggregate scan/count claims.
+        report = {'code': 'canonical_field_errors', 'issues': [
+            _canonical_field_issue(path, 'extra_field', value, 'defined_field')]}
+        raise ValueError("结构化正文含未定义字段，请使用已定义字段。" + json.dumps(report, ensure_ascii=False))
     def check_text(value):
         if value is not None and (not isinstance(value, str) or len(value.strip()) > MAX_CELL):
             raise ValueError("结构化文字必须为字符串且不超过字段容量；请调整字段或使用完整正文。")
@@ -540,21 +697,21 @@ def validate_canonical_input(stage: str, payload: dict) -> None:
         field = shape.field(key)
         if field is None:
             if value:
-                raise ValueError(f"结构化正文不支持字段 {key}，请放入对应内容字段或使用完整正文。")
+                extra_field(['structured'], value)
             continue
         if field.kind == 'visual_design':
             normalize_visual_design(value)
         elif field.kind == 'text':
             check_text(value)
         elif isinstance(value, list):
-            for item in value:
+            for index, item in enumerate(value):
                 if field.kind == 'texts':
                     check_text(item)
                 elif isinstance(item, dict):
                     for column, cell in item.items():
                         identity = stage == 'writing' and key == 'segments' and column in {'shot_id', 'page_id'}
                         if column not in field.columns and not identity and cell:
-                            raise ValueError(f"结构化正文不支持 {key}.{column}，请使用已定义字段。")
+                            extra_field(['structured', field.name, index], cell)
                         if column == 'options':
                             if not isinstance(cell, dict) or any(not isinstance(v, bool) for v in cell.values()):
                                 raise ValueError("方案依赖必须明确写 true 或 false。")
@@ -885,9 +1042,9 @@ def _material(data: dict[str, Any]) -> list[dict[str, Any]]:
 
     if items:
         blocked = blocked_material(data)
-        title = f"{len(items)} 个镜头"
+        title = f"{len(items)} 项素材"
         if blocked:
-            title += f"，其中 {len(blocked)} 个做不出来"
+            title += f"，其中 {len(blocked)} 项尚待解决"
         blocks.append(
             {
                 "type": "cards",

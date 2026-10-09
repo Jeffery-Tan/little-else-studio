@@ -101,6 +101,11 @@ def test_invalid_model_observations_retain_cny_usage_without_retry(native, fault
     assert len(native[2].calls) == 1
     assert Ledger(native[1], native[5]).entries(RUN)[0].estimated_cny is not None
     assert not native[0].get(f'/api/runs/{RUN}/image-analysis').json()['candidates']
+    rejected = [e for e in native[1].read_events(RUN) if e['kind'] == 'analysis_response_rejected']
+    assert len(rejected) == 1 and rejected[0]['validation_phase'] == 'observations'
+    assert rejected[0]['call_id'] == Ledger(native[1], native[5]).entries(RUN)[0].call_id
+    assert len(rejected[0]['response_sha256']) == 64 and rejected[0]['reason']
+    assert 'response' not in rejected[0]  # No raw model response retained.
 
 
 def test_real_compaction_preserves_audio_timing_and_native_input_identity():

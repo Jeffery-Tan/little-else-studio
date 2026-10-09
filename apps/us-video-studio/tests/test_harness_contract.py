@@ -2,7 +2,7 @@
 import pytest
 
 from fakes import ScriptedModel, final_turn, tool_turn
-from studio.agents.client import ToolCall, Turn, run_agent_loop
+from studio.agents.client import ModelError, ToolCall, Turn, run_agent_loop
 from studio.agents.orchestrator import Orchestrator
 from studio.agents.reviewer import run_review
 from studio.config import Settings
@@ -21,19 +21,24 @@ def loop(model, execute, names):
 def test_unavailable_tool_never_reaches_handler_even_if_handler_would_accept_it():
     model = ScriptedModel([tool_turn("one", "approve_stage", {}), final_turn("Cannot approve")])
     executed = []
-    result = loop(model, lambda *args: executed.append(args), ["read_artifact"])
+    with pytest.raises(ModelError) as caught:
+        loop(model, lambda *args: executed.append(args), ["read_artifact"])
     assert executed == []
-    assert result.tool_log[0]["ok"] is False
-    assert model.calls[1]["messages"][-1]["content"][0]["is_error"] is True
+    assert len(model.calls) == 1
+    assert caught.value.response_diagnostic['schema_rule'] == 'unavailable_tool'
+    assert caught.value.usage_status == 'known' and caught.value.retryable is False
 
 
 @pytest.mark.parametrize("arguments", [None, [], "bad", 3])
 def test_non_object_arguments_do_not_reach_handler(arguments):
     model = ScriptedModel([tool_turn("one", "submit_stage", arguments), final_turn("Repair needed")])
     executed = []
-    result = loop(model, lambda *args: executed.append(args), ["submit_stage"])
+    with pytest.raises(ModelError) as caught:
+        loop(model, lambda *args: executed.append(args), ["submit_stage"])
     assert executed == []
-    assert "JSON object" in result.tool_log[0]["result"]
+    assert len(model.calls) == 1
+    assert caught.value.response_diagnostic['code'] == 'invalid_identity'
+    assert caught.value.usage_status == 'known' and caught.value.retryable is False
 
 
 def test_completion_pairs_every_call_and_skips_remaining_writes_without_another_model_call():
@@ -113,7 +118,7 @@ def test_incomplete_work_is_visible_as_failed_tool_to_main_agent(project, tool_n
         attempt = pipeline.start_attempt("harness-test", "direction")
         pipeline.submit("harness-test", "direction", attempt.token, content="Direction", summary="direction")
     model = ScriptedModel([
-        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video", "deliverable": "direction"}),
+        tool_turn("route", "prepare_creative_context", {"intent": "continue", "format": "video", "deliverable": "direction"}),
         tool_turn("work", tool_name, {"stage": "direction"}),
         final_turn("No committed result"),  # Child ends without submitting a result.
         final_turn("This work has not completed."),

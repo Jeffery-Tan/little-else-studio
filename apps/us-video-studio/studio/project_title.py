@@ -21,6 +21,14 @@ _VERY_LIKE = re.compile(r"^(?:的|了|和|与|及|或|在|是|要|把|被|从|�
 _VERB_BREAK = re.compile(r"(?:做|拍|写|出|弄|生成|想要|需要|希望|变成|改成|来一|一条)")
 _CLAUSE_SPLIT = re.compile(r"[。！？!?\n]")
 _COMMA_SPLIT = re.compile(r"[，,；;：:]")
+_ATTACHMENT_HEAD = re.compile(
+    r"^(?:请\s*)?(?:(?:使用|根据|基于|参考|实际查看|查看|分析|用|看)\s*)?"
+    r"(?:我(?:已|刚刚|刚)?\s*)?(?:附上(?:了)?|上传(?:了)?|附件|随附)"
+    r"(?:里面(?:的)?|里(?:的)?|中(?:的)?|的)\s*")
+_ATTACHMENT_ONLY = re.compile(
+    r"^(?:请\s*)?(?:(?:使用|根据|基于|参考|实际查看|查看|分析|用|看)\s*)?"
+    r"(?:我(?:已|刚刚|刚)?\s*)?(?:附上(?:了)?|上传(?:了)?|附件|随附)$")
+_SOURCE_LABEL = re.compile(r"(?:的)?(?:商品图|产品图|参考图|(?:商品|产品|参考)?(?:图片|照片|素材|视频))$")
 _MAX = 16
 _MIN = 2
 
@@ -59,6 +67,18 @@ def _first_clause(text: str) -> str:
     # has a theme or form; the tail is usually style/length constraints.
     head = _COMMA_SPLIT.split(line)[0].strip()
     return head or line
+
+
+def _attachment_subject(text: str) -> tuple[str, bool]:
+    """Remove an explicit leading source reference, keeping its named topic."""
+    scan = _strip_filler(text)
+    matched = _ATTACHMENT_HEAD.match(scan)
+    if matched:
+        subject = scan[matched.end():].strip()
+        return ('' if subject == '图' else _SOURCE_LABEL.sub('', subject).strip()), True
+    if _ATTACHMENT_ONLY.fullmatch(scan):
+        return '', True
+    return text, False
 
 
 def _find_form(text: str) -> str | None:
@@ -106,13 +126,19 @@ def _find_theme(text: str, form: str | None) -> str | None:
 
 def derive_project_title(text: str) -> str:
     """Turn a free-form prompt into a short, human project name."""
-    raw = (text or "").strip()
+    # URLs identify sources, not the product/theme. Keep the original brief
+    # untouched; only the new title's scan excludes them.
+    raw = re.sub(r"https?://[^\s<>，。；！？「」“”\"']+", ' ', text or '', flags=re.I).strip()
     if not raw:
         return f"作品{date.today().strftime('%m%d')}"
 
-    head = _first_clause(raw)
-    form = _find_form(head) or _find_form(raw)
-    theme = _find_theme(head, form) or _find_theme(raw, form)
+    head, attachment_reference = _attachment_subject(_first_clause(raw))
+    # Later clauses describe constraints or sources. They must not turn a
+    # neutral theme into a video title merely because videos were prohibited.
+    form = _find_form(head)
+    # A source-only head provides no product identity. In particular, don't
+    # scan later restrictions to invent one after stripping an attachment.
+    theme = _find_theme(head, form) or (None if attachment_reference else _find_theme(raw, form))
 
     if theme and form and theme not in form and form not in theme:
         title = f"{theme}{form}"

@@ -94,7 +94,7 @@ class CodexAuth:
 
     def start(self):
         with self.jobs.lock:
-            if self.closed:
+            if self.closed or self.jobs.closing:
                 raise HTTPException(409, '服务正在停止，请重新连接工作台。')
             if self.process is not None:
                 return self.status()

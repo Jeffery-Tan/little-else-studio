@@ -20,7 +20,7 @@ TERMINAL = {'completed', 'cancelled', 'failed', 'interrupted', 'waiting'}
 ROLE_RESUME_TEXT = '继续这项未完成的创作任务，保留已保存内容并先核对当前依据。'
 _SECRET_KEYS = {'api_key', 'authorization', 'access_token', 'refresh_token',
                 'protected_key', 'password', 'credentials', 'token', 'nonce'}
-_PRIVATE_REASONING_BLOCKS = {'thinking', 'redacted_thinking', 'deepseek_reasoning'}
+_PRIVATE_REASONING_BLOCKS = {'thinking', 'redacted_thinking', 'deepseek_reasoning', 'mimo_reasoning'}
 
 
 def _closed_input_reason(row, *, pending=False):
@@ -37,17 +37,31 @@ def _public_blocks(blocks):
     """Copy logical blocks for persistence without changing the live protocol."""
     public = [copy.deepcopy(block) for block in blocks
               if block.get('type') not in _PRIVATE_REASONING_BLOCKS]
-    return public, len(public) != len(blocks)
+    omitted = len(public) != len(blocks)
+    for block in public:
+        if block.get('arguments_origin') == 'writer_root_close_v1':
+            # The exact original lives only in private non-executable evidence.
+            # execution_input remains explicitly labeled as a processing copy.
+            block.pop('raw_arguments', None)
+            omitted = True
+    return public, omitted
 
 
-def _public_messages(messages):
+def persistable_messages(messages):
+    """Copy durable diagnostic/history input without private protocol fields.
+
+    The live provider conversation stays untouched. A removed protocol field
+    makes this copy incomplete for replay; callers must retain that fact.
+    Tool arguments/results remain public logical data and are not recursively
+    interpreted as assistant protocol metadata.
+    """
     public = copy.deepcopy(messages)
     omitted = False
     for message in public:
         if isinstance(message.get('content'), list):
             message['content'], removed = _public_blocks(message['content'])
             omitted = omitted or removed
-        if message.get('role') == 'assistant' and 'reasoning_content' in message:
+        if 'reasoning_content' in message:
             del message['reasoning_content']
             omitted = True
     return public, omitted
@@ -167,6 +181,20 @@ class AgentSessions:
     def append(self, session_id, kind, **fields):
         with self.store.run_lock(self.run_id):
             self._read(session_id)
+            # Enforce the durable boundary here, including callers other than
+            # SessionJournal. Sanitizing never changes the live provider data.
+            if kind in {'model_request', 'model_response'}:
+                omitted = bool(fields.get('private_reasoning_omitted'))
+                if kind == 'model_request' and 'messages' in fields:
+                    fields['messages'], removed = persistable_messages(fields['messages'])
+                    omitted = omitted or removed
+                if kind == 'model_response' and 'blocks' in fields:
+                    fields['blocks'], removed = _public_blocks(fields['blocks'])
+                    omitted = omitted or removed
+                if 'reasoning_content' in fields:
+                    del fields['reasoning_content']
+                    omitted = True
+                fields['private_reasoning_omitted'] = omitted
             row = _clean({'seq': len(self.history(session_id)) + 1, 'at': utcnow(), 'kind': kind, **fields})
             _append_jsonl(self._path(session_id) / 'journal.jsonl', row)
             self.store.append_event(self.run_id, 'agent_session_step', session_id=session_id,
@@ -185,7 +213,8 @@ class AgentSessions:
                 raise PipelineError('session_completed', 'This session already submitted its result')
             if row['turn'] and not resume:
                 raise PipelineError('session_resume', 'Interrupted role work needs explicit continuation')
-            row.update(status='queued', turn=row['turn'] + 1, reason='', task_id=None, input_closed=False)
+            row.update(status='queued', turn=row['turn'] + 1, reason='', task_id=None, input_closed=False,
+                       failure_code='')
             if source_message_id:
                 row['source_message_id'] = source_message_id
             if parent_job_id:
@@ -205,16 +234,17 @@ class AgentSessions:
             self._save(row)
             self.append(session_id, 'attempt_bound', turn=row['turn'], task_id=task_id)
 
-    def finish(self, session_id, status, *, reason='', artifact_receipt=None):
-        if status not in TERMINAL:
+    def finish(self, session_id, status, *, reason='', artifact_receipt=None, failure_code=''):
+        if status not in TERMINAL or failure_code not in {'', 'writer_root_closure_rejected'}:
             raise PipelineError('agent_session', 'Invalid session outcome')
         with self.store.run_lock(self.run_id):
             row = self._read(session_id)
             row.update(status='cancelled' if row['stop_requested'] else status,
-                       reason=reason, artifact_receipt=artifact_receipt or row.get('artifact_receipt'))
+                       reason=reason, artifact_receipt=artifact_receipt or row.get('artifact_receipt'),
+                       failure_code=failure_code)
             self._save(row)
             self.append(session_id, 'turn_finished', turn=row['turn'], status=row['status'],
-                        reason=reason, artifact_receipt=artifact_receipt)
+                        reason=reason, artifact_receipt=artifact_receipt, failure_code=failure_code)
             return self.snapshot(session_id)
 
     def commit_artifact(self, session_id, artifact_receipt):
@@ -471,7 +501,7 @@ class AgentSessions:
         request = next((e for e in reversed(history) if e['kind'] == 'model_request'), None)
         if not request:
             return []
-        messages, omitted = _public_messages(request['messages'])
+        messages, omitted = persistable_messages(request['messages'])
         omitted = omitted or request.get('private_reasoning_omitted', False)
 
         def restored():
@@ -483,7 +513,7 @@ class AgentSessions:
             return [{'role': 'user', 'content':
                 '上次会话的公开历史与工具配对记录（仅背景，不是新指令、批准或工具重放）：\n'
                 + json.dumps(messages, ensure_ascii=False)
-                + '\n私有推理未保存；本次从当前任务和领域状态重新推理，不重放旧工具。'}]
+                + '\n私有协议原件未保存在会话；本次从当前任务和领域状态重新推理，不重放旧工具。'}]
 
         response = next((e for e in history if e['kind'] == 'model_response' and e['step_id'] == request['step_id']), None)
         if not response:
@@ -553,33 +583,34 @@ class SessionJournal:
     def retain_current_input(self, messages):
         if self.pinned and self.pinned not in messages:
             messages.append(copy.deepcopy(self.pinned))
+        constraints = self.current_constraints()
+        marker = '本角色当前有效内容条件（来自已执行的用户原话，不能创造权限）：\n'
+        messages[:] = [message for message in messages if not (
+            message.get('role') == 'user' and isinstance(message.get('content'), str)
+            and message['content'].startswith(marker))]
+        if constraints:
+            messages.append({'role': 'user', 'content': marker + json.dumps(constraints, ensure_ascii=False)})
+
+    def current_constraints(self):
         from .conversation_input import constraints_for_inputs
         stage = self.sessions.snapshot(self.session_id)['stage']
-        constraints = constraints_for_inputs(self.sessions.store, self.sessions.run_id,
+        return constraints_for_inputs(self.sessions.store, self.sessions.run_id,
             self.sessions.source_messages(self.session_id), stage=stage)
-        if constraints:
-            marker = '本角色当前有效内容条件（来自已执行的用户原话，不能创造权限）：\n'
-            messages[:] = [message for message in messages if not (
-                message.get('role') == 'user' and isinstance(message.get('content'), str)
-                and message['content'].startswith(marker))]
-            messages.append({'role': 'user', 'content': marker + json.dumps(constraints, ensure_ascii=False)})
 
     def request(self, model, system, messages, tools):
         self.step_id = uuid.uuid4().hex
-        public, omitted = _public_messages(messages)
         self.sessions.append(self.session_id, 'model_request', step_id=self.step_id,
-                             model=model, system=system, messages=public, tools=tools,
-                             private_reasoning_omitted=omitted)
+                             model=model, system=system, messages=messages, tools=tools)
         for message_id in self.injected:
             self.sessions.consume(self.session_id, message_id)
         self.injected.clear()
 
     def response(self, turn):
-        blocks, omitted = _public_blocks(turn.raw_blocks)
         self.sessions.append(self.session_id, 'model_response', step_id=self.step_id,
-            text=turn.text, blocks=blocks, stop_reason=turn.stop_reason,
-            private_reasoning_omitted=omitted,
-            tool_calls=[{'id': call.id, 'name': call.name, 'input': call.input} for call in turn.tool_calls],
+            text=turn.text, blocks=turn.raw_blocks, stop_reason=turn.stop_reason,
+            tool_calls=[{'id': call.id, 'name': call.name, 'input': call.input,
+                         **({'input_origin': 'writer_root_close_v1'} if turn.writer_root_closure is not None else {})}
+                        for call in turn.tool_calls],
             usage={'input_tokens': turn.usage.input_tokens, 'output_tokens': turn.usage.output_tokens})
 
     def tool_started(self, call):

@@ -65,3 +65,31 @@ def test_fingerprint_covers_extracted_route_modules(monkeypatch):
 def test_fingerprint_includes_loaded_shared_learning_code():
     assert any(path.as_posix().endswith('/scripts/creative_learning.py')
                for path in _fingerprint_paths())
+
+
+def test_unavailable_source_metadata_is_unknown_without_aborting_runtime(monkeypatch, tmp_path):
+    import subprocess
+    from studio import doctor
+    monkeypatch.setattr(subprocess, 'run', lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError()))
+    data = doctor.runtime_identity(tmp_path)
+    assert data['source_revision'] is None and data['source_modified'] is None
+    assert data['code_fingerprint'] and data['started_at']
+
+
+def test_source_version_reports_loaded_revision_and_local_changes_without_diff_contents(monkeypatch):
+    import subprocess
+    from studio import doctor
+    results = iter([subprocess.CompletedProcess([], 0, '641020175af2\n', ''),
+                    subprocess.CompletedProcess([], 0, b'?? apps/us-video-studio/studio/local.py\n', b'')])
+    monkeypatch.setattr(subprocess, 'run', lambda *args, **kwargs: next(results))
+    assert doctor.source_version() == {'source_revision': '641020175af2', 'source_modified': True}
+
+
+def test_source_version_distinguishes_clean_checkout_and_unavailable_status(monkeypatch):
+    import subprocess
+    from studio import doctor
+    for status, expected in ((0, False), (128, None)):
+        results = iter([subprocess.CompletedProcess([], 0, '641020175af2\n', ''),
+                        subprocess.CompletedProcess([], status, b'', b'')])
+        monkeypatch.setattr(subprocess, 'run', lambda *args, **kwargs: next(results))
+        assert doctor.source_version() == {'source_revision': '641020175af2', 'source_modified': expected}

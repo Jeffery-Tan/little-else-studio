@@ -2,7 +2,7 @@
 from __future__ import annotations
 from typing import Any
 from fastapi import HTTPException
-from .http_contracts import BriefAmendmentDecisionIn, BriefAmendmentIn, DecisionIn, DecisionContinuationIn
+from .http_contracts import BriefAmendmentDecisionIn, BriefAmendmentIn, DecisionIn, DecisionContinuationIn, DecisionPreparationIn
 from .models import PipelineError, STAGE_SPEC
 
 
@@ -270,3 +270,52 @@ def install_approval_routes(app, jobs, pipeline, store, require_run, continuatio
             except (PipelineError, ValueError) as exc:
                 raise HTTPException(409, str(exc)) from exc
         return {'status': 'started', 'job_id': job['job_id']}
+
+    @app.post('/api/runs/{run_id}/decision-preparation')
+    def restart_decision_preparation(run_id: str, payload: DecisionPreparationIn):
+        """An explicit fresh preparation request; the failed request is never replayed."""
+        require_run(run_id)
+        from .decision import continuation_request_id, continuation_text
+        from .decision_continuation import freeze, related_jobs
+        with jobs.lock:
+            approval = next((a for a in reversed(store.list_approvals(run_id, payload.stage))
+                             if a.source == 'ui' and a.continue_after
+                             and a.decision in {'approved', 'approved_override'}
+                             and a.artifact_version == payload.expected_version
+                             and a.artifact_sha256 == payload.expected_artifact_sha256), None)
+            if approval is None:
+                raise HTTPException(409, '没有这一版准确的 UI 采用决定。')
+            base = continuation_request_id(approval)
+            request_id = f'{base}:prepare:{payload.request_id}'
+            rows = store.read_events(run_id)
+            original = [e for e in rows if e['kind'] == 'job_created'
+                        and e.get('job_id') == payload.failed_job_id
+                        and (e.get('request_id') == base or
+                             (e.get('job_payload') or {}).get('decision_context', {}).get('approval') == approval.to_dict())]
+            if len(original) != 1:
+                raise HTTPException(409, '无法核对这次准备失败对应的原决定。')
+            ended = [e for e in rows if e['kind'] == 'job_status' and e.get('job_id') == payload.failed_job_id]
+            if not ended or ended[-1].get('status') not in {'blocked', 'failed'}:
+                raise HTTPException(409, '原准备尚未确定失败，不能创建新的准备请求。')
+            try:
+                # Returning a lost response resolves its existing identity, even
+                # while it is running. A different identity cannot start busy work.
+                existing = any(e['kind'] == 'job_created' and e.get('request_id') == request_id for e in rows)
+                if jobs.busy(run_id) and not existing:
+                    raise PipelineError('busy', '当前制作仍在运行，请等这一轮结束。')
+                linked = related_jobs(rows, approval)
+                if not existing and (not linked or linked[-1]['job_id'] != payload.failed_job_id):
+                    raise PipelineError('decision_scope', '这项决定已有更新的准备任务，请核对最新状态。')
+                requests = [e for e in rows if e['kind'] == 'decision_preparation_requested'
+                            and e.get('request_id') == request_id]
+                if requests:
+                    if len(requests) != 1 or requests[0]['failed_job_id'] != payload.failed_job_id:
+                        raise PipelineError('request_conflict', '同一准备请求不能更换原失败任务。')
+                else:
+                    store.append_event(run_id, 'decision_preparation_requested', request_id=request_id,
+                                       failed_job_id=payload.failed_job_id)
+                freeze(store, pipeline, run_id, request_id)
+                job = jobs.submit_decision_followup(run_id, continuation_text(approval, store=store, run_id=run_id), request_id)
+            except (PipelineError, ValueError) as exc:
+                raise HTTPException(409, str(exc)) from exc
+        return {'status': job['status'], 'job_id': job['job_id'], 'request_id': request_id}

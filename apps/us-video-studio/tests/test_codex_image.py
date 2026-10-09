@@ -37,6 +37,7 @@ class Session:
         self.cwd, self.config = cwd, config
         self.stream = iter(copy.deepcopy(self.events))
         self.sent, self.closed = [], False
+        self.next_id, self.deadline, self.cancel_deadline = 0, adapter.time.monotonic() + timeout, None
         self.instances.append(self)
 
     def initialize(self):
@@ -67,6 +68,20 @@ class Session:
             return next(self.stream)
         except StopIteration:
             raise ModelError(0, "Synthetic disconnect")
+
+    def event_poll(self, interval=adapter.POLL_SECONDS):
+        return self.event()
+
+    def send(self, message):
+        self.sent.append((message['method'], message['params']))
+
+    def _check_cancel(self):
+        if self.check_cancel:
+            try:
+                self.check_cancel()
+            except adapter.JobCancelled:
+                self.cancel_deadline = adapter.time.monotonic()+adapter.CANCEL_SECONDS
+                raise
 
     def close(self):
         self.closed = True
@@ -311,3 +326,57 @@ def test_cancel_before_invocation_reports_safe_preflight(client, tmp_path):
         client.generate(adapter.ImageRequest("image", tmp_path / "out"))
     assert error.value.provider_invoked is False
     assert not Session.instances
+
+
+def test_cancel_after_thread_setup_still_has_no_model_invocation(client, tmp_path):
+    calls = []
+
+    def check():
+        calls.append(True)
+        if len(calls) == 2:
+            raise adapter.JobCancelled()
+
+    client.check_cancel = check
+    with pytest.raises(transport.CodexUnavailable) as caught:
+        client.generate(adapter.ImageRequest('image', tmp_path/'output'))
+    assert caught.value.provider_invoked is False
+    session = Session.instances[0]
+    assert session.cancel_deadline is not None and session.closed
+    assert not any(method=='turn/start' for method, _ in session.sent)
+
+
+def test_stop_in_turn_request_pre_send_race_is_not_reported_as_submitted(client, monkeypatch, tmp_path):
+    original = Session.request
+
+    def request(self, method, params):
+        if method=='turn/start':
+            self.turn_start_sent = False
+            self.cancel_deadline = adapter.time.monotonic()+adapter.CANCEL_SECONDS
+            raise adapter.JobCancelled()
+        return original(self, method, params)
+
+    monkeypatch.setattr(Session, 'request', request)
+    with pytest.raises(transport.CodexUnavailable) as caught:
+        client.generate(adapter.ImageRequest('image', tmp_path/'output'))
+    assert caught.value.provider_invoked is False
+    assert Session.instances[0].closed
+    assert not any(method in {'turn/start','turn/interrupt'} for method, _ in Session.instances[0].sent)
+
+
+@pytest.mark.parametrize('turn_id', [None, '', 123, ['foreign']])
+def test_invalid_turn_identity_never_used_for_interrupt(client, monkeypatch, tmp_path, turn_id):
+    original = Session.request
+
+    def request(self, method, params):
+        if method == 'turn/start':
+            self.sent.append((method, params))
+            return {'turn':{'id':turn_id}}
+        return original(self, method, params)
+
+    monkeypatch.setattr(Session, 'request', request)
+    result = client.generate(adapter.ImageRequest('image', tmp_path/'out'))
+    assert result.status == 'unknown' and result.turn_id == ''
+    assert result.provider_invoked and result.usage_status == 'unknown'
+    assert sum(method=='turn/start' for method, _ in Session.instances[0].sent) == 1
+    assert not any(method=='turn/interrupt' for method, _ in Session.instances[0].sent)
+    assert Session.instances[0].closed

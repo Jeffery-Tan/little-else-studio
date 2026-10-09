@@ -18,7 +18,7 @@ from studio.decision import candidates, resolve
 from studio.ledger import Ledger
 from studio.pipeline import Pipeline
 from studio.store import Store
-from studio.tools.registry import tool_names_for
+from studio.tools.registry import STRICT_ABSENT, tool_names_for
 
 RUN = "f5-scenarios"
 
@@ -278,13 +278,20 @@ def test_scenario_g_a_shot_revision_is_scoped_and_commits_nothing_else(tmp_path)
     store, pipeline, source = storyboard_run(tmp_path)
     before = {row["draft_id"]: row["draft_sha256"]
               for row in draft_records(store, RUN).values()}
+    text = "第二镜不行，重做一下。"
+    interpretation = {'task': {'quote': text, 'mode': 'revise', 'deliverable': 'production_input',
+                              'format': 'video', 'allowed_stages': [], 'pause_after': False},
+                      'constraints': []}
 
     orch, model = orchestrator(store, pipeline, tmp_path, [
-        # The designed order: declare what this message is for, look at the
-        # storyboard, then replace exactly the shot the user named.
+        # This exact fresh receipt has no pending decision/question. Interpret
+        # its whole original text first; then retain the original production path.
+        tool_turn('interpret', 'propose_task_interpretation', {
+            **interpretation, 'reuse_artifact': STRICT_ABSENT,
+            'video_use': STRICT_ABSENT, 'image_use': STRICT_ABSENT}),
         tool_turn("route", "prepare_creative_context", {
             "intent": "edit", "format": "video", "deliverable": "production_input",
-            "production_kind": "image"}),
+            "production_kind": "image", 'task_interpretation': interpretation}),
         tool_turn("read", "read_production", {}),
         tool_turn("revise", "prepare_production", {
             "request_id": "frame-2-v2", "kind": "image",
@@ -293,10 +300,15 @@ def test_scenario_g_a_shot_revision_is_scoped_and_commits_nothing_else(tmp_path)
             "model": "codex-image", "supersedes": "frame-2"}),
         final_turn("第二镜换了一版更日常的描述，其他镜头保持不动。"),
     ])
-    orch.send("第二镜不行，重做一下。")
+    orch.send(text)
+    assert 'prepare_creative_context' not in model.calls[0]['tool_names']
+    assert 'prepare_creative_context' in model.calls[1]['tool_names']
+    binding = next(e['interpretation'] for e in store.read_events(RUN)
+                   if e['kind'] == 'user_task_interpretation_recorded')
+    assert binding['task'] == interpretation['task']
 
     # The agent was actually shown the shots, so "第二镜" had something to bind to.
-    shown = json.dumps(model.calls[2]["messages"], ensure_ascii=False)
+    shown = json.dumps(model.calls[3]["messages"], ensure_ascii=False)
     assert "shot-02" in shown and "frame-2" in shown, (
         "the agent has to be able to resolve '第二镜' from what it was given")
 
@@ -330,16 +342,28 @@ def test_scenario_e_a_generation_request_prepares_one_confirmation_and_submits_n
     from studio.production import target_shots
 
     store, pipeline, _source = storyboard_run(tmp_path, shots=6)
+    text = "按这六镜生成吧。"
+    interpretation = {'task': {'quote': text, 'mode': 'produce', 'deliverable': 'production_media',
+                              'format': 'video', 'allowed_stages': [], 'pause_after': False},
+                      'constraints': []}
     orch, model = orchestrator(store, pipeline, tmp_path, [
+        tool_turn('interpret', 'propose_task_interpretation', {
+            **interpretation, 'reuse_artifact': STRICT_ABSENT,
+            'video_use': STRICT_ABSENT, 'image_use': STRICT_ABSENT}),
         tool_turn("route", "prepare_creative_context", {
             "intent": "edit", "format": "video", "deliverable": "production_media",
-            "media_kind": "image"}),
+            "media_kind": "image", 'task_interpretation': interpretation}),
         tool_turn("look", "read_user_actions", {}),
         final_turn("六面分镜的生成还差你最后确认一次；我不会替你提交。"),
     ])
-    orch.send("按这六镜生成吧。")
+    orch.send(text)
+    assert 'prepare_creative_context' not in model.calls[0]['tool_names']
+    assert 'prepare_creative_context' in model.calls[1]['tool_names']
+    binding = next(e['interpretation'] for e in store.read_events(RUN)
+                   if e['kind'] == 'user_task_interpretation_recorded')
+    assert binding['task'] == interpretation['task']
 
-    payload = json.dumps(model.calls[2]["messages"], ensure_ascii=False)
+    payload = json.dumps(model.calls[3]["messages"], ensure_ascii=False)
     assert "preparable_execution" in payload, (
         "the agent must be able to read the exact set a confirmation would cover")
     assert "authorise_generation" in payload

@@ -25,7 +25,8 @@ function harness({ post, list, loadRuns } = {}) {
     return nodes.get(key);
   };
   const state = { runId: 'old-run', decisionBusy: false, busy: false, chatDrafts: new Map(),
-    artifactBodies: new Map(), clarificationChoices: new Map(), composerSubmissions: new Map(), runs: [], view: 'home' };
+    artifactBodies: new Map(), clarificationChoices: new Map(), composerSubmissions: new Map(),
+    projectReadNotices: new Map(), runs: [], view: 'home' };
   get('run-select').value = state.runId;
   const context = vm.createContext({
     state, $: get,
@@ -212,8 +213,14 @@ test('a rejected project switch restores the selector and preserves the original
 
 test('successful project switches keep chat drafts separate', async () => {
   const h = harness();
+  h.state.projectReadIntegrity = {available:false};
+  h.state.projectReadNotices.set('recovery',{runId:'old-run',integrity:h.state.projectReadIntegrity});
+  h.get('project-read-status').hidden = false;
   h.get('chat-input').value = 'Draft for old run';
   assert.equal(await h.context.selectRun('other-run'), true);
+  assert.equal(h.state.projectReadIntegrity,null);
+  assert.equal(h.state.projectReadNotices.size,0);
+  assert.equal(h.get('project-read-status').hidden,true);
   assert.equal(h.get('chat-input').value, '');
   h.get('chat-input').value = 'Draft for other run';
   assert.equal(await h.context.selectRun('old-run'), true);

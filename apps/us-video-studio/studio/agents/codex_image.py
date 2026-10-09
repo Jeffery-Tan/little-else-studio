@@ -15,6 +15,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import queue
 import subprocess
 import tempfile
 import time
@@ -30,6 +31,9 @@ from . import codex_client as transport
 MAX_IMAGE_BYTES = 24 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
 MAX_LINE = 40 * 1024 * 1024
+POLL_SECONDS = 0.1
+CANCEL_SECONDS = 5.0
+CLEANUP_SECONDS = 0.5
 IMAGE_TYPES = {"PNG": ("image/png", ".png"), "JPEG": ("image/jpeg", ".jpg"),
                "WEBP": ("image/webp", ".webp")}
 
@@ -70,6 +74,99 @@ class ImageResult:
 
 class _ImageSession(transport._StdioSession):
     """The native image payload exceeds the text adapter's line-size bound."""
+
+    check_cancel = None
+    cancel_deadline = None
+    turn_start_sent = False
+
+    def _check_cancel(self):
+        if self.check_cancel:
+            try:
+                self.check_cancel()
+            except JobCancelled:
+                if self.cancel_deadline is None:
+                    self.cancel_deadline = time.monotonic() + CANCEL_SECONDS
+                raise
+
+    def event_poll(self, interval=POLL_SECONDS):
+        # Read only one frame. An endless stream of approval requests must not
+        # hide cancellation inside the shared RPC reader's deny loop.
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise ModelError(0, "Codex request timed out; usage unconfirmed")
+        if self.pending:
+            message = self.pending.pop(0)
+        else:
+            try:
+                message = self.messages.get(timeout=min(interval, remaining))
+            except queue.Empty:
+                raise TimeoutError() from None
+            if message is None:
+                raise ModelError(0, "Codex process or protocol ended unexpectedly; usage unconfirmed")
+        if "id" in message and "method" in message:
+            self._deny(message)
+            return {}
+        return message
+
+    def request(self, method, params):
+        if not self.check_cancel:
+            if method == "turn/start":
+                self.turn_start_sent = True
+            return super().request(method, params)
+        self._check_cancel()
+        self.next_id += 1
+        request_id = self.next_id
+        if method == "turn/start":
+            # From this point a pipe write may have partially reached Codex.
+            # A write failure cannot establish that no request was submitted.
+            self.turn_start_sent = True
+        self.send({"id": request_id, "method": method, "params": params})
+        deferred = []
+        try:
+            while True:
+                self._check_cancel()
+                try:
+                    message = self.event_poll()
+                except TimeoutError:
+                    continue
+                self._check_cancel()
+                if self.denied_request:
+                    raise ModelError(0, "Codex requested an unsupported setup action")
+                if message.get("id") == request_id:
+                    if "error" in message:
+                        raise ModelError(0, "Codex rejected the protocol request; response details withheld")
+                    if not isinstance(message.get("result"), dict):
+                        raise ModelError(0, "Codex returned an invalid protocol result")
+                    return message["result"]
+                deferred.append(message)
+        finally:
+            self.pending[:0] = deferred
+
+    def close(self):
+        if self.cancel_deadline is None:
+            return super().close()
+        # Cleanup shares the stop window, rather than adding two five-second
+        # waits. Never block on stdout.close while its reader holds the pipe.
+        remaining = lambda: max(0.0, self.cancel_deadline - time.monotonic())
+        try:
+            self.process.stdin.close()
+        except (OSError, ValueError):
+            pass
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=remaining() / 2)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                try:
+                    self.process.wait(timeout=remaining() / 2)
+                except subprocess.TimeoutExpired:
+                    raise ModelError(0, "Codex local cleanup unconfirmed; image outcome unknown") from None
+        self.reader.join(timeout=remaining())
+        if not self.reader.is_alive():
+            self.process.stdout.close()
+        else:
+            raise ModelError(0, "Codex local reader cleanup unconfirmed; image outcome unknown")
 
     def _pump(self):
         try:
@@ -236,6 +333,8 @@ class CodexImageClient:
             cwd = Path(directory)
             try:
                 session = _ImageSession(self.command, cwd, config, self.timeout)
+                session.check_cancel = self.check_cancel
+                session.cancel_deadline = None
             except OSError as exc:
                 raise transport.CodexUnavailable("Codex image session could not start") from exc
             try:
@@ -254,11 +353,12 @@ class CodexImageClient:
                     "developerInstructions": "", "dynamicTools": [],
                 })
                 result.thread_id = transport._verify_thread(setup, cwd, request.model, transport._global_instruction_sources(initialized))
+                if not result.thread_id:
+                    raise transport.CodexUnavailable("Missing image thread identity")
                 result.model = setup["model"]
                 if session.denied_request:
                     raise transport.CodexUnavailable("Codex requested an unsupported setup action")
-                if self.check_cancel:
-                    self.check_cancel()
+                session._check_cancel()
                 session.deadline = time.monotonic() + self.timeout
                 invoked = True
                 started = session.request("turn/start", {
@@ -266,13 +366,35 @@ class CodexImageClient:
                     "runtimeWorkspaceRoots": [str(cwd)], "approvalPolicy": "never",
                     "sandboxPolicy": {"type": "readOnly", "networkAccess": False}, "input": content,
                 })
-                result.turn_id = started.get("turn", {}).get("id") or ""
-                if not result.turn_id:
+                turn_id = started.get("turn", {}).get("id")
+                if not isinstance(turn_id, str) or not turn_id:
                     raise ModelError(0, "Missing image turn identity")
+                result.turn_id = turn_id
+                interrupt_requested = False
+
+                def check_stop():
+                    nonlocal interrupt_requested
+                    if self.check_cancel and not interrupt_requested:
+                        try:
+                            self.check_cancel()
+                        except JobCancelled:
+                            interrupt_requested = True
+                            session.cancel_deadline = time.monotonic() + CANCEL_SECONDS
+                            session.deadline = min(session.deadline,
+                                session.cancel_deadline - CLEANUP_SECONDS)
+                            session.next_id += 1
+                            session.send({"id": session.next_id, "method": "turn/interrupt",
+                                "params": {"threadId": result.thread_id, "turnId": result.turn_id}})
+                    if interrupt_requested and time.monotonic() >= session.deadline:
+                        raise JobCancelled("停止已请求；图片结果与提供方中断回执未确认。")
+
                 while True:
-                    if self.check_cancel:
-                        self.check_cancel()
-                    event = session.event()
+                    check_stop()
+                    try:
+                        event = session.event_poll(POLL_SECONDS)
+                    except TimeoutError:
+                        continue
+                    check_stop()
                     if session.denied_request:
                         raise ValueError("Unexpected native approval request")
                     params = event.get("params", {})
@@ -301,7 +423,11 @@ class CodexImageClient:
                             if method == "item/completed" and item_id not in completed:
                                 completed.add(item_id)
                                 if item.get("status") != "completed" or item.get("failure"):
-                                    result.status, result.message = "failed", "Codex image generation failed; usage requires verification"
+                                    if interrupt_requested:
+                                        result.status, result.failure_code = "unknown", "cancelled"
+                                        result.message = "Image generation reported failure after stop; image usage requires verification"
+                                    else:
+                                        result.status, result.message = "failed", "Codex image generation failed; usage requires verification"
                                     break
                                 encoded = item.get("result", "")
                                 if not isinstance(encoded, str) or len(encoded) > (MAX_IMAGE_BYTES + 2) // 3 * 4:
@@ -320,19 +446,30 @@ class CodexImageClient:
                         elif item.get("type") not in {"userMessage", "agentMessage", "reasoning"}:
                             raise ValueError("Unexpected native tool")
                     elif method == "turn/completed":
+                        if interrupt_requested:
+                            raise JobCancelled("停止已请求；已收到的图片与用量记录保留。")
                         ok = params.get("turn", {}).get("status") == "completed" and len(images) == 1
                         result.status = "completed" if ok else "failed"
                         result.message = "Image saved; image usage requires verification" if ok else "No complete image result; usage requires verification"
                         break
             except (ModelError, OSError, ValueError, binascii.Error, JobCancelled) as exc:
+                if isinstance(exc, JobCancelled) and getattr(session, 'turn_start_sent', None) is False:
+                    invoked = False
                 if not invoked:
                     raise transport.CodexUnavailable("Codex image setup failed; no model request sent") from None
-                result.failure_code = ('cancelled' if isinstance(exc, JobCancelled) else
+                result.failure_code = ('cancelled' if isinstance(exc, JobCancelled) or session.cancel_deadline is not None else
                     'transport_or_timeout' if isinstance(exc, ModelError) else
                     'local_io' if isinstance(exc, OSError) else
                     'payload_decode' if isinstance(exc, binascii.Error) else 'protocol_or_payload')
                 result.status, result.message = "unknown", "Image task interrupted or returned an unsupported result; verify usage before continuing"
             finally:
-                session.close()
+                try:
+                    session.close()
+                except (ModelError, OSError):
+                    if not invoked:
+                        raise transport.CodexUnavailable("Codex image setup cleanup failed; no model request sent") from None
+                    result.status = "unknown"
+                    result.failure_code = result.failure_code or 'transport_or_timeout'
+                    result.message = "Local image session cleanup unconfirmed; image outcome and usage require verification"
         result.images = tuple(images)
         return result

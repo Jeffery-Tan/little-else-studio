@@ -170,6 +170,51 @@ def test_bare_reference_can_ask_one_question_without_download(native,monkeypatch
     assert downloads==[] and len(native[2].calls)==1
 
 
+def test_current_quote_can_correct_historical_quote_and_keep_reference(native, monkeypatch):
+    accept_upload(native[1], RUN, 'local.mp4', video_bytes(audio=True))
+    historical = '基于这个视频来做一个带货视频'
+    native[1].append_chat(RUN, 'user', historical)
+    message = '参考视频完全无口播，全靠装载来体现功能性的，我要的是这个效果。'
+    # Keep the task/purpose declaration valid so this test reaches the separate
+    # observation-quote gate. Deriving video_use.quote from the deliberately bad
+    # first call would fail the earlier interpretation gate on both attempts.
+    interpretation = {
+        'task': dict(quote=message, mode='analyze', deliverable='analysis', format='none',
+                     allowed_stages=[], pause_after=False),
+        'constraints': [],
+        'video_use': dict(source='local.mp4', purpose='reference', quote=message),
+    }
+    scripted(native, monkeypatch, [
+        tool_turn('historical-quote', 'observe_reference', dict(source='local.mp4', action='analyze',
+            quote=historical, scope='开场动作与声音', task_interpretation=interpretation)),
+        tool_turn('current-quote', 'observe_reference', dict(source='local.mp4', action='analyze',
+            quote=message, scope='无口播，观察装载动作与推进', task_interpretation=interpretation)),
+        observation(),
+    ])
+    job = chat(native, message)
+    assert job['status'] == 'succeeded', job
+    assert job['deliverable']['goal'] == 'analysis' and job['deliverable']['status'] == 'complete'
+    assert len(native[2].calls) == 3  # Bad quote never invokes the observer.
+    rejected = next(block for request_message in native[2].calls[1]['messages']
+                    if isinstance(request_message.get('content'), list)
+                    for block in request_message['content']
+                    if block.get('type') == 'tool_result' and block.get('tool_use_id') == 'historical-quote')
+    assert rejected['is_error'] is True
+    correction = rejected['content']
+    assert '请逐字引用以下本轮原话片段' in correction and message in correction
+    assert '# 本轮用户原话' in native[2].calls[0]['system']
+    events = native[1].read_events(RUN)
+    candidates = [e for e in events if e['kind'] == 'video_analysis_candidate']
+    assert len(candidates) == 1 and candidates[0]['candidate']['name'] == 'local.mp4'
+    requests = [e for e in events if e['kind'] == 'reference_observation_requested']
+    assert len(requests) == 1 and requests[0]['scope'] == '无口播，观察装载动作与推进'
+    declarations = [e['interpretation'] for e in events if e['kind'] == 'user_task_interpretation_recorded']
+    assert len(declarations) == 1 and declarations[0]['task'] == interpretation['task']
+    assert declarations[0]['video_use'] == interpretation['video_use']
+    assert not any(e['kind'] == 'agent_task_prepared' for e in events)
+    assert not native[1].list_approvals(RUN)
+
+
 def test_product_video_attachment_cannot_be_reinterpreted_as_reference(native,monkeypatch):
     accept_upload(native[1],RUN,'product.mp4',video_bytes(audio=True))
     scripted(native,monkeypatch,[

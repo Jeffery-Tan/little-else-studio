@@ -55,7 +55,7 @@ def env(tmp_path):
         target.write_text('Fixture method card ' + ident, encoding='utf-8')
     store = Store(tmp_path / "external")
     store.create_run("run-one", "Fixture", "US brief")
-    artifact = store.write_artifact("run-one", "direction", 1, "Exact fixture creative", summary="Fixture", author_role="director", attempt=1)
+    artifact = store.write_artifact("run-one", "direction", 1, "Exact fixture creative", summary="Fixture", author_role="director", attempt='direction#1')
     return LearningService(store, repo), store, artifact
 
 
@@ -254,12 +254,12 @@ def test_modified_artifact_refuses_apply(env):
 def test_artifact_path_cannot_cross_runs_and_metadata_cannot_switch_versions(env):
     service, store, artifact = env
     store.create_run("run-two", "Other", "Other brief")
-    other = store.write_artifact("run-two", "direction", 1, "Other creative", summary="Other", author_role="director", attempt=1)
+    other = store.write_artifact("run-two", "direction", 1, "Other creative", summary="Other", author_role="director", attempt='direction#1')
     payload = feedback(other)
     payload["stage"] = "../../run-two/artifacts/direction"
     with pytest.raises(ValueError, match="stage"):
         service.propose("run-one", payload, actor="user")
-    other_version = store.write_artifact("run-one", "direction", 2, "Revision", summary="Revision", author_role="director", attempt=1)
+    other_version = store.write_artifact("run-one", "direction", 2, "Revision", summary="Revision", author_role="director", attempt='direction#1')
     metadata = store.run_dir("run-one") / "artifacts/direction-v1.json"
     metadata.write_text(_json(other_version.to_dict()), encoding="utf-8")
     with pytest.raises((LearningConflict, PipelineError), match="identity|metadata"):

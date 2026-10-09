@@ -196,6 +196,35 @@ def test_content_preferences_cannot_grant_authority_or_change_facts(env, key):
     assert not any(event['kind'].startswith('user_constraint_') for event in store.read_events(RUN))
 
 
+@pytest.mark.parametrize('key', ['generated_scenes_only', 'No.Video', 'visual', 'visual..setting', '', None])
+def test_malformed_condition_names_report_format_without_writing(env, key):
+    store, _ = env
+    receipt = executing(env, 'Use only generated scenes this time.')
+    before = store.read_events(RUN)
+    with pytest.raises(PipelineError, match='条件名称格式无效') as caught:
+        record_task_interpretation(store, RUN, receipt, proposal(receipt,
+            clause(receipt['text'], key=key, lifetime='turn')))
+    assert '执行权限' not in str(caught.value)
+    assert store.read_events(RUN) == before
+    assert not store.list_approvals(RUN)
+
+
+@pytest.mark.parametrize('key', ['visual.setting', 'script.duration', 'content.sources'])
+def test_dotted_content_names_are_documented_and_preserve_original_quotes(env, key):
+    from studio.conversation_input import TASK_INTERPRETATION_TOOL
+    import re
+    key_schema = TASK_INTERPRETATION_TOOL['input_schema']['properties']['constraints']['items']['properties']['key']
+    assert re.fullmatch(key_schema['pattern'], key)
+    assert key in key_schema['description']
+    assert not re.fullmatch(key_schema['pattern'], 'generated_scenes_only')
+    store, _ = env
+    receipt = executing(env, 'Use only generated scenes this time.')
+    result = record_task_interpretation(store, RUN, receipt, proposal(receipt,
+        clause(receipt['text'], key=key, lifetime='turn')))
+    assert result['constraints'][0]['key'] == key
+    assert result['constraints'][0]['quote'] == receipt['text']
+
+
 def test_interpretation_validates_all_before_any_write_and_is_idempotent(env):
     store, _ = env
     receipt = executing(env, 'Keep dialogue casual throughout this project.')
@@ -351,3 +380,91 @@ def test_baseline_fake_protocol_upgrade_is_explicit_and_not_semantic():
     missing = ScriptedModel([fixture], legacy_task_contracts=False).complete(model='offline',
         system=system, messages=[{'role': 'user', 'content': source}], tools=[])
     assert 'task_interpretation' not in missing.tool_calls[0].input
+
+
+@pytest.mark.parametrize('difference', [None, 'value', 'scope', 'order', 'missing', 'no_journal'])
+def test_role_seed_only_deduplicates_identical_fresh_journal_conditions(env, difference):
+    from studio.agent_sessions import AgentSessions, SessionJournal
+    from studio.learning import LearningService
+    from studio.task_context import assemble_role_task
+    from studio.tools.workspace import Workspace
+    store, pipe = env
+    attempt = pipe.start_attempt(RUN, 'intake')
+    pipe.submit(RUN, 'intake', attempt.token, content='Offline facts', summary='Facts')
+    for stage in ['direction', 'material_plan']:
+        attempt = pipe.start_attempt(RUN, stage)
+        pipe.submit(RUN, stage, attempt.token, content=f'Offline {stage}', summary=stage)
+        if stage == 'direction':
+            pipe.record_approval(RUN, stage, nonce=pipe.issue_nonce(RUN, stage), decision='approved')
+    before_approvals = store.list_approvals(RUN)
+    receipt = executing(env, 'For this project keep speech casual and pictures plain.')
+    record_task_interpretation(store, RUN, receipt, proposal(receipt,
+        clause('keep speech casual', scope_quote='For this project'),
+        clause('pictures plain', key='visual.style', value='plain', scope_quote='For this project')))
+    sessions = AgentSessions(store, RUN)
+    sid = sessions.ensure(role='writer', stage='writing', source_message_id=receipt['message_id'])['session_id']
+    journal = SessionJournal(sessions, sid)
+    exact = journal.current_constraints()
+    assert len(exact) == 2
+    dynamic = copy.deepcopy(exact)
+    if difference == 'value': dynamic[0]['value'] = 'changed'
+    if difference == 'scope': dynamic[0]['scope']['paths'] = [['segments', 0, 'line']]
+    if difference == 'order': dynamic.reverse()
+    if difference == 'missing': dynamic.pop()
+    if difference == 'no_journal': dynamic = None
+    kwargs = dict(method_context={'text':'Offline method'}, user_input_id=receipt['message_id'])
+    workspace = Workspace(store, pipe, RUN, 'writer', target_stage='writing')
+    ordinary = assemble_role_task(store, pipe, LearningService(store), RUN, workspace,
+        'writing', 'Write', **kwargs)
+    projected = assemble_role_task(store, pipe, LearningService(store), RUN, workspace,
+        'writing', 'Write', journal_constraints=dynamic, **kwargs)
+    marker = '# 仍有效且适用于本阶段的用户项目条件'
+    assert (marker in projected.seed) == (difference is not None)
+    assert projected.sources == ordinary.sources
+    assert 'exceptions 指定局部例外' in projected.seed
+    assert '只有明确替换才使旧条件失效' in projected.seed
+    assert len([row for row in projected.sources if row['kind'] == 'user_constraint']) == 2
+    assert receipt['text'] in projected.seed
+    if difference is None:
+        assert len(projected.seed) < len(ordinary.seed)
+        messages = [{'role':'user', 'content':projected.seed}]
+        journal.retain_current_input(messages)
+        assert json.dumps(exact, ensure_ascii=False) in messages[-1]['content']
+    else:
+        assert projected.seed == ordinary.seed
+    assert store.list_approvals(RUN) == before_approvals
+
+
+def test_journal_fresh_conditions_replace_and_clear_the_old_projection(env):
+    from studio.agent_sessions import AgentSessions, SessionJournal
+    store, _ = env
+    receipt = executing(env, 'For the project keep the voice casual.')
+    old = record_task_interpretation(store, RUN, receipt, proposal(receipt,
+        clause('keep the voice casual', scope_quote='For the project')))['constraints'][0]
+    sessions = AgentSessions(store, RUN)
+    sid = sessions.ensure(role='writer', stage='writing', source_message_id=receipt['message_id'])['session_id']
+    journal = SessionJournal(sessions, sid)
+    messages = [{'role':'user', 'content':'Original task'}]
+    journal.retain_current_input(messages)
+    assert len(messages) == 2 and 'casual' in messages[-1]['content']
+    future = receive(store, RUN, 'FUTURE_NOT_EXECUTED', 'future-journal')
+    accept(store, RUN, future)
+    journal.retain_current_input(messages)
+    assert len(messages) == 2 and 'FUTURE_NOT_EXECUTED' not in json.dumps(messages)
+    replacement = executing(env, 'For the project replace the voice with dry wit.')
+    new = record_task_interpretation(store, RUN, replacement, proposal(replacement,
+        clause('replace the voice with dry wit', value='dry wit', operation='replace',
+               scope_quote='For the project', supersedes=[old['id']])))['constraints'][0]
+    journal.retain_current_input(messages)
+    assert len(messages) == 2
+    assert 'dry wit' in messages[-1]['content']
+    current_rows = json.loads(messages[-1]['content'].split('\n', 1)[1])
+    assert [row['id'] for row in current_rows] == [new['id']]
+    assert current_rows[0]['supersedes'] == [old['id']]
+    released = executing(env, 'For the project remove the dry wit requirement.')
+    record_task_interpretation(store, RUN, released, proposal(released,
+        clause('remove the dry wit requirement', value='released', operation='release',
+               scope_quote='For the project', supersedes=[new['id']])))
+    journal.retain_current_input(messages)
+    assert messages == [{'role':'user', 'content':'Original task'}]
+    assert not store.list_approvals(RUN)

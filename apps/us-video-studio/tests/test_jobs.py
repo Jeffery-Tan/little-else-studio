@@ -11,7 +11,7 @@ import pytest
 from local_http import TestClient
 from PIL import Image
 
-from fakes import ScriptedModel, final_turn, tool_turn
+from fakes import ScriptedModel, final_turn, tool_turn, fixture_task_interpretation
 from studio.jobs import WriterLease
 from studio.ledger import Ledger
 from studio.models import PipelineError
@@ -39,6 +39,29 @@ def post_job(http, request_id='one', text='本次测试'):
     result = http.post(f'/api/runs/{RUN}/jobs', json={'text': text, 'request_id': request_id})
     assert result.status_code == 200, result.text
     return result.json()
+
+
+def test_invalid_model_response_uses_plain_failure_text_and_keeps_technical_diagnostic(tmp_path):
+    from studio.agents.openai_compat import _parse
+    class InvalidModel:
+        def complete(self, **kwargs):
+            return _parse({'usage': {'prompt_tokens': 4, 'completion_tokens': 6},
+                'choices': [{'finish_reason': 'tool_calls', 'message': {'tool_calls': [
+                    {'id': 'one', 'type': 'function', 'function': {
+                        'name': 'read_project_state', 'arguments': 'PRIVATE_BAD_JSON'}}]}}]}, 'fixture')
+    with TestClient(build_app(settings_for(tmp_path), client_factory=InvalidModel)) as http:
+        make_run(http)
+        started = post_job(http)
+        job = wait_job(http, started['job_id'])
+        assert job['status'] == 'failed'
+        assert '工具参数不是有效 JSON' in job['reason']
+        assert 'model endpoint returned' not in job['reason'] and 'PRIVATE' not in job['reason']
+        events = Store(tmp_path).read_events(RUN)
+        rejection = next(e for e in events if e['kind'] == 'agent_response_rejected')
+        assert rejection['diagnostic']['field'] == 'tool_arguments'
+        rows = http.app.state.jobs.ledger.entries(RUN)
+        assert len(rows) == 1 and rows[0].usage_status == 'known'
+        assert rows[0].call_id == rejection['call_id']
 
 
 def test_midflight_message_pauses_an_atomic_job_then_reaches_producer(tmp_path):
@@ -787,8 +810,12 @@ def test_role_connections_are_frozen_per_job_and_keys_never_enter_events(tmp_pat
     import studio.connections as connections
     monkeypatch.setattr(connections, '_dpapi', lambda data, **kwargs: data)
     entered, release = threading.Event(), threading.Event()
+    text = '先整理需求，再给两个视频创意方向。'
+    interpretation = fixture_task_interpretation(text, intent='new', deliverable='direction')
     model = ScriptedModel([
-            tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video", "deliverable": "direction"}),
+        tool_turn('bind', 'propose_task_interpretation', {**interpretation,
+            'reuse_artifact': 'not_applicable', 'video_use': 'not_applicable', 'image_use': 'not_applicable'}),
+        tool_turn("route", "prepare_creative_context", {"intent": "new", "format": "video", "deliverable": "direction"}),
         tool_turn('i', 'write_stage', {'stage': 'intake', 'content': '需求', 'summary': '需求'}),
         tool_turn('d', 'dispatch', {'stage': 'direction', 'brief': '两个方向'}),
         tool_turn('s', 'submit_stage', {'content': '方案', 'summary': '方向'}),
@@ -814,14 +841,14 @@ def test_role_connections_are_frozen_per_job_and_keys_never_enter_events(tmp_pat
         make_run(http)
         saved = http.put('/api/connections', json=payload(0, 'synthetic-key-v1', 'model-v1'))
         assert saved.status_code == 200 and 'synthetic-key-v1' not in saved.text
-        job = post_job(http)
+        job = post_job(http, text=text)
         assert entered.wait(2)
         changed = http.put('/api/connections', json=payload(1, 'synthetic-key-v2', 'model-v2'))
         assert changed.status_code == 200
         release.set()
         final = wait_job(http, job['job_id'])
-        assert final['status'] == 'succeeded'
-        assert len(model.calls) == 5  # Current-turn routing plus a real director submission.
+        assert final['status'] == 'succeeded', final.get('reason')
+        assert len(model.calls) == 6  # Initial task binding, routing, and a real director submission.
         assert http.get(f"/api/runs/{RUN}/artifacts/direction/1").status_code == 200
         assert {c['model'] for c in model.calls} == {'model-v1'}
         assert {token for _, token in seen} == {'synthetic-key-v1'}

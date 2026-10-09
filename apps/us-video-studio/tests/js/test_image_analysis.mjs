@@ -19,6 +19,49 @@ test('native Omni setup transmits video and audio with a fixed model and explici
   assert.match(ui.costText(c,c.suggested_model,'video'),/含思考/);
 });
 
+test('the selected MiMo video service takes precedence over the legacy observer',()=>{
+  const c={id:'mimo',name:'MiMo <unsafe>',provider:'mimo',has_key:true,
+    suggested_model:'mimo-v2.6-flash',native_video:true,base_url:'https://api.xiaomimimo.com/v1',pricing:{}};
+  const html=ui.setup({name:'reference.mp4',kind:'video'},{connections:[],video_connection:c,
+    bailian_omni:{id:'legacy',name:'百炼北京',native_video:true},video:{available:true}});
+  assert.match(html,/name="connection_id"><option value="mimo"/);
+  assert.match(html,/readonly value="mimo-v2.6-flash"/);
+  assert.match(html,/视频及可用音轨发送至 MiMo &lt;unsafe&gt;/);
+  assert.match(html,/默认 2 fps/);
+  assert.doesNotMatch(html,/百炼北京|<unsafe>|checked/);
+  const cost=ui.costText(c,c.suggested_model,'video');
+  assert.match(cost,/费用将显示为待核实/);
+  assert.match(cost,/8192 token（含思考）/);
+  assert.doesNotMatch(cost,/undefined|¥undefined/);
+  assert.match(ui.costText({...c,pricing:{[c.suggested_model]:{input_usd_per_mtok:.14,output_usd_per_mtok:.28}}},c.suggested_model,'video'),/输入 \$0.14/);
+});
+
+test('a selected MiMo video service without its key shows the exact gap and cannot fall back',()=>{
+  const html=ui.setup({name:'reference.mp4',kind:'video'},{connections:[],
+    video_connection:{id:'mimo',name:'MiMo',provider:'mimo',has_key:false,native_video:true},
+    bailian_omni:{id:'legacy',name:'百炼北京',native_video:true},video:{available:true}});
+  assert.match(html,/为所选 MiMo 服务填写 API Key/);
+  assert.match(html,/不会自动改用其他服务/);
+  assert.match(html,/data-model-settings/);
+  assert.doesNotMatch(html,/百炼北京|<form|type="submit"/);
+});
+
+test('a new response with no selected native connection does not substitute its legacy field',()=>{
+  const html=ui.setup({name:'reference.mp4',kind:'video'},{connections:[{id:'vision',name:'Vision'}],
+    video_connection:null,bailian_omni:{id:'legacy',name:'百炼北京',native_video:true},video:{available:true}});
+  assert.match(html,/开始视频画面分析/);
+  assert.doesNotMatch(html,/百炼北京|开始声画分析/);
+});
+
+test('a MiMo connection in the generic video form only authorizes frames',()=>{
+  const html=ui.setup({name:'reference.mp4',kind:'video'},{connections:[{id:'mimo',name:'MiMo',provider:'mimo'}],
+    video_connection:null,video:{available:true}});
+  assert.match(html,/value="mimo"/);
+  assert.match(html,/开始视频画面分析/);
+  assert.match(html,/不发送原视频、音频或项目对话/);
+  assert.doesNotMatch(html,/开始声画分析|视频及可用音轨/);
+});
+
 test('native review presents audio scope and CNY instead of a false silent-frame report',()=>{
   const html=ui.review({...candidate,media_kind:'video',estimated_cny:.014,
     audiovisual:{duration_seconds:30,audio_sent:true,audio_ranges:[[0,30]]}});

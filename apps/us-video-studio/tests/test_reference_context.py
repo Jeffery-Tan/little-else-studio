@@ -74,6 +74,8 @@ def prompt_turn(tmp_path, *, prior=False, override=None, fresh=False):
         tool_turn('prepare', 'prepare_creative_context', route),
         tool_turn('save', 'save_reference_prompt', dict(prompt='Synthetic adapted product prompt')),
         final_turn('Cannot change the selected reference'),
+        *([final_turn('The original prompt remains incomplete; selected reference unchanged')]
+          if override else []),
     ], legacy_task_contracts=False)
     calls = []
     def observer(*args):
@@ -104,6 +106,9 @@ def test_prompt_requests_receive_full_selected_observation_without_changing_proj
 def test_model_cannot_change_exact_reference_after_observation_or_save_a_mislabeled_prompt(tmp_path, override):
     store, model, result, before, _ = prompt_turn(tmp_path, prior=True, override=override)
     assert result.deliverable['status'] == 'incomplete'
+    assert result.deliverable['goal'] == 'reference_prompt'
+    assert result.stopped_because == 'incomplete' and len(model.calls) == 5
+    assert '本轮真实任务已绑定，约定交付仍缺' in model.calls[-1]['messages'][-1]['content']
     assert current(store, RUN) == before
     assert not any(e['kind'] == 'reference_prompt_saved' for e in store.read_events(RUN))
     assert '不能改为自主创作或换成其他参考' in model.requests_text()
@@ -142,11 +147,15 @@ def test_recreate_cannot_switch_reference_during_later_preparation(tmp_path):
         tool_turn('switch', 'prepare_creative_context', dict(intent='new', format='video', deliverable='intake',
             creation_mode='inspiration', reference_id=b['reference_id'], reference_scope='Only B')),
         final_turn('Source switch rejected'),
+        final_turn('Original intake remains incomplete; selected reference unchanged'),
     ], legacy_task_contracts=False)
     receipt = receive(store, RUN, text, 'recreate-input', reference_target=a)
     result = Orchestrator(store, pipeline, settings, model, Ledger(store, settings), RUN).send(
         text, user_input_id=receipt['message_id'])
     assert result.deliverable['status'] == 'incomplete'
+    assert result.deliverable['goal'] == 'intake'
+    assert result.stopped_because == 'incomplete' and len(model.calls) == 4
+    assert '本轮真实任务已绑定，约定交付仍缺' in model.calls[-1]['messages'][-1]['content']
     assert current(store, RUN)['reference_id'] == 'reference-A'
     assert not store.latest_artifact(RUN, 'intake')
     assert '不能改为自主创作或换成其他参考' in model.requests_text()
@@ -165,11 +174,15 @@ def test_new_reference_dependency_cannot_be_skipped_by_preparing_with_an_old_ref
             task_interpretation=proposal, creation_mode='inspiration', reference_id=b['reference_id'], reference_scope='Only B')),
         tool_turn('write', 'write_stage', dict(stage='intake', content='Synthetic scheme using old B', summary='Synthetic')),
         final_turn('Skipped dependency'),
+        final_turn('New reference is still unread; original intake remains incomplete'),
     ], legacy_task_contracts=False)
     receipt = receive(store, RUN, text, 'new-reference-input', reference_consent=True)
     result = Orchestrator(store, pipeline, settings, model, Ledger(store, settings), RUN).send(
         text, user_input_id=receipt['message_id'])
     assert result.deliverable['status'] == 'incomplete'
+    assert result.deliverable['goal'] == 'intake'
+    assert result.stopped_because == 'incomplete' and len(model.calls) == 4
+    assert '本轮真实任务已绑定，约定交付仍缺' in model.calls[-1]['messages'][-1]['content']
     assert not store.latest_artifact(RUN, 'intake')
     assert current(store, RUN) == before
     assert '先读取指定参考' in model.requests_text()

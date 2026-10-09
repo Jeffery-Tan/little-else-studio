@@ -38,7 +38,7 @@ from .models import (
     utcnow,
 )
 from .store import Store, serialized_run, sha256_text
-from .structured import normalize, canonical_document, validate_canonical_input, material_blockers
+from .structured import normalize, canonical_document, validate_canonical_input, canonical_field_diagnostic, material_blockers
 
 
 @dataclass(frozen=True)
@@ -170,8 +170,7 @@ class Pipeline:
             return memo[stage]
 
         spec = STAGE_SPEC[stage]
-        artifacts = self.store.list_artifacts(run_id, stage)
-        latest = artifacts[-1] if artifacts else None
+        latest = self.store.latest_artifact(run_id, stage)
 
         # --- upstream fingerprints and staleness --------------------------- #
         upstream: dict[str, str] = {}
@@ -395,9 +394,10 @@ class Pipeline:
         self.stage_state(run_id, stage, own_memo)
         return bool(own_memo.get(f"__complete__{stage}"))
 
-    def state(self, run_id: str) -> RunState:
+    def state(self, run_id: str, _memo: dict | None = None) -> RunState:
+        """Reuse stage checks only inside the caller's same locked projection."""
         run = self.store.read_run(run_id)
-        memo: dict = {}
+        memo: dict = {} if _memo is None else _memo
         stages = {s: self.stage_state(run_id, s, memo) for s in STAGES}
         nxt = next((s for s in STAGES if not memo.get(f"__complete__{s}")), None)
         return RunState(run=run, stages=stages, next_stage=nxt)
@@ -490,6 +490,9 @@ class Pipeline:
         limitations: list[str] | None = None,
         structured: dict[str, Any] | None = None,
         actor: str = "agent",
+        writing_source_message_ids: tuple[str, ...] | list[str] = (),
+        writing_format: str | None = None,
+        local_writing_revision: bool = False,
     ) -> Artifact:
         """Turn an open attempt into an immutable artifact version."""
         spec = STAGE_SPEC[stage]
@@ -538,6 +541,7 @@ class Pipeline:
                 raise PipelineError('structure', 'images 与 segments 不能提供两份不同的页面清单。')
             structured = {key: value for key, value in structured.items() if key != 'images'} | {'segments': structured['images']}
         shape = normalize(stage, structured or {})
+        full_writing_submission = structured is not None or not content.strip() or bool(writing_source_message_ids)
         # Visual design is production content, not optional layout. When it is
         # supplied, malformed design or unknown shot identities must never be
         # dropped behind a successfully saved prose document.
@@ -565,7 +569,28 @@ class Pipeline:
                         previous, history, photo=photo)
         except ValueError as exc:
             raise PipelineError('structure', str(exc)) from exc
+        writing_delivery = {}
+        if stage == 'writing':
+            from .task_contract import writing_completeness
+            from .project_brief import content_format
+            identities = list(dict.fromkeys(identity for identity in writing_source_message_ids if identity))
+            delivery_format = writing_format or content_format(self.store.read_events(run_id)) or 'video'
+            # Legacy prose may still be imported/read and an exact field patch
+            # is not a new full script. Neither route may claim full delivery.
+            if not local_writing_revision and full_writing_submission:
+                check = writing_completeness(self.store, run_id, shape.data,
+                    source_message_ids=identities, format=delivery_format)
+                if check['missing']:
+                    raise PipelineError('writing_incomplete', '；'.join(check['missing']))
+            writing_delivery = {'writing_delivery': {
+                'format': delivery_format, 'mode': ('local' if local_writing_revision else
+                                                  'full' if full_writing_submission else 'legacy_prose'),
+                'source_message_ids': identities}}
         if not content.strip():
+            diagnostic = canonical_field_diagnostic(stage, structured or {})
+            if diagnostic:
+                raise PipelineError('structure', '结构化内容未通过本次字段检查，本次未保存产物；请按所列字段纠正。'
+                                    + json.dumps(diagnostic, ensure_ascii=False))
             if shape.dropped:
                 raise PipelineError("structure", "结构化内容存在无法保存的字段，请修正后提交；原尝试仍保留。")
             try:
@@ -573,6 +598,12 @@ class Pipeline:
                 content = canonical_document(stage, shape.data)
             except ValueError as exc:
                 raise PipelineError("structure", str(exc)) from exc
+        if stage == 'direction':
+            from .active_brief import compile_active_brief, validate_direction_clause_references
+            try:
+                validate_direction_clause_references(compile_active_brief(self.store, run_id), shape.data)
+            except ValueError as exc:
+                raise PipelineError('brief_reference', str(exc)) from exc
         artifact = self.store.write_artifact(
             run_id,
             stage,
@@ -594,6 +625,7 @@ class Pipeline:
             artifact=f"{stage}-v{version}",
             sha256=artifact.sha256,
             actor=actor,
+            **writing_delivery,
         )
         if structured and shape.dropped:
             # Recorded, not swallowed. A prompt that is quietly failing to

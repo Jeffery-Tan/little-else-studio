@@ -280,6 +280,31 @@ def test_parallel_tool_calls_in_one_turn_all_execute():
 # ------------------------------------------- non-convergence guard (H-fix) -- #
 
 
+def test_known_prerequisite_ends_after_failed_tool_before_repeat_guard():
+    # The requested tool is available, but its handler reports a prerequisite.
+    # An unavailable tool now rejects the whole batch before this recovery path.
+    turns = [tool_turn(f'bad-{index}', 'read_project_state', {}) for index in range(4)]
+    later = tool_turn('later', 'read_capabilities', {})
+    turns[-1].tool_calls.extend(later.tool_calls)
+    turns[-1].raw_blocks.extend(later.raw_blocks)
+    model = ScriptedModel(turns)
+    executed = []
+
+    def execute(name, args):
+        assert name == 'read_project_state', 'the later handler must not run'
+        executed.append(name)
+        raise ValueError('synthetic prerequisite unavailable')
+
+    result = run_agent_loop(model, model='fixture', system='s',
+        messages=[{'role': 'user', 'content': 'Synthetic recovery'}],
+        tools=[{'name': 'read_project_state'}, {'name': 'read_capabilities'}], execute_tool=execute,
+        stop_when=lambda: len(model.calls) == 4)
+    assert len(model.calls) == len(executed) == 4 and result.stopped_because == 'done'
+    assert all(not record['ok'] and record['failure_key'] for record in result.tool_log[:-1])
+    assert result.tool_log[-1]['skipped']
+    assert len(result.messages[-1]['content']) == 2
+
+
 def _repeating_failure_model(rounds: int) -> ScriptedModel:
     return ScriptedModel([
         tool_turn(f"t{i}", "submit_patch", {"changes": [{"path": ["x"], "value": "y"}]})

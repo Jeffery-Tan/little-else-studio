@@ -18,7 +18,8 @@ class TaskContext:
 
 def assemble_role_task(store, pipeline, learning, run_id, workspace: Workspace,
                        stage: str, brief: str, *, previous=None, revision_scope=None,
-                       method_context: dict, user_input_id=None, turn_scope=None) -> TaskContext:
+                       method_context: dict, user_input_id=None, turn_scope=None,
+                       journal_constraints=None) -> TaskContext:
     """Read exact stage versions once; log only identities and hashes elsewhere."""
     role = workspace.role
     local_revision = bool(revision_scope and revision_scope['mode'] == 'local')
@@ -43,8 +44,12 @@ def assemble_role_task(store, pipeline, learning, run_id, workspace: Workspace,
             row.get('ambiguity') or row['quote'] for row in conflicts))
     applicable = [row for row in applicable if row['status'] == 'active']
     if applicable:
-        parts += ['# 仍有效且适用于本阶段的用户项目条件', json.dumps(applicable, ensure_ascii=False),
-                  '这些条件来自已经执行的用户消息，超过对话窗口仍有效。不得用任务摘要覆盖；'
+        # Only the same trusted journal's exact fresh projection can replace
+        # this duplicate. Preserve source identities even when its text is sent
+        # once per request rather than repeated inside the immutable seed.
+        if journal_constraints != applicable:
+            parts += ['# 仍有效且适用于本阶段的用户项目条件', json.dumps(applicable, ensure_ascii=False)]
+        parts += ['这些条件来自已经执行的用户消息，超过对话窗口仍有效。不得用任务摘要覆盖；'
                   'scope.stages/paths 限定适用范围，exceptions 指定局部例外；不得把局部条件扩成全片。'
                   '冲突时报告冲突，只有明确替换才使旧条件失效。', '']
         sources += tuple({'kind': 'user_constraint', 'message_id': row['source_message_id'],
@@ -147,7 +152,9 @@ def assemble_role_task(store, pipeline, learning, run_id, workspace: Workspace,
         seed += '\n# 本轮修订范围\n' + json.dumps(revision_scope, ensure_ascii=False)
     if local_revision:
         seed += ('\n本任务只用 submit_patch 提交 changes[{path,value}] 与 summary，不能提交全文。'
-                 '未列字段由程序保留。仍须通读完整脚本，复查台词可读时长、前后衔接和声画关系；'
+                 '未列字段由程序保留。上方已提供核验过的完整修订基线，可直接通读；'
+                 '仅在信息缺失或需重新核对时使用 read_artifact，原读取权限不变。'
+                 '仍须复查台词可读时长、前后衔接和声画关系；'
                  '范围内无法修好时说明具体冲突，不扩大修改。')
 
     readable = '、'.join(workspace.readable) or '（无）'

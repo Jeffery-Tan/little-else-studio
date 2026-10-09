@@ -848,8 +848,11 @@ def test_a_step_that_has_never_run_promises_nothing(env):
     assert "从没跑过" in pending["next_cost_sentence"]
 
 
-def test_the_last_gate_says_there_is_nothing_after_it(env):
+@pytest.mark.parametrize('format', [None, 'video', 'photo'])
+def test_writing_gate_explains_input_preparation_and_separate_generation_confirmation(env, format):
     store, pipeline, ledger = env
+    if format:
+        store.append_event(RUN, 'creative_context_selected', selection={'intent': 'new', 'format': format})
     store.append_chat(RUN, "user", "整理需求。")
     write_intake(pipeline)
     write_direction(pipeline)
@@ -863,8 +866,38 @@ def test_the_last_gate_says_there_is_nothing_after_it(env):
 
     pending = timeline(store, pipeline, ledger)["pending"]
     assert pending["stage"] == "writing"
+    assert pending['stage_label'] == ('图文方案' if format == 'photo' else '脚本')
+    assert pending['headline'] == f'「{pending["stage_label"]}」已保存，等你决定。'
     assert pending["next_stage_label"] == ""
-    assert "走完了" in pending["next_cost_sentence"]
+    assert ('逐页图片输入' if format == 'photo' else '实际分镜输入') in pending['body']
+    assert '尚不提交图片或视频生成' in pending['body']
+    assert '准备不产生媒体生成费用' in pending['next_cost_sentence']
+    assert '文字模型用量仍会记录' in pending['next_cost_sentence']
+    assert '图片、视频生成分别确认范围与费用' in pending['next_cost_sentence']
+    assert '走完了' not in pending['next_cost_sentence']
+    assert '没有下一步要花的钱' not in pending['next_cost_sentence']
+    approve(pipeline, 'writing')
+    original = store.read_events(RUN)
+    result = timeline(store, pipeline, ledger)
+    items = [item for turn in result['turns'] for item in turn['items']]
+    for item in items:
+        if item['kind'] in {'approval', 'artifact'} and item.get('stage') == 'writing':
+            assert item['stage_label'] == ('图文方案' if format == 'photo' else '脚本')
+    assert store.read_events(RUN) == original
+    from studio.decision import continuation_text
+    text = continuation_text(store.list_approvals(RUN, 'writing')[-1], store=store, run_id=RUN)
+    if format == 'photo':
+        assert '逐页准备包含定稿图内文案的完整图片制作输入' in text
+        assert '分镜参考图' not in text
+    else:
+        assert '分镜参考图制作方案' in text
+    assert '先不提交图片或视频生成' in text
+    store.append_event(RUN, 'creative_context_selected', selection={'intent': 'new', 'format': 'video' if format == 'photo' else 'photo'})
+    changed = timeline(store, pipeline, ledger)
+    for turn in changed['turns']:
+        for item in turn['items']:
+            if item['kind'] in {'approval', 'artifact'} and item.get('stage') == 'writing':
+                assert item['stage_label'] == ('图文方案' if format == 'photo' else '脚本')
 
 
 def test_last_stage_cost_reads_the_newest_run_of_that_step(env):

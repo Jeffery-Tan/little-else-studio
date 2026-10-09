@@ -41,7 +41,7 @@ test('storyboard shows every saved image input and labels uploaded photos as ref
  const imageTwo={...draft,kind:'image',draft_id:'evening',prompt:'Evening street shot',attempts:[]};
  const shown={...data,capabilities:{...data.capabilities,image:{available:true}},drafts:[imageOne,imageTwo]};
  const html=ui.canvasHtml(shown,'image','demo',[]);
- assert.match(html,/分镜首帧（2）/);
+ assert.match(html,/分镜首帧输入（2）/);
  assert.match(html,/镜头 01/);assert.match(html,/镜头 02/);
  assert.match(html,/Morning &lt;street&gt; shot/);assert.match(html,/Evening street shot/);
  assert.equal((html.match(/<details class="production-shot"/g)||[]).length,2);
@@ -57,8 +57,8 @@ test('photo canvas uses page wording while retaining server target count and sta
  const image={...draft,kind:'image',draft_id:'photo-page-2',shot_id:'source-page-2',prompt:'Current page image',attempts:[]};
  const shown={...data,capabilities:{...data.capabilities,image:{available:true}},drafts:[image],
   shots:{image:{total:4,complete_list:true,shots:[
-   {ordinal:2,shot_id:'source-page-2',draft_id:'photo-page-2',stage:'input_ready',stage_label:'输入已准备'},
-   {ordinal:4,shot_id:'source-page-4',stage:'unprepared',stage_label:'输入尚未准备',blocker:'unprepared'}]}}};
+   {ordinal:2,shot_id:'source-page-2',draft_id:'photo-page-2',source_ready:true,stage:'input_ready',stage_label:'输入已准备'},
+   {ordinal:4,shot_id:'source-page-4',source_ready:false,stage:'unprepared',stage_label:'输入尚未准备',blocker:'unprepared'}]}}};
  const html=ui.canvasHtml(shown,'image','demo',[],'photo');
  assert.match(html,/图文图片（4）/);
  assert.match(html,/目标 4 页，已准备输入 1 页，已生成 0 张/);
@@ -67,6 +67,33 @@ test('photo canvas uses page wording while retaining server target count and sta
  assert.match(html,/这一页还没有制作输入/);
  assert.doesNotMatch(html,/分镜首帧|面镜头|这一镜|镜头 0/);
 });
+
+test('shared source readiness counts usable inputs while historical results and unresolved tasks stay readable',()=>{
+ const saved={name:'historical.png',sha256:hash,kind:'image',approved:false,url:'/api/runs/demo/materials/historical.png'};
+ const complete={...draft,kind:'image',draft_id:'old-shot-01',shot_id:'shot-01',source_ready:false,
+  design_issue:'原输入结果可查看；补设计后才能继续制作。',is_current:true,
+  attempts:[{attempt_id:'completed-01',status:'succeeded',output:saved}]};
+ const unresolved={...complete,draft_id:'old-shot-08',shot_id:'shot-08',
+  attempts:[{attempt_id:'original-08',status:'unknown'}]};
+ const shots=Array.from({length:10},(_,index)=>({ordinal:index+1,shot_id:`shot-${String(index+1).padStart(2,'0')}`,
+  source_ready:false,stage:'unprepared',stage_label:'输入需要补设计'}));
+ Object.assign(shots[0],{draft_id:complete.draft_id,reason:complete.design_issue});
+ Object.assign(shots[7],{draft_id:unresolved.draft_id,stage:'unverified',stage_label:'结果待核实',
+  blocker:'attempt_unresolved',attempt_id:'original-08',attempt_status:'unknown',
+  reason:'原任务提交结果尚未确认。'});
+ const shown={...data,capabilities:{image:{available:true}},materials:[saved],drafts:[complete,unresolved],
+  shots:{image:{total:10,complete_list:true,shots}}};
+ const html=ui.canvasHtml(shown,'image','demo',[]);
+ assert.match(html,/目标 10 面镜头，已准备输入 0 面，已生成 1 张/);
+ assert.match(html,/<img src="\/api\/runs\/demo\/materials\/historical.png"/);
+ assert.match(html,/结果待核实/);assert.match(html,/原任务提交结果尚未确认/);
+ assert.match(html,/先查询原任务，不要重新提交/);
+ assert.doesNotMatch(html,/attempt_unresolved|data-generate|data-approve/);
+ assert.equal(saved.approved,false);
+ // A query state does not invalidate a separately verified current input.
+ shots[7].source_ready=true;
+ assert.match(ui.canvasHtml(shown,'image','demo',[]),/已准备输入 1 面/);
+});
 test('one batch review pins every eligible shot and shows exact images before approval',()=>{
  const image={...draft,kind:'image',draft_id:'first',prompt:'First <frame>',estimate:{amount:2,currency:'CNY',notice:'Fixture'},attempts:[]};
  const second={...image,draft_id:'second',prompt:'Second frame'};
@@ -74,11 +101,11 @@ test('one batch review pins every eligible shot and shows exact images before ap
  assert.deepEqual(ui.batchGenerationDrafts(shown,'demo').map(row=>row.draft_id),['first','second']);
  const confirm=ui.batchConfirmationHtml({kind:'generate',drafts:[
   {draft_id:'first',expected_sha256:hash},{draft_id:'second',expected_sha256:hash}]},shown,'demo');
- assert.match(confirm,/一次生成整组首帧/);assert.match(confirm,/估算合计 CNY 4.00/);
+ assert.match(confirm,/一次生成所选 2 张首帧/);assert.match(confirm,/估算合计 CNY 4.00/);
  // Scenario E: the one-time confirmation names what it is bound to, so a later
  // edit to any shot invalidates it visibly rather than silently.
  assert.match(confirm,/来源：脚本第 2 版/);
- assert.match(confirm,/输入：当前 2 面准确分镜/);
+ assert.match(confirm,/输入：本次所选 2 面准确分镜/);
  assert.match(confirm,/模型：Codex Image/);
  assert.match(confirm,/费用：估算 CNY 4\.00/);
  const unknownCost=ui.batchConfirmationHtml({kind:'generate',drafts:[
@@ -195,7 +222,7 @@ test('video canvas keeps reference material separate from a generated video',()=
  assert.doesNotMatch(html,/production-canvas-media/);
 });
 test('records escape prompts findings model status messages and block external outputs',()=>{const html=ui.draftHtml({...draft,prompt:'<script>x</script>',review:{verdict:'ready',findings:['<img src=x>']},attempts:[{attempt_id:'x',status:'failed',message:'<iframe>',output:{url:'https://evil.test/a',name:'bad'}}]},data,'demo');assert.doesNotMatch(html,/<script>|<iframe>|<img src=x>|https:\/\/evil/);assert.match(html,/&lt;script/);assert.match(html,/&lt;img/);});
-test('review and generation affordances distinguish pending and recovery',()=>{const html=ui.draftHtml({...draft,attempts:[{attempt_id:'pending',status:'unknown'}]},data,'demo');assert.match(html,/data-generate="one" disabled/);assert.match(html,/核实提供方提交记录/);assert.match(html,/不会重新生成/);assert.doesNotMatch(html,/自动重试/);});
+test('review and generation affordances distinguish pending and recovery',()=>{const html=ui.draftHtml({...draft,attempts:[{attempt_id:'pending',status:'unknown'}]},data,'demo');assert.doesNotMatch(html,/data-generate/);assert.match(html,/核实提供方提交记录/);assert.match(html,/不会重新生成/);assert.doesNotMatch(html,/自动重试/);});
 test('network ambiguity including server failures retains request identity',()=>{for(const error of [new Error('Failed to fetch'),{status:500},{status:502},{status:429},{}])assert.equal(ui.uncertain(error),true);for(const status of [400,403,404,409,422])assert.equal(ui.uncertain({status}),false);const request=ui.actionRequest('generate',draft,'nonce','known-id');const persisted=JSON.parse(JSON.stringify({pending:request}));const recovered=ui.actionRequest('generate',{...draft,prompt:'Changed form',draft_sha256:'b'.repeat(64)},'new-nonce','new-id',persisted.pending);assert.equal(recovered.body.request_id,'known-id');assert.equal(recovered.body.expected_sha256,hash);});
 test('running jobs block actions but unknown accounting never does',()=>{
  const active={...data,active:true};
@@ -249,7 +276,7 @@ test('current work picks unresolved generation before a newer draft or older suc
  const html=ui.draftHtml(pending,{...data,materials:[...data.materials,movie]},'demo');
  assert.match(html,/<div class="production-actions production-primary-actions"><button class="primary" data-refresh="pending-job">查询这次结果/);
  assert.doesNotMatch(html,/<video controls|下载视频/);
- assert.match(html,/data-generate="pending" disabled/);
+ assert.doesNotMatch(html,/data-generate/);
 });
 test('completed video makes playback and download the main work, while a new generation stays secondary',()=>{
  const movie={name:'movie.mp4',sha256:hash,kind:'video',url:'/api/runs/demo/materials/movie.mp4'};
@@ -335,7 +362,7 @@ test('unknown retry still prioritizes original-task recovery while retaining an 
  assert.match(html,/data-refresh="pending"/);assert.match(html,/上一份已生成结果/);
  assert.match(html,/data-feedback-attempt="first"/);
  assert.match(html,/<video controls preload="metadata"/);
- assert.match(html,/data-generate="one" disabled/);
+ assert.doesNotMatch(html,/data-generate/);
 });
 test('returned image asks for exact image approval before treating it as complete',()=>{
  const picture={name:'returned.png',sha256:hash,kind:'image',url:'/api/runs/demo/materials/returned.png',approved:false};
@@ -393,4 +420,104 @@ test('generation confirmation keeps exact scope, reference, cost and limits visi
  assert.match(html,/<details class="production-confirm-prompt"><summary>查看实际发送的完整画面描述/);
  assert.match(html,/&lt;raw prompt&gt;/);assert.doesNotMatch(html,/<raw prompt>|<word>/);
  assert.match(html,/data-consent/);assert.match(html,/data-authorize disabled/);
+});
+
+test('batch progress follows script shot identity after revisions change insertion order',()=>{
+ const revised={...draft,kind:'image',draft_id:'shot-02-v2',attempts:[]};
+ const unresolved={...draft,kind:'image',draft_id:'shot-08-v1',attempts:[{status:'unknown'}]};
+ const old={...draft,kind:'image',draft_id:'shot-02-v1',is_current:false,attempts:[{status:'unknown'}]};
+ const current={...data,drafts:[old,unresolved,revised],shots:{image:{shots:[
+   {ordinal:2,shot_id:'shot-02',draft_id:revised.draft_id},
+   {ordinal:8,shot_id:'shot-08',draft_id:unresolved.draft_id}
+ ]}}};
+ const blocker=ui.batchBlocker(current,'demo');
+ assert.equal(blocker.draft.draft_id,unresolved.draft_id);
+ assert.equal(blocker.ordinal,8);
+ assert.equal(ui.batchGenerationDrafts(current,'demo').length,0);
+});
+
+test('an original image task outranks missing design and a batch of fresh inputs',()=>{
+ const original={...draft,kind:'image',draft_id:'old-shot-08',shot_id:'shot-08',source_ready:false,
+  design_issue:'This historical input needs design.',is_current:true,
+  attempts:[{attempt_id:'original-08',status:'unknown'}]};
+ const fresh=[1,2].map(index=>({...draft,kind:'image',draft_id:`fresh-${index}`,shot_id:`shot-0${index}`,
+  references:[],attempts:[],can_generate:true}));
+ const shown={...data,capabilities:{image:{available:true}},drafts:[original,...fresh],
+  unresolved_attempts:[{kind:'image',shot_id:'shot-08',ordinal:8,draft_id:original.draft_id,
+    attempt_id:'original-08',status:'unknown'}]};
+ const blocker=ui.batchBlocker(shown,'demo');
+ assert.equal(blocker.draft.draft_id,original.draft_id);
+ assert.equal(blocker.attempt.attempt_id,'original-08');assert.equal(blocker.ordinal,8);
+ assert.equal(ui.currentProductionWork(shown,'image','demo').phase,'unknown');
+ assert.deepEqual(ui.batchGenerationDrafts(shown,'demo'),[]);
+ assert.equal(ui.batchConfirmationHtml({kind:'generate',drafts:fresh.map(row=>({
+   draft_id:row.draft_id,expected_sha256:row.draft_sha256}))},shown,'demo'),'');
+ const html=ui.draftHtml(original,shown,'demo');
+ assert.match(html,/data-recover="original-08"/);assert.doesNotMatch(html,/data-generate|data-edit-input/);
+});
+
+test('coverage joins the original attempt instead of its current replacement draft',()=>{
+ const original={...draft,kind:'image',draft_id:'old-input',shot_id:'shot-08',source_ready:false,
+  design_issue:'Missing design binding',is_current:false,
+  attempts:[{attempt_id:'original-08',status:'unknown',task_id:'provider-08'},
+    {attempt_id:'later-failed',status:'failed'}]};
+ const replacement={...draft,kind:'image',draft_id:'new-input',shot_id:'shot-08',attempts:[]};
+ const shown={...data,capabilities:{image:{available:true}},drafts:[original,replacement],
+  shots:{image:{shots:[{draft_id:replacement.draft_id,shot_id:'shot-08',ordinal:8,
+    attempt_id:'original-08',attempt_status:'unknown',task_id:'provider-08',
+    source_ready:true,stage:'unverified',blocker:'attempt_unresolved'}]}}};
+ const work=ui.currentProductionWork(shown,'image','demo');
+ assert.equal(work.phase,'unknown');assert.equal(work.primaryAction,'refresh');
+ assert.equal(work.draft.draft_id,'old-input');assert.equal(work.attempt.attempt_id,'original-08');
+ assert.equal(ui.batchBlocker(shown,'demo').ordinal,8);
+ assert.deepEqual(ui.batchGenerationDrafts(shown,'demo'),[]);
+ assert.notEqual(ui.gate(replacement,shown),'');
+ const html=ui.draftHtml(original,shown,'demo');
+ assert.match(html,/data-refresh="original-08">查询这次结果/);
+ assert.doesNotMatch(html,/data-generate/);
+});
+
+test('shared original tasks remain visible outside the current targets and across media batches',()=>{
+ const video={...draft,draft_id:'historical-video',shot_id:'old-shot',source_ready:false,is_current:false,
+  attempts:[{attempt_id:'old-video-task',status:'submission_unknown'}]};
+ const image={...draft,kind:'image',draft_id:'fresh-image',shot_id:'new-shot',references:[],attempts:[]};
+ const shown={...data,capabilities:{image:{available:true},video:{available:true}},drafts:[video,image],
+  shots:{image:{shots:[{draft_id:image.draft_id,shot_id:image.shot_id,ordinal:1}]}},
+  unresolved_attempts:[{kind:'video',shot_id:'old-shot',draft_id:video.draft_id,
+   attempt_id:'old-video-task',status:'submission_unknown'}]};
+ assert.equal(ui.batchBlocker(shown,'demo').work.kind,'video');
+ assert.equal(ui.currentProductionWork(shown,'video','demo').draft.draft_id,video.draft_id);
+ assert.deepEqual(ui.batchGenerationDrafts(shown,'demo'),[]);
+ assert.deepEqual(ui.videoBatchGenerationDrafts(shown,'demo'),[]);
+ // A batch boundary is global; a separate manual input is not silently widened.
+ assert.equal(ui.gate(image,shown),'');
+});
+
+test('settling an original task restores generation without treating unknown accounting as a task',()=>{
+ const original={...draft,kind:'image',draft_id:'historical-image',shot_id:'shot-08',source_ready:false,
+  is_current:false,attempts:[{attempt_id:'original-08',status:'retry_authorized',usage_status:'unknown'}]};
+ const replacement={...draft,kind:'image',draft_id:'new-input',shot_id:'shot-08',references:[],attempts:[]};
+ const success={...draft,kind:'image',draft_id:'saved-image',shot_id:'shot-01',attempts:[{
+  attempt_id:'saved-result',status:'succeeded',usage_status:'unknown',output:data.materials[0]}]};
+ const shown={...data,capabilities:{image:{available:true}},drafts:[original,success,replacement],
+  unresolved_attempts:[]};
+ assert.equal(ui.batchBlocker(shown,'demo'),null);
+ assert.deepEqual(ui.batchGenerationDrafts(shown,'demo').map(row=>row.draft_id),['new-input']);
+ const work=ui.currentProductionWork(shown,'image','demo');
+ assert.equal(work.phase,'ready');assert.equal(work.draft.draft_id,replacement.draft_id);
+ assert.match(ui.draftHtml(replacement,shown,'demo'),/data-generate="new-input"/);
+ assert.equal(shown.materials[0].approved,true);
+});
+
+test('a shared unresolved identity with missing local detail blocks a new batch safely',()=>{
+ const image={...draft,kind:'image',draft_id:'fresh-image',references:[],attempts:[]};
+ const shown={...data,capabilities:{image:{available:true}},drafts:[image],
+  unresolved_attempts:[{kind:'image',shot_id:'old-shot',draft_id:'not-in-payload',
+   attempt_id:'original-task',status:'unknown'}]};
+ const blocker=ui.batchBlocker(shown,'demo');
+ assert.equal(blocker.draft,null);assert.equal(blocker.attempt.attempt_id,'original-task');
+ assert.equal(blocker.work.primaryAction,'none');
+ assert.deepEqual(ui.batchGenerationDrafts(shown,'demo'),[]);
+ assert.match(ui.emptyWorkHtml(blocker.work),/原任务记录需要重新读取/);
+ assert.doesNotMatch(ui.emptyWorkHtml(blocker.work),/data-generate|data-recover/);
 });

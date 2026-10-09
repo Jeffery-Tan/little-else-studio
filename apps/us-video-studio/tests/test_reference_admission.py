@@ -8,6 +8,7 @@ import pytest
 from fakes import ScriptedModel, tool_turn, final_turn, fixture_task_interpretation
 from local_http import TestClient
 from studio.agents.orchestrator import Orchestrator
+from studio.agents.client import SafePreflightError
 from studio.conversation_input import receive
 from studio.creation_mode import digest
 from studio.ledger import Ledger
@@ -20,6 +21,17 @@ from test_conversation_runtime_control import wait_idle
 from test_server import RUN, settings_for, make_run
 
 URL = 'https://www.tiktok.com/@fixture/video/7250000000000000000'
+
+
+def unavailable_image_connection(monkeypatch):
+    # The reference boundary uses a synthetic selected video service; images are
+    # independently unavailable and must never read credentials in this test.
+    monkeypatch.setattr('studio.agents.bailian_omni.connection_info', lambda: {
+        'id': 'bailian_omni', 'provider': 'bailian_omni',
+        'base_url': 'https://fixture.invalid/compatible-mode/v1'})
+    def unavailable(*args, **kwargs):
+        raise SafePreflightError('Synthetic image service unavailable')
+    monkeypatch.setattr('studio.agents.bailian_omni.freeze', unavailable)
 
 
 def contract(text, goal='analysis', *, source=None, purpose='reference', quote=None):
@@ -40,7 +52,8 @@ def run_turn(tmp_path, text, *, source=URL, goal='analysis', action='analyze',
     args = dict(source=source, action=action, quote=quote or text, scope='Opening expression')
     if interpretation:
         args['task_interpretation'] = contract(text, goal, source=source, quote=quote)
-    turns = [tool_turn('observe', 'observe_reference', args), final_turn('Original task still applies')]
+    turns = [tool_turn('observe', 'observe_reference', args), final_turn('Original task still applies'),
+             final_turn('Original task remains incomplete after the bounded reminder')]
     model = ScriptedModel(turns, legacy_task_contracts=False)
     calls = []
     def observe(*args):
@@ -74,7 +87,10 @@ def test_analysis_is_dependency_and_does_not_replace_frozen_goal(tmp_path, goal)
     assert result.deliverable['goal'] == goal
     assert result.deliverable['status'] == 'incomplete'
     assert not store.latest_artifact(RUN, 'writing')
-    assert len(model.calls) == 2  # The analysis did not conclude the model loop.
+    # Observation is a dependency, not completion. The new unselected-scope
+    # check gives one bounded reminder; the fake still submits no final work.
+    assert len(model.calls) == 3
+    assert '不要再次解释、改目标、扩大 allowed_stages' in json.dumps(model.calls[-1]['messages'], ensure_ascii=False)
 
 
 def test_prompt_action_cannot_downgrade_frozen_writing_goal(tmp_path):
@@ -171,8 +187,7 @@ def test_analysis_dependency_can_finish_exact_prompt_contract_without_role_dispa
 
 @pytest.mark.parametrize('admitted', [True, False])
 def test_busy_reference_input_keeps_its_own_admission_not_the_original_job(tmp_path, monkeypatch, admitted):
-    monkeypatch.setattr('studio.agents.bailian_omni.connection_info',
-                        lambda: {'base_url': 'https://fixture.invalid/compatible-mode/v1'})
+    unavailable_image_connection(monkeypatch)
     entered, release = threading.Event(), threading.Event()
     text = '请拆解这条参考 ' + URL
     next_model = ScriptedModel([tool_turn('observe', 'observe_reference', dict(
@@ -213,8 +228,7 @@ def test_busy_reference_input_keeps_its_own_admission_not_the_original_job(tmp_p
 
 def test_restart_requires_explicit_recovery_and_keeps_pending_reference_admission(tmp_path, monkeypatch):
     from studio.agent_runtime import AgentRuntime
-    monkeypatch.setattr('studio.agents.bailian_omni.connection_info',
-                        lambda: {'base_url': 'https://fixture.invalid/compatible-mode/v1'})
+    unavailable_image_connection(monkeypatch)
     store = Store(tmp_path)
     store.create_run(RUN, 'Offline recovery', 'Synthetic facts')
     receipt = receive(store, RUN, '拆解参考 ' + URL, 'pending-reference', reference_consent=True)

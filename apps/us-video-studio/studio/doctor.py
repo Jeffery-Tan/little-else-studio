@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,10 +39,26 @@ def code_fingerprint() -> str:
     return digest.hexdigest()[:16]
 
 
+def source_version() -> dict:
+    """Identify loaded source without network, raw paths or Git diff contents."""
+    try:
+        revision = subprocess.run(['git', 'rev-parse', '--short=12', 'HEAD'], cwd=REPOSITORY,
+                                  capture_output=True, text=True, timeout=2, check=True).stdout.strip()
+        if not revision or any(c not in '0123456789abcdef' for c in revision):
+            return {'source_revision': None, 'source_modified': None}
+        changed = subprocess.run(['git', 'status', '--porcelain', '--untracked-files=normal', '--', 'apps/us-video-studio'],
+                                 cwd=REPOSITORY, capture_output=True, timeout=2)
+        return {'source_revision': revision,
+                'source_modified': bool(changed.stdout.strip()) if changed.returncode == 0 else None}
+    except (OSError, subprocess.SubprocessError):
+        return {'source_revision': None, 'source_modified': None}
+
+
 def runtime_identity(data_root: Path) -> dict:
     """Safe, frozen-on-call identity. No credential or project contents are read."""
     root = Path(data_root).expanduser().resolve()
     return {
+        **source_version(),
         'started_at': datetime.now(timezone.utc).isoformat(),
         'process_id': os.getpid(),
         'hot_reload': {'enabled': False, 'state': 'disabled'},
@@ -132,6 +149,12 @@ def inspect(data_root: Path, port: int = 4760, *, host: str = '127.0.0.1', allow
         '已找到所选 Git 外数据目录。' if safe_root and exists else '数据根不存在或位于 Git 仓库内。',
         '请显式选择已恢复的 Git 外数据根；不要启动一个空目录。' if not safe_root or not exists else '')
     if exists and safe_root:
+        from .project_integrity import project_catalog, public_diagnostic
+        projects = project_catalog(root)
+        unavailable = [public_diagnostic(item) for item in projects if not item['available']]
+        add('project_integrity', 'warning' if unavailable else 'ok',
+            f'{len(projects) - len(unavailable)} 个项目可用；{len(unavailable)} 个项目资料损坏，隔离并保留原件。',
+            '启动后在项目首页查看错误；不要自动截断或覆盖原文件。' if unavailable else '', required=False)
         # A lock file alone can be left by an aborted first start. It is not a
         # project identity and must not turn an empty folder into a restored one.
         known = _has_project_data(root)
@@ -190,7 +213,8 @@ def inspect(data_root: Path, port: int = 4760, *, host: str = '127.0.0.1', allow
         '；'.join(package_errors) if package_errors else 'Skill 方法包、来源与工具映射均可读取。',
         '恢复仓库中的方法卡及来源文件后重查。' if package_errors else '')
     return {'ready_to_start': not any(c['required'] and c['status'] == 'error' for c in checks),
-            'data_root': str(root), 'checks': checks}
+            'data_root': str(root), 'checks': checks,
+            'unavailable_projects': unavailable if exists and safe_root else []}
 
 
 def main() -> None:
@@ -201,6 +225,8 @@ def main() -> None:
     parser.add_argument('--allow-new', action='store_true', help='明确允许已存在的空数据根作为新工作台')
     parser.add_argument('--start', action='store_true', help='检查通过后启动本地服务')
     parser.add_argument('--reload', action='store_true', help='空闲时自动加载后端代码变更')
+    parser.add_argument('--no-reload', action='store_true', help='关闭空闲时自动加载代码更新')
+    parser.add_argument('--reload-worker', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     report = inspect(args.data_root, args.port, allow_new=args.allow_new)
     if args.json:
@@ -217,13 +243,16 @@ def main() -> None:
         root = args.data_root.expanduser().resolve()
         if args.allow_new and not _has_project_data(root):
             mark_new_root(root)
-        if args.reload:
+        if args.reload and not args.no_reload:
             from .dev_reload import supervise
             raise SystemExit(supervise(root, args.port))
         import uvicorn
         from .config import load_settings
         from .server import build_app
-        uvicorn.run(build_app(load_settings(args.data_root)), host='127.0.0.1', port=args.port, log_level='info')
+        if args.reload_worker:
+            from .runtime_reload import serve
+            raise SystemExit(serve(build_app(load_settings(root)), args.port, auto_reload=not args.no_reload))
+        uvicorn.run(build_app(load_settings(root)), host='127.0.0.1', port=args.port)
 
 
 if __name__ == '__main__':

@@ -20,7 +20,14 @@ from test_context_projection import clause, proposal
 from test_conversational_decision import (RUN as DECISION_RUN, orchestrator,
     seed_direction)
 from test_decision import received_message
-from test_revision_scope import RUN, QUOTE, env, patch, plan, plan_args
+from test_revision_scope import RUN, QUOTE, env, patch, plan, plan_args, revision_meaning
+
+
+def edit_proposal(receipt, *rows):
+    # These fixtures explicitly edit the first line. This is not a classifier
+    # or a compatibility bypass for missing/ambiguous scope.
+    edit = revision_meaning(receipt['text'])['constraints'][0]
+    return proposal(receipt, edit, *rows, mode='revise', deliverable='revision')
 
 
 def begin(store, run_id, text, **kwargs):
@@ -119,7 +126,10 @@ def test_field_content_condition_does_not_shrink_full_task(env, intent):
     interpretation = record_task_interpretation(store, RUN, receipt, meaning)
     assert interpreted_task_constraints(receipt, interpretation)['local_only'] is False
 
-    main = Orchestrator(store, pipe, settings, ScriptedModel([final_turn('Read only.')]), ledger, RUN)
+    # A bound, unfulfilled full draft receives the existing one completion
+    # reminder; the fake declines again rather than inventing a delivery.
+    main = Orchestrator(store, pipe, settings, ScriptedModel([
+        final_turn('Read only.'), final_turn('No full draft delivered.')]), ledger, RUN)
     main.send(text, user_input_id=receipt['message_id'])
     main._execute('prepare_creative_context', {'intent': 'continue', 'format': 'video',
         'deliverable': 'writing', 'task_interpretation': meaning},
@@ -137,7 +147,7 @@ def test_explicit_local_edit_guard_survives_content_scope_fix(env, targeted):
     target = {'stage': 'writing', 'path': ['segments', 0, 'line']} if targeted else None
     receipt = begin(store, RUN, text, feedback_target=target)
     interpretation = record_task_interpretation(store, RUN, receipt,
-        proposal(receipt, mode='revise', deliverable='revision'))
+        proposal(receipt, mode='revise', deliverable='revision') if targeted else edit_proposal(receipt))
     assert interpreted_task_constraints(receipt, interpretation)['local_only']
 
 
@@ -198,7 +208,7 @@ def test_local_dispatch_can_save_despite_another_shot_condition_conflict(env):
     rows = conflicted_second_line(env)
     receipt = begin(store, RUN, QUOTE)
     meaning = record_task_interpretation(store, RUN, receipt,
-        proposal(receipt, mode='revise', deliverable='revision'))
+        edit_proposal(receipt))
     model = ScriptedModel([tool_turn('patch', 'submit_patch', patch())])
     outcome = Dispatcher(store, pipe, settings, model, ledger, RUN).dispatch('writing', QUOTE,
         revision_scope=plan(env), user_input_id=receipt['message_id'],
@@ -225,7 +235,7 @@ def test_revision_entry_binds_exact_scope_before_related_conflict_check(env, tar
     main.send(QUOTE, user_input_id=receipt['message_id'])
     workspace = Workspace(store, pipe, RUN, 'orchestrator')
     selection = {'intent': 'edit', 'format': 'video', 'deliverable': 'revision',
-        'task_interpretation': proposal(receipt, mode='revise', deliverable='revision')}
+        'task_interpretation': edit_proposal(receipt)}
     main._execute('prepare_creative_context', selection, workspace)
     bound = json.loads(main._execute('plan_revision', plan_args(store), workspace))
     # Rechecking the route now uses the validated plan's precise field paths.
@@ -259,9 +269,9 @@ def test_reported_field_condition_does_not_redirect_local_submission(env):
     store, pipe, settings, ledger = env
     text = QUOTE + '。同事建议第二句用正式口吻。'
     receipt = begin(store, RUN, text)
-    interpretation = record_task_interpretation(store, RUN, receipt, proposal(receipt,
+    interpretation = record_task_interpretation(store, RUN, receipt, edit_proposal(receipt,
         clause('同事建议第二句用正式口吻', lifetime='turn', scope_quote='', intent='reported',
-               paths=[['segments', 1, 'line']]), mode='revise', deliverable='revision'))
+               paths=[['segments', 1, 'line']])))
     scope = plan(env, quote=text)
     model = ScriptedModel([tool_turn('patch', 'submit_patch', patch())])
     outcome = Dispatcher(store, pipe, settings, model, ledger, RUN).dispatch('writing', text,
@@ -275,9 +285,8 @@ def test_initial_local_task_with_another_field_project_condition_preserves_scope
     store, pipe, settings, ledger = env
     text = QUOTE + '。以后本项目第二句保持日常口吻。'
     receipt = begin(store, RUN, text)
-    interpretation = record_task_interpretation(store, RUN, receipt, proposal(receipt,
-        clause('第二句保持日常口吻', scope_quote='以后本项目', paths=[['segments', 1, 'line']]),
-        mode='revise', deliverable='revision'))
+    interpretation = record_task_interpretation(store, RUN, receipt, edit_proposal(receipt,
+        clause('第二句保持日常口吻', scope_quote='以后本项目', paths=[['segments', 1, 'line']])))
     scope = plan(env, quote=text)
     model = ScriptedModel([tool_turn('patch', 'submit_patch', patch())])
     outcome = Dispatcher(store, pipe, settings, model, ledger, RUN).dispatch('writing', text,

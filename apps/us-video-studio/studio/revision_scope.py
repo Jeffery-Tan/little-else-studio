@@ -151,16 +151,51 @@ def plan_revision(store, pipeline, run_id, args, *, turn_id, user_message, previ
         raise PipelineError('revision_scope', 'local 须列出字段；rework 不接受局部字段列表。')
     from .conversation_input import task_constraints
     limits = constraints or task_constraints({'message_id': '', 'text': user_message})
-    if limits.get('local_only') and args['mode'] != 'local':
+    ingress = task_constraints({'message_id': limits.get('message_id', ''), 'text': user_message,
+                                'feedback_target': limits.get('feedback_target')})
+    if ingress['local_only'] and args['mode'] != 'local':
         raise PipelineError('revision_scope', '用户本轮限定局部修改，首次修订也不能选 rework 扩大范围；有冲突请先澄清。')
     target = limits.get('feedback_target') or {}
+    from .production_feedback import PRODUCTION_TARGETS
+    if target.get('kind') in PRODUCTION_TARGETS:
+        raise PipelineError('revision_scope', '所选镜头的制作反馈不能重写需求、方向或脚本。')
     if target.get('path'):
         if (args['stage'] != target.get('stage') or args['version'] != target.get('version')
                 or args['sha256'] != target.get('artifact_sha256')
                 or any(field.get('path') != target['path'] for field in fields)):
             raise PipelineError('revision_scope', '修订范围须保持用户选中的准确版本和字段。')
+    frozen = None
+    if not target.get('path'):
+        # The plan is a later model proposal. Read its limits from the original
+        # executed input, never from the proposal or a mutable caller snapshot.
+        from .conversation_input import (message, interpretation_for, interpreted_task_constraints,
+                                          validated_edit_scopes)
+        identity = limits.get('message_id')
+        if not identity:
+            raise PipelineError('revision_scope', '尚未绑定编辑范围；请先沿本条真实原话解释 content.edit_scope。')
+        receipt = message(store, run_id, identity)
+        interpreted = interpretation_for(store, run_id, identity)
+        current = interpreted_task_constraints(receipt, interpreted)
+        if (receipt['text'] != user_message or not interpreted
+                or limits.get('interpretation_id') != interpreted['id']
+                or limits.get('edit_scopes') != current.get('edit_scopes')):
+            raise PipelineError('revision_scope', '编辑范围没有绑定当前准确原话与任务解释，请核对原范围。')
+        eligible = [entry for entry in validated_edit_scopes(receipt, interpreted) if entry['stage'] == args['stage']]
+        if len(eligible) != 1:
+            raise PipelineError('revision_scope', '本阶段尚未绑定准确编辑范围；旧解释不改写，请明确当前任务范围。')
+        frozen = eligible[0]
+        if (args['version'], args['sha256']) != (frozen['version'], frozen['sha256']):
+            raise PipelineError('version_conflict', '编辑范围的准确基线已变化，请重新核对当前版本。')
+        if frozen['mode'] == 'local' and (args['mode'] != 'local' or any(
+                not isinstance(field, dict) or field.get('path') not in frozen['paths'] for field in fields)):
+            raise PipelineError('revision_scope', '修订不能扩大首次解释已冻结的局部编辑范围。')
     scope = {**copy.deepcopy(args), 'fields': fields, 'turn_id': turn_id}
     base, inputs = check_base(store, pipeline, run_id, scope)
+    if frozen:
+        if inputs != frozen['inputs']:
+            raise PipelineError('version_conflict', '编辑范围的上游依据已变化，请重新核对。')
+        scope.update(source_message_id=frozen['source_message_id'],
+                     interpretation_id=interpreted['id'], constraint_id=frozen['constraint_id'])
     keys = []
     for entry in fields:
         if (not isinstance(entry, dict) or set(entry) != {'path', 'instruction'}

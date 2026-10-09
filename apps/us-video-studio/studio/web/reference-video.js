@@ -14,12 +14,15 @@
     if(name)payload.attachments=[{name,purpose:'reference'}];
     return payload;
   }
+  const canReuseAnalysis=task=>Boolean(task?.candidate && task.candidate.status !== 'stale' && task.status !== 'stale');
   function form(data, task=null){
-    if(!data.connection&&(!task?.recovery||task.recovery.requires_observation)) return '<p>请先配置现有百炼北京连接，再开始参考视频任务。</p>';
+    const reusable=canReuseAnalysis(task), needsObservation=task?.recovery ? task.recovery.requires_observation === true : !reusable;
+    if(!data.connection&&needsObservation) return '<p>请先在模型设置中配置视频理解服务，再开始参考视频任务。</p>';
     if(!task)return '<p>在对话里说想做什么，附上视频或 TK 链接即可。</p>';
-    const pinned=task.sha256;
+    const pinned=task.sha256, service=esc(data.connection?.name || '所选视频理解服务'), missingKey=needsObservation&&data.connection?.has_key === false;
     const savedAnalysis=Boolean(task.analysis_id||task.candidate||task.report);
-    return `<form class="material-observation-editor" data-reference-form><p>继续${task.recovery?esc(recoveryGoal(task)):task.intent==='recreate'?'参考复刻':'视频分析'}。${pinned?(savedAnalysis?'已完成的分析会复用。':'原片已保存，声画分析尚未完成。'):task.source_url?'不选文件会重新获取原链接；也可以选择原视频上传，已保存的目标无需重填。':'选择原视频继续，已保存的目标无需重填。'}</p>${task.recovery?.original_text?`<details><summary>原来的要求</summary><p>${esc(task.recovery.original_text)}</p></details>`:''}${pinned?`<p>使用：${esc(task.name)}</p>`:''}<label>原视频${task.source_url&&!pinned?'（可选）':''}<input name="file" type="file" accept=".mp4,.mov,.m4v,.webm" ${pinned?'disabled':''}></label><p class="muted">继续会按需进行百炼声画分析；已完成分析不重复调用。复刻的后续文字策划按当前团队连接计费。</p><p role="alert" data-reference-error></p><button type="submit" class="primary">继续处理</button></form>`;
+    const processing=!needsObservation?'已有有效分析直接复用，不发起新的视频理解调用。':`继续会按需通过 ${service} 进行声画分析；已有有效分析会复用，不重复调用。`;
+    return `<form class="material-observation-editor" data-reference-form><p>继续${task.recovery?esc(recoveryGoal(task)):task.intent==='recreate'?'参考复刻':'视频分析'}。${pinned?(savedAnalysis?'已完成的分析会复用。':'原片已保存，声画分析尚未完成。'):task.source_url?'不选文件会重新获取原链接；也可以选择原视频上传，已保存的目标无需重填。':'选择原视频继续，已保存的目标无需重填。'}</p>${task.recovery?.original_text?`<details><summary>原来的要求</summary><p>${esc(task.recovery.original_text)}</p></details>`:''}${pinned?`<p>使用：${esc(task.name)}</p>`:''}<label>原视频${task.source_url&&!pinned?'（可选）':''}<input name="file" type="file" accept=".mp4,.mov,.m4v,.webm" ${pinned?'disabled':''}></label><p class="muted">${processing}复刻的后续文字策划按当前团队连接计费。</p>${missingKey?`<p role="alert">请先在模型设置中为 ${service} 填写 API Key；不会自动改用其他服务。</p>`:''}<p role="alert" data-reference-error></p><button type="submit" class="primary" ${missingKey?'disabled':''}>继续处理</button></form>`;
   }
 
   function taskPresentation(task,{busy=false}={}){
@@ -131,7 +134,7 @@
       };
     }
   }
-  root.StudioReferenceVideo={form,tasks,taskPresentation,breakdownHtml,mountBreakdowns,recoveryPayload};
+  root.StudioReferenceVideo={form,tasks,taskPresentation,breakdownHtml,mountBreakdowns,recoveryPayload,canReuseAnalysis};
   if(typeof module!=='undefined') module.exports=root.StudioReferenceVideo;
 })(typeof window!=='undefined'?window:globalThis);
 
@@ -155,6 +158,7 @@ async function openReferenceVideo(runId, task=null, opener=null){
   form.onsubmit=async event=>{
     event.preventDefault(); if(busy)return;
     const error=form.querySelector('[data-reference-error]');
+    if((task.recovery?task.recovery.requires_observation===true:!StudioReferenceVideo.canReuseAnalysis(task))&&(!data.connection||data.connection.has_key===false)){error.textContent='请先在模型设置中填写所选视频理解服务的 API Key。';return;}
     if(state.runId!==runId || state.busy || state.decisionBusy){error.textContent='请先结束当前任务。';return;}
     const file=form.elements.file.files[0], link=task.source_url||'';
     if(!task?.sha256 && !file && !link){error.textContent='请选择原视频或粘贴TK链接。';return;}
@@ -181,7 +185,7 @@ async function openReferenceVideo(runId, task=null, opener=null){
         {name:file?name:null,sha256:file?sha:null})}:{request_kind:'reference_video',request_id:requestId,reference_id:referenceId,
         intent:task.intent,instruction:task.instruction||'',
         name,expected_sha256:sha,source_url:name?null:link,consent:true,
-        expected_revision:data.revision,expected_endpoint:data.connection.base_url};
+        expected_revision:data.revision,expected_endpoint:data.connection?.base_url||''};
       dialog.close();toggleMaterials(false);setProjectFocus('chat');await submitJob(runId,payload);
     }catch(err){error.textContent=err.message;}
     finally{busy=false;form.querySelector('[type="submit"]').disabled=false;}

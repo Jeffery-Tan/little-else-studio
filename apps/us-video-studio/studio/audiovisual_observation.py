@@ -52,7 +52,7 @@ def _sound_ranges(raw, origin, check_cancel):
     return [[round(a, 3), round(b, 3)] for a, b in ranges]
 
 
-def _compact(raw, check_cancel):
+def _compact(raw, check_cancel, *, max_bytes=MAX_INLINE_BYTES):
     """Reduce only visuals; remux original audio packets on their original clock."""
     import av
     target = io.BytesIO()
@@ -74,7 +74,7 @@ def _compact(raw, check_cancel):
             tracks = [src_video] + ([source.streams.audio[0]] if audio else [])
             for packet in source.demux(tracks):
                 check_cancel()
-                if time.monotonic() - started > 90 or target.tell() > MAX_INLINE_BYTES:
+                if time.monotonic() - started > 90 or target.tell() > max_bytes:
                     raise ObservationError('观察副本超过处理上限；请导入更小的视频或明确片段。')
                 if packet.stream.type == 'audio':
                     if packet.dts is not None:
@@ -95,20 +95,21 @@ def _compact(raw, check_cancel):
             for packet in video.encode():
                 output.mux(packet)
     result = target.getvalue()
-    if len(result) > MAX_INLINE_BYTES:
+    if len(result) > max_bytes:
         raise ObservationError('视频观察副本仍超过发送上限，请导入较小视频。')
     return result
 
 
-def prepare_video(raw, check_cancel=lambda: None):
+def prepare_video(raw, check_cancel=lambda: None, *, max_bytes=MAX_INLINE_BYTES):
     import av
     try:
         original = sample_video(raw, check_cancel)
         origin = original['frames'][0]['source_time_seconds']
         sound = _sound_ranges(raw, origin, check_cancel)
         with av.open(io.BytesIO(raw), options={'protocol_whitelist': 'pipe'}) as container:
-            convert_container = container.format.name == 'matroska,webm'
-        sent = _compact(raw, check_cancel) if len(raw) > MAX_INLINE_BYTES or convert_container else raw
+            convert_container = 'mp4' not in container.format.name.split(',')
+            mime = 'video/quicktime' if container.metadata.get('major_brand', '').strip() == 'qt' else 'video/mp4'
+        sent = _compact(raw, check_cancel, max_bytes=max_bytes) if len(raw) > max_bytes or convert_container else raw
         if sent is not raw:
             checked = sample_video(sent, check_cancel)
             sent_sound = _sound_ranges(sent, checked['frames'][0]['source_time_seconds'], check_cancel)
@@ -125,6 +126,7 @@ def prepare_video(raw, check_cancel=lambda: None):
             limitations.append('本次发送压缩观察副本；细小文字和纹理可能损失，原音轨保留。')
         info = {'mode': 'native_audiovisual', 'source_sha256': hashlib.sha256(raw).hexdigest(),
                 'input_sha256': hashlib.sha256(sent).hexdigest(), 'input_bytes': len(sent),
+                'input_media_type': 'video/mp4' if sent is not raw else mime,
                 'duration_seconds': original['duration_seconds'], 'video_fps': 2,
                 'audio_sent': bool(sound), 'audio_ranges': sound, 'transcoded': sent is not raw,
                 'limitations': limitations}

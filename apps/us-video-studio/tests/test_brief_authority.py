@@ -200,11 +200,18 @@ def test_a_compliant_alternative_stays_adoptable_when_the_recommendation_is_bloc
 
 
 def test_an_unknown_clause_id_blocks_the_option_that_cites_it(store):
-    pipe, _ = _gated_direction(
-        store,
-        options=[{"key": "A", "satisfies": "goal.primary"},
-                 {"key": "B", "satisfies": "must.deadbeef"}],
-    )
+    # An immutable historical artifact can predate submit-time reference
+    # checking. Import it explicitly; new submissions must reject this shape.
+    pipe = Pipeline(store)
+    submit_intake(pipe)
+    attempt = pipe.start_attempt(RUN, 'direction')
+    artifact = store.write_artifact(RUN, 'direction', 1, '历史方向正文', summary='历史方向',
+        author_role='director', attempt=attempt.key, evidence=[], limitations=[],
+        inputs=attempt.inputs, structured={'options': [
+            {'key': 'A', 'satisfies': 'goal.primary'},
+            {'key': 'B', 'satisfies': 'must.deadbeef'}], 'recommended': 'A'})
+    store.append_event(RUN, 'attempt_submitted', stage='direction', number=attempt.number,
+                       artifact=artifact.key, sha256=artifact.sha256, actor='historical_import')
     gate = pipe.stage_state(RUN, "direction").brief_gate
     kinds = {b["kind"] for b in gate["blockers"] if b["key"] == "B"}
     assert "unknown_clause" in kinds

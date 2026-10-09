@@ -4,23 +4,27 @@ from __future__ import annotations
 from .registry import tool_names_for
 
 
-def capabilities(settings, role, *, local_revision=False):
+def capabilities(settings, role, *, local_revision=False, request_manifest=None):
     from ..image_analysis import MAX_IMAGE_BYTES, VISION_PROVIDERS
-    return {
+    role_tools = list(tool_names_for(role, local_revision=local_revision))
+    tools = list(request_manifest) if request_manifest is not None else role_tools
+    if len(tools) != len(set(tools)) or not set(tools) <= set(role_tools):
+        raise ValueError('Request capability manifest must use unique declared role tools.')
+    result = {
         "role": role,
-        "tools": list(tool_names_for(role, local_revision=local_revision)),
+        "tools": tools,
         "model_route": {"provider": settings.provider_by_role.get(role, "unspecified"),
                         "model": settings.model_for(role)},
         "role_input": "text and source-labelled observation records; list_materials does not send pixels",
         "image_analysis": {"execution": "creative request via observe_images", "agent_can_execute": role == 'orchestrator',
                            "accepted_protocols": sorted(VISION_PROVIDERS), "max_bytes": MAX_IMAGE_BYTES,
-                           "scope": "1–12 project images per conversation batch via Beijing Omni", "model_visual_quality_verified": False,
-                           "ui_summary": "主制片可按任务观察项目图片；是否可用取决于本机连接和实际图片。模型观察会注明来源，不能代替人工确认。",
+                           "scope": "1–12 project images per conversation batch via independently selected MiMo or Beijing Omni", "model_visual_quality_verified": False,
+                           "ui_summary": "图片理解可独立选择 MiMo 或原百炼；主制片按任务观察项目图片，不随角色或视频模型切换。模型观察会注明来源，不能代替人工确认。",
                            "notice": "主制片在创作范围内用observe_images实际看图，模型观察标明来源供团队策划，不冒充人工确认；仅列文件不算看图。原手动候选入口继续保留。"},
         "video_understanding": {"agent_can_execute": False, "user_command": "video-analysis",
-                                "coverage": "up to 90 seconds; Beijing Omni receives a video file and available audio; other vision routes receive up to 12 frames with no audio input",
-                                "ui_summary": "素材区可显式分析视频：百炼北京连接支持有限声画输入，其他视觉连接只分析抽帧。实际可用性与理解质量需逐次检查。",
-                                "notice": "素材页百炼北京支持声画分析，沿用 Wan 凭据，需检查本机连接是否就绪；结果选择后进入证据。模型采样和时间估计不保证逐帧验收，角色自身仍只读取观察记录。",
+                                "coverage": "up to 90 seconds; MiMo or Beijing Omni receives a video file and available audio; other vision routes receive up to 12 frames with no audio input",
+                                "ui_summary": "视频理解可独立选择 MiMo 原生声画分析或原百炼北京连接；其他视觉接口只分析抽帧。主制片调用同一视频理解服务，实际理解质量需逐次检查。",
+                                "notice": "视频理解不随角色模型切换。MiMo 使用自己的密钥，百炼沿用 Wan 连接；原片与可用音轨经受限观察副本发送。结果选择后进入商品证据，明确参考任务沿原规则复用。模型采样和时间估计不保证逐帧验收，角色自身仍只读取观察记录。",
                                 "model_audiovisual_quality_verified": False},
         "reference_video": {"agent_can_execute": role == 'orchestrator', "user_command": "observe_reference",
                             "notice": "明确要求分析/复刻时主制片可调用受限参考观察，一轮最多一次，已有分析复用；只分析结束本轮。裸链接先问用途，其他角色只读指定观察。两种来源在对话中直接提供，不要求用途表；生成审批仍不开放。"},
@@ -34,6 +38,17 @@ def capabilities(settings, role, *, local_revision=False):
                               "notice": "没有通用联网搜索、浏览器或 Shell 工具；先使用本项目证据和合资格方法，缺口明确标注。"},
         "history": "main agent can retrieve this run's older conversation; workers receive their exact prior artifact",
     }
+    if request_manifest is not None:
+        result['tools_scope'] = 'this_frozen_request'
+        result['notice'] = ('tools 是本次请求实际开放的工具；下面应用能力摘要不是执行权限。'
+                            '尚未绑定任务解释时先解释完整原话，其他工具只有下一次请求明确开放后才能调用。')
+        result['image_analysis']['agent_can_execute'] = 'observe_images' in tools
+        result['image_analysis']['execution'] = ('Only the supplied observe_images schema and bound task permit observation.'
+            if 'observe_images' in tools else 'No image observation in this request.')
+        result['reference_video']['agent_can_execute'] = 'observe_reference' in tools
+        result['production']['next_action'] = ('只在已绑定制作范围内保存准确输入，仍不能批准或提交生成。'
+            if 'prepare_production' in tools else '本次没有准备或生成权限；先完成当前解释或只读答复。')
+    return result
 
 
 def conversation(store, run_id, *, before=None, limit=10, message_index=None, offset=0,

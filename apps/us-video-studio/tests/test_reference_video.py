@@ -121,6 +121,70 @@ def test_remote_analysis_failure_resumes_without_download(native, monkeypatch):
     assert downloads == [URL] and len(native[2].calls) == 2
 
 
+@pytest.mark.parametrize('failed', [False, True])
+def test_canonical_alias_keeps_original_task_and_cached_source(native, monkeypatch, failed):
+    p, raw = request(native, remote=True)
+    p['source_url'] = 'https://vm.tiktok.com/SyntheticAlias/'
+    downloads = downloader(monkeypatch, raw)
+    if failed:
+        native[2].turn = Turn(text='bad json', stop_reason='end_turn', model=MODEL, usage=Usage(10, 2))
+    assert submit(native, p)['status'] == ('failed' if failed else 'succeeded')
+    native[2].turn = Turn(text=json.dumps(RESULT), stop_reason='end_turn', model=MODEL, usage=Usage(10, 2))
+    observe = native[0].app.state.observe_reference
+    result = observe(RUN, URL, 'Read the saved source', lambda _: None, lambda: None,
+                     endpoint=BASE, revision=1)
+    assert result['reference_id'] == p['reference_id'] and result['reused'] is not failed
+    assert downloads == [p['source_url']] and len(native[2].calls) == (2 if failed else 1)
+    result = observe(RUN, URL, 'Reuse completed observation', lambda _: None, lambda: None,
+                     endpoint=BASE, revision=1)
+    assert result['reference_id'] == p['reference_id'] and result['reused'] is True
+    assert len(task_state(native[1], RUN)) == 1 and len(native[2].calls) == (2 if failed else 1)
+
+
+@pytest.mark.parametrize('source_kind', ['local', 'url', 'downloaded_file'])
+def test_explicit_conversation_retry_keeps_source_and_uses_current_scope(native, monkeypatch, source_kind):
+    remote = source_kind != 'local'
+    p, raw = request(native, remote=remote)
+    original_instruction = '重点拆解开场钩子与手持观感'
+    current_instruction = '无口播，重点拆解装载动作与画面推进'
+    p['instruction'] = original_instruction
+    downloads = downloader(monkeypatch, raw)
+    native[2].turn = Turn(text='bad json', stop_reason='end_turn', model=MODEL, usage=Usage(10, 2))
+    assert submit(native, p)['status'] == 'failed'
+    assert len(native[2].calls) == 1
+    source_before = next(e for e in native[1].read_events(RUN) if e['kind'] == 'reference_video_source')
+    source = URL if source_kind == 'url' else source_before['source']['name']
+    native[2].turn = Turn(text=json.dumps(RESULT), stop_reason='end_turn', model=MODEL, usage=Usage(10, 2))
+
+    # This internal observer is reached only after the orchestrator validates
+    # this turn's explicit user quote; no new Job or automatic retry is created.
+    observe = native[0].app.state.observe_reference
+    result = observe(RUN, source, current_instruction, lambda _: None, lambda: None,
+                     endpoint=BASE, revision=1)
+    assert result['reference_id'] == p['reference_id'] and result['reused'] is False
+    assert len(native[2].calls) == 2 and downloads == ([URL] if remote else [])
+    sent = json.dumps(native[2].calls[1]['messages'], ensure_ascii=False)
+    assert current_instruction in sent and original_instruction not in sent
+    events = native[1].read_events(RUN)
+    started = [e for e in events if e['kind'] == 'reference_video_started']
+    sources = [e for e in events if e['kind'] == 'reference_video_source']
+    requests = [e for e in events if e['kind'] == 'reference_video_analysis_requested']
+    assert len(started) == len(sources) == 1
+    assert started[0]['request']['instruction'] == original_instruction
+    assert sources[0]['source'] == source_before['source']
+    assert [e['instruction'] for e in requests] == [original_instruction, current_instruction]
+    assert all(e['reference_id'] == p['reference_id'] for e in requests)
+    assert len({e['request_id'] for e in requests}) == 2
+    assert all(e['sha256'] == hashlib.sha256(raw).hexdigest() for e in requests)
+
+    reused = observe(RUN, source, '继续沿用已完成的观察', lambda _: None, lambda: None,
+                     endpoint=BASE, revision=1)
+    assert reused['reference_id'] == p['reference_id'] and reused['reused'] is True
+    assert len(native[2].calls) == 2 and downloads == ([URL] if remote else [])
+    assert len([e for e in native[1].read_events(RUN)
+                if e['kind'] == 'reference_video_analysis_requested']) == 2
+
+
 def test_recreate_planner_failure_reuses_completed_analysis(native, monkeypatch):
     p, raw = request(native, remote=True, intent='recreate')
     downloads = downloader(monkeypatch, raw)

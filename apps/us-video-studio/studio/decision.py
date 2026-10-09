@@ -178,7 +178,8 @@ def candidates(store, pipeline, run_id, *, pending=None) -> list[dict[str, Any]]
         label = str(row.get("stage_label") or stage)
         kind = str(row.get("kind") or "decision_request")
         target = {"stage": stage, "version": int(version), "artifact_sha256": sha}
-        options = [{"id": str(o.get("key")), "label": str(o.get("label") or o.get("key"))}
+        options = [{"id": str(o.get("key")), "label": str(o.get("label") or o.get("key")),
+                    **({"title": o["title"]} if o.get("title") else {})}
                    for o in (row.get("options") or [])
                    if o.get("key") and bool(o.get("admissible", True))]
         answers: list[dict[str, Any]] = []
@@ -372,6 +373,8 @@ def resolve(decisions: list[dict], proposed: dict | None, *, source: str = "conv
                         'question': '请明确这次要对当前展示的哪份内容做什么决定。'}
             action = {**action, 'message_id': receipt['message_id'],
                       'display_context_id': receipt.get('display_context_id'),
+                      **({'evidence_quote': proposed['evidence_quote']}
+                         if proposed.get('evidence_quote') is not None else {}),
                       'continue_after': continue_after(receipt, proposed, interpretation=interpretation)}
         return {'status': 'commit', 'action': action}
 
@@ -604,6 +607,12 @@ def continuation_text(approval, *, store=None, run_id=None) -> str:
         chosen = f'我选择方向 {approval.selected_option_id}。' if approval.selected_option_id else ''
         return (f'我已采用当前的{stage_label}。{chosen}{extra} '
                 '请继续完成素材安排和完整方案，完成内部检查后展示给我确认。')
+    from .project_brief import content_format
+    photo = store is not None and run_id is not None and content_format(store.read_events(run_id)) == 'photo'
+    if photo:
+        return (f'我已采用当前的图文方案。{extra} '
+                '请逐页准备包含定稿图内文案的完整图片制作输入，在工作区展示实际输入供我确认。'
+                '先不提交图片或视频生成。')
     return (f'我已采用当前的{stage_label}。{extra} '
             '请准备对应的分镜参考图制作方案，在工作区展示实际输入供我确认。'
             '先不提交图片或视频生成。')

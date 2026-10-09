@@ -353,6 +353,8 @@ def describe_event(ev: dict[str, Any]) -> str:
     means the agent was cut off mid-thought.
     """
     kind = ev.get("type")
+    if kind == 'agent_submission_normalized':
+        return '模型省略的辅助字段已由工作台补为空值，并保留待复核提示；没有重新调用模型。'
     if kind == "agent_tool":
         return describe_tool_call(
             ev.get("role", ""), ev.get("tool", ""), ev.get("args") or {}, bool(ev.get("ok"))
@@ -395,6 +397,8 @@ def failure_note(text: str) -> str:
     """
     if 'unknown, partial or pending usage' in text or 'reconcile provider evidence' in text:
         return '这一轮当时因用量记录缺失而暂停，已有内容已保留。现已取消核账限制，可以继续。'
+    if text.endswith('model endpoint returned 200: invalid Chat Completions response; received usage retained'):
+        return '模型返回内容未通过格式校验，这一轮已停止。已有内容与调用用量记录保留；这份旧错误未注明具体失败字段。'
     if '模型输出达到单次上限' in text:
         return '这轮负责这一步的团队模型输出达到单次上限，结果不完整，新版未保存。系统已停止自动重试，避免重复计费；请从当前阶段继续。'
     if '团队模型返回的结果读不出来' in text or '角色模型返回了无法读取的结果' in text:
@@ -501,7 +505,7 @@ def spend_sentence(spend: Any, usd_enforceable: bool) -> str:
 
 
 def build_rail(stages: list[dict[str, Any]], next_stage: str | None,
-               chat: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+               chat: list[dict[str, Any]] | None = None, *, store=None, run_id=None) -> list[dict[str, Any]]:
     """Top-of-screen progress, and the four stage views behind it.
 
     Each step reports one of three things: done (✓), the one being worked on now
@@ -521,6 +525,9 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None,
     ``version`` on this same step; it can never be a verdict on an older draft.
     """
     from .structured import question_answered, view
+    from .interactions import artifact_responses
+    responses = artifact_responses(store, run_id) if store is not None and run_id else []
+    questions = build_questions(stages, chat, store=store, run_id=run_id)
 
     rail: list[dict[str, Any]] = []
     for st in stages:
@@ -585,11 +592,13 @@ def build_rail(stages: list[dict[str, Any]], next_stage: str | None,
                 "needs_you": bool(st.get("can_approve")),
                 "blank": blank,
                 "blocks": view(stage, structured),
-                "questions": [q for q in build_questions(stages, chat) if q["stage"] == stage],
+                "questions": [q for q in questions if q["stage"] == stage],
                 "team_issues": [q for q in (structured.get("open_questions") or [])
                                 if isinstance(q, dict) and q.get("question")
-                                and not question_answered(chat, q["question"], latest.get("created_at", ""))
-                                and not any(q.get("question") == ask["question"] for ask in build_questions(stages, chat)
+                                and not question_answered(chat, q["question"], latest.get("created_at", ""),
+                                    responses=responses, stage=stage, version=latest.get('version'),
+                                    artifact_sha256=latest.get('sha256'))
+                                and not any(q.get("question") == ask["question"] for ask in questions
                                             if ask["stage"] == stage)],
                 "review": None
                 if not review.get("verdict")

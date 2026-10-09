@@ -23,8 +23,9 @@ from .config import ACTIVE_ROLES, ROLES, Pricing, Settings
 from .agents.client import SafePreflightError
 from .connection_checks import valid_deepseek_key
 
-PROVIDERS = ('codex_cli', 'deepseek', 'anthropic_compat', 'openai_compat')
+PROVIDERS = ('codex_cli', 'deepseek', 'mimo', 'anthropic_compat', 'openai_compat')
 DEEPSEEK_BASE_URL = 'https://api.deepseek.com/v1'
+MIMO_BASE_URL = 'https://api.xiaomimimo.com/v1'
 _LOCK = threading.RLock()
 _REPO = Path(__file__).resolve().parents[3]
 
@@ -103,7 +104,9 @@ def _public(doc):
                             | {'has_key': bool(c.get('protected_key')),
                                'token_limit_parameter': c.get('token_limit_parameter', 'max_completion_tokens')}
                             for c in doc['connections']],
-            'roles': copy.deepcopy(doc['roles'])}
+            'roles': copy.deepcopy(doc['roles']),
+            'video_analysis': copy.deepcopy(doc.get('video_analysis')),
+            'image_analysis': copy.deepcopy(doc.get('image_analysis'))}
 
 
 def _role_projection(doc, roles):
@@ -192,6 +195,7 @@ class ConnectionStore:
                 if not isinstance(name, str) or not name.strip() or len(name) > 120:
                     raise ValueError('Connection name must be nonempty and at most 120 characters')
                 base_url = (DEEPSEEK_BASE_URL if provider == 'deepseek' else
+                            MIMO_BASE_URL if provider == 'mimo' else
                             validate_base_url(value.get('base_url')) if provider != 'codex_cli' else '')
                 entry = {'id': cid, 'name': name, 'provider': provider, 'base_url': base_url,
                          'pricing': _pricing(value.get('pricing', {}))}
@@ -201,6 +205,7 @@ class ConnectionStore:
                     entry['pricing'] = {}
                     warnings.append(f'Connection {cid}: provider or endpoint changed; pricing cleared. Verify and save its rate card again.')
                 token_parameter = ('max_tokens' if provider == 'deepseek' else
+                                   'max_completion_tokens' if provider == 'mimo' else
                                    value.get('token_limit_parameter', 'max_completion_tokens'))
                 if token_parameter not in ('max_tokens', 'max_completion_tokens'):
                     raise ValueError('Unsupported Chat Completions token limit parameter')
@@ -234,7 +239,22 @@ class ConnectionStore:
                 if providers[value['connection']] != 'codex_cli' and not model.strip():
                     raise ValueError('API connections require an explicit model')
                 bindings[role] = {'connection': value['connection'], 'model': model.strip()}
-            doc = {'schema_version': 1, 'revision': previous['revision'] + 1, 'connections': clean, 'roles': bindings}
+            video = copy.deepcopy(payload.get('video_analysis', previous.get('video_analysis')))
+            if video is not None:
+                if (not isinstance(video, dict) or set(video) != {'connection', 'model'}
+                        or not isinstance(video.get('connection'), str)
+                        or providers.get(video.get('connection')) != 'mimo'
+                        or video.get('model') != 'mimo-v2.6-flash'):
+                    raise ValueError('视频理解请选择已添加的 MiMo 服务与 mimo-v2.6-flash；留空保留百炼。')
+            image = copy.deepcopy(payload.get('image_analysis', previous.get('image_analysis')))
+            if image is not None:
+                if (not isinstance(image, dict) or set(image) != {'connection', 'model'}
+                        or not isinstance(image.get('connection'), str)
+                        or providers.get(image.get('connection')) != 'mimo'
+                        or image.get('model') != 'mimo-v2.6-flash'):
+                    raise ValueError('图片理解请选择已添加的 MiMo 服务与 mimo-v2.6-flash；留空保留百炼。')
+            doc = {'schema_version': 1, 'revision': previous['revision'] + 1, 'connections': clean,
+                   'roles': bindings, 'video_analysis': video, 'image_analysis': image}
             self.root.mkdir(parents=True, exist_ok=True)
             from .store import _atomic_write_text
             _atomic_write_text(self.path, json.dumps(doc, ensure_ascii=False, indent=2) + '\n')
@@ -283,7 +303,7 @@ class ConnectionStore:
                 if type(expected_revision) is not int or expected_revision != doc['revision']:
                     raise ConnectionConflict('模型设置已更新，请重新打开图片分析后再确认。')
                 connection = next((c for c in doc['connections'] if c['id'] == image_connection), None)
-                if not connection or connection['provider'] not in {'openai_compat', 'anthropic_compat'}:
+                if not connection or connection['provider'] not in {'openai_compat', 'anthropic_compat', 'mimo'}:
                     raise ConnectionUnavailable('这个连接尚未接入图片分析，请选择支持图片输入的 API 服务。')
                 if not connection.get('protected_key'):
                     raise ConnectionUnavailable('请先在模型设置中保存此服务的 API Key。')
@@ -367,9 +387,12 @@ class RoutedClient:
                     raise ValueError('Invalid local DeepSeek key')
                 # DeepSeek's thinking-mode default has more room than the
                 # generic compatibility client's 16K completion limit.
-                # Keep the director's reasoning available for creative tradeoffs;
-                # the stage brief and context assembly bound the actual task.
-                return DeepSeekClient(token, max_tokens=None, reasoning_effort='high',
+                # The writer's structured delivery completed at low effort in
+                # the isolated live check; high exhausted the single-call deadline.
+                # Keep other roles' existing creative deliberation setting.
+                effort = 'low' if role == 'writer' else 'high'
+                return DeepSeekClient(token, max_tokens=None, reasoning_effort=effort,
+                                      progress_stream=role != 'writer',
                                       check_cancel=self.check_cancel,
                                       cancel_event=self.cancel_event)
             except (ValueError, TypeError):
@@ -377,13 +400,22 @@ class RoutedClient:
                 # Stop a dispatched role without turning a local setup problem
                 # into a retryable tool error or exposing the submitted value.
                 raise ConnectionUnavailable('DeepSeek 本地连接配置无效，请检查密钥后重试。') from None
+        if provider == 'mimo':
+            from .agents.mimo_client import MiMoClient
+            try:
+                return MiMoClient(token, max_tokens=self.max_tokens, check_cancel=self.check_cancel,
+                                  cancel_event=self.cancel_event)
+            except (ValueError, TypeError):
+                raise ConnectionUnavailable('MiMo 本地连接配置无效，请检查密钥与输出上限后重试。') from None
         try:
             base_url = validate_base_url(connection['base_url'])
         except ValueError:
             raise ConnectionUnavailable('This model connection has an invalid endpoint; correct it in the workbench') from None
         if provider == 'anthropic_compat':
             from .agents.client import AnthropicCompatClient
-            return AnthropicCompatClient(base_url, token, max_tokens=self.max_tokens)
+            return AnthropicCompatClient(base_url, token, max_tokens=self.max_tokens,
+                                         check_cancel=self.check_cancel, cancel_event=self.cancel_event)
         from .agents.openai_compat import OpenAICompatClient
         return OpenAICompatClient(base_url, token, max_tokens=self.max_tokens,
-                                  token_limit_parameter=connection['token_limit_parameter'])
+                                  token_limit_parameter=connection['token_limit_parameter'],
+                                  check_cancel=self.check_cancel, cancel_event=self.cancel_event)

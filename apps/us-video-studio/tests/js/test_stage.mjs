@@ -88,6 +88,35 @@ const threeOptions = [
   { key: "C", recommended: false, label: "改用 C", return_note: "改用 C（导演推荐的是 B）" },
 ];
 
+test('unfinished saved script stays readable and explicitly adoptable without a completion prompt',()=>{
+  const current=pending({stage:'writing',stage_label:'脚本',version:2,artifact_sha256:'a'.repeat(64),
+    reviewed:false,headline:'「脚本」草稿已保存，检查或交付未完成。',
+    body:'请先查看或修改；仍可明确采用，不代表检查完成。',
+    source_execution:{job_id:'source',status:'blocked',notice:'草稿已保存，检查或交付未完成；请先查看或修改。'}});
+  const html=stageHtml(step({stage:'writing',artifact_sha256:'a'.repeat(64),blocks:[
+    {type:'cards',cards:[{head:'0:00–0:03',fields:[{label:'画面',value:'放入饭盒'},{label:'台词',value:'Lunch, ready.'}]}]}
+  ]}),{pending:current});
+  assert.match(html,/草稿已保存，检查或交付未完成/);
+  assert.match(html,/仍可明确采用，不代表检查完成/);
+  assert.match(html,/data-act="approve">采用当前草稿/);
+  assert.match(html,/data-act="reject">按意见修改/);
+  assert.match(html,/data-creator-target="第 1 段台词"/);
+  assert.doesNotMatch(html,/确认当前脚本并继续|审核已通过|脚本已保存，等你决定/);
+});
+
+test('the same source warning changes direction guidance without removing admissible choices',()=>{
+  const current=pending({options:threeOptions,source_execution:{job_id:'source',status:'blocked',
+    notice:'草稿已保存，检查或交付未完成；请先查看或修改。'},
+    body:'检查或交付未完成；仍可明确采用这版草稿。'});
+  const html=stageHtml(step({blocks:[{type:'cards',cards:threeOptions.map(option=>({
+    head:option.key,fields:[{label:'主张',value:`方向 ${option.key}`}]}))}]}),{pending:current});
+  assert.match(html,/先查看或修改方向草稿/);
+  assert.match(html,/检查或交付未完成/);
+  assert.match(html,/data-act="approve">采用所选草稿方向/);
+  assert.equal((html.match(/data-act="pick-option"/g)||[]).length,3);
+  assert.doesNotMatch(html,/选一个方向，继续写成方案/);
+});
+
 /* --------------------------------------------------------------- security -- */
 
 test("a script tag in the summary renders as text, not as an element", () => {
@@ -679,4 +708,69 @@ test('prose-only historical script displays its original bytes without invented 
   assert.match(html,/Say the actual line/);
   assert.match(html,/这份历史脚本按原文保存/);
   assert.doesNotMatch(html,/creator-script-segment|data-creator-target=/);
+});
+
+test('photo decision uses the server name while preserving exact decision attributes', () => {
+  const hash='a'.repeat(64);
+  const current=pending({stage:'writing',stage_label:'图文方案',version:2,artifact_sha256:hash,
+    headline:'「图文方案」已保存，等你决定。',reviewed:false,options:[]});
+  const html=stageHtml(step({stage:'writing',artifact_sha256:hash}),{pending:current,contentFormat:'photo'});
+  assert.match(html,/确认当前图文方案并继续/);
+  assert.match(html,/placeholder="当前图文方案需要改哪里？"/);
+  assert.match(html,/data-stage="writing" data-version="2" data-sha="a{64}"/);
+  assert.match(html,/data-act="approve"/);
+  assert.match(html,/data-act="reject"/);
+  assert.doesNotMatch(html,/确认当前脚本|当前脚本需要改/);
+});
+
+test('decision names from the projection remain escaped in actions and placeholders', () => {
+  const current=pending({stage:'writing',stage_label:'<img src=x onerror=alert(1)>',version:2,options:[]});
+  const html=stageHtml(step({stage:'writing'}),{pending:current});
+  assert.doesNotMatch(html,/<img src=x/);
+  assert.match(html,/确认当前&lt;img/);
+  assert.match(html,/placeholder="当前&lt;img/);
+});
+
+
+test('photo reading titles use explicit format while video and unknown headings remain original', () => {
+  const writing=step({stage:'writing',label:'脚本',blocks:[
+    {type:'text',title:'制作依据',text:'Keep exact original support'},
+    {type:'cards',cards:[{head:'Page 1',fields:[{label:'画面',value:'Original picture'},{label:'台词',value:'Exact copy'}]}]},
+  ],artifact_sha256:'a'.repeat(64)});
+  const before=JSON.stringify(writing);
+  const photo=stageHtml(writing,{contentFormat:'photo',readOnly:true});
+  assert.match(photo,/<h1>图文方案<\/h1>/);
+  assert.match(photo,/逐页检查画面、图内文案与发布文案/);
+  assert.match(photo,/查看逐页安排与其他依据/);
+  assert.doesNotMatch(photo,/<h1>脚本<\/h1>|查看分镜顺序与其他依据/);
+  assert.match(photo,/Keep exact original support|Original picture|Exact copy/);
+  for (const contentFormat of ['video',null]) {
+    const html=stageHtml(writing,{contentFormat,readOnly:true});
+    assert.match(html,/<h1>脚本<\/h1>/);
+    assert.doesNotMatch(html,/<h1>图文方案<\/h1>/);
+  }
+  assert.equal(JSON.stringify(writing),before);
+  const legacy=stageHtml({...writing,blocks:[]},{contentFormat:'photo',readOnly:true});
+  assert.match(legacy,/图文方案正文/);
+  assert.doesNotMatch(legacy,/脚本正文|历史脚本/);
+});
+
+
+test('reader shows the exact saved version and identifies photo plan references',()=>{
+  const source=step({stage:'writing',version:7,blocks:[{type:'cards',cards:[
+    {head:'Page 1',media:'source <a>.png',fields:[{label:'画面',value:'Exact picture'}]},
+    {head:'Page 2',fields:[{label:'画面',value:'No reference'}]},
+  ]}],artifact_sha256:'a'.repeat(64)});
+  const original=JSON.stringify(source);
+  const html=stageHtml(source,{readOnly:true,contentFormat:'photo'});
+  assert.match(html,/第 7 版 · 逐页检查/);
+  assert.equal((html.match(/方案参考图/g)||[]).length,1);
+  assert.match(html,/data-media="source &lt;a&gt;.png"/);
+  assert.doesNotMatch(html,/已生成|data-act="approve"/);
+  assert.equal(JSON.stringify(source),original);
+  const video=stageHtml(source,{readOnly:true,contentFormat:'video'});
+  assert.match(video,/第 7 版/);assert.doesNotMatch(video,/方案参考图/);
+  for (const version of [undefined,null,0,-1,7.5,'7',true])
+    assert.doesNotMatch(stageHtml({...source,version},{readOnly:true,contentFormat:'photo'}),/第 .* 版 ·/);
+  assert.doesNotMatch(stageHtml(source,{readOnly:false,contentFormat:'photo'}),/第 7 版 ·/);
 });

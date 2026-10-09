@@ -39,6 +39,12 @@ function answerKey(q) {
   return `${q.stage}:v${q.version}:${q.question}`;
 }
 
+function stageDisplayLabel(step, contentFormat) {
+  if (!step) return '';
+  return step?.stage === 'writing' && contentFormat === 'photo'
+    ? '图文方案' : step?.label || '创作项目';
+}
+
 function stageHtml(step, ctx) {
   if (!step) return "";
   ctx = ctx || {};
@@ -58,7 +64,7 @@ function stageHtml(step, ctx) {
   return (
     `<div class="pane${pending ? " has-gate" : ""}" data-stage="${escapeHtml(step.stage)}">` +
     (pending && !inlineDirection ? `<a class="decision-jump" href="#stage-decision">查看方案并决定 ↓</a>` : "") +
-    titleHtml(step) +
+    titleHtml(step, ctx) +
     warnHtml(step) +
     (ctx.readOnly ? '' : headHtml(step)) +
     (direction?.html || writing || docHtml(step, ctx)) +
@@ -168,7 +174,10 @@ function directionWorkHtml(step, pending, ctx) {
     amendBlockHtml(pending) + decisionActionsHtml(pending, true) +
     `<p class="gate-limit">仅确认这一版策划，不开始图片或视频生成。</p>` +
     `<details class="gate-next"><summary>后续阶段与历史用量</summary>${pending.next_stage_label ? `<div>下一步：${escapeHtml(pending.next_stage_label)} · ${escapeHtml(pending.next_owner)}</div>` : ''}<div class="gate-next-cost">${escapeHtml(pending.next_cost_sentence || '')}</div></details></div>` : '';
-  const html = `<div class="pane-doc"><section${gateAttrs}><div class="creator-decision-intro"><span class="creator-kicker">${inlineGate ? '现在需要你决定' : '当前创意'}</span><h2>${inlineGate ? '选一个方向，继续写成方案' : selected ? `${selectedLabel}的方向` : '看看这些创意方向'}</h2></div>${decision}${selectedCard ? cardList + recommendationHtml : recommendationHtml + findings + cardList}${footer}${other.length ? `<details class="creator-direction-support"><summary>完整依据与其他内容</summary>${blocksHtml(other)}</details>` : ''}${sourceSummaryHtml(step)}</section></div>`;
+  const draftNotice = inlineGate && pending.source_execution?.notice;
+  const heading = inlineGate ? draftNotice ? '先查看或修改方向草稿' : '选一个方向，继续写成方案'
+    : selected ? `${selectedLabel}的方向` : '看看这些创意方向';
+  const html = `<div class="pane-doc"><section${gateAttrs}><div class="creator-decision-intro"><span class="creator-kicker">${inlineGate ? draftNotice ? '草稿已保存' : '现在需要你决定' : '当前创意'}</span><h2>${heading}</h2>${draftNotice ? `<p>${escapeHtml(pending.body || draftNotice)}</p>` : ''}</div>${decision}${selectedCard ? cardList + recommendationHtml : recommendationHtml + findings + cardList}${footer}${other.length ? `<details class="creator-direction-support"><summary>完整依据与其他内容</summary>${blocksHtml(other)}</details>` : ''}${sourceSummaryHtml(step)}</section></div>`;
   return {html, inlineGate};
 }
 
@@ -183,7 +192,9 @@ function sourceSummaryHtml(step) {
 function writingWorkHtml(step, ctx) {
   const blocks = step.blocks || [];
   const cards = blocks.find(block => block.type === 'cards' && block.cards?.length)?.cards || [];
-  if (!cards.length) return legacyWorkHtml(step, '脚本正文', '这份历史脚本按原文保存；可阅读原稿并对当前作品提出修改。', ctx);
+  if (!cards.length) return legacyWorkHtml(step, ctx?.contentFormat === 'photo' ? '图文方案正文' : '脚本正文',
+    ctx?.contentFormat === 'photo' ? '这份图文方案按原文保存；可阅读原稿并对当前作品提出修改。'
+      : '这份历史脚本按原文保存；可阅读原稿并对当前作品提出修改。', ctx);
   const isPhoto = ctx?.contentFormat === 'photo' ||
     (!ctx?.contentFormat && cards.every(card => /^(?:第\s*)?\d+\s*页|^页\s*\d+|^P\s*\d+/iu.test(String(card.head || '').trim())));
   const canSelect = !step.stale && step.integrity_ok !== false && /^[a-f0-9]{64}$/.test(step.artifact_sha256 || '');
@@ -208,7 +219,7 @@ function writingWorkHtml(step, ctx) {
   }).join('');
   const pending = ctx?.pending;
   const reviewState = pending && pending.stage === step.stage && pending.version === step.version
-    ? `<p class="creator-script-review-state">${pending.reviewed === false ? '脚本已保存，等你决定' : pending.passed ? '审核已通过，仍待你决定' : '审核未通过，建议先看修改意见'}${pending.findings?.length ? ` · ${pending.findings.length} 点` : ''}</p>` : '';
+    ? `<p class="creator-script-review-state">${escapeHtml(pending.source_execution?.notice || (pending.reviewed === false ? `${isPhoto ? '图文方案' : '脚本'}已保存，等你决定` : pending.passed ? '审核已通过，仍待你决定' : '审核未通过，建议先看修改意见'))}${pending.findings?.length ? ` · ${pending.findings.length} 点` : ''}</p>` : '';
   const overview = `<nav class="creator-script-overview" aria-label="${isPhoto ? '图文稿页码' : '脚本段落'}"><div class="creator-script-overview-head"><strong>${cards.length} ${isPhoto ? '页' : '段'}内容</strong><span>点一段直接阅读</span></div>${reviewState}<ol>${outline}</ol></nav>`;
   const segments = cards.map((card, index) => {
     const number = index + 1;
@@ -230,7 +241,7 @@ function writingWorkHtml(step, ctx) {
     const words = hasLine ? `<div class="creator-script-words"><strong>${isPhoto ? '图内文案' : '台词或字幕'}</strong><p class="creator-script-line vf-value"${fieldTarget(`${target}${isPhoto ? '图内文案' : '台词'}`,'line')}>${escapeHtml(line)}</p></div>` :
       explicitNoLine ? `<p class="creator-script-no-line">原稿注明：${escapeHtml(line)}</p>` : '';
     const visual = picture || card.media ? `<div class="creator-script-visual">` +
-      (card.media ? `<div class="creator-script-media" data-media="${escapeHtml(card.media)}"></div>` : '') +
+      (card.media ? `${isPhoto ? '<p class="creator-kicker">方案参考图</p>' : ''}<div class="creator-script-media" data-media="${escapeHtml(card.media)}"></div>` : '') +
       (picture ? `<div class="creator-script-picture-wrap"><strong>${isPhoto ? '画面' : '画面与动作'}</strong><p class="creator-script-picture vf-value"${fieldTarget(`${target}画面`,'picture')}>${escapeHtml(picture)}</p></div>` : '') + '</div>' : '';
     const audio = sound ? `<div class="creator-script-sound"><strong>声音</strong><p${fieldTarget(`${target}声音`,'sound')}>${escapeHtml(sound)}</p></div>` : '';
     // These are references to the shared design, not new creative decisions or
@@ -245,8 +256,8 @@ function writingWorkHtml(step, ctx) {
   }).join('');
   return `<div class="pane-doc creator-script-work"><div class="creator-script-intro"><span class="creator-kicker">${isPhoto ? '当前图文稿' : '当前脚本'}</span><h2>${isPhoto ? '逐页看画面与图内文案' : '逐段读画面与表达'}</h2><p>${canSelect ? '点选画面或文字，可在对话中讨论，也可按意见直接修改该字段。' : '先阅读这份作品；来源或版本需要核对后才能针对具体内容修改。'}</p></div>${overview}<div class="creator-script-lines">${segments}</div>` +
     (caption?.text ? `<section class="creator-script-caption"><h3>发布文案</h3><p class="blk-text"${canSelect ? ` data-creator-target="发布文案" data-creator-path="${escapeHtml(JSON.stringify(['caption']))}"` : ''}>${escapeHtml(caption.text)}</p></section>` : '') +
-    (assumptions?.items?.length ? `<section class="creator-script-assumptions"><h3>这份脚本仍需核对</h3><ul>${assumptions.items.map(item => `<li>${escapeHtml(item.text)}</li>`).join('')}</ul></section>` : '') +
-    (other.length ? `<details class="creator-script-support"><summary>查看分镜顺序与其他依据</summary>${blocksHtml(other)}</details>` : '') + sourceSummaryHtml(step) + '</div>';
+    (assumptions?.items?.length ? `<section class="creator-script-assumptions"><h3>这份${isPhoto ? '图文方案' : '脚本'}仍需核对</h3><ul>${assumptions.items.map(item => `<li>${escapeHtml(item.text)}</li>`).join('')}</ul></section>` : '') +
+    (other.length ? `<details class="creator-script-support"><summary>${isPhoto ? '查看逐页安排与其他依据' : '查看分镜顺序与其他依据'}</summary>${blocksHtml(other)}</details>` : '') + sourceSummaryHtml(step) + '</div>';
 }
 
 function teamIssuesHtml(issues) {
@@ -311,7 +322,10 @@ function revisionNoteHtml(placeholder) {
 
 function decisionActionsHtml(pending, direction = false) {
   const revise = `<button type="button" class="good small" data-act="reject">按意见修改，先出新版</button>`;
-  const adopt = `<button type="button" class="ghost small" data-act="approve">${direction ? '按所选方向继续' : pending.stage === 'direction' ? '确认当前方向并继续' : '确认当前脚本并继续'}</button>`;
+  const label = pending.source_execution?.notice
+    ? direction ? '采用所选草稿方向' : '采用当前草稿'
+    : direction ? '按所选方向继续' : pending.stage === 'direction' ? '确认当前方向并继续' : `确认当前${pending.stage_label || '脚本'}并继续`;
+  const adopt = `<button type="button" class="ghost small" data-act="approve">${escapeHtml(label)}</button>`;
   return gateActionsHtml(['approve', 'reject'], '选择和填写意见都不会立即提交。',
     `<div class="gate-decision-buttons">${revise}${adopt}</div>`);
 }
@@ -400,10 +414,11 @@ function stageDecisionGateHtml(pending, step) {
     gateAmendAttrs(pending) + `>` +
     `<div class="gate-head">下一步 · ${escapeHtml(pending.stage_label)}</div>` +
     `<p class="gate-headline">${escapeHtml(pending.headline)}</p>` +
+    (pending.source_execution?.notice ? `<p>${escapeHtml(pending.body || pending.source_execution.notice)}</p>` : '') +
     conflictsHtml(pending) + findingsHtml(pending) + choices +
     (options.length ? `<p class="gate-choice-summary" role="status">尚未选择方向；团队推荐不代表你已选择。</p>` : '') +
     amendBlockHtml(pending) +
-    revisionNoteHtml(options.length ? "想保留哪个想法、具体哪里要改？不选方向也可以要求全部重做。" : "当前脚本需要改哪里？") +
+    revisionNoteHtml(options.length ? "想保留哪个想法、具体哪里要改？不选方向也可以要求全部重做。" : `当前${pending.stage_label || '脚本'}需要改哪里？`) +
     decisionActionsHtml(pending, Boolean(options.length)) +
     `<details class="gate-next"><summary>后续阶段与历史用量</summary>` +
     (pending.next_stage_label ? `<div>下一步：${escapeHtml(pending.next_stage_label)} · ${escapeHtml(pending.next_owner)}</div>` : '') +
@@ -519,15 +534,16 @@ function warnHtml(step) {
   return out;
 }
 
-function titleHtml(step) {
-  const explanation = {
+function titleHtml(step, ctx) {
+  const photo = step.stage === 'writing' && ctx?.contentFormat === 'photo';
+  const explanation = photo ? '逐页检查画面、图内文案与发布文案。' : {
     intake: "明确要打动谁，以及这次创作要解决什么。",
     direction: "比较创意主张，找到值得继续的方向。",
     material_plan: "看看已有的画面证据，还缺哪些素材。",
     writing: "阅读完整表达，检查画面、文案与节奏。",
   }[step.stage] || "阅读这一步的创作内容。";
-  return `<header class="stage-heading"><h1>${escapeHtml(step.label || "创作项目")}</h1>` +
-    `<p class="stage-description">${escapeHtml(explanation)}</p></header>`;
+  return `<header class="stage-heading"><h1>${escapeHtml(stageDisplayLabel(step, ctx?.contentFormat))}</h1>` +
+    `<p class="stage-description">${ctx?.readOnly && step.has_doc && Number.isSafeInteger(step.version) && step.version > 0 ? `第 ${step.version} 版 · ` : ''}${escapeHtml(explanation)}</p></header>`;
 }
 
 function headHtml(step) {

@@ -157,6 +157,11 @@ class DecisionContinuationIn(BaseModel):
     expected_artifact_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
 
 
+class DecisionPreparationIn(DecisionContinuationIn):
+    request_id: str = Field(pattern=r'^[A-Za-z0-9_-]{8,128}$')
+    failed_job_id: str = Field(min_length=1, max_length=128)
+
+
 class BriefAmendmentChange(BaseModel):
     clause_id: str = Field(min_length=1, max_length=80)
     op: Literal["replace", "retire", "add"] = "replace"

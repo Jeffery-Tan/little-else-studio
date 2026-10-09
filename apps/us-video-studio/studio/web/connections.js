@@ -3,9 +3,11 @@
 const ROLE_NAMES = { orchestrator: "主制片", director: "创意导演", material: "视觉策划", writer: "编剧", reviewer: "独立审片（已停用）" };
 const ACTIVE_CONNECTION_ROLES = ["orchestrator", "director", "material", "writer"];
 const ROLE_DESCRIPTIONS = { orchestrator: "理解需求，统筹每一步", director: "找到切入点与表达方向", material: "安排画面、动作与素材", writer: "把创意写成可拍的脚本", reviewer: "保留历史配置；当前工作流不会调用" };
-const PROVIDER_NAMES = { codex_cli: "Codex · 本机登录", deepseek: "DeepSeek", openai_compat: "其他服务 · OpenAI 兼容", anthropic_compat: "其他服务 · Anthropic 兼容" };
+const PROVIDER_NAMES = { codex_cli: "Codex · 本机登录", deepseek: "DeepSeek", mimo: "MiMo · 小米", openai_compat: "其他服务 · OpenAI 兼容", anthropic_compat: "其他服务 · Anthropic 兼容" };
 const DEEPSEEK_MODELS = ["deepseek-flash", "deepseek-v4-pro"];
 const DEEPSEEK_URL = "https://api.deepseek.com/v1";
+const MIMO_MODELS = ["mimo-v2.6-flash"];
+const MIMO_URL = "https://api.xiaomimimo.com/v1";
 
 $("connections-open").onclick = async () => {
   const button = $("connections-open");
@@ -38,6 +40,14 @@ function openConnectionDialog(config) {
   if (document.querySelector?.(".connection-dialog")) return;
   const dialog = document.createElement("dialog"); dialog.className = "connection-dialog";
   const form = document.createElement("form"), rows = [], roleInputs = {};
+  const videoService = document.createElement("select"), videoNote = box("p", "muted");
+  const imageService = document.createElement("select"), imageNote = box("p", "muted");
+  let videoSelection = config.video_analysis?.connection || "";
+  let imageSelection = config.image_analysis?.connection || "";
+  let imageBindingInvalid = config.image_analysis != null && (typeof config.image_analysis.connection !== "string"
+    || config.image_analysis.model !== MIMO_MODELS[0]);
+  videoService.setAttribute("aria-label", "视频理解服务");
+  imageService.setAttribute("aria-label", "图片理解服务");
   let closed = false, saving = false, codexChecking = false, codexModels = null;
   const heading = box("div", "connection-heading");
   const close = box("button", "ghost", "关闭"); close.type = "button";
@@ -56,7 +66,7 @@ function openConnectionDialog(config) {
   const loaded = config.runtime;
   runtime.append(box("summary", "", "当前服务版本与环境"),
     box("p", "muted", loaded
-      ? `进程启动：${loaded.started_at} · 代码指纹：${loaded.code_fingerprint} · 数据根标识：${loaded.data_root_id} · Python ${loaded.python}。FFmpeg：${loaded.media_tools?.ffmpeg ? '可找到' : '未找到'}。${loaded.meaning}`
+      ? `代码版本：${loaded.source_revision || '未知'}${loaded.source_modified === true ? '（含本地修改）' : ''} · 进程启动：${loaded.started_at} · 代码指纹：${loaded.code_fingerprint} · 数据根标识：${loaded.data_root_id} · Python ${loaded.python}。FFmpeg：${loaded.media_tools?.ffmpeg ? '可找到' : '未找到'}。${loaded.meaning}`
       : "运行信息暂不可用；请确认后端已更新并重新打开模型设置。"));
   if (loaded) runtime.append(box("p", "muted", loaded.hot_reload?.enabled
     ? `热重载已开启。${loaded.hot_reload.message || '代码修改后自动更新；执行中等待本轮结束。'}`
@@ -71,8 +81,40 @@ function openConnectionDialog(config) {
   const save = box("button", "primary", "保存团队设置"); save.type = "submit";
   const teamSummary = box("p", "connection-team-summary"); teamSummary.setAttribute("role", "status");
   function selectedModel(fields) { return fields.model ? fields.model.value.trim() : ""; }
+  function updateVideoNote() {
+    if (!videoSelection) {
+      videoNote.textContent = "保留原百炼声画分析。视频理解独立于团队角色；已有分析继续复用，不自动重跑。图片生成仍由 Codex 调用工具处理。";
+      return;
+    }
+    const row = rows.find(item => item.id === videoSelection);
+    if (!row || row.provider.value !== "mimo") {
+      videoNote.textContent = "所选视频理解服务已改变，请明确重新选择。不会自动改用其他服务。";
+      return;
+    }
+    const ready = row.key.value || (row.original.has_key && endpointMatches(row));
+    videoNote.textContent = `${row.name.value || "MiMo"} · ${MIMO_MODELS[0]} · 原生视频与可用音轨，默认 2 fps。${ready ? "密钥已填写或保存；实际分析效果待验证。" : "等待填写 MiMo API Key；可以先保存选择，填好密钥后才能分析。"}不更换团队角色，不自动重跑已有分析；图片生成仍由 Codex 调用工具处理。`;
+  }
+  videoService.onchange = () => { videoSelection = videoService.value; syncButtons(); };
+  function updateImageNote() {
+    if (imageBindingInvalid) {
+      imageNote.textContent = "原图片理解设置无效，请明确重新选择服务。不会自动改用其他服务。";
+      return;
+    }
+    if (!imageSelection) {
+      imageNote.textContent = "保留原百炼图片观察。图片理解独立于视频理解和团队角色；已有观察继续复用，不自动重跑。图片生成仍由 Codex 调用工具处理。";
+      return;
+    }
+    const row = rows.find(item => item.id === imageSelection);
+    if (!row || row.provider.value !== "mimo") {
+      imageNote.textContent = "所选图片理解服务已改变，请明确重新选择。不会自动改用其他服务。";
+      return;
+    }
+    const ready = row.key.value || (row.original.has_key && endpointMatches(row));
+    imageNote.textContent = `${row.name.value || "MiMo"} · ${MIMO_MODELS[0]} · 使用本项目图片的实际像素，按现有上限压缩与拆批。${ready ? "密钥已填写或保存；实际理解效果待验证。" : "等待填写 MiMo API Key；可以先保存选择，填好密钥后才能观察。"}不更换视频理解或团队角色，不自动重跑已有观察；图片生成仍由 Codex 调用工具处理。`;
+  }
+  imageService.onchange = () => { imageSelection = imageService.value; imageBindingInvalid = false; syncButtons(); };
   function endpointMatches(row) {
-    const endpoint = row.provider.value === "codex_cli" ? "" : row.provider.value === "deepseek" ? DEEPSEEK_URL : row.baseUrl.value.trim().replace(/\/+$/, "");
+    const endpoint = row.provider.value === "codex_cli" ? "" : row.provider.value === "deepseek" ? DEEPSEEK_URL : row.provider.value === "mimo" ? MIMO_URL : row.baseUrl.value.trim().replace(/\/+$/, "");
     return row.provider.value === row.original.provider && endpoint === String(row.original.base_url || "").replace(/\/+$/, "");
   }
   function updateRoleSummary() {
@@ -126,6 +168,11 @@ function openConnectionDialog(config) {
         ? "当前模型不在这份模型列表中，已保留原值。请确认后保留，或主动改选。"
         : row.verified ? "选项来自本次验证返回的模型列表；尚未进行创作调用测试。"
           : "暂用预设模型列表；验证后会显示服务实际返回的模型。";
+    } else if (row?.provider.value === "mimo") {
+      const options = Object.assign(Object.create(null), Object.fromEntries(MIMO_MODELS.map(id => [id, id])));
+      if (value && !MIMO_MODELS.includes(value)) options[value] = `${value} · 保留原配置`;
+      input = selectInput(options, value || MIMO_MODELS[0]);
+      fields.note.textContent = "预设 MiMo 官方模型；尚未验证密钥或实际创作效果。";
     } else {
       input = textInput(value, row?.provider.value === "codex_cli" ? "留空使用本机默认模型" : "提供方的模型 ID");
       fields.note.textContent = row?.provider.value === "codex_cli" ? "沿用本机 Codex 登录；留空使用其默认模型。" : "按服务提供方填写模型 ID，保留已有模型设置。";
@@ -145,16 +192,46 @@ function openConnectionDialog(config) {
       row.check.disabled = saving || row.checking;
       row.codexModelCheck.disabled = saving || codexChecking;
       if (row.remove) {
-        const bound = Object.values(roleInputs).some(fields => fields.connection.value === row.id);
+        const bound = imageSelection === row.id || videoSelection === row.id || Object.values(roleInputs).some(fields => fields.connection.value === row.id);
         row.remove.disabled = saving || row.checking || bound;
-        row.remove.title = bound ? "先将使用此服务的角色分配到其他服务" : "取消这条尚未保存的服务";
+        row.remove.title = bound ? "先将使用此服务的角色、图片或视频理解改选其他服务" : "取消这条尚未保存的服务";
       }
     }
     updateRoleSummary();
+    updateVideoNote();
+    updateImageNote();
   }
   function refreshChoices() {
     const counts = new Map();
     for (const row of rows) counts.set(row.name.value, (counts.get(row.name.value) || 0) + 1);
+    videoService.replaceChildren();
+    const legacy = document.createElement("option"); legacy.value = ""; legacy.textContent = "原百炼 · 保留现有声画分析";
+    videoService.append(legacy);
+    for (const row of rows.filter(item => item.provider.value === "mimo")) {
+      const option = document.createElement("option"); option.value = row.id;
+      const name = row.name.value || "MiMo";
+      option.textContent = `${counts.get(row.name.value) > 1 ? `${name} · ${row.id}` : name} · ${MIMO_MODELS[0]}`;
+      videoService.append(option);
+    }
+    if (videoSelection && !rows.some(row => row.id === videoSelection && row.provider.value === "mimo")) {
+      const missing = document.createElement("option"); missing.value = videoSelection; missing.textContent = "原视频理解服务已改变 · 请重新选择";
+      videoService.append(missing);
+    }
+    videoService.value = videoSelection;
+    imageService.replaceChildren();
+    const legacyImage = document.createElement("option"); legacyImage.value = ""; legacyImage.textContent = "原百炼 · 保留现有图片观察";
+    imageService.append(legacyImage);
+    for (const row of rows.filter(item => item.provider.value === "mimo")) {
+      const option = document.createElement("option"); option.value = row.id;
+      const name = row.name.value || "MiMo";
+      option.textContent = `${counts.get(row.name.value) > 1 ? `${name} · ${row.id}` : name} · ${MIMO_MODELS[0]}`;
+      imageService.append(option);
+    }
+    if (imageSelection && !rows.some(row => row.id === imageSelection && row.provider.value === "mimo")) {
+      const missing = document.createElement("option"); missing.value = imageSelection; missing.textContent = "原图片理解服务已改变 · 请重新选择";
+      imageService.append(missing);
+    }
+    imageService.value = imageSelection;
     for (const fields of Object.values(roleInputs)) {
       const previous = fields.connection.value || fields.originalConnection;
       fields.connection.replaceChildren();
@@ -175,6 +252,8 @@ function openConnectionDialog(config) {
     row.readiness.textContent = row.provider.value === "codex_cli" ? "本机登录 · 任务开始时检查连接"
       : row.key.value ? "密钥已填写 · 尚未保存" : row.original.has_key && endpointMatches(row) ? "密钥已保存 · 不回显" : "等待填写 API Key";
     updateRoleSummary();
+    updateVideoNote();
+    updateImageNote();
   }
   function addConnection(connection, isNew = false) {
     const card = box("section", "connection-card"); card.dataset.connectionId = connection.id;
@@ -185,7 +264,7 @@ function openConnectionDialog(config) {
     const key = textInput("", connection.has_key ? "已保存；留空保留" : "输入 API Key");
     key.type = "password"; key.autocomplete = "new-password"; key.spellcheck = false;
     function savedKeyMatches() {
-      const endpoint = provider.value === "deepseek" ? DEEPSEEK_URL : baseUrl.value.trim().replace(/\/+$/, "");
+      const endpoint = provider.value === "deepseek" ? DEEPSEEK_URL : provider.value === "mimo" ? MIMO_URL : baseUrl.value.trim().replace(/\/+$/, "");
       return Boolean(connection.has_key && provider.value === connection.provider
         && endpoint === String(connection.base_url || "").replace(/\/+$/, ""));
     }
@@ -203,7 +282,7 @@ function openConnectionDialog(config) {
     if (isNew) {
       const remove = box("button", "ghost small", "取消添加"); remove.type = "button"; row.remove = remove;
       remove.onclick = () => {
-        if (saving || row.checking || Object.values(roleInputs).some(fields => fields.connection.value === row.id)) return;
+        if (saving || row.checking || imageSelection === row.id || videoSelection === row.id || Object.values(roleInputs).some(fields => fields.connection.value === row.id)) return;
         row.editVersion++; row.key.value = ""; row.codexLogin?.dispose(); rows.splice(rows.indexOf(row), 1); card.remove(); refreshChoices();
       };
       header.append(remove);
@@ -240,14 +319,16 @@ function openConnectionDialog(config) {
     priceAdd.onclick = () => { if (!saving) { addPrice(); invalidate(row); } }; pricingSection.append(priceAdd);
     advanced.append(box("summary", "", "高级连接与费用设置"), protocolFields, pricingSection);
     function providerChanged(changed = true) {
-      const deepseek = provider.value === "deepseek", codex = provider.value === "codex_cli";
+      const deepseek = provider.value === "deepseek", mimo = provider.value === "mimo", codex = provider.value === "codex_cli";
       if (deepseek) { baseUrl.value = DEEPSEEK_URL; tokenLimit.value = "max_tokens"; }
+      if (mimo) { baseUrl.value = MIMO_URL; tokenLimit.value = "max_completion_tokens"; }
       updateKeyHint();
       apiFields.hidden = codex; verification.hidden = !deepseek; codexModelHost.hidden = !codex;
-      protocolFields.hidden = deepseek || codex; advanced.hidden = codex;
+      protocolFields.hidden = deepseek || mimo || codex; advanced.hidden = codex;
       row.codexLogin.setVisible(codex);
       tokenField.hidden = provider.value !== "openai_compat";
       hint.textContent = deepseek ? "已预设 DeepSeek 官方连接，无需填写地址或兼容参数。填入 Key 后可先验证。"
+        : mimo ? "已预设 MiMo 官方连接与 mimo-v2.6-flash。图片理解、原生视频声画分析已接入，可在下方分别独立选择，实际效果待验证。"
         : codex ? "使用本机 Codex 登录。模型按下方角色设置；主制片不会自动改用其他服务。"
           : "在高级设置中填写服务地址及兼容参数。切换地址或协议后，请重新填写 Key 并核实价格。";
       if (changed) invalidate(row);
@@ -341,12 +422,20 @@ function openConnectionDialog(config) {
     line.append(identity, field("模型服务", connection), modelField); rolesHost.append(line);
   }
   refreshChoices();
+  form.append(box("h3", "", "3 · 图片理解"), field("图片理解服务", imageService), imageNote);
+  form.append(box("h3", "", "4 · 视频理解"), field("视频理解服务", videoService), videoNote);
   const actions = box("div", "dialog-actions"); actions.append(save);
-  form.append(box("p", "connection-save-note", "3 · 保存后从下一次任务生效，不改变正在运行的任务，也不会重写已有稿件。可以保存尚未验证的配置；这不会被标记为已实测。"), error, actions);
+  form.append(box("p", "connection-save-note", "5 · 保存后从下一次任务生效，不会重写已有稿件或重跑观察；当前任务尚未发起的图片观察若配置变化会停止。可以保存尚未验证的配置；这不会被标记为已实测。"), error, actions);
   form.onsubmit = async event => {
     event.preventDefault(); if (saving || closed) return; error.textContent = "";
     if (rows.some(row => row.checking)) { error.textContent = "正在验证密钥与模型，请等验证结束后再保存。"; return; }
     if (codexChecking) { error.textContent = "正在读取本机模型列表，请等候完成后再保存。"; return; }
+    if (imageBindingInvalid || (imageSelection && !rows.some(row => row.id === imageSelection && row.provider.value === "mimo"))) {
+      error.textContent = "图片理解服务已改变或配置无效，请重新选择后保存。"; return;
+    }
+    if (videoSelection && !rows.some(row => row.id === videoSelection && row.provider.value === "mimo")) {
+      error.textContent = "视频理解服务已改变，请重新选择后保存。"; return;
+    }
     const connections = rows.map(row => {
       const pricing = {};
       for (const price of row.priceRows) {
@@ -355,15 +444,17 @@ function openConnectionDialog(config) {
           input_usd_per_mtok: price.input.value === "" ? null : Number(price.input.value), output_usd_per_mtok: price.output.value === "" ? null : Number(price.output.value) };
       }
       const result = { id: row.id, name: row.name.value.trim(), provider: row.provider.value, pricing,
-        base_url: row.provider.value === "codex_cli" ? "" : row.provider.value === "deepseek" ? DEEPSEEK_URL : row.baseUrl.value.trim(),
-        token_limit_parameter: row.provider.value === "deepseek" ? "max_tokens" : row.tokenLimit.value };
+        base_url: row.provider.value === "codex_cli" ? "" : row.provider.value === "deepseek" ? DEEPSEEK_URL : row.provider.value === "mimo" ? MIMO_URL : row.baseUrl.value.trim(),
+        token_limit_parameter: row.provider.value === "deepseek" ? "max_tokens" : row.provider.value === "mimo" ? "max_completion_tokens" : row.tokenLimit.value };
       if (row.key.value && row.provider.value !== "codex_cli") result.api_key = row.key.value;
       return result;
     });
     const roles = Object.fromEntries(Object.entries(roleInputs).map(([role, fields]) => [role, { connection: fields.connection.value, model: selectedModel(fields) }]));
+    const video_analysis = videoSelection ? { connection: videoSelection, model: MIMO_MODELS[0] } : null;
+    const image_analysis = imageSelection ? { connection: imageSelection, model: MIMO_MODELS[0] } : null;
     saving = true; for (const control of form.querySelectorAll("input,select,button")) control.disabled = true; syncButtons();
     try {
-      const saved = await api("/api/connections", { method: "PUT", body: JSON.stringify({ expected_revision: config.revision, connections, roles }) });
+      const saved = await api("/api/connections", { method: "PUT", body: JSON.stringify({ expected_revision: config.revision, connections, roles, video_analysis, image_analysis }) });
       rows.forEach(row => { row.key.value = ""; }); saving = false; dialog.close();
       toast(saved.warnings?.length ? "设置已保存。服务已改变，旧价格已清空，请核实后重新填写。" : "团队设置已保存，下一轮开始生效；保存不代表已完成创作测试。");
     } catch (err) {

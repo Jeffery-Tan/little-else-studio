@@ -54,7 +54,7 @@ function inline(s) {
   return s;
 }
 
-function renderMarkdown(source) {
+function renderMarkdown(source, { scrollTables = false } = {}) {
   const lines = String(source == null ? "" : source).replace(/\r\n?/g, "\n").split("\n");
   const out = [];
   let para = [];
@@ -76,11 +76,14 @@ function renderMarkdown(source) {
   };
   const flushTable = () => {
     if (!table) return;
-    const head = `<tr>${table.head.map((c) => `<th>${inline(escapeHtml(c))}</th>`).join("")}</tr>`;
+    const head = `<tr>${table.head.map((c) => `<th${scrollTables ? ' scope="col"' : ""}>${inline(escapeHtml(c))}</th>`).join("")}</tr>`;
     const body = table.rows
       .map((r) => `<tr>${r.map((c) => `<td>${inline(escapeHtml(c))}</td>`).join("")}</tr>`)
       .join("");
-    out.push(`<table><thead>${head}</thead><tbody>${body}</tbody></table>`);
+    const markup = `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+    out.push(scrollTables
+      ? `<p class="markdown-table-hint">表格较宽时，可左右滚动查看</p><div class="markdown-table-scroll" tabindex="0" role="region" aria-label="表格，可用左右方向键滚动">${markup}</div>`
+      : markup);
     table = null;
   };
   const flushAll = () => {

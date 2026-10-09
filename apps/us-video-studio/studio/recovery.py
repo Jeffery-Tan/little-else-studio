@@ -26,6 +26,7 @@ from .jobs import WriterLease
 from .models import PipelineError, STAGES
 from .pipeline import Pipeline
 from .store import Store
+from .project_repair import RepairPlan, RepairAction, preview_repair, apply_repair
 
 
 class RecoveryAction(BaseModel):
@@ -74,6 +75,30 @@ def recovery_snapshot(jobs, run_id):
 
 def install_recovery_routes(app, jobs, require_run):
     """Explicit human-only HTTP actions; never part of the Agent tool registry."""
+    def repair_idle(run_id):
+        require_run(run_id)
+        jobs.initialize()
+        if jobs.active is not None:
+            raise PipelineError('job_busy', '制作团队仍在执行，请等待结束后恢复项目。')
+
+    @app.post('/api/runs/{run_id}/recovery/artifacts/preview')
+    def preview_artifacts(run_id: str, payload: RepairPlan):
+        try:
+            with jobs.lock, jobs.store.run_lock(run_id):
+                repair_idle(run_id)
+                return preview_repair(jobs.store, run_id, payload)
+        except (PipelineError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post('/api/runs/{run_id}/recovery/artifacts/apply')
+    def recover_artifacts(run_id: str, payload: RepairAction):
+        try:
+            with jobs.lock, jobs.store.run_lock(run_id):
+                repair_idle(run_id)
+                return apply_repair(jobs.store, run_id, payload)
+        except (PipelineError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     def validate_action(run_id, revision):
         jobs.initialize()
         if jobs.active is not None:

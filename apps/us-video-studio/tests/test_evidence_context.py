@@ -197,6 +197,89 @@ def test_generated_output_is_derived_not_a_new_source_fact(env):
     assert materials[output.name]["origin_sha256"] == recorded
 
 
+def test_observing_own_generated_images_preserves_adopted_upstream(env):
+    from studio.evidence import evidence_generation
+    store, pipeline = env
+    material(store)
+    make_writing_ready(store, pipeline)
+    writing = submit(pipeline, 'writing', 'Approved synthetic script')
+    pipeline.record_review(RUN, 'writing', verdict='pass', findings=[])
+    pipeline.record_approval(RUN, 'writing', nonce=pipeline.issue_nonce(RUN, 'writing'), decision='approved')
+    before = evidence_fingerprint(store, RUN), evidence_generation(store, RUN)
+    approvals = store.list_approvals(RUN)
+    output = material(store, 'result.png', b'Synthetic generated image')
+    observed = record(output, purpose='reference', observer='model:fixture')
+    store.append_event(RUN, 'material_uploaded', name=output.name, sha256=observed['sha256'])
+    store.append_event(RUN, 'production_output', output={'name': output.name, 'sha256': observed['sha256']})
+    store.append_event(RUN, 'agent_images_observed', observations=[observed])
+    assert (evidence_fingerprint(store, RUN), evidence_generation(store, RUN)) == before
+    assert store.list_approvals(RUN) == approvals
+    assert pipeline.stage_state(RUN, 'direction').status == 'approved'
+    state = pipeline.stage_state(RUN, 'writing')
+    assert state.status == 'approved' and state.latest.sha256 == writing.sha256 and not state.stale
+    generated = next(m for m in evidence_snapshot(store, RUN)['materials'] if m['name'] == output.name)
+    assert generated['origin'] == 'generated' and generated['observations'] == [observed]
+
+
+@pytest.mark.parametrize('source', ['mixed', 'changed_bytes', 'unknown_history', 'empty', 'missing', 'non_object'])
+def test_source_image_observations_still_advance_generation(env, source):
+    from studio.evidence import evidence_generation
+    store, _ = env
+    original = material(store)
+    output = material(store, 'result.png', b'Synthetic result')
+    observed = record(output, purpose='reference')
+    store.append_event(RUN, 'production_output', output={'name': output.name, 'sha256': observed['sha256']})
+    before = evidence_generation(store, RUN)
+    rows = [observed]
+    if source == 'mixed':
+        rows.append(record(original, purpose='product'))
+    elif source == 'changed_bytes':
+        output.write_bytes(b'Changed bytes')
+        rows = [record(output, purpose='reference')]
+    elif source == 'unknown_history':
+        rows = [{'name': [], 'sha256': None}]
+    elif source == 'empty':
+        rows = []
+    elif source == 'missing':
+        rows = [{'name': output.name}]
+    else:
+        rows = [None]
+    event = store.append_event(RUN, 'agent_images_observed', observations=rows)
+    assert evidence_generation(store, RUN) == event['seq'] > before
+
+
+def test_later_generation_registration_does_not_reclassify_prior_observation(env):
+    from studio.evidence import evidence_generation
+    store, _ = env
+    output = material(store, 'result.png', b'Synthetic result')
+    observed = record(output, purpose='reference')
+    event = store.append_event(RUN, 'agent_images_observed', observations=[observed])
+    store.append_event(RUN, 'production_output', output={'name': output.name, 'sha256': observed['sha256']})
+    assert evidence_generation(store, RUN) == event['seq']
+
+
+def test_real_source_return_to_prior_bytes_stays_stale_after_generated_observation(env):
+    from studio.evidence import evidence_generation
+    store, pipeline = env
+    original = material(store)
+    original_bytes = original.read_bytes()
+    make_writing_ready(store, pipeline)
+    before = evidence_fingerprint(store, RUN), evidence_generation(store, RUN)
+    output = material(store, 'result.png', b'Synthetic result')
+    observed = record(output, purpose='reference')
+    store.append_event(RUN, 'production_output', output={'name': output.name, 'sha256': observed['sha256']})
+    original.write_bytes(b'Changed product bytes')
+    store.append_event(RUN, 'material_uploaded', name=original.name,
+                       sha256=hashlib.sha256(original.read_bytes()).hexdigest())
+    original.write_bytes(original_bytes)
+    returned = store.append_event(RUN, 'material_uploaded', name=original.name,
+                                  sha256=hashlib.sha256(original_bytes).hexdigest())
+    store.append_event(RUN, 'agent_images_observed', observations=[observed])
+    assert evidence_fingerprint(store, RUN) == before[0]
+    assert evidence_generation(store, RUN) == returned['seq'] > before[1]
+    assert pipeline.stage_state(RUN, 'direction').stale
+
+
 def test_generated_file_changed_after_generation_is_a_source_change(env):
     """The exclusion is keyed on (name, sha256), not on the name alone."""
     store, _ = env

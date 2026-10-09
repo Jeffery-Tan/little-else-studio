@@ -8,9 +8,8 @@ from typing import Literal
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, model_validator
 
-from .agents import bailian_omni
 from .agents.client import SafePreflightError, ModelError, JobCancelled
-from .audiovisual_observation import prepare_video
+from . import video_understanding
 from .image_analysis import AnalysisIn, prepare_analysis, candidates, confirm_candidate
 from .material_observations import _manifest, ObservationError
 from .materials import accept_upload, resolve, kind_of
@@ -265,7 +264,7 @@ def install_reference_video_routes(app, jobs, require_run, connections, settings
     @app.get('/api/runs/{run_id}/reference-videos')
     def workspace(run_id: str):
         require_run(run_id)
-        return {'tasks': task_state(store, run_id), 'connection': bailian_omni.connection_info(),
+        return {'tasks': task_state(store, run_id), 'connection': video_understanding.connection_info(connections),
                 'revision': connections.public()['revision']}
 
     @app.post('/api/runs/{run_id}/reference-videos/{reference_id}/prompt')
@@ -306,9 +305,9 @@ def install_reference_video_routes(app, jobs, require_run, connections, settings
                                'revision': event['seq'], 'actor': 'user',
                                'analysis_id': payload.analysis_id}}
 
-    def prepare(run_id, payload, *, observe_only=False):
+    def prepare(run_id, payload, *, observe_only=False, observation_instruction=None):
         if not payload.consent:
-            raise ValueError('开始参考任务需要确认发送至百炼及可能产生的分析费用。')
+            raise ValueError('开始参考任务需要确认发送至所选视频理解服务及可能产生的分析费用。')
         prior = next((t for t in task_state(store, run_id) if t['reference_id'] == payload.reference_id), None)
         if prior:
             if prior['intent'] != payload.intent or prior.get('instruction', '') != payload.instruction:
@@ -323,7 +322,9 @@ def install_reference_video_routes(app, jobs, require_run, connections, settings
             raise ValueError('模型设置已变化，请重新打开参考视频入口。')
         if any(jobs.pipeline.stage_state(run_id, s).open_attempt for s in STAGES):
             raise ValueError('请先处理当前未完成的策划步骤，再开始参考任务。')
-        frozen = bailian_omni.freeze(settings, payload.expected_endpoint)
+        cached = prior.get('candidate') if prior and prior['status'] != 'stale' else None
+        frozen = None if cached else video_understanding.freeze(connections, settings,
+            expected_revision=payload.expected_revision, expected_endpoint=payload.expected_endpoint)
         # Freeze creative routing before the download; no new role credential is
         # read later if the user changes connections while the reference runs.
         creative = prepare_creative_job(run_id) if payload.intent == 'recreate' and not observe_only else None
@@ -360,7 +361,7 @@ def install_reference_video_routes(app, jobs, require_run, connections, settings
                     source.update(name=name, origin='tiktok_public')
                 # Validate before registering remote bytes as project material.
                 try:
-                    _, info = prepare_video(raw, check_cancel)
+                    _, info = video_understanding.prepare_video(raw, frozen, check_cancel)
                 except ObservationError as exc:
                     raise PipelineError('reference_invalid', str(exc)) from None
                 if source['origin'] == 'tiktok_public' and not info['audio_sent']:
@@ -381,12 +382,22 @@ def install_reference_video_routes(app, jobs, require_run, connections, settings
             existing_candidate = next((c for c in candidates(store, run_id)
                 if c.get('reference_task_id') == payload.reference_id and c['sha256'] == sha and c['status'] != 'stale'), None)
             if existing_candidate is None:
+                if frozen is None:
+                    raise PipelineError('reference_changed', '原分析已变化，请重新确认视频理解服务后再继续。')
+                # A conversation retry keeps the original reference task and
+                # source, but observes according to this turn's actual scope.
+                # Do not rewrite the original task request or its instruction.
+                analysis_instruction = (payload.instruction if observation_instruction is None
+                                        else observation_instruction)
                 analysis = AnalysisIn(request_id=payload.request_id, name=name, expected_sha256=sha,
-                    expected_revision=payload.expected_revision, connection_id=bailian_omni.CONNECTION,
-                    model=bailian_omni.MODEL, purpose='reference', consent=True, expected_endpoint=payload.expected_endpoint)
+                    expected_revision=payload.expected_revision, connection_id=frozen[2]['id'],
+                    model=frozen[2]['suggested_model'], purpose='reference', consent=True, expected_endpoint=payload.expected_endpoint)
                 observer, _ = prepare_analysis(store, jobs.pipeline, connections, settings, (run_id, analysis),
                     client_factory=client_factory, video=True, _native_frozen=frozen, _reference_id=payload.reference_id,
-                    _reference_instruction=payload.instruction)
+                    _reference_instruction=analysis_instruction)
+                store.append_event(run_id, 'reference_video_analysis_requested',
+                    reference_id=payload.reference_id, request_id=payload.request_id,
+                    name=name, sha256=sha, instruction=analysis_instruction)
                 result = observer('', emit, check_cancel)
                 existing_candidate = next(c for c in candidates(store, run_id) if c['analysis_id'] == result.analysis_id)
             c = existing_candidate
@@ -431,7 +442,9 @@ def install_reference_video_routes(app, jobs, require_run, connections, settings
                                    reason=reason, error_kind=type(exc).__name__)
                 raise
 
-        return run, {'observer': frozen[2], 'intent': payload.intent, 'reference_id': payload.reference_id,
+        observer_info = frozen[2] if frozen else {'id': cached['connection_id'], 'name': cached['connection_name'],
+                                               'provider': cached['provider'], 'suggested_model': cached['model'], 'reused': True}
+        return run, {'observer': observer_info, 'intent': payload.intent, 'reference_id': payload.reference_id,
                      'creative': creative[1] if creative else None}
 
     @app.post('/api/runs/{run_id}/reference-videos')
@@ -450,6 +463,7 @@ def install_reference_video_routes(app, jobs, require_run, connections, settings
         """Run inside the current conversation Job; never create a nested Job."""
         import uuid
         from .creation_mode import reference_candidate
+        from .conversation_input import verified_video_aliases
         fields = {}
         if source.startswith('https://'):
             fields['source_url'] = checked_url(source)
@@ -459,7 +473,8 @@ def install_reference_video_routes(app, jobs, require_run, connections, settings
                 raise ValueError('请使用当前项目实际上传的视频文件名或用户提供的TK链接。')
             fields.update(name=source, expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
         previous = next((t for t in reversed(task_state(store, run_id))
-            if (fields.get('source_url') and t.get('source_url') == fields['source_url']) or
+            if (fields.get('source_url') and (t.get('source_url') == fields['source_url']
+                or fields['source_url'] in verified_video_aliases(store, run_id, t))) or
                (fields.get('name') and t.get('name') == source and t.get('sha256') == fields['expected_sha256'])), None)
         if previous and previous['status'] == 'stale':
             previous = None
@@ -468,13 +483,17 @@ def install_reference_video_routes(app, jobs, require_run, connections, settings
                 return reuse_analysis(store, run_id, previous['reference_id'])
             except ValueError:
                 pass
+            if fields.get('source_url') and previous.get('source_url'):
+                # Continue the original request; a verified redirect alias is
+                # not a new source or a reason to redownload/recharge.
+                fields['source_url'] = previous['source_url']
         # An explicit new turn may retry a failed download/analysis. Keep the old
         # source identity so downloaded bytes survive; do not retry in this turn.
         rid = previous['reference_id'] if previous else uuid.uuid4().hex
         payload = ReferenceIn(request_id=uuid.uuid4().hex, reference_id=rid,
             intent=previous['intent'] if previous else 'analyze', instruction=previous.get('instruction', '') if previous else instruction,
             consent=True, expected_revision=revision, expected_endpoint=endpoint, **fields)
-        runner, _ = prepare(run_id, payload, observe_only=True)
+        runner, _ = prepare(run_id, payload, observe_only=True, observation_instruction=instruction)
         runner('', emit, check_cancel)
         c = reference_candidate(store, run_id, rid)
         return {'reference_id': rid, 'report': report_for(c), 'reused': False}
@@ -488,9 +507,10 @@ def install_reference_video_routes(app, jobs, require_run, connections, settings
                 'reference_scope': recovery['reference_scope']}
         dependency, dependency_config = None, None
         if recovery['requires_observation']:
-            connection = bailian_omni.connection_info()
+            revision = connections.public()['revision']
+            connection = video_understanding.connection_info(connections)
             if not connection:
-                raise PipelineError('reference_connection', '参考观察连接未就绪，请检查当前百炼连接。')
+                raise PipelineError('reference_connection', '参考观察连接未就绪，请检查视频理解设置。')
             selected = receipt['reference_recovery']
             if selected.get('name'):
                 fields = {'name': selected['name'], 'expected_sha256': selected['expected_sha256']}
@@ -500,7 +520,7 @@ def install_reference_video_routes(app, jobs, require_run, connections, settings
                 fields = {'source_url': task.get('source_url')}
             payload = ReferenceIn(request_id=receipt['message_id'], reference_id=task['reference_id'],
                 intent=task['intent'], instruction=task.get('instruction', ''), consent=True,
-                expected_revision=connections.public()['revision'], expected_endpoint=connection['base_url'], **fields)
+                expected_revision=revision, expected_endpoint=connection['base_url'], **fields)
             dependency, dependency_config = prepare(run_id, payload, observe_only=True)
         # Freeze the original team's routing before any observation is started.
         creative = prepare_creative_job(run_id, user_input_id=receipt['message_id'],

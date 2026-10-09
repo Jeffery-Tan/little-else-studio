@@ -20,6 +20,7 @@ from .connections import ConnectionUnavailable
 from .models import BudgetExceeded, PipelineError, STAGES
 from .steer_intent import classify, continuation_allowed, needs_stop
 from .store import Store
+from .project_integrity import ProjectDataError
 from .agent_runtime import AgentRuntime, bind_task, reset_task
 from .tools.registry import tool_names_for
 
@@ -134,6 +135,7 @@ class JobManager:
         self.before_submit: Callable[[], None] | None = None
         self.prepare_input: Callable | None = None
         self.prepare_followup: Callable | None = None
+        self.prepare_decision_followup: Callable | None = None
         self._closing_drain_started = False
 
     def _role_futures(self, run_id=None, parent_job_id=None):
@@ -244,13 +246,14 @@ class JobManager:
                 jobs[row['job_id']]['status'] = row['status']
         return list(jobs.values())
 
-    def get(self, run_id, job_id, after_seq=0):
+    def get(self, run_id, job_id, after_seq=0, *, include_project_state=False):
         # A terminal old job and its queued successor must be observed as one
         # transition; otherwise a polling browser can stop watching between them.
         with self.lock:
-            return self._get_locked(run_id, job_id, after_seq)
+            return self._get_locked(run_id, job_id, after_seq,
+                                    include_project_state=include_project_state)
 
-    def _get_locked(self, run_id, job_id, after_seq=0):
+    def _get_locked(self, run_id, job_id, after_seq=0, *, include_project_state=False):
         with self.store.run_lock(run_id):
             all_rows = self.store.read_events(run_id)
             rows = [e for e in all_rows if e.get('job_id') == job_id]
@@ -320,11 +323,18 @@ class JobManager:
         ]
         out['can_continue'] = out['status'] in TERMINAL
         with self.store.run_lock(run_id):
+            # Share validated upstream states only in this locked projection.
+            # A later GET starts afresh and must detect intervening changes.
+            stage_memo = {}
             out['open_attempts'] = [
                 {'stage': stage, 'attempt': state.open_attempt.key}
                 for stage in STAGES
-                if (state := self.pipeline.stage_state(run_id, stage)).open_attempt is not None
+                if (state := self.pipeline.stage_state(run_id, stage, stage_memo)).open_attempt is not None
             ]
+            if include_project_state:
+                # The HTTP brief uses these same validated states, rather than
+                # starting another complete read after releasing the run lock.
+                out['_project_state'] = self.pipeline.state(run_id, stage_memo).to_dict()
         out['can_continue'] = (out['can_continue'] and not out['open_attempts']
                                and not self._role_futures(run_id))
         if out['status'] == 'interrupted':
@@ -332,9 +342,10 @@ class JobManager:
                                '在恢复面板关闭遗留阶段尝试，再由你明确发起下一轮。')
         return out
 
-    def latest(self, run_id, after_seq=0):
+    def latest(self, run_id, after_seq=0, *, include_project_state=False):
         jobs = self.list(run_id)
-        return self.get(run_id, jobs[-1]['job_id'], after_seq) if jobs else None
+        return self.get(run_id, jobs[-1]['job_id'], after_seq,
+                        include_project_state=include_project_state) if jobs else None
 
     def request_receipt(self, run_id, request_id, *, kind='job', job_id=None):
         """Read an exact durable acceptance record without retrying the request.
@@ -385,6 +396,7 @@ class JobManager:
                prepare=None, parent_job_id=None, user_input_id=None):
         with self.lock:
             self.initialize()
+            self.store.require_healthy(run_id)
             if self.closing:
                 raise PipelineError('closing', '服务正在停止，请稍后重新连接。')
             if self.store.deletion_state(run_id):
@@ -442,9 +454,16 @@ class JobManager:
                                if e['kind'] == 'decision_followup_requested'
                                and e.get('request_id') == request_id), {})
                 source_id = intent.get('source_user_input_id')
+                from .decision_continuation import freeze
+                decision_context = freeze(self.store, self.pipeline, run_id, request_id)
+                payload = {'source_user_input_id': source_id} if source_id else {}
+                if decision_context:
+                    payload['decision_context'] = decision_context
                 job = self.submit(run_id, text, request_id, parent_job_id=parent_job_id,
-                    payload={'source_user_input_id': source_id} if source_id else None,
-                    prepare=(lambda rid: self.prepare_followup(rid, source_id))
+                    payload=payload or None,
+                    prepare=(lambda rid: self.prepare_decision_followup(rid, decision_context))
+                        if decision_context and self.prepare_decision_followup else
+                        (lambda rid: self.prepare_followup(rid, source_id))
                         if source_id and self.prepare_followup else None)
             if not any(e['kind'] == 'decision_followup_consumed' and e.get('request_id') == request_id
                        for e in self.store.read_events(run_id)):
@@ -731,12 +750,17 @@ class JobManager:
                               'failed': '媒体生成失败，请查看原任务错误',
                               'unknown': '媒体结果待核实，请查询原任务'}
                     status = 'blocked'
-                    reason = labels.get(deliverable['status'], '交付未完成') + '：' + '、'.join(deliverable['missing'])
+                    reason = (deliverable['blocker']['note'] if deliverable.get('blocker') else
+                              labels.get(deliverable['status'], '交付未完成') + '：' + '、'.join(deliverable['missing']))
             emit({'type': 'done', 'text': result.text, 'rounds': result.rounds,
                   'stopped_because': result.stopped_because, 'tools': result.used_tools})
         except JobCancelled as exc:
             status, reason = 'cancelled', str(exc)
             emit({'type': 'cancelled', 'message': reason})
+        except ProjectDataError as exc:
+            # The durable project is now unavailable. Do not append even a
+            # failure event to its damaged originals or repeat a provider call.
+            status, reason = 'failed', str(exc)
         except BudgetExceeded as exc:
             status, reason = 'blocked', str(exc)
             emit({'type': 'blocked', 'message': reason})
@@ -748,83 +772,95 @@ class JobManager:
             emit({'type': 'blocked', 'message': reason})
         except Exception as exc:
             detail = str(exc) if isinstance(exc, (ModelError, PipelineError)) else '执行失败；调用状态已保留，请检查连接和台账。'
-            status, reason = 'failed', f'{type(exc).__name__}: {detail}'
+            status, reason = 'failed', (exc.public_message if isinstance(exc, ModelError) and exc.public_message
+                                        else f'{type(exc).__name__}: {detail}')
             emit({'type': 'error', 'message': reason})
         finally:
-            # An error (including non-Orchestrator runners) may leave an
-            # independent child in a provider call. Keep active and the writer
-            # lease until the child has saved its actual outcome and returned.
-            self._settle_roles(run_id, job_id,
-                               stop=status != 'succeeded' or self.cancelled.is_set())
-            with self.lock:
-                # Cancellation can arrive after the last provider check but
-                # before this lock. It must remain a stop, not a completion error.
-                if self.cancelled.is_set() and status in {'succeeded', 'blocked'}:
-                    status, reason = 'cancelled', '用户已请求停止；已保存的产物保留，不自动重跑。'
-                task_status = {'succeeded': 'completed', 'failed': 'failed',
-                               'blocked': 'waiting', 'cancelled': 'cancelled'}.get(status, 'interrupted')
-                try:
-                    runtime.transition(job_id, task_status, reason=reason)
-                except PipelineError as exc:
-                    # A missing child result is a real defect, not a completed turn.
-                    status, reason = 'failed', str(exc)
-                    runtime.transition(job_id, 'failed', reason=reason)
-                self._event(run_id, job_id, 'job_status', status=status, reason=reason)
-                self.active = None
-                rows = self.store.read_events(run_id)
-                corrections = [r for r in rows
-                               if r.get('job_id') == job_id and r.get('kind') == 'job_steer_received']
-                discarded = any(r.get('job_id') == job_id and r.get('kind') == 'job_steer_discarded'
-                                for r in rows)
-                discarded = self._settle_stopped_steer(run_id, job_id, corrections, discarded)
-                resumed = _pending_steer_work(corrections)
-                completed = self.get(run_id, job_id)
-                pending = [] if discarded else self._pending_inputs(run_id, completed, corrections)
-                # Explicit cancellation revokes inherited inbox entries too.
-                if discarded or (status == 'cancelled' and not resumed and not self.closing):
-                    pending = []
-                if pending and self.closing:
-                    self._event(run_id, job_id, 'job_steer_blocked',
-                                reason='服务停止，已收到的消息尚未处理；请核对状态后明确接续。')
-                if pending and not discarded and not self.closing:
-                    # The old user's instruction is included even if cancellation
-                    # happened before Orchestrator.send could write it to chat.
-                    try:
-                        if self.get(run_id, job_id)['open_attempts']:
-                            raise PipelineError('steer_recovery', '原任务留下未完成阶段，请先在恢复面板处理，再发送调整要求。')
-                        self._submit_pending_inputs(run_id, completed, pending)
-                    except (PipelineError, ValueError, CodexUnavailable, ConnectionUnavailable) as exc:
-                        self._event(run_id, job_id, 'job_steer_blocked', reason=str(exc))
-                        self._event(run_id, job_id, 'job_progress', event={
-                            'type': 'agent_control', 'message': '调整已保存，但未能自动接续；请查看恢复提示。'})
-                # The current turn only records a decision. Start its exactly-
-                # once successor after releasing all run locks, in the same
-                # jobs->run lock order as UI continuation. Never restart on
-                # service initialization; failed creation stays explicit pending.
-                source = self.get(run_id, job_id)['request_id']
-                followups = [e for e in self.store.read_events(run_id)
-                             if e['kind'] == 'decision_followup_requested'
-                             and e.get('source_request_id') == source]
-                for followup in followups:
-                    if (self.closing or pending or any(r.get('steer_class') != 'status' for r in corrections)
-                            or discarded or status == 'cancelled'):
-                        self._event(run_id, job_id, 'decision_followup_suppressed',
-                                    request_id=followup['request_id'],
-                                    reason='中途消息或停止已改变本轮接续要求，原决定接续未自动启动。')
-                        continue
-                    try:
-                        if self.get(run_id, job_id)['open_attempts']:
-                            raise PipelineError('decision_recovery', '有尚未结束的阶段，请先查看恢复记录。')
-                        self.submit_decision_followup(run_id, followup['text'], followup['request_id'],
-                                                      parent_job_id=job_id)
-                    except (PipelineError, ValueError, CodexUnavailable, ConnectionUnavailable) as exc:
-                        self._event(run_id, job_id, 'decision_followup_blocked',
-                                    request_id=followup['request_id'], reason=str(exc))
-                if self.closing:
-                    if self._role_futures():
-                        self._start_close_drain_locked()
-                    else:
+            if not self.store.project_integrity(run_id)['available']:
+                # A provider may have been in flight when an external write
+                # damaged this run. Wait for those workers, then release only
+                # process bookkeeping; the diagnostic remains derived on disk.
+                self._settle_roles(run_id, job_id, stop=False)
+                with self.lock:
+                    self.active = None
+                    self.changed.notify_all()
+                    if self.closing:
                         self.lease.close()
+            else:
+                # An error (including non-Orchestrator runners) may leave an
+                # independent child in a provider call. Keep active and the writer
+                # lease until the child has saved its actual outcome and returned.
+                self._settle_roles(run_id, job_id,
+                                   stop=status != 'succeeded' or self.cancelled.is_set())
+                with self.lock:
+                    # Cancellation can arrive after the last provider check but
+                    # before this lock. It must remain a stop, not a completion error.
+                    if self.cancelled.is_set() and status in {'succeeded', 'blocked'}:
+                        status, reason = 'cancelled', '用户已请求停止；已保存的产物保留，不自动重跑。'
+                    task_status = {'succeeded': 'completed', 'failed': 'failed',
+                                   'blocked': 'waiting', 'cancelled': 'cancelled'}.get(status, 'interrupted')
+                    try:
+                        runtime.transition(job_id, task_status, reason=reason)
+                    except PipelineError as exc:
+                        # A missing child result is a real defect, not a completed turn.
+                        status, reason = 'failed', str(exc)
+                        runtime.transition(job_id, 'failed', reason=reason)
+                    self._event(run_id, job_id, 'job_status', status=status, reason=reason)
+                    self.active = None
+                    rows = self.store.read_events(run_id)
+                    corrections = [r for r in rows
+                                   if r.get('job_id') == job_id and r.get('kind') == 'job_steer_received']
+                    discarded = any(r.get('job_id') == job_id and r.get('kind') == 'job_steer_discarded'
+                                    for r in rows)
+                    discarded = self._settle_stopped_steer(run_id, job_id, corrections, discarded)
+                    resumed = _pending_steer_work(corrections)
+                    completed = self.get(run_id, job_id)
+                    pending = [] if discarded else self._pending_inputs(run_id, completed, corrections)
+                    # Explicit cancellation revokes inherited inbox entries too.
+                    if discarded or (status == 'cancelled' and not resumed and not self.closing):
+                        pending = []
+                    if pending and self.closing:
+                        self._event(run_id, job_id, 'job_steer_blocked',
+                                    reason='服务停止，已收到的消息尚未处理；请核对状态后明确接续。')
+                    if pending and not discarded and not self.closing:
+                        # The old user's instruction is included even if cancellation
+                        # happened before Orchestrator.send could write it to chat.
+                        try:
+                            if self.get(run_id, job_id)['open_attempts']:
+                                raise PipelineError('steer_recovery', '原任务留下未完成阶段，请先在恢复面板处理，再发送调整要求。')
+                            self._submit_pending_inputs(run_id, completed, pending)
+                        except (PipelineError, ValueError, CodexUnavailable, ConnectionUnavailable) as exc:
+                            self._event(run_id, job_id, 'job_steer_blocked', reason=str(exc))
+                            self._event(run_id, job_id, 'job_progress', event={
+                                'type': 'agent_control', 'message': '调整已保存，但未能自动接续；请查看恢复提示。'})
+                    # The current turn only records a decision. Start its exactly-
+                    # once successor after releasing all run locks, in the same
+                    # jobs->run lock order as UI continuation. Never restart on
+                    # service initialization; failed creation stays explicit pending.
+                    source = self.get(run_id, job_id)['request_id']
+                    followups = [e for e in self.store.read_events(run_id)
+                                 if e['kind'] == 'decision_followup_requested'
+                                 and e.get('source_request_id') == source]
+                    for followup in followups:
+                        if (self.closing or pending or any(r.get('steer_class') != 'status' for r in corrections)
+                                or discarded or status == 'cancelled'):
+                            self._event(run_id, job_id, 'decision_followup_suppressed',
+                                        request_id=followup['request_id'],
+                                        reason='中途消息或停止已改变本轮接续要求，原决定接续未自动启动。')
+                            continue
+                        try:
+                            if self.get(run_id, job_id)['open_attempts']:
+                                raise PipelineError('decision_recovery', '有尚未结束的阶段，请先查看恢复记录。')
+                            self.submit_decision_followup(run_id, followup['text'], followup['request_id'],
+                                                          parent_job_id=job_id)
+                        except (PipelineError, ValueError, CodexUnavailable, ConnectionUnavailable) as exc:
+                            self._event(run_id, job_id, 'decision_followup_blocked',
+                                        request_id=followup['request_id'], reason=str(exc))
+                    if self.closing:
+                        if self._role_futures():
+                            self._start_close_drain_locked()
+                        else:
+                            self.lease.close()
             reset_task(activation)
 
     def cancel(self, run_id, job_id):
@@ -875,6 +911,23 @@ class JobManager:
                 return
             with self.changed:
                 self.changed.wait(timeout=0.2)
+
+    def begin_reload(self):
+        """Close new job admission atomically, after jobs and login have finished.
+
+        Keep the writer lease until HTTP shutdown completes. Job completion and
+        its steer continuation hold the same lock, so reload cannot split them.
+        """
+        with self.lock:
+            if self.closing or self.active is not None:
+                return False
+            if self.before_submit is not None:
+                try:
+                    self.before_submit()
+                except PipelineError:
+                    return False
+            self.closing = True
+            return True
 
     def close(self):
         with self.lock:

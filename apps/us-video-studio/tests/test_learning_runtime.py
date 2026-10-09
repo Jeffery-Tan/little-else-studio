@@ -166,16 +166,26 @@ def test_feedback_is_pending_then_applied_feedback_enters_next_job_but_not_revie
     proposal = learning.proposals(RUN)[0]
     assert proposal["status"] == "pending"
     learning.apply(RUN, proposal["id"], proposal["base_library_sha256"])
+    text = "根据已保存反馈继续修改方向。"
+    interpretation = {"task": {"quote": text, "mode": "clarify", "deliverable": "follow_up",
+        "format": "video", "allowed_stages": [], "pause_after": False}, "constraints": []}
     next_model = ScriptedModel([
-        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video", "deliverable": "revision"}),
+        tool_turn("route", "prepare_creative_context", {"intent": "feedback", "format": "video",
+            "deliverable": "follow_up", "task_interpretation": interpretation}),
         tool_turn("scope", "ask_user", {"question": "这次方向要修改哪些内容？",
-            "options": [{"label": "只调整角色关系"}, {"label": "重新考虑整个方向"}],
-            "context": "修订范围待确认"})])
-    orchestrator(runtime, next_model).send("根据已保存反馈继续修改方向。")
+            "options": [{"label": "只调整角色关系", "description": "保留原方向，限定修改角色关系"},
+                        {"label": "重新考虑整个方向", "description": "明确是否重做整份方向"}],
+            "context": "修订范围待确认", "recommended": 0})])
+    result = orchestrator(runtime, next_model).send(text)
+    assert not result.failed_tools
     assert quote in next_model.calls[1]["messages"][-1]["content"][0]["content"]
+    assert store.latest_artifact(RUN, "direction").sha256 == artifact.sha256
+    assert not any(e["kind"] == "agent_revision_planned" for e in store.read_events(RUN))
     review_model = ScriptedModel([tool_turn("review", "finish_review", {"verdict": "pass"}), final_turn("已审")])
+    # The independent reviewer below is an explicit offline test invocation,
+    # not an automatic continuation of the clarification-only producer turn.
     review = run_review(store=store, pipeline=pipeline, settings=settings, client=review_model, ledger=ledger,
-                        run_id=RUN, stage="direction", learning_service=learning)
+                        run_id=RUN, stage="direction", learning_service=learning, explicit_request=True)
     assert review.verdict == "pass"
     assert quote not in review_model.requests_text()
     assert "前三秒能否识别商品和购买处境" in review_model.calls[0]["system"]

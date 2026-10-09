@@ -95,6 +95,29 @@ def test_non_thinking_tool_round_replays_without_private_reasoning(monkeypatch):
     assert next(row for row in replay if row['role'] == 'tool')['tool_call_id'] == 'read-one'
 
 
+@pytest.mark.parametrize('value', [None, 0, 1, 'false'])
+def test_progress_transport_mode_requires_boolean(value):
+    with pytest.raises(ValueError, match='progress_stream'):
+        DeepSeekClient('synthetic-only', progress_stream=value)
+
+
+def test_nonstream_progress_uses_one_complete_request_and_preserves_usage(monkeypatch):
+    seen = transport(monkeypatch, [response('Draft saved', calls=[('read-one', 'intake')])])
+    progress = []
+    turn = DeepSeekClient('synthetic-only', reasoning_effort='low', progress_stream=False).complete_with_progress(
+        model='deepseek-flash', system='writer', messages=[{'role': 'user', 'content': 'Task'}],
+        tools=TOOLS, on_progress=progress.append)
+    assert len(seen) == 1
+    payload = json.loads(seen[0].content)
+    assert payload['stream'] is False and payload['reasoning_effort'] == 'low'
+    assert 'max_tokens' not in payload
+    assert turn.tool_calls[0].input == {'stage': 'intake'}
+    assert (turn.usage.input_tokens, turn.usage.output_tokens) == (31, 17)
+    assert turn.transport_diagnostic['stream'] is False
+    assert turn.transport_diagnostic['transport_outcome'] == 'completed'
+    assert 'private reasoning' not in str(progress)
+
+
 def test_streamed_public_progress_never_exposes_reasoning_or_partial_tool_args(monkeypatch):
     def chunk(delta, finish=None, usage=None):
         return 'data: ' + json.dumps({'model': 'deepseek-flash',
@@ -130,7 +153,32 @@ def test_stream_without_done_is_not_dispatched_or_accounted_as_final(monkeypatch
     with pytest.raises(ModelError) as caught:
         DeepSeekClient('synthetic-only').complete_with_progress(model='deepseek-flash',
             system='role', messages=[{'role': 'user', 'content': 'check'}], tools=TOOLS)
-    assert caught.value.usage_status == 'unknown'
+    assert caught.value.usage_status == 'partial'
+    assert (caught.value.usage.input_tokens, caught.value.usage.output_tokens) == (4, 6)
+
+
+@pytest.mark.parametrize('finish', ['content_filter', 'insufficient_system_resource', 'aborted'])
+def test_completed_interrupted_stream_keeps_usage_and_reports_provider_reason(monkeypatch, finish):
+    wire = 'data: ' + json.dumps({'choices': [{'index': 0,
+        'delta': {'content': 'PRIVATE_CONTENT', 'reasoning_content': 'PRIVATE_REASONING'},
+        'finish_reason': finish}], 'usage': {'prompt_tokens': 4, 'completion_tokens': 6}}) + '\n\ndata: [DONE]\n\n'
+    seen = transport(monkeypatch, [httpx.Response(200, text=wire)])
+    with pytest.raises(ModelError) as caught:
+        DeepSeekClient('synthetic-only').complete_with_progress(model='deepseek-flash',
+            system='role', messages=[{'role': 'user', 'content': 'check'}], tools=TOOLS)
+    assert caught.value.usage_status == 'known'
+    assert caught.value.response_diagnostic['code'] == 'provider_interrupted'
+    assert caught.value.response_diagnostic['finish_reason'] == finish
+    assert 'PRIVATE' not in str(caught.value) + str(caught.value.response_diagnostic)
+    assert len(seen) == 1
+
+
+def test_missing_private_reasoning_has_a_safe_specific_diagnostic():
+    with pytest.raises(ModelError) as caught:
+        _parse(response(reasoning=None), 'deepseek-flash', require_reasoning=True)
+    assert caught.value.response_diagnostic['field'] == 'reasoning_content'
+    assert caught.value.response_diagnostic['code'] == 'missing_or_invalid_reasoning'
+    assert caught.value.usage_status == 'known'
 
 
 def test_multi_tool_rounds_replay_exact_reasoning_and_never_display_it(monkeypatch):

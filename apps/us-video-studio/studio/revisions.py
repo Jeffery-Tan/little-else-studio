@@ -292,7 +292,8 @@ def install_revision_routes(app, jobs, require_run, connections, settings, learn
         require_run(run_id)
         with store.run_lock(run_id):
             versions = store.list_artifacts(run_id, stage)
-            selected = next((a for a in versions if a.version == version), None) if version else (versions[-1] if versions else None)
+            selected = (next((a for a in versions if a.version == version), None) if version
+                        else store.latest_artifact(run_id, stage))
             if selected is None: raise HTTPException(404, '还没有可查看的方案版本。')
             if not store.verify_artifact(run_id, stage, selected.version): raise HTTPException(409, '版本文件已变化，请检查原稿。')
             reason = ''

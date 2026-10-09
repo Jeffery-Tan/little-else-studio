@@ -1,7 +1,6 @@
 """Transport and accounting regressions; all HTTP is mocked, data is temporary."""
 from __future__ import annotations
 
-from contextlib import contextmanager
 import json
 
 import httpx
@@ -61,20 +60,19 @@ def test_invalid_usage_cannot_be_treated_as_zero():
 @pytest.mark.parametrize("failure", ["503", "disconnect"])
 def test_http_attempt_is_never_automatically_retried(monkeypatch, failure):
     attempts = []
-    class Response:
-        status_code = 503 if failure == "503" else 200
-        def iter_lines(self):
-            yield from sse({"type": "message_start", "message": {"usage": {"input_tokens": 37}}})
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield ('\n\n'.join(sse({"type": "message_start", "message": {"usage": {"input_tokens": 37}}}))
+                   + '\n\n').encode()
             raise httpx.ReadError("broken stream")
-    class HTTP:
-        def __init__(self, **kw): pass
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
-        @contextmanager
-        def stream(self, *args, **kwargs):
-            attempts.append(1)
-            yield Response()
-    monkeypatch.setattr(httpx, "Client", HTTP)
+        async def aclose(self):
+            pass
+    def handler(_):
+        attempts.append(1)
+        return httpx.Response(503 if failure == "503" else 200, stream=Body())
+    real = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs:
+                        real(**kwargs, transport=httpx.MockTransport(handler)))
     client = AnthropicCompatClient("https://example.invalid", "test-credential")
     with pytest.raises(ModelError) as error:
         client.complete(model="test", system="", messages=[], tools=[])

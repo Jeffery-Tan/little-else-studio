@@ -156,8 +156,16 @@
 /* Completed observation/review actions remain distinct clickable controls. */
 .job-status[data-active="false"] .job-copy {flex-wrap:wrap;justify-content:flex-start;gap:8px}
 .job-status[data-active="false"] .job-copy>strong {flex:0 0 auto}
-.job-status[data-active="false"] .job-copy>.job-warning {flex:1 1 100%;min-width:0;overflow-wrap:anywhere}
+.job-status[data-active="false"] .job-copy>.job-warning,
+.job-status[data-active="false"] .job-copy>.job-restored {flex:1 1 100%;min-width:0;overflow-wrap:anywhere}
 .job-status[data-active="false"] .job-copy>.muted {flex:1 1 180px;min-width:0;margin-left:0}
 .job-status[data-active="false"] .job-activity-open {position:static;flex:0 0 auto}
 .job-status[data-active="false"] .job-copy>button {flex:0 0 auto;padding:4px 8px}
 .job-status[data-active="true"][data-chat-job="true"] .job-activity-open {position:static;grid-column:2;grid-row:1;white-space:nowrap}
+
+/* Tables keep readable columns while only this reading region scrolls. */
+.msg.assistant .body .markdown-table-hint {font-size:11px;color:var(--ink-faint);margin:.8rem 0 .3rem}
+.msg.assistant .body .markdown-table-scroll {max-width:100%;min-width:0;overflow-x:auto;margin:.3rem 0 .8rem;overscroll-behavior-x:contain}
+.msg.assistant .body .markdown-table-scroll:focus-visible {outline:2px solid var(--accent);outline-offset:2px}
+.msg.assistant .body .markdown-table-scroll>table {display:table;table-layout:auto;width:100%;max-width:none;margin:0;overflow:visible}
+.msg.assistant .body .markdown-table-scroll th,.msg.assistant .body .markdown-table-scroll td {min-width:11rem;white-space:normal;word-break:normal;overflow-wrap:anywhere;vertical-align:top}

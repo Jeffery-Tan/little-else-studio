@@ -72,6 +72,18 @@ def test_explicit_repeat_reuses_saved_product_analysis(native, monkeypatch):
     assert len(candidates(native[1], RUN)) == 1
 
 
+def test_canonical_alias_reuses_product_source_without_download(native, monkeypatch):
+    short = 'https://vm.tiktok.com/SyntheticAlias/'
+    downloads = downloader(monkeypatch, video_bytes(audio=True))
+    scripted(native, monkeypatch, [product_tool(source=short), product_result()])
+    assert chat(native, '用这条商品视频补全商品信息 ' + short)['status'] == 'succeeded'
+    scripted(native, monkeypatch, [product_tool(quote='再看这条商品视频', source=URL)])
+    assert chat(native, '再看这条商品视频 ' + URL, request_id='product-alias')['status'] == 'succeeded'
+    assert downloads == [short] and len(native[2].calls) == 3
+    assert len(candidates(native[1], RUN)) == 1
+    assert sum(e['kind'] == 'product_video_source' for e in native[1].read_events(RUN)) == 1
+
+
 def test_bare_link_cannot_trigger_product_download(native, monkeypatch):
     downloads = downloader(monkeypatch, video_bytes(audio=True))
     scripted(native, monkeypatch, [product_tool(quote=URL), final_turn('这条视频是用于补全商品信息还是拆解参考表达？')])

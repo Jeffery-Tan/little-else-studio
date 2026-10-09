@@ -24,6 +24,8 @@ import threading
 from functools import wraps
 from pathlib import Path
 from typing import Any, Iterable
+from .project_integrity import (guard_project_write, inspect_project, journal_lock,
+                                project_catalog, require_healthy)
 
 from .models import (
     Artifact,
@@ -82,6 +84,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
     Same directory matters: ``os.replace`` is atomic within a volume, and a
     half-written artifact must never be observable.
     """
+    guard_project_write(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
@@ -92,19 +95,31 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 
 def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
+    guard_project_write(path)
+    _append_jsonl_after_check(path, record)
+
+
+def _append_jsonl_after_check(path: Path, record: dict[str, Any]) -> None:
+    """Private write primitive; callers must validate before this transaction.
+
+    Shared helpers still enter through _append_jsonl's guard. Store.append_event
+    already checks under its run lock before allocating the sequence, so it
+    uses this primitive without repeating the same full-project scan.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(record, ensure_ascii=False, sort_keys=True)
-    with open(path, "a", encoding="utf-8", newline="\n") as fh:
-        fh.write(line + "\n")
-        fh.flush()
-        os.fsync(fh.fileno())
+    with journal_lock(path):
+        with open(path, "a", encoding="utf-8", newline="\n") as fh:
+            fh.write(line + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
     out: list[dict[str, Any]] = []
-    with open(path, "r", encoding="utf-8") as fh:
+    with journal_lock(path), open(path, "r", encoding="utf-8") as fh:
         for lineno, line in enumerate(fh, start=1):
             line = line.strip()
             if not line:
@@ -148,6 +163,7 @@ class Store:
         run_dir = self.run_dir(run_id)
         run_file = run_dir / "run.json"
         if run_file.exists():
+            self.require_healthy(run_id)
             raise PipelineError("store", f"run already exists: {run_id}")
         run = Run(
             run_id=run_id,
@@ -168,16 +184,29 @@ class Store:
         path = self.run_dir(run_id) / "run.json"
         if not path.is_file():
             raise PipelineError("store", f"no such run: {run_id}")
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return Run(**data)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return Run(**data)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            # Classify only a confirmed on-disk shape/encoding failure. Unknown
+            # implementation errors are not turned into project quarantine.
+            self.require_healthy(run_id)
+            raise
 
     def list_runs(self) -> list[Run]:
-        out: list[Run] = []
-        for entry in sorted((self.root / "runs").iterdir()):
-            run_file = entry / "run.json"
-            if run_file.is_file():
-                out.append(Run(**json.loads(run_file.read_text(encoding="utf-8"))))
-        return out
+        """Executable projects only; catalog retains every damaged project."""
+        return [Run(**item['metadata']) for item in self.project_catalog() if item['available']]
+
+    def project_catalog(self) -> list[dict]:
+        return project_catalog(self.root)
+
+    def project_integrity(self, run_id: str) -> dict:
+        self.run_dir(run_id)
+        return inspect_project(self.root, run_id)
+
+    def require_healthy(self, run_id: str) -> dict:
+        self.run_dir(run_id)
+        return require_healthy(self.root, run_id)
 
     def deletion_state(self, run_id: str) -> dict[str, Any] | None:
         """Project visibility lives in its existing journal, never in its files."""
@@ -190,19 +219,23 @@ class Store:
 
     @serialized_run
     def set_deleted(self, run_id: str, deleted: bool) -> None:
+        self.require_healthy(run_id)
         self.read_run(run_id)
         if bool(self.deletion_state(run_id)) != deleted:
             self.append_event(run_id, 'project_deleted' if deleted else 'project_restored')
 
     # -------------------------------------------------------------- events --
 
+    @serialized_run
     def append_event(self, run_id: str, kind: str, **fields: Any) -> dict[str, Any]:
+        self.require_healthy(run_id)
         path = self.run_dir(run_id) / "events.jsonl"
         existing = _read_jsonl(path)
         record = {"seq": len(existing) + 1, "at": utcnow(), "kind": kind, **fields}
-        _append_jsonl(path, record)
+        _append_jsonl_after_check(path, record)
         return record
 
+    @serialized_run
     def read_events(self, run_id: str) -> list[dict[str, Any]]:
         return _read_jsonl(self.run_dir(run_id) / "events.jsonl")
 
@@ -237,6 +270,8 @@ class Store:
             raise PipelineError("store", f"unknown stage: {stage!r}")
         if version < 1:
             raise PipelineError("store", f"version must be >= 1, got {version}")
+        if not isinstance(attempt, str) or not attempt.strip():
+            raise PipelineError('store', 'new artifact attempt must be a nonempty string task identity')
         if not content.strip():
             raise PipelineError("store", "refusing to write an empty artifact")
 
@@ -332,8 +367,17 @@ class Store:
         out.sort(key=lambda a: (STAGES.index(a.stage), a.version))
         return out
 
+    def active_artifacts(self, run_id: str, stage: str | None = None) -> list[Artifact]:
+        """Current candidates; withdrawn immutable versions remain in history."""
+        withdrawn = {(row['stage'], row['version'], row['sha256'])
+                     for event in self.read_events(run_id)
+                     if event.get('kind') == 'artifact_versions_withdrawn'
+                     for row in event['artifacts']}
+        return [a for a in self.list_artifacts(run_id, stage)
+                if (a.stage, a.version, a.sha256) not in withdrawn]
+
     def latest_artifact(self, run_id: str, stage: str) -> Artifact | None:
-        versions = self.list_artifacts(run_id, stage)
+        versions = self.active_artifacts(run_id, stage)
         return versions[-1] if versions else None
 
     def next_version(self, run_id: str, stage: str) -> int:
@@ -408,6 +452,7 @@ class Store:
 
     def archive_run(self, run_id: str) -> Path:
         """Mark a run out of the way. Moves files; deletes nothing."""
+        self.require_healthy(run_id)
         src = self.run_dir(run_id)
         if not src.is_dir():
             raise PipelineError("store", f"no such run: {run_id}")

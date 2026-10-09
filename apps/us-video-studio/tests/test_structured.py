@@ -380,12 +380,53 @@ def test_material_blocks_count_what_cannot_be_filmed():
 
     blocks = s.view("material_plan", data)
     cards = next(b for b in blocks if b["type"] == "cards")
-    assert cards["title"] == "3 个镜头，其中 2 个做不出来"
+    assert cards["title"] == "3 项素材，其中 2 项尚待解决"
     assert [c["chip"]["tone"] for c in cards["cards"]] == ["ok", "bad", "warn"]
     assert [c["emphasis"] for c in cards["cards"]] == ["", "blocked", "blocked"]
 
     gaps = next(b for b in blocks if b["type"] == "list")
     assert gaps["items"] == [{"text": "没有实测素材", "note": "这条主张没法证明"}]
+
+
+def test_material_cards_count_sources_instead_of_inventing_more_pages():
+    data = s.normalize('material_plan', {'items':[
+        {'shot':f'Page {page} source {source}', 'purpose':f'Distinct page {page} reason',
+         'status':'已有', 'note':'Synthetic source for the same page', 'file':'product.png'}
+        for page in range(1,4) for source in range(1,3)
+    ]}).data
+    cards = next(b for b in s.view('material_plan', data) if b['type']=='cards')
+    assert cards['title'] == '6 项素材'
+    assert [c['head'] for c in cards['cards']] == [r['shot'] for r in data['items']]
+    assert all(c['media']=='product.png' for c in cards['cards'])
+    assert s.material_blockers(data) == []
+
+
+def test_material_scope_guidance_reaches_both_real_role_systems_and_submission_tool(tmp_path):
+    from studio.agents.roles import MATERIAL
+    from studio.store import Store
+    from studio.tools.registry import tools_for
+    run = Store(tmp_path).create_run('material-scope', 'Synthetic', 'Three pages without performance claims')
+    contract = s.material_plan_submission_contract()
+    for format in ('photo','video'):
+        assert contract in MATERIAL.system(run, format=format)
+        submit = next(t for t in tools_for('material', format=format) if t['name']=='submit_stage')
+        assert contract in submit['input_schema']['properties']['structured']['description']
+    assert '无法获得' in contract and '可后补' in contract and '阻塞' in contract
+
+
+def test_nonblocking_exclusions_do_not_create_needs_but_notes_cannot_override_unavailable():
+    data = s.normalize('material_plan', {
+        'items':[{'shot':'Three generated kitchen pages','status':'需要生成'}],
+        'gaps':[{'gap':'No performance or real use evidence', 'consequence':'Excluded from this plan',
+                 'blocking':'可后补'}],
+    }).data
+    assert s.material_blockers(data) == []
+    data['items'].append({'shot':'Necessary performance evidence','status':'无法获得',
+                         'note':'Excluded; do not block writing'})
+    assert s.material_blockers(data) == ['Necessary performance evidence']
+    data['items'].pop()
+    data['gaps'][0]['blocking']='阻塞'
+    assert s.material_blockers(data) == ['No performance or real use evidence']
 
 
 def test_critical_material_gap_is_visible_even_when_shot_can_be_made():

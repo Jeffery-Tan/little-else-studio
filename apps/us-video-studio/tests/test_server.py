@@ -61,7 +61,7 @@ def test_index_and_static_assets_are_served(client):
     assert index.status_code == 200
     assert "US 视频制片室" in index.text
     assert index.headers['content-security-policy'] == "frame-ancestors 'none'"
-    assert index.headers['cache-control'] == 'no-store'
+    assert index.headers['cache-control'] == 'no-cache'
     assert client.get("/static/app.js").status_code == 200
     assert client.get("/static/style.css").status_code == 200
 
@@ -79,7 +79,12 @@ def test_settings_and_agent_share_declared_media_boundaries(client):
     data = client.get('/api/capabilities').json()
     assert data['video_understanding']['agent_can_execute'] is False
     assert '百炼北京' in data['video_understanding']['ui_summary']
+    assert 'MiMo' in data['video_understanding']['ui_summary']
+    assert 'MiMo' in data['video_understanding']['coverage']
     assert data['image_analysis']['agent_can_execute'] is True
+    assert 'MiMo' in data['image_analysis']['ui_summary']
+    assert '不随角色或视频模型切换' in data['image_analysis']['ui_summary']
+    assert 'independently selected' in data['image_analysis']['scope']
     assert data['production']['agent_can_approve_or_generate'] is False
 
 
@@ -166,7 +171,7 @@ def drive_intake_and_direction(box, structured=None):
     http = box["http"]
     make_run(http)
     box["model"] = ScriptedModel([
-        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video", "deliverable": "direction"}),
+        tool_turn("route", "prepare_creative_context", {"intent": "new", "format": "video", "deliverable": "direction"}),
         tool_turn("t1", "write_stage", {
             "stage": "intake", "content": "需求正文", "summary": "需求整理",
         }),
@@ -179,7 +184,7 @@ def drive_intake_and_direction(box, structured=None):
     res = http.post(f"/api/runs/{RUN}/message", json={"text": "做个保温袋视频"})
     assert res.status_code == 200
     events = stream_events(res)
-    assert events[-1]["type"] == "done"
+    assert events[-1]["type"] == "done", events[-1]
 
 
 def shown(http, stage="direction"):

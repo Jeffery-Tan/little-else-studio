@@ -1,8 +1,9 @@
 """Learning and delivery HTTP routes."""
 from __future__ import annotations
-from fastapi import HTTPException
-from fastapi.responses import FileResponse, Response
-from .delivery import delivery_snapshot, delivery_zip
+from fastapi import HTTPException, Query
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from starlette.background import BackgroundTask
+from .delivery import delivery_snapshot, delivery_zip, photo_delivery_zip
 from .http_contracts import LearningProposalIn, LearningApplyIn, LearningRejectIn, LearningRefreshIn
 from .learning import LearningConflict
 from .learning_session import session_snapshot
@@ -187,6 +188,25 @@ def install_learning_routes(app, learning, learning_assets, creative_packages, s
                 'Cache-Control': 'no-store'})
         except (ValueError, PipelineError) as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @app.get('/api/runs/{run_id}/delivery/photos/download')
+    def download_photos(run_id: str, expected_snapshot_sha256: str = Query(pattern=r'^[a-f0-9]{64}$')):
+        require_run(run_id)
+        try:
+            payload, version = photo_delivery_zip(store, pipeline, run_id, expected_snapshot_sha256,
+                                                  ledger=jobs.ledger, execution_active=bool(jobs.active))
+        except (ValueError, PipelineError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        async def chunks():
+            try:
+                while chunk := payload.read(64 * 1024):
+                    yield chunk
+            finally:
+                payload.close()
+        return StreamingResponse(chunks(), media_type='application/zip',
+            background=BackgroundTask(payload.close), headers={
+                'Content-Disposition': f'attachment; filename="{run_id}-v{version}-photos.zip"',
+                'Cache-Control': 'no-store'})
 
     @app.get('/api/runs/{run_id}/creative-packages/{package_id}/files/{filename:path}')
     def package_file(run_id: str, package_id: str, filename: str):

@@ -7,10 +7,14 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
   const writing = rail.find(row => row.stage === 'writing' && row.has_doc);
   const direction = rail.find(row => row.stage === 'direction' && row.has_doc);
   const hasCreativeWork = rail.some(row => row.has_doc);
+  const projectedAnalysis = timeline.brief?.analysis;
+  const imageAnalysis = projectedAnalysis?.kind === 'image' && projectedAnalysis.analysis_only === true &&
+    !hasCreativeWork && !imageWork?.draft && !videoWork?.draft ? projectedAnalysis : null;
   const latestReference = referenceTasks.at(-1);
   const reference = latestReference?.intent === 'analyze' ? latestReference : null;
   const analysisOnly = !hasCreativeWork && !imageWork?.draft && !videoWork?.draft &&
-    (Boolean(reference) || (currentJob?.job_kind === 'reference_video' && latestReference?.intent === 'analyze'));
+    (Boolean(imageAnalysis) || Boolean(reference) ||
+      (currentJob?.job_kind === 'reference_video' && latestReference?.intent === 'analyze'));
   const creativeTimes = [
     ...rail.map(row => row.created_at), imageWork?.draft?.created_at, videoWork?.draft?.created_at,
     imageWork?.attempt?.at, videoWork?.attempt?.at,
@@ -35,12 +39,13 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
   const format = projectedFormat || declaredFormat || (videoWork?.draft ? 'video' : null) ||
     (imageWork?.draft ? 'photo' : null) ||
     ((writing?.blocks || []).some(block => block.type === 'timeline') ? 'video' : null);
-  const goal = analysisOnly ? '参考视频拆解报告'
+  const writingName = format === 'photo' ? '图文方案' : format === 'video' ? '脚本' : '创作方案';
+  const goal = imageAnalysis ? imageAnalysis.goal : analysisOnly ? '参考视频拆解报告'
     : format === 'photo' ? '带货图片与文案'
     : format === 'video' ? `商品视频${hasCaption || requestedCaption ? '与发布文案' : ''}`
     : '交付形式待确认';
   const result = (current, action, tab = 'plan', stage = null, detail = '') =>
-    ({goal, current, action, tab, stage, detail, analysisOnly, referenceCurrent, reference, format});
+    ({goal, current, action, tab, stage, detail, analysisOnly, imageAnalysis, referenceCurrent, reference, format});
   const nav = (label, tab, current, stage = null, detail = '') =>
     result(current, {kind: 'navigate', label, tab, stage}, tab, stage, detail);
   const pending = timeline.pending;
@@ -68,6 +73,7 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
   if (dollarCap) return result('创作已暂停：本机共享美元预算上限已达到',
     null, 'plan', null, '已保存的作品和决定仍可阅读。');
 
+  if (imageAnalysis) return nav('阅读分析结果', 'plan', imageAnalysis.title, null, imageAnalysis.detail);
   if (analysisOnly) {
     if (reference?.report) return nav('阅读分析结果', 'plan', '参考拆解报告已保存', null,
       '阅读观察与限制；只分析不会自动进入制作。');
@@ -83,18 +89,20 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
     {kind: 'brief-redo', label: '继续重做方向'}, 'plan', 'direction');
   if (interaction) return result(interaction.question || '有一项需要你确认',
     {kind: 'question', label: '回答这个问题'}, 'plan');
+  if (pending?.source_execution?.notice) return nav('查看或修改草稿', 'plan',
+    pending.headline, pending.stage, pending.source_execution.notice);
   if (pending?.stage === 'direction') return pending.passed === false
     ? nav('查看方向与审核', 'plan', '创意方向已保存，但审核提出修改意见', 'direction')
-    : nav('选择创意方向', 'plan', '正在选择创意方向；采用后会继续准备脚本', 'direction');
+    : nav('选择创意方向', 'plan', `正在选择创意方向；采用后会继续准备${writingName}`, 'direction');
   if (pending?.stage === 'writing') return pending.passed === false
-    ? nav('查看脚本与审核', 'plan', '脚本新版已保存，但审核提出修改意见', 'writing')
-    : nav('阅读并决定脚本', 'plan', '脚本已准备好，等待你阅读和决定', 'writing');
+    ? nav(`查看${writingName}与审核`, 'plan', `${writingName}新版已保存，但审核提出修改意见`, 'writing')
+    : nav(`阅读并决定${writingName}`, 'plan', `${writingName}已准备好，等待你阅读和决定`, 'writing');
   if (timeline.brief?.questions?.length) return result('有个细节想和你确认',
     {kind: 'question', label: '回答这个问题'}, 'plan', timeline.brief.questions[0].stage,
     '说出现有条件或还不确定的地方，团队会调整表达与素材安排。');
   if (timeline.brief?.action?.kind === 'review_stage') {
     const review = timeline.brief.action;
-    const name = review.stage === 'direction' ? '创意方向' : review.stage === 'writing' ? '脚本' : '当前作品';
+    const name = review.stage === 'direction' ? '创意方向' : review.stage === 'writing' ? writingName : '当前作品';
     return result(`${name}已保存，内部审核未完成`, review, 'plan', review.stage,
       timeline.brief.detail || '先阅读当前作品与审核记录，再决定是否重新审核当前方案。');
   }
@@ -104,7 +112,7 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
     writing?.stage || direction?.stage || null,
     '下方阅读本轮参考；原项目的最终交付仍按作品目标保留。');
   if (timeline.brief?.phase === 'needs_resolution') return result(
-    '素材方案有关键缺口，完整脚本暂不继续',
+    `素材方案有关键缺口，完整${writingName}暂不继续`,
     {kind:'chat',label:'调整素材方案'}, 'plan', 'material_plan', timeline.brief.detail || '');
 
   // The latest unresolved attempt controls recovery; a verified earlier result
@@ -147,7 +155,7 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
           ? `上一份已生成${work.kind === 'video' ? '视频' : '图片'}仍可查看；${work.detail || work.label}`
           : work.detail || work.label || '本次制作需要处理后继续');
     if (work.phase === 'prepare') return result(
-      work.kind === 'image' ? '脚本已确认，下一步准备画面' : '参考图已确认，下一步准备视频',
+      work.kind === 'image' ? `${writingName}已确认，下一步准备画面` : '参考图已确认，下一步准备视频',
       {kind:'prepare',label:work.kind === 'image' ? '准备画面输入' : '准备这张图的视频输入',tab}, tab);
   }
   if (timeline.next_action?.kind === 'resume_direction') return result(
@@ -155,16 +163,16 @@ function creatorProjectView({run = {}, timeline = {}, imageWork = null, videoWor
     '按当前有效需求和已选参考直接重做，完成后交你点选。');
   if (writing) {
     if (writing.stale || writing.integrity_ok === false) return nav('核对稿件变化', 'plan',
-      '当前脚本的来源或文件已变化', 'writing');
+      `当前${writingName}的来源或文件已变化`, 'writing');
     if (writing.approval_decision === 'approved' || writing.approval_decision === 'approved_override'
-        || timeline.brief?.phase === 'ready') return result('脚本已确认，下一步准备实际画面',
+        || timeline.brief?.phase === 'ready') return result(`${writingName}已确认，下一步准备实际画面`,
       {kind:'navigate',label:'准备当前画面',tab:'storyboard'}, 'plan', 'writing');
-    return nav('阅读并修改脚本', 'plan', '当前脚本可阅读和修改', 'writing');
+    return nav(`阅读并修改${writingName}`, 'plan', `当前${writingName}可阅读和修改`, 'writing');
   }
   if (direction) {
     const approved = ['approved','approved_override'].includes(direction.approval_decision);
-    if (approved) return result(`已采用方向${direction.selected_option_id ? ` ${direction.selected_option_id}` : ''}，下一份脚本尚未准备好`,
-      {kind:'chat',label:'讨论下一份脚本'}, 'plan', 'direction');
+    if (approved) return result(`已采用方向${direction.selected_option_id ? ` ${direction.selected_option_id}` : ''}，下一份${writingName}尚未准备好`,
+      {kind:'chat',label:`讨论下一份${writingName}`}, 'plan', 'direction');
     return nav('阅读创意方向', 'plan', '当前创意方向可阅读', 'direction');
   }
   if (timeline.brief?.phase === 'interrupted' && String(run.brief || '').trim()) return result(

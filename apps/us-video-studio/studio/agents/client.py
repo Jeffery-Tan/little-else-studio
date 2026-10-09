@@ -18,8 +18,10 @@ Two properties the loop guarantees:
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Protocol
 
@@ -39,11 +41,16 @@ DEFAULT_MAX_TOKENS = 16384
 
 class ModelError(RuntimeError):
     def __init__(self, status: int, message: str, *, usage=None, provider_invoked: bool | None = None,
-                 usage_final: bool = False):
+                 usage_final: bool = False, response_diagnostic=None, public_message: str | None = None,
+                 retryable: bool = True):
         super().__init__(f"model endpoint returned {status}: {message}")
         self.status = status
         self.message = message
         self.provider_invoked = provider_invoked
+        self.response_diagnostic = response_diagnostic
+        self.transport_diagnostic = None
+        self.public_message = public_message
+        self.retryable = retryable
         # Only a transport that has not sent a model request may assert this.
         # HTTP errors/disconnects keep the default unknown invocation state.
         self.usage = Usage(0, 0) if provider_invoked is False else (usage or Usage(None, None))
@@ -62,6 +69,7 @@ class JobCancelled(RuntimeError):
         super().__init__(message)
         self.usage = usage
         self.usage_final = usage_final
+        self.transport_diagnostic = None
 
 
 class SafePreflightError(RuntimeError):
@@ -69,7 +77,11 @@ class SafePreflightError(RuntimeError):
 
 
 class NonRetryableStageError(RuntimeError):
-    """A paid stage response failed validation; stop this turn before redispatch."""
+    """A stage protocol/setup failure must stop this turn before redispatch."""
+
+
+class WriterRootClosureRejected(NonRetryableStageError):
+    """Only an evidenced framing correction's business rejection is terminal."""
 
 
 @dataclass
@@ -97,6 +109,22 @@ class Turn:
     model: str = ""
     #: Assistant content blocks, echoed back verbatim on the next request.
     raw_blocks: list[dict[str, Any]] = field(default_factory=list)
+    #: Fixed schema paths and hashes only; raw assistant replay stays unchanged.
+    response_normalizations: list[dict[str, Any]] = field(default_factory=list)
+    #: Actual request options and bounded counters only, recorded under its call ID.
+    transport_diagnostic: dict[str, Any] | None = None
+    #: One source/execution framing pair; no tool may run before its audit is durable.
+    writer_root_closure: Any | None = None
+
+
+@dataclass(frozen=True)
+class FinishingContext:
+    """One read-only conclusion from exact saved sources, never another work loop."""
+
+    system: str
+    messages: list[dict[str, Any]]
+    check_current: Callable[[], None]
+    stage: str = 'writing'
 
 
 class ModelClient(Protocol):
@@ -129,6 +157,10 @@ class AnthropicCompatClient:
         *,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         timeout: float = 180.0,
+        check_cancel=None,
+        cancel_event=None,
+        request_timeout: float = 600.0,
+        progress_interval: float = 10.0,
     ):
         if not token:
             raise RuntimeError("no credential supplied to the model client")
@@ -137,6 +169,10 @@ class AnthropicCompatClient:
         self._token = token
         self.max_tokens = max_tokens
         self.timeout = timeout
+        from .bounded_http import validate_wait
+        validate_wait(request_timeout, progress_interval)
+        self.check_cancel, self.cancel_event = check_cancel, cancel_event
+        self.request_timeout, self.progress_interval = request_timeout, progress_interval
 
     # -- transport ---------------------------------------------------------- #
 
@@ -172,24 +208,73 @@ class AnthropicCompatClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> Turn:
+        return self._complete(model=model, system=system, messages=messages, tools=tools)
+
+    def complete_with_progress(self, *, model, system, messages, tools, on_progress=None):
+        return self._complete(model=model, system=system, messages=messages, tools=tools, on_progress=on_progress)
+
+    def _complete(self, *, model, system, messages, tools, on_progress=None):
+        from .bounded_http import bounded_http, check_stopped
+        check_stopped(self.check_cancel, self.cancel_event)
         url = self.base_url + ('/messages' if self.base_url.endswith('/v1') else '/v1/messages')
         payload = self._payload(model, system, messages, tools)
 
         # One invocation is exactly one HTTP attempt. Even connection failures
         # cannot prove that the provider did not start work; never auto-retry.
-        try:
-            with httpx.Client(timeout=self.timeout, follow_redirects=False, trust_env=False) as client:
-                with client.stream("POST", url, headers=self._headers(), json=payload) as resp:
+        async def exchange(model_data, model_usage):
+            async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False, trust_env=False) as client:
+                async with client.stream("POST", url, headers=self._headers(), json=payload) as resp:
                     if resp.status_code != 200:
                         # Do not persist arbitrary response bodies: gateways can
                         # echo credentials or request content in errors.
-                        raise ModelError(resp.status_code, "request rejected; usage unconfirmed")
-                    return _parse_stream(resp.iter_lines(), model)
-        except httpx.TransportError as exc:
-            raise ModelError(0, f"transport failed ({type(exc).__name__}); usage unconfirmed") from exc
+                        raise ModelError(resp.status_code, "request rejected; usage unconfirmed", retryable=False)
+                    return await _parse_async_stream(resp.aiter_lines(), model,
+                        on_usage=model_usage, on_model_data=model_data)
+        return asyncio.run(bounded_http(exchange, payload=payload, endpoint=url, provider='anthropic_compat',
+            check_cancel=self.check_cancel, cancel_event=self.cancel_event,
+            request_timeout=self.request_timeout, progress_interval=self.progress_interval, on_progress=on_progress))
+
+
+_STREAM_EOF = object()
 
 
 def _parse_stream(lines: Iterable[str], model: str) -> Turn:
+    """Synchronous fixture/compatibility entry to the same incremental parser."""
+    parser = _stream_parser(model)
+    next(parser)
+    try:
+        try:
+            for line in lines:
+                parser.send(line)
+            parser.send(_STREAM_EOF)
+        except StopIteration as complete:
+            return complete.value
+        except ModelError:
+            raise
+        except Exception as error:
+            # Preserve the synchronous iterator's already observed usage.
+            parser.throw(error)
+    finally:
+        parser.close()
+
+
+async def _parse_async_stream(lines, model, *, on_usage, on_model_data):
+    parser = _stream_parser(model, on_usage=on_usage, on_model_data=on_model_data)
+    next(parser)
+    try:
+        try:
+            async for line in lines:
+                parser.send(line)
+            parser.send(_STREAM_EOF)
+        except StopIteration as complete:
+            return complete.value
+        # HTTPX errors remain transport errors. The lifecycle owns cancellation
+        # and retains incremental usage via on_usage before closing this parser.
+    finally:
+        parser.close()
+
+
+def _stream_parser(model, *, on_usage=None, on_model_data=None):
     """Accept only a complete, closed Messages stream; preserve partial usage."""
     turn = Turn(model=model, usage=Usage(None, None))
     blocks: dict[int, dict[str, Any]] = {}
@@ -209,9 +294,14 @@ def _parse_stream(lines: Iterable[str], model: str) -> Turn:
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     fail("invalid usage in stream")
                 setattr(turn.usage, name, value)
+                if on_usage:
+                    on_usage(turn.usage)
 
     try:
-        for raw in lines:
+        while True:
+            raw = yield
+            if raw is _STREAM_EOF:
+                break
             line = raw.strip() if isinstance(raw, str) else raw.decode("utf-8", "replace").strip()
             if not line.startswith("data:"):
                 continue
@@ -252,8 +342,12 @@ def _parse_stream(lines: Iterable[str], model: str) -> Turn:
                     partial_json[idx] = ""
                 elif block.get("type") == "text":
                     turn.text += block.get("text", "")
+                    if block.get("text") and on_model_data:
+                        on_model_data()
                 elif block.get("type") == "thinking":
                     turn.thinking += block.get("thinking", "")
+                    if block.get("thinking") and on_model_data:
+                        on_model_data()
             elif kind == "content_block_delta":
                 idx = event.get("index")
                 if idx not in opened:
@@ -265,12 +359,18 @@ def _parse_stream(lines: Iterable[str], model: str) -> Turn:
                     text = delta.get("text") or ""
                     turn.text += text
                     block["text"] = block.get("text", "") + text
+                    if text and on_model_data:
+                        on_model_data()
                 elif dtype == "thinking_delta" and block.get("type") == "thinking":
                     thought = delta.get("thinking") or ""
                     turn.thinking += thought
                     block["thinking"] = block.get("thinking", "") + thought
+                    if thought and on_model_data:
+                        on_model_data()
                 elif dtype == "input_json_delta" and block.get("type") == "tool_use":
                     partial_json[idx] += delta.get("partial_json") or ""
+                    if delta.get("partial_json") and on_model_data:
+                        on_model_data()
                 elif dtype == "signature_delta" and block.get("type") == "thinking":
                     block["signature"] = block.get("signature", "") + (delta.get("signature") or "")
                 else:
@@ -394,6 +494,131 @@ def _failure_key(output: str) -> str:
     return hashlib.sha256(identity.encode('utf-8')).hexdigest()
 
 
+def prepare_strict_writer_execution(turn: Turn, tools: list[dict[str, Any]]) -> Turn:
+    """Validate original wire arguments before decoding a detached execution batch.
+
+    Provider parsers may already have decoded these sentinels. Rechecking their
+    original replay blocks keeps this boundary provider-independent and idempotent.
+    Logical/history handlers still enforce scope, quotes and permissions.
+    """
+    from .writer_root_closure import verify_root_closure
+    verify_root_closure(turn, tools)
+    from ..tools.registry import is_strict_writer_wire_schema, strict_writer_execution_arguments
+    schemas = {tool['name']: tool['input_schema'] for tool in tools
+               if tool.get('strict') is True
+               and is_strict_writer_wire_schema(tool['name'], tool['input_schema'])}
+    if not schemas:
+        return turn
+    from .deepseek_client import _strict_schema_issue
+    from .requests import safe_response_diagnostic
+    replacements = []
+    for index, call in enumerate(turn.tool_calls):
+        if call.name not in schemas:
+            continue
+        original = next((block['input'] for block in turn.raw_blocks
+                         if block.get('type') == 'tool_use' and block.get('id') == call.id
+                         and block.get('name') == call.name and 'input' in block), call.input)
+        issue = _strict_schema_issue(original, schemas[call.name])
+        if issue:
+            diagnostic = safe_response_diagnostic({
+                'field': 'tool_arguments', 'code': 'invalid_arguments_schema',
+                'tool_call_index': index, **issue})
+            raise ModelError(200, 'invalid strict writer wire arguments; no tools dispatched',
+                usage=turn.usage, usage_final=True, response_diagnostic=diagnostic,
+                public_message='模型返回的工具参数不符合本次工具格式，本轮未执行返回工具。'
+                               '已保留调用用量，不会自动重试。', retryable=False)
+        replacements.append((call, strict_writer_execution_arguments(call.name, original, schemas[call.name])))
+    # A later invalid call cannot leave an earlier call partially normalized or executed.
+    for call, arguments in replacements:
+        call.input = arguments
+    return turn
+
+
+def _request_tool_batch_error(turn: Turn, tools: list[dict[str, Any]], issue) -> ModelError:
+    from .requests import safe_response_diagnostic
+    return ModelError(200, 'invalid request tool manifest; no tools dispatched',
+        usage=turn.usage, usage_final=True, response_diagnostic=safe_response_diagnostic(issue, tools=tools),
+        public_message='模型返回的工具或参数不符合本次工作范围，本轮未执行返回工具。'
+                       '已保留调用用量，不会自动重试。', retryable=False)
+
+
+def _validate_tool_batch_identity(turn: Turn, tools: list[dict[str, Any]]) -> None:
+    """Every role checks the whole batch before dispatch or parameter processing."""
+    allowed = frozenset(tool['name'] for tool in tools)
+    seen = set()
+    for index, call in enumerate(turn.tool_calls):
+        issue = None
+        if not isinstance(call.name, str) or not call.name:
+            issue = {'field': 'tool_call', 'code': 'invalid_identity', 'tool_call_index': index}
+        elif call.name not in allowed:
+            issue = {'field': 'tool_arguments', 'code': 'invalid_arguments_schema',
+                     'schema_rule': 'unavailable_tool', 'tool_call_index': index}
+        elif (not isinstance(call.id, str) or not call.id or call.id in seen
+              or not isinstance(call.input, dict)):
+            issue = {'field': 'tool_call', 'code': 'invalid_identity', 'tool_call_index': index}
+        if issue:
+            raise _request_tool_batch_error(turn, tools, issue)
+        seen.add(call.id)
+
+
+def _validate_request_tool_batch(turn: Turn, tools: list[dict[str, Any]]) -> None:
+    """Check dynamic strict arguments after the shared identity/allowlist guard.
+
+    Static writer requests retain their evidenced parameter-processing boundary;
+    original blocks can legitimately precede the execution copy's empty fields.
+    """
+    from .deepseek_client import _strict_schemas, _strict_schema_issue
+    schemas = _strict_schemas(tools)
+    for index, call in enumerate(turn.tool_calls):
+        if call.name in schemas:
+            original = next((block['input'] for block in turn.raw_blocks
+                if block.get('type') == 'tool_use' and block.get('id') == call.id
+                and block.get('name') == call.name and 'input' in block), call.input)
+            mismatch = _strict_schema_issue(original, schemas[call.name])
+            if mismatch:
+                issue = {'field': 'tool_arguments', 'code': 'invalid_arguments_schema',
+                         'tool_call_index': index, 'tool_name': call.name, **mismatch}
+                raise _request_tool_batch_error(turn, tools, issue)
+
+
+def _final_reply_text(text: str, preserve_final_text=None):
+    return text if preserve_final_text is not None and preserve_final_text() else text.strip()
+
+
+def complete_finishing_turn(client: ModelClient, *, model: str, context: FinishingContext,
+                            work_result: LoopResult, on_activity=None, on_turn=None,
+                            check_cancel=None, preserve_final_text=None) -> LoopResult:
+    """One tool-free call; no continuation, fallback, execution or second attempt."""
+    if check_cancel:
+        check_cancel()
+    context.check_current()
+    finishing_round = work_result.rounds + 1
+    if on_activity:
+        on_activity({'type': 'agent_activity', 'phase': 'finishing',
+                     'stage': context.stage, 'round': finishing_round})
+    previous_stage = getattr(client, 'stage', None)
+    try:
+        if hasattr(client, 'stage'):
+            client.stage = context.stage
+        final = client.complete(model=model, system=context.system,
+                                messages=context.messages, tools=[])
+    finally:
+        if hasattr(client, 'stage'):
+            client.stage = previous_stage
+    if check_cancel:
+        check_cancel()
+    context.check_current()
+    if final.tool_calls or final.stop_reason != 'end_turn' or not final.text.strip():
+        raise ModelError(200, 'invalid read-only finishing response; no tools executed',
+            usage=final.usage, usage_final=True, retryable=False,
+            public_message='稿件已保存，但本轮收尾回答未完成；不会自动重试或修改稿件。')
+    if on_turn:
+        on_turn(final)
+    return LoopResult(text=_final_reply_text(final.text, preserve_final_text),
+                      messages=[*context.messages, {'role': 'assistant', 'content': final.raw_blocks or final.text}],
+                      rounds=finishing_round, stopped_because='done', tool_log=work_result.tool_log)
+
+
 def run_agent_loop(
     client: ModelClient,
     *,
@@ -414,12 +639,18 @@ def run_agent_loop(
     parallel_read_tools: frozenset[str] = frozenset(),
     pinned_user_input: str | None = None,
     preserve_initial_context: bool = True,
+    finishing_context: Callable[[], FinishingContext | None] | None = None,
+    tools_for_request: Callable[[], list[dict[str, Any]]] | None = None,
+    system_for_request: Callable[[], str] | None = None,
+    preserve_final_text: Callable[[], bool] | None = None,
 ) -> LoopResult:
     """Drive a tool-use conversation to completion.
 
     ``execute_tool`` returns text or a backend-owned ``ToolResult``. A successful
     concluding result ends this role after recording the batch; remaining calls
     are paired with explicit skips. Only tools in this request may execute.
+    ``stop_when`` checks after every recorded tool result, including validation
+    errors. A known prerequisite ends the batch without hiding its failures.
     Anything it raises is converted into an ``is_error`` tool result *and* recorded in
     ``tool_log`` — the failure is visible to the model and to the caller, never
     swallowed.
@@ -443,6 +674,12 @@ def run_agent_loop(
     for round_index in range(1, max_rounds + 1):
         if check_cancel is not None:
             check_cancel()
+        request_tools = copy.deepcopy(tools_for_request() if tools_for_request is not None else tools)
+        if (not isinstance(request_tools, list) or any(not isinstance(tool, dict)
+                or not isinstance(tool.get('name'), str) or not tool['name'] for tool in request_tools)
+                or len({tool['name'] for tool in request_tools}) != len(request_tools)):
+            raise SafePreflightError('本次工具清单无法核对，没有发起模型请求。')
+        allowed_tools = frozenset(tool['name'] for tool in request_tools)
         if session_journal is not None:
             session_journal.before_step(convo)
             session_journal.retain_current_input(convo)
@@ -458,11 +695,20 @@ def run_agent_loop(
             session_journal.projection(projected['projection'])
             if 'read_role_history' in allowed_tools:
                 session_journal.retain_history_index(convo)
+        request_system = system_for_request() if system_for_request is not None else system
+        if not isinstance(request_system, str):
+            raise SafePreflightError('本次任务上下文无法核对，没有发起模型请求。')
         if on_activity is not None:
             on_activity({"type": "agent_activity", "phase": "thinking", "round": round_index})
         if session_journal is not None:
-            session_journal.request(model, system, convo, tools)
-        turn = client.complete(model=model, system=system, messages=convo, tools=tools)
+            session_journal.request(model, request_system, convo, request_tools)
+        turn = client.complete(model=model, system=request_system, messages=convo, tools=copy.deepcopy(request_tools))
+        _validate_tool_batch_identity(turn, request_tools)
+        if tools_for_request is not None:
+            _validate_request_tool_batch(turn, request_tools)
+        prepare_strict_writer_execution(turn, request_tools)
+        if turn.writer_root_closure is not None and not turn.writer_root_closure.evidence_saved:
+            raise SafePreflightError('脚本格式处理证据尚未保存，本轮未执行返回工具。')
         if session_journal is not None:
             session_journal.response(turn)
         if on_turn is not None:
@@ -520,7 +766,7 @@ def run_agent_loop(
                         on_activity({'type':'agent_activity','phase':'continuing','round':round_index})
                     continue
             return LoopResult(
-                text="\n".join(text_seen).strip(),
+                text=_final_reply_text("\n".join(text_seen), preserve_final_text),
                 messages=convo,
                 rounds=round_index,
                 stopped_because="incomplete" if incomplete else "done" if turn.stop_reason != "max_tokens" else "max_tokens",
@@ -576,7 +822,7 @@ def run_agent_loop(
                     outcome = value if isinstance(value, ToolResult) else ToolResult(value)
                 output, is_error = outcome.content, outcome.is_error
                 if not is_error:
-                    concluded = outcome.concludes_turn or (stop_when is not None and stop_when())
+                    concluded = concluded or outcome.concludes_turn
             except (BudgetExceeded, JobCancelled, SafePreflightError, NonRetryableStageError):
                 # Deliberately *not* converted into a tool result. Doing so
                 # handed the model the string "派工失败" and let it retry: each
@@ -594,8 +840,11 @@ def run_agent_loop(
                 is_error = True
             if session_journal is not None:
                 session_journal.tool_result(call, output, is_error, skipped)
-            record = {"round": round_index, "tool": call.name, "args": call.input,
+            record = {"round": round_index, "tool": call.name,
+                      "args": {} if turn.writer_root_closure is not None else call.input,
                       "ok": not is_error, "result": output[:2000]}
+            if turn.writer_root_closure is not None:
+                record['processing_method'] = 'writer_root_close_v1'
             if is_error and not skipped:
                 record['failure_key'] = _failure_key(output)
             if skipped:
@@ -603,6 +852,13 @@ def run_agent_loop(
             tool_log.append(record)
             if on_tool is not None:
                 on_tool(record)
+            if is_error and turn.writer_root_closure is not None:
+                # The original and this business rejection are already in the
+                # journal. Never turn a framing correction into another paid round.
+                raise WriterRootClosureRejected('格式处理后的脚本提交未通过业务校验，本轮已停止；'
+                                                 '已保存内容与用量保留，不会自动再调模型。')
+            if not concluded and stop_when is not None:
+                concluded = bool(stop_when())
             results.append(
                 {
                     "type": "tool_result",
@@ -623,10 +879,10 @@ def run_agent_loop(
             if not rec["ok"] and not rec.get("skipped"):
                 key = (rec["tool"], rec.get('failure_key') or _failure_key(rec.get("result", "")))
                 failures[key] = failures.get(key, 0) + 1
-        if any(count > REPEATED_FAILURE_LIMIT for count in failures.values()):
+        if not concluded and any(count > REPEATED_FAILURE_LIMIT for count in failures.values()):
             convo.append({"role": "user", "content": results})
             return LoopResult(
-                text="\n".join(text_seen).strip(),
+                text=_final_reply_text("\n".join(text_seen), preserve_final_text),
                 messages=convo,
                 rounds=round_index,
                 stopped_because="repeated_failure",
@@ -641,9 +897,17 @@ def run_agent_loop(
             # batch before returning. No dangling tool_use blocks on resume.
             return LoopResult(text="", messages=convo, rounds=round_index,
                               stopped_because="done", tool_log=tool_log)
+        if finishing_context is not None:
+            context = finishing_context()
+            if context is not None:
+                return complete_finishing_turn(client, model=model, context=context,
+                    work_result=LoopResult(text='', messages=convo, rounds=round_index,
+                                           stopped_because='work_complete', tool_log=tool_log),
+                    on_activity=on_activity, on_turn=on_turn, check_cancel=check_cancel,
+                    preserve_final_text=preserve_final_text)
 
     return LoopResult(
-        text="\n".join(text_seen).strip(),
+        text=_final_reply_text("\n".join(text_seen), preserve_final_text),
         messages=convo,
         rounds=max_rounds,
         stopped_because="max_rounds",

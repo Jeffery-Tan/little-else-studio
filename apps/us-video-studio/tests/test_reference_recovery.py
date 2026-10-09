@@ -205,6 +205,7 @@ def test_natural_failure_restores_dependency_and_original_goal_in_one_job(native
         tool_turn('observe', 'observe_reference', dict(source=URL, action='analyze',
             scope='Opening visual mechanism', quote=text, task_interpretation=proposal)),
         final_turn('Mock dependency failed'),
+        final_turn('Mock original intake remains incomplete after the bounded reminder'),
     ])
     response = native[0].post(f'/api/runs/{RUN}/jobs', json={
         'text': text, 'request_id': 'actual-natural-original', 'reference_consent': True})

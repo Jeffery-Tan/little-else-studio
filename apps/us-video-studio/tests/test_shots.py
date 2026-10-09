@@ -70,7 +70,7 @@ def test_legacy_prose_script_reports_an_unreadable_shot_list_instead_of_guessing
     store = Store(tmp_path)
     store.create_run('legacy', 'Legacy', 'Synthetic')
     pipe = Pipeline(store)
-    for stage in ['intake', 'direction', 'material_plan', 'writing']:
+    for stage in ['intake', 'direction', 'material_plan']:
         attempt = pipe.start_attempt('legacy', stage)
         pipe.submit('legacy', stage, attempt.token, content=f'Prose {stage}', summary=stage,
                     structured={'options': [{'key': 'A', 'claim': 'Synthetic',
@@ -79,6 +79,10 @@ def test_legacy_prose_script_reports_an_unreadable_shot_list_instead_of_guessing
         if stage == 'direction':
             pipe.record_approval('legacy', stage, nonce=pipe.issue_nonce('legacy', stage),
                                  decision='approved', selected_option_id='A')
+    # Read a historical prose artifact, not a new empty full-script submission.
+    store.write_artifact('legacy', 'writing', 1, 'Prose writing', summary='Historical prose',
+        author_role='writer', attempt='writing#1',
+        inputs=pipe.require_prerequisites('legacy', 'writing'), structured={})
     targets = target_shots(store, 'legacy', 'image')
     assert targets['complete_list'] is False
     assert targets['shots'] == []

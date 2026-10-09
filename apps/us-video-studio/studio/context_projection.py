@@ -118,6 +118,8 @@ def build_conversation_context(store, pipeline, run_id, *, current_receipt=None,
         archived = indexed[:split]
         constraints = applicable_constraints(store, run_id,
             user_input_id=current_receipt['message_id'] if current_receipt else None)
+        from .conversation_input import reply_constraints_for_input
+        reply_rows = reply_constraints_for_input(store, run_id, current_receipt['message_id']) if current_receipt else []
         # Include bounded literal excerpts from the oldest and newest archived
         # turns. Other turns retain exact index/hash references, not invented
         # statements about what the user supposedly agreed to.
@@ -138,6 +140,7 @@ def build_conversation_context(store, pipeline, run_id, *, current_receipt=None,
             'current_message_sha256': hashlib.sha256(current_receipt['text'].encode()).hexdigest()
                 if current_receipt else None,
             'effective_constraints': constraints,
+            **({'current_reply_constraints': reply_rows} if reply_rows else {}),
             'domain': _domain_refs(store, pipeline, run_id),
             'authority': 'historical_index_only_no_decision_or_execution_authorization',
         }

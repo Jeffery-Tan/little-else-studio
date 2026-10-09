@@ -15,14 +15,16 @@ import shutil
 import subprocess
 import tempfile
 import time
+import threading
 import uuid
 import warnings
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
 
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from PIL import Image
 
 from .agents.budget import BudgetedClient
@@ -81,10 +83,16 @@ class PurposeReference(Reference):
     design_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
+class PreservedPrompt(Input):
+    draft_id: str = Field(min_length=1, max_length=160)
+    expected_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
 class DraftIn(Input):
     request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_.:-]+$')
     kind: Literal['image', 'video']
-    prompt: str = Field(min_length=1, max_length=5000)
+    prompt: str | None = Field(min_length=1, max_length=5000)
+    preserve_prompt_from: PreservedPrompt | None = None
     source_version: int = Field(ge=1, strict=True)
     source_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
     reference: Reference | None = None
@@ -101,6 +109,15 @@ class DraftIn(Input):
     #: default instead of reading as a brand-new shot.
     supersedes: str | None = Field(default=None, min_length=1, max_length=160)
     reuse_attempt_id: str | None = Field(default=None, min_length=1, max_length=160)
+
+    @model_validator(mode='after')
+    def prompt_mode(self):
+        if self.preserve_prompt_from is not None:
+            if self.prompt is not None or self.supersedes != self.preserve_prompt_from.draft_id:
+                raise ValueError('复用原描述时须明确 prompt=null，并引用 supersedes 指向的同一准确输入。')
+        elif self.prompt is None:
+            raise ValueError('请填写实际出图描述；不改原描述时须提供准确的复用输入与指纹。')
+        return self
 
 
 class ActionIn(Input):
@@ -195,6 +212,9 @@ class RecoverIn(Input):
     not_submitted: bool = False
     retry_with_unknown_cost: bool = False
     quantity: float | None = Field(default=None, ge=0, le=10000, strict=True, allow_inf_nan=False)
+    request_id: str | None = Field(default=None, min_length=1, max_length=128,
+                                   pattern=r'^[A-Za-z0-9_.:-]+$')
+    expected_attempt_sha256: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
 
 
 def digest(value):
@@ -405,6 +425,9 @@ RETRYABLE_BLOCKERS = frozenset({'unprepared', 'no_capability', 'unapproved_refer
 
 #: Phases whose result is already settled, so a further attempt is a new decision.
 SETTLED_MEDIA_PHASES = frozenset({'succeeded', 'failed', 'unknown'})
+UNRESOLVED_MEDIA_PHASES = frozenset({'queued', 'running', 'preparing', 'submitting',
+    'submitted', 'downloading', 'retrieve_failed', 'unknown', 'submission_unknown',
+    'recovering', 'cancelling'})
 
 
 def shot_id_for(draft_id: str) -> str:
@@ -526,6 +549,11 @@ def target_shots(store, run_id, kind='image'):
     answer stays honestly unknown rather than guessed from the sentence.
     """
     artifact = store.latest_artifact(run_id, 'writing')
+    return _artifact_target_shots(artifact, kind)
+
+
+def _artifact_target_shots(artifact, kind):
+    """One identity rule for both current targets and exact historical sources."""
     if not artifact:
         return {'kind': kind, 'source': 'no_script', 'shots': [], 'complete_list': False,
                 'source_version': None, 'source_sha256': None,
@@ -582,7 +610,11 @@ def coverage(drafts: dict, kind, *, targets=None, baseline=None):
                     attempts.append(original)
         latest = attempts[-1] if attempts else {}
         phase = latest.get('status')
-        if draft and not source_ready:
+        if phase in UNRESOLVED_MEDIA_PHASES:
+            stage = ATTEMPT_SHOT_STAGE.get(phase, 'unverified')
+            blocker = 'attempt_unresolved' if stage == 'unverified' else None
+            action = 'check_original_task' if blocker else 'wait_for_task'
+        elif draft and not source_ready:
             stage, blocker, action = ('unprepared', 'visual_design_invalid', 'complete_visual_design') if (
                 draft.get('design_issue')) else ('unprepared', 'stale_source', 'save_current_input')
         elif delivered and latest is delivered:
@@ -610,7 +642,10 @@ def coverage(drafts: dict, kind, *, targets=None, baseline=None):
             'blocker': blocker, 'next_action': action,
             'retryable': bool(blocker in RETRYABLE_BLOCKERS
                               or (blocker == 'generation_failed' and draft)),
-            'reason': draft.get('design_issue', '') if draft and not source_ready else latest.get('message', '') or '',
+            'reason': ((latest.get('message') or ('这次提交结果尚未确认，请先核实原任务。'
+                        if stage == 'unverified' else '原任务仍在处理，请等待这次任务返回。'))
+                       if phase in UNRESOLVED_MEDIA_PHASES else
+                       draft.get('design_issue', '') if draft and not source_ready else latest.get('message', '') or ''),
             'attempt_id': latest.get('attempt_id'),
             'attempt_status': latest.get('status'),
             'task_id': latest.get('task_id'),
@@ -707,6 +742,40 @@ def attempt_records(store, run_id, ledger_entries=None, *, execution_active=Fals
     return items
 
 
+
+def image_recovery_state(run_id, attempt, draft):
+    """Legal user decisions for this exact record, never a provider outcome.
+
+    Workspace already projects output byte availability. The write boundary
+    additionally reopens and validates the image under the same run lock.
+    """
+    output = attempt.get('output')
+    identity = {key: attempt.get(key) for key in (
+        'attempt_id', 'draft_id', 'media_kind', 'status', 'task_id',
+        'provider_thread_id', 'provider_turn_id', 'provider_outcome',
+        'failure_code', 'observed_image_calls', 'usage_status', 'usage_quantity')}
+    identity.update(run_id=run_id, output=output,
+                    attempt_draft_sha256=attempt.get('draft_sha256'),
+                    draft_sha256=draft.get('draft_sha256'),
+                    source_version=draft.get('source_version'),
+                    source_sha256=draft.get('source_sha256'))
+    modes = []
+    reason = ''
+    if (attempt.get('media_kind') == 'image'
+            and attempt.get('status') in {'unknown', 'submission_unknown'}
+            and not attempt.get('task_id')):
+        if not output:
+            modes = ['not_submitted', 'retry_with_unknown_cost']
+        elif (attempt.get('output_available') is True
+                and attempt.get('provider_outcome') == 'unknown'
+                and attempt.get('draft_sha256') == draft.get('draft_sha256')
+                and isinstance(attempt.get('draft_sha256'), str)):
+            modes = ['retry_with_unknown_cost']
+        else:
+            reason = '已记录的保留图片暂不能核对，请先核实原文件；不能记作未提交或重新生成。'
+    return {'modes': modes, 'attempt_sha256': digest(identity),
+            'has_retained_output': bool(output), 'reason': reason}
+
 def preparation_failure(exc: Exception) -> dict:
     """One shape for every refusal, so the controller never has to guess.
 
@@ -733,7 +802,37 @@ def _endpoint_host(endpoint):
     return ''
 
 
-def agent_production_state(store, pipeline, run_id) -> dict:
+def agent_draft_projection(draft, *, include_input=False):
+    """Model-only input index; the workbench keeps the complete original."""
+    keys = {
+        'actor', 'created_at', 'draft_id', 'draft_sha256', 'kind', 'model',
+        'duration', 'resolution', 'parameters', 'estimate', 'shot_id',
+        'source_version', 'source_sha256', 'source_snapshot', 'supersedes',
+        'superseded_by', 'shot_revision', 'is_current', 'design_issue',
+        'design_labels', 'source_ready', 'reference_approved', 'can_generate',
+        'reason', 'event_seq', 'review', 'references', 'reuse',
+    }
+    result = {k: deepcopy(v) for k, v in draft.items() if k in keys}
+    result['attempts'] = [{k: deepcopy(v) for k, v in attempt.items() if k != 'endpoint'}
+                         | ({'endpoint_host': _endpoint_host(attempt.get('endpoint'))}
+                            if _endpoint_host(attempt.get('endpoint')) else {})
+                         for attempt in draft.get('attempts') or []]
+    reference = {k: deepcopy(v) for k, v in (draft.get('reference') or {}).items() if k != 'url'}
+    result['reference'] = reference or None
+    result['input_details_included'] = include_input
+    result['read_input'] = {'tool': 'read_production', 'draft_id': draft['draft_id'],
+                            'expected_sha256': draft['draft_sha256']}
+    if include_input:
+        # Both distinct source descriptions are needed, once each. Aliases and
+        # the original request envelope do not add content or authority.
+        for key in ('shot_prompt', 'compiled_prompt', 'design_binding',
+                    'shot_binding', 'reuse_dependencies'):
+            if key in draft:
+                result[key] = deepcopy(draft[key])
+    return result
+
+
+def agent_production_state(store, pipeline, run_id, *, draft_id=None, expected_sha256=None) -> dict:
     """The controller's read-only view of production, with nothing to leak.
 
     Assembled from the same projection the page uses, so the controller and the
@@ -742,22 +841,40 @@ def agent_production_state(store, pipeline, run_id) -> dict:
     controller has no business fetching project media) and provider response
     bodies. ``endpoint`` is reduced to its host because a signed query string
     can appear in it.
+    Default reads index every input without repeating full prompts. An exact
+    identity/hash reads one original in full, including stale historical input;
+    that read never makes it current, approved or eligible for generation.
     """
+    if (draft_id is None) != (expected_sha256 is None):
+        raise ValueError('读取原制作输入须同时提供准确 draft_id 和 expected_sha256。')
     state = _read_state_without_service(store, pipeline, run_id)
-    drafts = []
-    for draft in state['drafts']:
-        attempts = [{k: v for k, v in attempt.items() if k != 'endpoint'}
-                    | ({'endpoint_host': _endpoint_host(attempt.get('endpoint'))}
-                       if _endpoint_host(attempt.get('endpoint')) else {})
-                    for attempt in draft.get('attempts') or []]
-        reference = {k: v for k, v in (draft.get('reference') or {}).items() if k != 'url'}
-        drafts.append({**draft, 'attempts': attempts, 'reference': reference or None})
+    if draft_id is not None:
+        matches = [draft for draft in state['drafts'] if draft['draft_id'] == draft_id
+                   and draft['draft_sha256'] == expected_sha256]
+        if len(matches) != 1:
+            raise ValueError('这份准确制作输入未能核对，请用当前状态中的身份与指纹读取；不会换成最新输入。')
+        selected = matches[0]
+        # Do not resend every historical input/catalog after reading the index.
+        # Global obstructions stay visible even when they belong to another shot.
+        return {
+            'view': 'input_detail',
+            'notice': '本次只读取这一份准确输入与绑定的来源段落；完整历史清单用无参数 read_production。'
+                      '来源段落是方案原文，不代表像素观察、采用或图审。历史输入仍是历史；未决提交只查询原任务，不自动重提。',
+            **{key: deepcopy(state[key]) for key in ('baseline', 'targets', 'shots',
+                'unresolved_attempts', 'preparation_blocker', 'open_stage_tasks')},
+            'drafts': [agent_draft_projection(selected, include_input=True)],
+            'source_shot': _agent_source_shot(store, run_id, selected, state),
+        }
+    drafts = [agent_draft_projection(draft) for draft in state['drafts']]
     return {
-        'notice': ('读取制作状态是免费的只读操作。准备方案也不收费；生成、图审与费用只能由用户在'
-                   '制作界面确认。已提交的提供方任务只查询原任务，绝不自动重提。'),
+        'view': 'input_detail' if draft_id is not None else 'state_index',
+        'notice': ('读取制作状态和保存制作输入本身不产生提供方费用；准备设计所需模型调用正常记录用量。生成、图审与费用只能由用户在'
+                   '制作界面确认。已提交的提供方任务只查询原任务，绝不自动重提。'
+                   '默认为完整状态索引；核对或修改原描述时，用 read_input 的准确身份与指纹读取详情，不猜最新输入。'),
         'baseline': state['baseline'],
         'targets': state['targets'],
         'shots': state['shots'],
+        'unresolved_attempts': state['unresolved_attempts'],
         'sources': state['sources'],
         'materials': [{k: v for k, v in m.items() if k != 'url'} for m in state['materials']],
         'drafts': drafts,
@@ -766,8 +883,43 @@ def agent_production_state(store, pipeline, run_id) -> dict:
         'assemblies': state['assemblies'],
         'latest_approved_image': state['latest_approved_image'],
         'visual_design_status': state['visual_design_status'],
+        'preparation_blocker': state['preparation_blocker'],
+        'open_stage_tasks': state['open_stage_tasks'],
+        'design_upgrade_action': state['design_upgrade_action'],
         'reuse_candidates': state['reuse_candidates'],
     }
+
+
+def _agent_source_shot(store, run_id, draft, state):
+    """Read only the immutable source bound to this exact input; never latest."""
+    identity = {'stage': 'writing', 'version': draft.get('source_version'),
+                'sha256': draft.get('source_sha256'), 'shot_id': draft.get('shot_id')}
+    unavailable = {'available': False, **identity,
+                   'reason': '这份输入的准确来源或唯一段落无法核对；不替换为最新方案。'}
+    sources = [row for row in state.get('sources', [])
+               if row.get('version') == identity['version']
+               and row.get('artifact_sha256') == identity['sha256']]
+    if len(sources) != 1 or type(identity['version']) is not int or identity['version'] < 1:
+        return unavailable
+    artifact = store.read_artifact(run_id, 'writing', identity['version'])
+    if artifact.sha256 != identity['sha256'] or not store.verify_artifact(run_id, 'writing', artifact.version):
+        raise ValueError('这份输入所绑定的原方案指纹无法核对；不会读取最新方案替代。')
+    if artifact.digest_algorithm != 'artifact-v2':
+        return {**unavailable, 'reason': '旧方案指纹只覆盖正文，未覆盖结构化段落；不能将该段标为已核验原文。'}
+    targets = _artifact_target_shots(artifact, draft.get('kind', 'image'))
+    matches = [row for row in targets['shots'] if row['shot_id'] == identity['shot_id']]
+    if len(matches) != 1:
+        return unavailable
+    target = matches[0]
+    segment = (artifact.structured or {})['segments'][target['ordinal'] - 1]
+    if not isinstance(segment, dict):
+        return unavailable
+    current = state.get('targets', {}).get(draft.get('kind', 'image'), {})
+    return {'available': True, **identity, 'ordinal': target['ordinal'],
+            **({'page_id': target['page_id']} if target.get('page_id') else {}),
+            'is_current_source': (current.get('source_version') == artifact.version
+                                  and current.get('source_sha256') == artifact.sha256),
+            'segment': deepcopy(segment)}
 
 
 def _read_state_without_service(store, pipeline, run_id, *, ledger=None,
@@ -779,8 +931,9 @@ def _read_state_without_service(store, pipeline, run_id, *, ledger=None,
     in chat. The turn-level deliverable check calls this on every model round, so
     it stays a small number of event-log scans and no media reads.
 
-    ``ledger`` is the service's ledger when there is one; without it the usage
-    columns are simply ``not_started``, which is a fact, not a guess.
+    The controller has no production service, but still reads the same effective
+    ledger journal. Missing service state cannot make a submitted call appear
+    unstarted or erase an uncertain task from the recovery projection.
     """
     events = store.read_events(run_id)
     drafts = draft_records(store, run_id)
@@ -790,7 +943,7 @@ def _read_state_without_service(store, pipeline, run_id, *, ledger=None,
         if event.get('kind') == 'production_material_approval':
             approvals[(event['name'], event['sha256'])] = event['approved']
     attempts = attempt_records(store, run_id,
-                               ledger.entries(run_id) if ledger is not None else None,
+                               ledger.entries(run_id) if ledger is not None else Ledger.project_entries(store, run_id),
                                execution_active=execution_active)
     materials = [{**m, 'approved': approvals.get((m['name'], m['sha256']), False)}
                  for m in evidence_snapshot(store, run_id)['materials']]
@@ -837,6 +990,8 @@ def _read_state_without_service(store, pipeline, run_id, *, ledger=None,
                 attempt['output_available'] = bool(isinstance(output, dict)
                     and output.get('name') in hashes
                     and hashes[output['name']] == output.get('sha256'))
+            if attempt.get('media_kind') == 'image':
+                attempt['recovery'] = image_recovery_state(run_id, attempt, draft)
         # A replaced input is readable history, not the default thing to
         # generate. The page and the controller both filter on ``is_current``,
         # but ``can_generate`` is the explicit answer and must agree with them.
@@ -858,8 +1013,109 @@ def _read_state_without_service(store, pipeline, run_id, *, ledger=None,
                             if event.get('kind') == 'production_assembly']
     result['shots'] = {kind: coverage(drafts, kind, targets=result['targets'][kind],
                                       baseline=baseline) for kind in ('image', 'video')}
+    ordinals = {kind: {row['shot_id']: row['ordinal'] for row in result['targets'][kind]['shots']}
+                for kind in ('image', 'video')}
+    result['unresolved_attempts'] = [{
+        'kind': draft['kind'], 'shot_id': draft['shot_id'],
+        'ordinal': ordinals[draft['kind']].get(draft['shot_id']),
+        'draft_id': draft['draft_id'], 'attempt_id': attempt['attempt_id'],
+        'status': attempt['status'], 'task_id': attempt.get('task_id'),
+        'message': attempt.get('message', ''),
+    } for attempt in attempts.values()
+        if attempt.get('status') in UNRESOLVED_MEDIA_PHASES
+        and (draft := drafts.get(attempt.get('draft_id'))) is not None]
+    from .design_upgrade import available as design_upgrade_action, latest_proposal
+    result['design_upgrade_action'] = design_upgrade_action(store, pipeline, run_id, stage_memo)
+    proposal = latest_proposal(store, run_id)
+    result['design_upgrade_proposal'] = ({'id': proposal['id'], 'sha256': proposal['sha256']}
+                                         if proposal else None)
+    result['open_stage_tasks'] = [{'stage': stage, 'attempt_number': state.open_attempt.number}
+        for stage in STAGES if (state := pipeline.stage_state(run_id, stage, stage_memo)).open_attempt]
+    result['preparation_blocker'] = _preparation_blocker(
+        result, pipeline.stage_state(run_id, 'writing', stage_memo), ready_source)
     result['latest_approved_image'] = latest_approved_image
+    from .delivery import photo_delivery_projection
+    from .project_brief import content_format
+    result['photo_delivery'] = photo_delivery_projection(
+        {**result, 'run_id': run_id}, current, writing_ready=ready_source, format=content_format(events))
     return result
+
+
+def _preparation_blocker(state, writing, complete):
+    """Prerequisites from this read's Pipeline memo, never from draft counts."""
+    def blocked(code, note, action):
+        return {'code': code, 'status': 'incomplete', 'note': note,
+                'next_action': {'action': action}}
+
+    if not writing.integrity_ok:
+        return blocked('script_integrity', '当前脚本无法通过版本校验，已暂停制作。请查看项目诊断并核对原文件。',
+                       'integrity_check')
+    if state['open_stage_tasks']:
+        original = state['open_stage_tasks'][0]
+        label = {'intake': '需求', 'direction': '创意方向', 'material_plan': '素材设计',
+                 'writing': '脚本'}[original['stage']]
+        return {'code': 'stage_task_in_progress', 'status': 'incomplete',
+                'note': f'{label}还有未结束的修改任务，已暂停制作。请先在团队工作记录中核对并处理原任务，再决定下一步。',
+                'next_action': {'action': 'check_stage_task', **original}}
+    if not writing.latest:
+        return blocked('script_missing', '还没有可用于制作的脚本。请先要求团队完成脚本，并阅读后决定采用。',
+                       'request_script')
+    if writing.stale:
+        return blocked('script_stale', '素材或上游方案已变化，当前脚本已失效，不能继续制作。请明确要求更新受影响的方案，再采用新脚本。',
+                       'request_upstream_revision')
+    if not complete:
+        if writing.approval and writing.approval.decision == 'returned':
+            return blocked('script_returned', '当前脚本已退回，不能继续制作。请先按退回意见修改，再阅读新版脚本决定是否采用。',
+                           'request_script_revision')
+        if writing.can_approve:
+            return blocked('script_awaiting_decision', '当前脚本尚未采用，已暂停制作。请在对话区阅读脚本，决定采用或退回。',
+                           'script_decision')
+        return blocked('script_not_ready', '当前脚本尚未满足制作条件，已暂停制作。请查看脚本的未完成原因，明确下一轮修改范围。',
+                       'review_script')
+    if not state['targets']['image']['complete_list']:
+        return blocked('shot_list_missing', '当前脚本没有可核对的镜头清单，不能准备分镜。请明确要求补齐逐镜脚本，再阅读新版决定是否采用。',
+                       'request_script_revision')
+    if not state['visual_design_status']['ready']:
+        action = state.get('design_upgrade_action')
+        note = '当前方案的共同人物、场景设计或逐镜身份尚不完整，不能准备可执行的分镜输入。'
+        if action:
+            note += f'请打开对话区的「{action["label"]}」，核对范围与模型调用后再确认；普通“继续”不会启动设计补充。'
+        else:
+            note += '请明确要求修改素材设计或脚本绑定，再阅读新版脚本决定是否采用。'
+        return {'code': 'visual_design_missing', 'status': 'incomplete', 'note': note,
+                'next_action': action or {'action': 'request_design_revision'}}
+    return None
+
+
+def continuation_blocker(state, goal, *, feedback=None):
+    """Actions impossible in a frozen production turn; no approval or writes.
+
+    Preparing an input can be valid while another image is awaiting recovery or
+    review. Delivering media must instead settle every original request first,
+    including requests hidden behind replaced or obsolete inputs.
+    """
+    if goal not in {'production_input', 'production_media'}:
+        return None
+    pending = state['unresolved_attempts']
+    if goal == 'production_media' and pending:
+        original = pending[0]
+        label = (f'第 {original["ordinal"]} 镜' if original.get('ordinal')
+                 else original['shot_id'])
+        medium = '图片' if original['kind'] == 'image' else '视频'
+        note = f'{label}的原{medium}任务尚未结束或结果未核实，已暂停后续媒体制作。请打开该镜头的原任务核实结果，不要重新提交。'
+        status = ('unknown' if original['status'] in {'unknown', 'submission_unknown', 'retrieve_failed'}
+                  else 'in_progress')
+        return {'code': 'original_media_unresolved', 'status': status, 'note': note,
+                'next_action': {'action': 'check_original_task',
+                    **{key: original.get(key) for key in
+                       ('kind', 'shot_id', 'draft_id', 'attempt_id', 'task_id')}}}
+    if state['preparation_blocker']:
+        return state['preparation_blocker']
+    if feedback and feedback.get('binding_issue'):
+        return {'code': 'feedback_binding_invalid', 'status': 'incomplete',
+                'note': '所选作品无法绑定当前镜头输入，不能执行这次修改。请重新打开当前镜头并选择准确的反馈对象。',
+                'next_action': {'action': 'select_current_input', 'shot_id': feedback['shot_id']}}
+    return None
 
 
 def edit_plan_records(store, run_id):
@@ -1086,6 +1342,8 @@ def prepare_draft(store, pipeline, run_id, payload: DraftIn, *, actor='user'):
             fields.pop('references')
         if not fields['reuse_attempt_id']:
             fields.pop('reuse_attempt_id')
+        if fields['preserve_prompt_from'] is None:
+            fields.pop('preserve_prompt_from')
         try:
             references = normalise_references(payload.kind,
                 payload.reference.model_dump() if payload.reference else None,
@@ -1093,7 +1351,7 @@ def prepare_draft(store, pipeline, run_id, payload: DraftIn, *, actor='user'):
         except ValueError as exc:
             raise ProductionError('reference_purpose_invalid', str(exc), target=target,
                                   retryable=True, next_action='choose_reference') from None
-        if not payload.prompt.strip():
+        if payload.prompt is not None and not payload.prompt.strip():
             raise ProductionError('empty_prompt', '请填写实际发送给生成模型的描述。',
                                   target=target, next_action='supply_prompt')
         if payload.kind == 'video':
@@ -1168,6 +1426,17 @@ def prepare_draft(store, pipeline, run_id, payload: DraftIn, *, actor='user'):
                                   '要替换的输入属于旧依据，请核对当前分镜并保存新输入。',
                                   target=target, next_action='review_current_shots',
                                   needs_user_decision=True)
+        shot_prompt = payload.prompt
+        if payload.preserve_prompt_from is not None:
+            if parent is None or parent['draft_sha256'] != payload.preserve_prompt_from.expected_sha256:
+                raise ProductionError('prompt_source_changed',
+                                      '要复用的原描述输入或指纹已变化，请重新读取当前准确输入。',
+                                      target=target, next_action='review_current_shots')
+            shot_prompt = parent.get('shot_prompt')
+            if not isinstance(shot_prompt, str) or not shot_prompt.strip() or len(shot_prompt) > 5000:
+                raise ProductionError('prompt_source_unavailable',
+                                      '这份输入没有可复用的准确原描述，请重新准备描述；旧输入保留。',
+                                      target=target, next_action='refine_shot_input')
         inherited = any(d['source_sha256'] == source.sha256 and d['source_snapshot'] == baseline
                         for d in drafts.values())
         if not pipeline.is_complete(run_id, 'writing') and not inherited:
@@ -1202,7 +1471,7 @@ def prepare_draft(store, pipeline, run_id, payload: DraftIn, *, actor='user'):
             compiled = compile_visual_input(store, pipeline, run_id,
                 source_version=payload.source_version, source_sha256=payload.source_sha256,
                 shot_id=payload.shot_id or (parent['shot_id'] if parent else None),
-                kind=payload.kind, shot_prompt=payload.prompt, references=references)
+                kind=payload.kind, shot_prompt=shot_prompt, references=references)
         except ValueError as exc:
             status = design_status(store, pipeline, run_id)
             code = 'visual_design_missing' if not status.get('design') else 'visual_design_invalid'
@@ -1224,7 +1493,7 @@ def prepare_draft(store, pipeline, run_id, payload: DraftIn, *, actor='user'):
                     'input_sha256': digest({'prompt': compiled['compiled_prompt'],
                                            'references': compiled['references']})}
         draft = {**fields, **compiled, 'prompt': compiled['compiled_prompt'],
-                 'shot_prompt': payload.prompt,
+                 'shot_prompt': shot_prompt,
                  'reference': ({key: references[0][key] for key in ('name', 'sha256')}
                                if references else None),
                  'draft_id': payload.request_id, 'created_at': utcnow(),
@@ -1235,7 +1504,7 @@ def prepare_draft(store, pipeline, run_id, payload: DraftIn, *, actor='user'):
         draft['shot_id'] = compiled['shot_binding']['shot_id']
         draft['supersedes'] = payload.supersedes
         draft['reuse_dependencies'] = shot_dependencies(store, run_id, draft['shot_id'],
-            kind=payload.kind, prompt=payload.prompt, references=references, model=payload.model,
+            kind=payload.kind, prompt=shot_prompt, references=references, model=payload.model,
             duration=payload.duration, resolution=payload.resolution)
         reused_attempt = None
         if payload.reuse_attempt_id:
@@ -1506,11 +1775,12 @@ class Production:
                 read_image(self.store, run_id, reference['name'], reference['sha256'])
         return d
 
-    def validate_generation_set(self, run_id, authorized):
+    def validate_generation_set(self, run_id, authorized, *, _draft_reader=None):
         """Revalidate every pinned revision, not only the next item in a batch."""
         with self.store.run_lock(run_id):
+            reader = self.get_draft if _draft_reader is None else _draft_reader
             try:
-                selected = [self.get_draft(run_id, draft_id, expected, True)
+                selected = [reader(run_id, draft_id, expected, True)
                             for draft_id, expected in authorized]
             except ValueError as exc:
                 raise PipelineError('generation_authorization_stale', str(exc)) from None
@@ -1637,13 +1907,14 @@ class Production:
             return done('制作检查已保存，请在制作页面查看。')
         return run, frozen[2] if frozen else snapshot.public()
 
-    def prepare_generation(self, run_id, draft_id, payload, *, authorized=None):
+    def prepare_generation(self, run_id, draft_id, payload, *, authorized=None, _draft_reader=None):
         self.require_nonce(run_id, payload.nonce)
         if not payload.consent:
             raise ValueError('请核对图片、实际描述与费用后确认本次生成。')
-        d = self.get_draft(run_id, draft_id, payload.expected_sha256, True)
+        reader = self.get_draft if _draft_reader is None else _draft_reader
+        d = reader(run_id, draft_id, payload.expected_sha256, True)
         authorized = tuple(authorized or [(draft_id, payload.expected_sha256)])
-        self.validate_generation_set(run_id, authorized)
+        self.validate_generation_set(run_id, authorized, _draft_reader=_draft_reader)
         # Submission recovery prevents duplicate remote jobs, independently of
         # accounting: a completed output with unknown billing is not a blocker.
         related = {row['draft_id'] for row in draft_records(self.store, run_id).values()
@@ -1710,12 +1981,34 @@ class Production:
                      'draft_id': draft_id, 'draft_sha256': d['draft_sha256'], 'estimate': d['estimate']}
 
     def prepare_batch_generation(self, run_id, payload: BatchGenerateIn):
+        """Reuse verified copies only during this one locked, read-only preflight."""
+        with self.store.run_lock(run_id):
+            owner_thread = threading.get_ident()
+            active = True
+            checked = {}
+
+            def read_checked(requested_run, draft_id, expected=None, check_source=False):
+                if (not active or threading.get_ident() != owner_thread
+                        or requested_run != run_id or check_source is not True):
+                    raise ValueError('本次生成预检已失效，须重新核对准确输入。')
+                key = (requested_run, draft_id, expected, check_source)
+                if key not in checked:
+                    checked[key] = deepcopy(self.get_draft(requested_run, draft_id, expected, True))
+                return deepcopy(checked[key])
+
+            try:
+                return self._prepare_batch_generation(run_id, payload, read_checked)
+            finally:
+                active = False
+                checked.clear()
+
+    def _prepare_batch_generation(self, run_id, payload: BatchGenerateIn, draft_reader):
         """One user decision starts pinned shots in order, stopping on uncertainty."""
         self.require_nonce(run_id, payload.nonce)
         if not payload.consent:
             raise ValueError('请先核对整组制作描述、参考和费用。')
         workspace = self.workspace(run_id, for_agent=True)
-        selected = [self.get_draft(run_id, item.draft_id, item.expected_sha256, True)
+        selected = [draft_reader(run_id, item.draft_id, item.expected_sha256, True)
                     for item in payload.drafts]
         kinds = {draft['kind'] for draft in selected}
         if len(kinds) != 1:
@@ -1727,17 +2020,13 @@ class Production:
         image_connection_revision = (payload.expected_connection_revision
                                      if payload.expected_connection_revision is not None
                                      else self.image_model_selection()['revision']) if kind == 'image' else None
-        unresolved = {'queued', 'running', 'preparing', 'submitting', 'submitted',
-                      'downloading', 'retrieve_failed', 'unknown', 'submission_unknown', 'recovering', 'cancelling'}
-        for draft in workspace['drafts']:
-            if (draft['kind'] == kind and draft['source_ready']
-                    and any(attempt['status'] in unresolved for attempt in draft['attempts'])):
-                raise ValueError('整组仍有任务未核实；先处理原任务，不能跳过后续片段。')
+        if workspace['unresolved_attempts']:
+            raise ValueError('整组仍有任务未核实；先处理原任务，不能跳过后续片段。')
         ids = [item.draft_id for item in payload.drafts]
         if len(ids) != len(set(ids)):
             raise ValueError('同一制作方案不能在一次任务中重复生成。')
         authorized = tuple((item.draft_id, item.expected_sha256) for item in payload.drafts)
-        self.validate_generation_set(run_id, authorized)
+        self.validate_generation_set(run_id, authorized, _draft_reader=draft_reader)
         if kind == 'video':
             sequence = workspace['video_sequence']
             if len(sequence) < 2 or any(not shot['approved'] or not shot['video_draft_id'] for shot in sequence):
@@ -1748,6 +2037,18 @@ class Production:
                 for a in drafts_by_id[shot['video_draft_id']]['attempts'])]
             if ids != expected:
                 raise ValueError('请按当前分镜顺序提交全部未完成的视频段，不能跳过或替换准确输入。')
+        # Freeze the verified delivery format with this exact submitted batch.
+        photo = kind == 'image' and content_format(self.store.read_events(run_id)) == 'photo'
+        # Display ordinals come from the same current-shot projection as the
+        # UI. A subset's position in this batch is not its source page number.
+        photo_ordinals = []
+        for draft in selected:
+            matches = [shot for shot in workspace.get('shots', {}).get(kind, {}).get('shots', [])
+                       if shot.get('draft_id') == draft['draft_id']
+                       and shot.get('draft_sha256') == draft['draft_sha256']
+                       and shot.get('shot_id') == draft.get('shot_id')]
+            ordinal = matches[0].get('ordinal') if len(matches) == 1 else None
+            photo_ordinals.append(ordinal if type(ordinal) is int and 0 < ordinal <= 9999 else None)
         prepared = []
         for index, item in enumerate(payload.drafts):
             attempt_id = 'batch.' + digest({'request_id': payload.request_id,
@@ -1755,7 +2056,8 @@ class Production:
             action = ActionIn(request_id=attempt_id, expected_sha256=item.expected_sha256,
                               consent=True, nonce=payload.nonce,
                               expected_connection_revision=image_connection_revision)
-            runner, _ = self.prepare_generation(run_id, item.draft_id, action, authorized=authorized)
+            runner, _ = self.prepare_generation(run_id, item.draft_id, action, authorized=authorized,
+                                                _draft_reader=draft_reader)
             prepared.append(runner)
 
         def run(_text, emit, check_cancel):
@@ -1764,15 +2066,24 @@ class Production:
             label = '视频段' if kind == 'video' else '首帧'
             for index, runner in enumerate(prepared, 1):
                 check_cancel()
-                emit({'type': 'status', 'message': f'正在生成第 {index}/{len(prepared)} 个{label}。'})
+                page = photo_ordinals[index - 1]
+                target = f'第 {page:02d} 页图片' if page is not None else '图文图片'
+                message = (f'正在生成{target}（本次 {index}/{len(prepared)} 张）。' if photo else
+                           f'正在生成第 {index}/{len(prepared)} 个{label}。')
+                emit({'type': 'status', 'message': message})
                 result = runner('', emit, check_cancel)
                 if result.stopped_because != 'done':
+                    failure = (f'本次已完成 {completed}/{len(prepared)} 张；{target}未完成：'
+                               f'{result.text}。其余所选页面没有提交。' if photo else
+                               f'已完成 {completed}/{len(prepared)} 个；第 {index} 个未完成：'
+                               f'{result.text}。其余{label}没有提交。')
                     return SimpleNamespace(stopped_because='incomplete', rounds=index,
-                        used_tools=[], text=(f'已完成 {completed}/{len(prepared)} 个；'
-                        f'第 {index} 个未完成：{result.text}。其余{label}没有提交。'))
+                                           used_tools=[], text=failure)
                 completed += 1
-            return done(f'{completed} 个{label}已生成并保存。'
-                        + ('请在成片区查看并拼接。' if kind == 'video' else
+            return done((f'本次 {completed} 张图文图片已生成并保存。' if photo else
+                         f'{completed} 个{label}已生成并保存。')
+                        + ('请逐页查看图片并核对商品结构、图内文案与发布 caption。' if photo else
+                           '请在成片区查看并拼接。' if kind == 'video' else
                            '请在画面区查看，确认准确图片后再继续视频制作。'))
 
         return run, {'provider': 'dashscope' if kind == 'video' else 'codex_cli',
@@ -2046,6 +2357,8 @@ def install_production_routes(app, jobs, require_run, connections, settings, lea
     service = Production(jobs, connections, settings, learning, client_factory=client_factory,
         image_factory=image_factory, video_factory=video_factory, poll_delay=poll_delay, poll_count=poll_count)
     app.state.production = service
+    from .design_upgrade import install_routes as install_design_upgrade_routes
+    install_design_upgrade_routes(app, service, require_run)
 
     def idle():
         if jobs.active is not None:
@@ -2106,7 +2419,7 @@ def install_production_routes(app, jobs, require_run, connections, settings, lea
             if prior:
                 latest_job = jobs.get(run_id, prior[-1]['job_id'])
                 if (not retry_id or latest_job['status'] not in {'failed', 'blocked'}
-                        or latest_job['open_attempts'] or latest_job['unresolved_calls']):
+                        or latest_job['open_attempts']):
                     return receipt(latest_job)
             request_id = retry_id or base_request_id
 
@@ -2210,7 +2523,7 @@ def install_production_routes(app, jobs, require_run, connections, settings, lea
             if prior:
                 latest_job = jobs.get(run_id, prior[-1]['job_id'])
                 if (not retry_id or latest_job['status'] not in {'failed', 'blocked'}
-                        or latest_job['open_attempts'] or latest_job['unresolved_calls']):
+                        or latest_job['open_attempts']):
                     return receipt(latest_job)
 
             def prepare_exact(rid):
@@ -2412,24 +2725,56 @@ def install_production_routes(app, jobs, require_run, connections, settings, lea
     def recover(run_id: str, attempt_id: str, payload: RecoverIn):
         require_run(run_id)
         try:
-            with jobs.lock, jobs.ledger.call_guard():
+            with jobs.lock, jobs.ledger.call_guard(), jobs.store.run_lock(run_id):
                 idle()
-                service.require_nonce(run_id, payload.nonce)
-                a = service.attempts(run_id).get(attempt_id)
+                attempts = service.attempts(run_id)
+                a = attempts.get(attempt_id)
                 if not a or not payload.evidence_note.strip():
                     raise ValueError('请选择真实制作记录，并填写提供方证据。')
                 choices = (int(payload.task_id is not None) + int(payload.not_submitted)
                            + int(payload.quantity is not None) + int(payload.retry_with_unknown_cost))
                 if choices != 1:
                     raise ValueError('请选择一种明确的恢复方式。')
+                if not payload.retry_with_unknown_cost and (payload.request_id or payload.expected_attempt_sha256):
+                    raise ValueError('准确恢复请求身份仅用于承担原图片未知结果与费用的决定。')
+                request_sha = digest({'run_id': run_id, 'attempt_id': attempt_id,
+                    'payload': payload.model_dump(exclude={'nonce'})})
+                if payload.retry_with_unknown_cost and payload.request_id:
+                    recorded = [row for row in attempts.values()
+                                if row.get('recovery_request_id') == payload.request_id]
+                    if recorded:
+                        if (len(recorded) != 1 or recorded[0]['attempt_id'] != attempt_id
+                                or recorded[0].get('recovery_payload_sha256') != request_sha):
+                            raise ValueError('这次恢复请求已用于不同的准确决定，不能改写原回执。')
+                        # This reads the already recorded decision, even after a
+                        # service nonce changes. It grants no new execution and
+                        # does not reclassify a later missing retained file.
+                        return {'recovered': True, 'new_generation': False,
+                                'usage_still_unknown': a['usage_status'] != 'known'}
+                service.require_nonce(run_id, payload.nonce)
                 if payload.retry_with_unknown_cost:
-                    if (a['media_kind'] != 'image' or a['status'] not in {'unknown', 'submission_unknown'}
-                            or a.get('output') or a.get('task_id')):
-                        raise ValueError('只有结果未知且无可核对输出的图片任务可选择承担未知费用后重试。')
+                    d = service.get_draft(run_id, a['draft_id'], a.get('draft_sha256'))
+                    if a.get('output'):
+                        output = a['output']
+                        read_image(service.store, run_id, output.get('name'), output.get('sha256'))
+                        a['output_available'] = True
+                        if not payload.request_id or not payload.expected_attempt_sha256:
+                            raise ValueError('请重新打开这次准确图片任务，核对保留文件与未知费用后再记录决定。')
+                    recovery = image_recovery_state(run_id, a, d)
+                    if 'retry_with_unknown_cost' not in recovery['modes']:
+                        raise ValueError('只有结果未知的图片任务可记录承担原结果与费用未知的恢复决定。')
+                    if (payload.expected_attempt_sha256 is not None
+                            and payload.expected_attempt_sha256 != recovery['attempt_sha256']):
+                        raise ValueError('原图片任务或保留文件已变化，请重新核对准确记录；没有记录恢复决定。')
                     service.status(run_id, attempt_id, status='retry_authorized',
                         message='用户决定保留旧请求结果与费用未知的记录，并允许另行确认新一轮生成；此操作没有提交新图片任务。',
-                        recovery_evidence=payload.evidence_note, recovery_actor='user')
-                    return {'recovered': True, 'new_generation': False, 'usage_still_unknown': True}
+                        recovery_evidence=payload.evidence_note, recovery_actor='user',
+                        **({'recovery_request_id': payload.request_id,
+                            'recovery_payload_sha256': request_sha,
+                            'recovery_attempt_sha256': recovery['attempt_sha256']}
+                           if payload.request_id else {}))
+                    return {'recovered': True, 'new_generation': False,
+                            'usage_still_unknown': a['usage_status'] != 'known'}
                 if payload.task_id:
                     if a['media_kind'] != 'video' or a.get('task_id') or a.get('output'):
                         raise ValueError('此任务不能重新绑定提供方任务。')

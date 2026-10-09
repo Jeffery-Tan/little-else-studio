@@ -328,7 +328,7 @@ def _answered_direction_questions(store: Store, run_id: str,
     from .structured import is_ask_user_question, question_answers
 
     questions: dict[str, dict[str, str]] = {}
-    for artifact in store.list_artifacts(run_id, "direction"):
+    for artifact in store.active_artifacts(run_id, "direction"):
         for row in artifact.structured.get("open_questions") or []:
             if not is_ask_user_question(row):
                 continue
@@ -819,6 +819,15 @@ def compile_active_brief(store: Store, run_id: str, *, version: int | None = Non
             "compiled_at": utcnow(),
         },
     }
+    # A response settles a question, not the product goal or an adopted draft.
+    # Keep its exact source in context without changing brief:snapshot, which
+    # would make the same-message adoption stale. Unknown remains unknown.
+    from .interactions import artifact_responses
+    responses = artifact_responses(store, run_id)
+    if responses:
+        brief['source']['question_responses'] = [{key: row[key] for key in (
+            'question_id', 'target', 'question', 'quote', 'answer_status',
+            'source_message_id', 'source_request_id', 'at')} for row in responses]
     # Approved amendments are replayed in order. Anything that cannot be
     # realigned onto the current clauses becomes a reported conflict instead of
     # a silent skip (R2) — a brief that quietly dropped a user decision must not
@@ -1162,6 +1171,32 @@ def fingerprint_for(store: Store, run_id: str) -> str:
 
 def _split_ids(cell: str) -> list[str]:
     return [p.strip() for p in re.split(r"[,，;；\s]+", cell or "") if p.strip()]
+
+
+def validate_direction_clause_references(brief: dict[str, Any],
+                                         structured: dict[str, Any]) -> None:
+    """Check references before saving, without deciding whether an option fits.
+
+    These fields address ActiveBrief clauses, not user-constraint keys or ids.
+    A known violation or amendment remains a valid declaration for the gate to
+    evaluate. Historical artifacts are read as saved; this only checks a new
+    submission against the brief its caller has already locked and verified.
+    """
+    known = set(clause_index(brief))
+    goal_id = (brief.get('goal') or {}).get('id')
+    if goal_id:
+        known.add(goal_id)
+    for number, row in enumerate(structured.get('options') or []):
+        for field in ('satisfies', 'violates', 'amend_clause'):
+            cell = str(row.get(field) or '').strip()
+            references = ([cell] if cell else []) if field == 'amend_clause' else _split_ids(cell)
+            if any(reference not in known for reference in references):
+                # Only an existing field path and trusted current identities
+                # may enter the correction receipt; never echo a bad cell.
+                raise ValueError(
+                    f'structured.options[{number}].{field}: '
+                    '引用必须是当前 ActiveBrief 的条款 id；有效 id：'
+                    + (', '.join(sorted(known)) or '（无）'))
 
 
 def _chosen_option(structured: dict[str, Any]) -> str:

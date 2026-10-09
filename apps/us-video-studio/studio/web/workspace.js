@@ -30,7 +30,7 @@ function shortTitle(title, max = 18) {
   return text.length <= max ? text : `${text.slice(0, Math.max(1, max - 1))}…`;
 }
 function filterProjects(runs, query) {
-  const urgent=new Set(['needs_input','reviewed','returned','review_failed','interrupted','stale']);
+  const urgent=new Set(['needs_input','reviewed','returned','review_failed','interrupted','stale','unavailable']);
   return runs.filter(run => (run.title || '').toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
     .sort((a,b)=>Number(urgent.has(b.project_brief?.phase))-Number(urgent.has(a.project_brief?.phase))
       || (Date.parse(b.updated_at||b.created_at)||0)-(Date.parse(a.updated_at||a.created_at)||0));
@@ -41,14 +41,26 @@ function inspirationCases(cases) {
 }
 function projectCardHtml(run, cover) {
   const id = escapeHtml(run.run_id), fullTitle = String(run.title || ''), title = escapeHtml(shortTitle(fullTitle));
+  if (run.integrity?.available === false) {
+    const issues = (run.integrity.issues || []).map(issue => `<li>${escapeHtml(issue.file)} · ${escapeHtml(issue.category)}` +
+      `${issue.line ? ` · 第 ${escapeHtml(issue.line)} 行` : ''}<br><small>${issue.sha256 ? `指纹 ${escapeHtml(issue.sha256)}` : '指纹无法读取'}</small></li>`).join('');
+    return `<article class="project-card-item"><div class="project-card project-unavailable"><span class="project-card-copy">` +
+      `<strong title="${escapeHtml(fullTitle)}">${title}</strong><span class="project-next" role="status">项目资料损坏，已暂停</span>` +
+      `<span>原文件已保留。此项目不能继续修改或调用；其他项目可正常使用。</span>` +
+      `<details><summary>查看资料错误</summary><ul>${issues}</ul><small>项目：${id}。请保留原件后检查备份，系统不会自动修补或重试。</small></details>` +
+      `</span></div></article>`;
+  }
   const learning=run.kind==='learning';
-  const analysis=!run.content_format&&/只分析.{0,20}参考视频/u.test(run.brief||'');
+  const imageAnalysis=run.project_brief?.analysis?.kind==='image' &&
+    run.project_brief.analysis.analysis_only===true ? run.project_brief.analysis : null;
+  const analysis=Boolean(imageAnalysis)||!run.content_format&&/只分析.{0,20}参考视频/u.test(run.brief||'');
   const format=learning?'学习':analysis?'分析':run.content_format==='photo'?'图文':run.content_format==='video'?'视频':'创作';
   const requestedCaption=/(?:与|和|及|附|加上|需要|附带|[+＋]).{0,6}(?:英文)?(?:发布文案|caption)/iu.test(run.brief||'');
-  const goal=learning?'参考研究与知识变更':run.creator_view?.goal|| (analysis?'参考视频拆解报告'
+  const goal=learning?'参考研究与知识变更':imageAnalysis?.goal||run.creator_view?.goal|| (analysis?'参考视频拆解报告'
     :run.content_format==='photo'?'带货图片与文案'
     :run.content_format==='video'?`商品视频${requestedCaption?'与发布文案':''}`:'交付形式待确认');
-  const next=learning?'打开原片、讨论与变更记录':run.creator_view?.current||'打开查看当前作品与下一步';
+  const next=learning?'打开原片、讨论与变更记录':imageAnalysis ? run.project_brief.title
+    :run.creator_view?.current||'打开查看当前作品与下一步';
   const visual = cover ? `<img src="${escapeHtml(cover)}" alt="" loading="lazy">` : `<div class="project-cover-art">${studioIcon(learning?'spark':'film')}<span>${format}项目</span></div>`;
   const created=studioDateTime(run.created_at);
   return `<div class="project-card-item"><button class="project-card" data-open-project="${id}" title="${escapeHtml(fullTitle)}"><span class="project-cover">${visual}<span class="project-open">${learning?'打开研究':'打开作品'} ↗</span></span><span class="project-card-copy"><strong title="${escapeHtml(fullTitle)}">${title}</strong>` +

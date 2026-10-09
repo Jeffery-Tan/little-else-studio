@@ -383,6 +383,11 @@ const JOB_ACTIVE = new Set(['queued', 'running', 'cancelling']);
 let steerPosting = false;
 let restoreJob = async () => {};
 function syncComposerAction() {}
+function mediaJobProgress(job) { return globalThis.__mediaJobProgress?.(job) || ''; }
+function trackAcceptedJob(runId, job) {
+  if(globalThis.__trackAcceptedJob)return globalThis.__trackAcceptedJob(runId,job);
+  state.currentJob={...job,run_id:runId};return true;
+}
 async function stopCurrentJob() { return globalThis.__stopCurrentJob?.(); }
 async function submitJob(runId, payload, options = {}) {
   return globalThis.__submitJob ? globalThis.__submitJob(runId, payload, options)

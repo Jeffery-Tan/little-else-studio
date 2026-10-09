@@ -39,7 +39,7 @@ Object.defineProperty(El.prototype,'elements',{get() {
   return {namedItem:name=>this.querySelector(`[name="${name}"]`)};
 }});
 
-async function page({kind='image', embedded=false, failed=false, historyCount=0}={}) {
+async function page({kind='image', embedded=false, failed=false, historyCount=0,originalTask=false,format=null,timelineRun=RUN}={}) {
   const output={name:kind==='image'?'result.png':'result.mp4',kind,sha256:OUTPUT_SHA,
     url:`/api/runs/${RUN}/materials/${kind==='image'?'result.png':'result.mp4'}`};
   const attempt={attempt_id:'shown-result',draft_id:'shown-draft',status:'succeeded',output};
@@ -57,6 +57,17 @@ async function page({kind='image', embedded=false, failed=false, historyCount=0}
     shots:{[kind]:{shots:current.map((row,index)=>({ordinal:index+1,shot_id:row.shot_id,
       draft_id:row.draft_id,draft_sha256:row.draft_sha256,source_ready:true}))}},
     materials:[output],capabilities:{image:{available:true},video:{available:true,models:[]}},active:false};
+  if(originalTask){
+    const replacement={...draft,draft_id:'replacement-image-input',attempts:[]};
+    draft.source_ready=false;draft.is_current=false;draft.design_issue='Historical input needs design';
+    draft.attempts=[{attempt_id:'original-task',status:'unknown',task_id:'provider-original',output},
+      {attempt_id:'later-failed',status:'failed'}];
+    data.drafts=[draft,replacement];
+    data.shots.image.shots=[{ordinal:8,shot_id:draft.shot_id,draft_id:replacement.draft_id,
+      attempt_id:'original-task',attempt_status:'unknown'}];
+    data.unresolved_attempts=[{kind:'image',draft_id:draft.draft_id,shot_id:draft.shot_id,ordinal:8,
+      attempt_id:'original-task',status:'unknown',task_id:'provider-original'}];
+  }
   const closeEvents=[],timers=new Map();let nextTimer=0;
   const dom=makeDom({body:webSource('index.html').match(/<body[^>]*>([\s\S]*?)<\/body>/)[1]});
   const {document}=dom;
@@ -74,7 +85,11 @@ async function page({kind='image', embedded=false, failed=false, historyCount=0}
     }
     return node;
   };
-  const app=loadApp({dom,routes:{'/production':()=>data,'/api/learning':{cases:[]}},globals:{
+  const app=loadApp({dom,routes:{'/attempts/original-task/refresh':()=>{
+      draft.attempts[0].status='failed';data.unresolved_attempts=[];
+      return {run_id:RUN,job_id:'original-refresh-job',job_kind:'production_refresh',
+        status:'succeeded',events:[]};
+    },'/production':()=>data,'/api/learning':{cases:[]}},globals:{
     initStudioNavigation(){},setStudioView(){},renderProjects(){},loadInspiration(){},
     setTimeout:fn=>{timers.set(++nextTimer,fn);return nextTimer;},clearTimeout:id=>timers.delete(id),
     requestAnimationFrame:fn=>fn(),scrollDown(){},
@@ -84,13 +99,13 @@ async function page({kind='image', embedded=false, failed=false, historyCount=0}
   vm.runInContext(webSource('production.js'),app.ctx,{filename:'production.js'});
   for(let i=0;i<3;i++)await new Promise(resolve=>setImmediate(resolve));
   app.ctx.__data=data;
-  vm.runInContext(`state.runId='${RUN}';state.productionData=__data;state.rail=[];`,app.ctx);
+  vm.runInContext(`state.runId='${RUN}';state.productionData=__data;state.rail=[];state.timeline={run:{run_id:${JSON.stringify(timelineRun)},content_format:${JSON.stringify(format)}}};`,app.ctx);
   const opener=document.createElement('button');document.body.append(opener);opener.focus();
   const input=document.getElementById('chat-input');input.value='  My unsent feedback\nkeep it  ';
   app.ctx.setConversationOpen(false);
   let mount;
   if(embedded){mount=document.createElement('section');document.body.append(mount);}
-  await app.ctx.openProduction({kind,mount,focusDraft:draft.draft_id});
+  await app.ctx.openProduction({kind,mount,focusDraft:originalTask?'replacement-image-input':draft.draft_id});
   const dialog=document.querySelector('.production-dialog');
   const body=dialog.querySelector('[data-body]');
   assert.equal(dialog.querySelector('[data-error]').textContent,'','production controller must render without fixture errors');
@@ -111,6 +126,24 @@ function assertComposer(app) {
   assert.equal(app.input.value,'  My unsent feedback\nkeep it  ');
   assert.deepEqual(app.observed.filter(call=>call.method!=='GET'),[]);
 }
+
+test('the real production controller queries the original replaced task and never opens a generation action',async()=>{
+  const app=await page({originalTask:true});
+  assert.match(app.body.textContent,/镜头 08|这次生成结果还未确认/);
+  assert.ok(app.body.querySelector('[data-refresh="original-task"]'));
+  assert.equal(app.body.querySelector('[data-generate]'),null);
+  assert.equal(app.body.querySelector('[data-recover="later-failed"]'),null);
+  assert.match(app.body.textContent,/保留文件 · 原结果未确认/);
+  assert.equal(app.body.querySelector('[data-image="result.png"]'),null,'uncertain bytes stay read-only');
+  app.click('[data-refresh="original-task"]');
+  for(let i=0;i<6;i++)await new Promise(resolve=>setImmediate(resolve));
+  const writes=app.observed.filter(call=>call.method!=='GET');
+  assert.equal(writes.length,1);
+  assert.equal(writes[0].path,`/api/runs/${RUN}/production/attempts/original-task/refresh`);
+  assert.ok(!app.body.querySelector('[data-refresh="original-task"]'));
+  assert.ok(app.body.querySelector('[data-generate="replacement-image-input"]'),
+    'a verified settled task restores the normal generation confirmation entry');
+});
 
 test('image feedback closes the real production modal and keeps focus on the pinned composer after its close event',async()=>{
   const app=await page();
@@ -153,6 +186,40 @@ test('production input feedback uses the backend current shot ordinal with histo
   assert.match(chip,/正在修改首帧 01 的出图描述/);assert.doesNotMatch(chip,/首帧 15/);
   assert.equal(app.read('state.feedbackTarget.draft_id'),'shown-draft');
   assert.equal(app.read('state.feedbackTarget.attempt_id'),'failed-new-attempt');
+});
+
+for(const target of ['media','input'])test(`photo ${target} feedback shows the server page ordinal and keeps its exact identity`,async()=>{
+  const app=await page({format:'photo',historyCount:14,failed:true});
+  app.click(target==='media'?'[data-feedback-attempt]':'[data-production-feedback]');
+  app.flushClose();assertComposer(app);
+  const chip=app.document.getElementById('feedback-target').textContent;
+  assert.match(chip,target==='media'?/正在批注第 01 页的生成图/:/正在修改第 01 页的出图描述/);
+  assert.doesNotMatch(chip,/首帧|第 15 页/);
+  assert.deepEqual(JSON.parse(app.read('JSON.stringify(state.feedbackTarget)')),target==='media'
+    ?{kind:'media',run_id:RUN,attempt_id:'shown-result',output_sha256:OUTPUT_SHA}
+    :{kind:'production_draft',run_id:RUN,draft_id:'shown-draft',draft_sha256:SHA,attempt_id:'failed-new-attempt'});
+});
+
+for(const format of ['video',null,'unknown'])test(`non-photo format ${format} keeps the legacy image feedback label`,async()=>{
+  const app=await page({format});app.click('[data-feedback-attempt]');app.flushClose();assertComposer(app);
+  assert.match(app.document.getElementById('feedback-target').textContent,/正在批注首帧 01 的生成图/);
+});
+
+test('another project photo projection cannot rename the current feedback',async()=>{
+  const app=await page({format:'photo',timelineRun:'another-project'});
+  app.click('[data-feedback-attempt]');app.flushClose();assertComposer(app);
+  assert.match(app.document.getElementById('feedback-target').textContent,/正在批注首帧 01 的生成图/);
+});
+
+test('photo historical and unverified inputs never borrow a page ordinal',async()=>{
+  const app=await page({format:'photo',historyCount:14});
+  app.ctx.__old=app.data.drafts[0];
+  app.read(`setProductionFeedbackTarget('${RUN}',__old);`);
+  assert.match(app.document.getElementById('feedback-target').textContent,/正在说明这版图片制作的问题/);
+  app.data.shots.image.shots[0].draft_sha256='f'.repeat(64);
+  app.click('[data-feedback-attempt]');app.flushClose();assertComposer(app);
+  assert.match(app.document.getElementById('feedback-target').textContent,/正在反馈这张图片/);
+  assert.doesNotMatch(app.document.getElementById('feedback-target').textContent,/第 01 页|首帧/);
 });
 
 test('historical or unverifiable shot feedback keeps exact identity and a generic label',async()=>{

@@ -13,7 +13,7 @@ INTERNAL_REF = re.compile(
 
 
 def creator_reply(text: str, delivery: dict, state, *, technical_requested=False,
-                  review_timed_out=False) -> str:
+                  review_timed_out=False, preserve_text=False) -> str:
     """Use the actual gate when an unfinished draft makes model advice unsafe.
 
     The model can describe its own work, but cannot make an unavailable approval
@@ -22,6 +22,8 @@ def creator_reply(text: str, delivery: dict, state, *, technical_requested=False
     place to read the model's substantive proposal.
     """
     goal = delivery.get('goal')
+    if delivery.get('blocker'):
+        return delivery['blocker']['note']
     if delivery.get('status') == 'incomplete' and goal in STAGE_NAMES:
         stage = state.stages[goal]
         name = STAGE_NAMES[goal]
@@ -29,6 +31,6 @@ def creator_reply(text: str, delivery: dict, state, *, technical_requested=False
             return f'{name}已保存，等你阅读后决定采用或退回。'
         return f'{name}本轮尚未完成。已有内容已保存，请查看本轮记录后继续。'
 
-    if technical_requested:
+    if technical_requested or preserve_text:
         return text
     return INTERNAL_REF.sub(lambda match: INTERNAL_NAMES[match.group(1).lower()], text)

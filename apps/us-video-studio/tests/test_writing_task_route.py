@@ -53,7 +53,8 @@ def target(artifact, **changes):
             'path': ['segments', 0, 'line'], **changes}
 
 
-def test_explicit_writing_field_uses_only_writer(tmp_path, monkeypatch):
+@pytest.mark.parametrize(('content_format', 'writing_name'), [('video', '脚本'), ('photo', '图文方案')])
+def test_explicit_writing_field_uses_only_writer(tmp_path, monkeypatch, content_format, writing_name):
     monkeypatch.setattr('studio.learning.LearningService.prepare_context', lambda *a, **k: {
         'text': 'FIXTURE_METHOD', 'snapshot_sha256': 'f' * 64, 'evidence_ref': 'fixture-method'})
     model = ScriptedModel([
@@ -65,7 +66,7 @@ def test_explicit_writing_field_uses_only_writer(tmp_path, monkeypatch):
         pipe = Pipeline(store)
         original = seed(pipe)
         store.append_event(RUN, 'creative_context_selected', selection={
-            'intent': 'continue', 'format': 'video', 'tags': ['fixture-tag'], 'case_ids': None})
+            'intent': 'continue', 'format': content_format, 'tags': ['fixture-tag'], 'case_ids': None})
         url = f'/api/runs/{RUN}/actions/revise-writing'
         payload = {'request_id': 'edit-1', 'text': '只把第一句改得自然一点，其他保留',
                    'feedback_target': target(original)}
@@ -83,6 +84,9 @@ def test_explicit_writing_field_uses_only_writer(tmp_path, monkeypatch):
         assert not any('prepare_creative_context' in c['tool_names'] for c in model.calls)
         revised = store.latest_artifact(RUN, 'writing')
         assert revised.version == 2
+        reply = store.read_chat(RUN)[-1]['text']
+        assert reply == f'{writing_name}第 2 版已保存。请阅读这一版后决定是否采用。'
+        assert 'writing-v' not in reply
         assert job['revision_result'] == {
             'stage': 'writing', 'version': 2, 'artifact_sha256': revised.sha256,
             'change_status': 'saved', 'review_status': 'not_requested'}

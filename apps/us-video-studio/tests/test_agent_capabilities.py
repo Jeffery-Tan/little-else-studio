@@ -31,7 +31,7 @@ def submit(pipeline, stage, text):
     return pipeline.submit(RUN, stage, attempt.token, content=text, summary=stage)
 
 
-def route(intent="edit"):
+def route(intent="continue"):
     return tool_turn("route-" + intent, "prepare_creative_context", {"intent": intent, "format": "video",
         "deliverable": "follow_up" if intent in {"status", "pause", "feedback"} else "intake"})
 
@@ -64,13 +64,39 @@ def test_a_feedback_scope_can_widen_when_the_message_is_actually_a_correction(en
     actual intent, not on an enumeration the model filled in once.
     """
     store, pipeline, settings, ledger = env
-    model = ScriptedModel([route("feedback"), route("edit"),
+    previous = submit(pipeline, "intake", "Existing fixture intake")
+    text = "修改本轮需求，让表达自然一点"
+    interpretation = fixture_task_interpretation(text, intent="edit", deliverable="intake")
+    interpretation["constraints"] = [{"quote": text, "key": "content.edit_scope", "value": "rework",
+        "operation": "add", "polarity": "require", "intent": "instruction",
+        "scope": {"lifetime": "turn", "stages": ["intake"], "paths": [], "quote": text},
+        "supersedes": [], "conflict_with": [], "ambiguity": ""}]
+
+    class RevisionModel(ScriptedModel):
+        def complete(self, **kwargs):
+            if self.turns and self.turns[0].tool_calls and self.turns[0].tool_calls[0].name == "write_stage":
+                # Consume the actual plan response, as the model must, instead
+                # of inventing an identity or bypassing the revision boundary.
+                plan = json.loads(kwargs["messages"][-1]["content"][0]["content"])
+                assert (plan["version"], plan["sha256"]) == (previous.version, previous.sha256)
+                self.turns[0].tool_calls[0].input["plan_id"] = plan["plan_id"]
+            return super().complete(**kwargs)
+
+    model = RevisionModel([route("feedback"),
+        tool_turn("route-edit", "prepare_creative_context", {"intent": "edit", "format": "video",
+            "deliverable": "intake", "task_interpretation": interpretation}),
+        tool_turn("plan", "plan_revision", {"stage": "intake", "version": previous.version,
+            "sha256": previous.sha256, "mode": "rework", "quote": text,
+            "reason": "Reorganize the current brief with natural expression", "fields": []}),
         tool_turn("write", "write_stage", {"stage": "intake", "content": "handled", "summary": "s"}),
         final_turn("Handled")])
     main = Orchestrator(store, pipeline, settings, model, ledger, RUN)
-    result = main.send("修改本轮需求，让表达自然一点")
+    result = main.send(text)
     assert not result.failed_tools
-    assert store.read_artifact_text(RUN, "intake", 1) == "handled"
+    assert store.read_artifact_text(RUN, "intake", 1) == "Existing fixture intake"
+    assert store.read_artifact_text(RUN, "intake", 2) == "handled"
+    planned = next(e["scope"] for e in store.read_events(RUN) if e["kind"] == "agent_revision_planned")
+    assert planned["sha256"] == previous.sha256
 
 
 def test_even_same_orchestrator_cannot_inherit_previous_production_scope(env):
@@ -96,7 +122,7 @@ def test_new_video_request_does_not_inherit_old_photo_system_constraint(env):
     store, pipeline, settings, ledger = env
     store.append_event(RUN, "creative_context_selected", selection={
         "intent": "new", "format": "photo", "tags": [], "case_ids": None})
-    model = ScriptedModel([route(),
+    model = ScriptedModel([route("new"),
         tool_turn("save", "write_stage", {"stage": "intake", "content": "Video fixture", "summary": "s"}),
         final_turn("Video work")])
     Orchestrator(store, pipeline, settings, model, ledger, RUN).send("现在改做视频")

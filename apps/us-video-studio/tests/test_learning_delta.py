@@ -401,7 +401,7 @@ def test_legacy_feedback_proposal_still_records_scoped_run_feedback_in_v2(env):
     migrate(service)
     store.create_run("creative-one", "Creative", "Product brief")
     artifact = store.write_artifact("creative-one", "direction", 1, "Draft", summary="Draft",
-                                    author_role="director", attempt=1)
+                                    author_role="director", attempt='direction#1')
     proposal = service.propose_feedback("creative-one", {"stage": "direction", "version": 1,
         "artifact_sha256": artifact.sha256, "quote": "只改开场语气", "scope": "persona_dialogue",
         "action": "local_change", "observation": "开场太硬"}, actor="user")

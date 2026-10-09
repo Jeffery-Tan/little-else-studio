@@ -7,16 +7,18 @@ nonces remain outside logs and model context; only the decision route approves.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import html
 import re
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .agents.orchestrator import Orchestrator, OrchestratorTurn
@@ -50,6 +52,28 @@ from .http_execution import install_execution_routes
 from .active_brief import load_amendments
 
 WEB_DIR = Path(__file__).parent / "web"
+
+
+def _versioned_index(web_dir: Path) -> str:
+    """Bind every local page resource to its current bytes, without a build step."""
+    web_root = web_dir.resolve()
+    page = (web_root / 'index.html').read_text(encoding='utf-8')
+    versions: dict[Path, str] = {}
+
+    def version(match: re.Match) -> str:
+        resource = urlsplit(html.unescape(match['url']))
+        asset = (web_root / resource.path.removeprefix('/static/')).resolve()
+        asset.relative_to(web_root)
+        if asset not in versions:
+            versions[asset] = hashlib.sha256(asset.read_bytes()).hexdigest()
+        query = [(key, value) for key, value in parse_qsl(resource.query, keep_blank_values=True)
+                 if key != 'v']
+        query.append(('v', versions[asset]))
+        url = urlunsplit(('', '', resource.path, urlencode(query), resource.fragment))
+        return f"{match['attribute']}{match['quote']}{html.escape(url, quote=True)}{match['quote']}"
+
+    return re.sub(r'''(?P<attribute>\b(?:src|href)\s*=\s*)(?P<quote>["'])(?P<url>/static/[^"']+)(?P=quote)''',
+                  version, page)
 
 
 def build_app(
@@ -91,7 +115,11 @@ def build_app(
 
     def prepare_job(run_id, review=None, reference_consent=False, feedback_target=None,
                     writing_revision=None, direction_resume=None, user_input_id=None,
-                    source_user_input_id=None, role_resume=None, reference_recovery_context=None):
+                    source_user_input_id=None, role_resume=None, reference_recovery_context=None,
+                    decision_context=None):
+        if decision_context is not None:
+            from .decision_continuation import validate
+            validate(store, pipeline, run_id, decision_context)
         if review is not None:
             require_review_version(run_id, review)
         if writing_revision is not None:
@@ -108,11 +136,25 @@ def build_app(
             job_settings = snapshot.settings(settings)
             summary = snapshot.public()
 
-        from .agents.bailian_omni import connection_info
-        reference_connection = connection_info() if reference_consent else None
+        from . import image_understanding
+        from .agents.client import SafePreflightError
+        image_revision = summary.get('revision', connections.public()['revision'])
+        image_connection, image_frozen, image_error = None, None, None
+        if reference_consent:
+            try:
+                image_connection = image_understanding.connection_info(connections)
+                image_frozen = image_understanding.freeze(connections, job_settings,
+                    expected_revision=image_revision, expected_info=image_connection)
+            except SafePreflightError as exc:
+                image_error = str(exc)
+            summary['image_observation'] = {'connection': image_connection, 'revision': image_revision,
+                'ready': image_frozen is not None,
+                'notice': '仅按本轮创作要求观察图片；不自动重跑已有观察，不授权图片生成'}
+        from .video_understanding import connection_info as video_connection_info
+        video_connection = video_connection_info(connections) if reference_consent else None
         reference_revision = connections.public()['revision']
         if reference_consent:
-            summary['reference_analysis'] = {'connection': reference_connection, 'revision': reference_revision,
+            summary['reference_analysis'] = {'connection': video_connection, 'revision': reference_revision,
                 'notice': '仅本轮明确参考要求才按需调用；非图片/视频生成授权'}
 
         def run(text, emit, check_cancel):
@@ -168,7 +210,7 @@ def build_app(
                 from .tools.dispatch import Dispatcher
 
                 check_cancel()
-                from .conversation_input import message as user_message, accept, start_execution
+                from .conversation_input import message as user_message, accept, start_execution, task_constraints
                 receipt = user_message(store, run_id, user_input_id)
                 accept(store, run_id, receipt)
                 start_execution(store, run_id, receipt)
@@ -180,7 +222,8 @@ def build_app(
                     'stage': 'writing', 'version': target['version'], 'sha256': target['sha256'],
                     'mode': 'local', 'quote': text, 'reason': '用户明确要求修改当前脚本的选中字段',
                     'fields': [{'path': target['path'], 'instruction': text}]},
-                    turn_id=writing_revision.request_id, user_message=text)
+                    turn_id=writing_revision.request_id, user_message=text,
+                    constraints=task_constraints(receipt))
                 store.append_event(run_id, 'creative_context_selected', selection=selection,
                                    turn_id=writing_revision.request_id, deliverable='revision',
                                    source='explicit_writing_field')
@@ -200,7 +243,11 @@ def build_app(
                                    'change_status': 'saved', 'review_status': 'not_requested'}
                 emit({'type': 'writing_revision_result', 'result': revision_result})
                 delivery = evaluate_deliverable(store, pipeline, run_id, 'revision', revision_scope=scope)
-                reply = f'脚本新版 {outcome.submitted} 已保存。请阅读准确版本后决定是否采用。'
+                from .project_brief import content_format
+                format_name = content_format(store.read_events(run_id))
+                writing_name = ('图文方案' if format_name == 'photo' else
+                                '脚本' if format_name == 'video' else '创作方案')
+                reply = f'{writing_name}第 {revised.version} 版已保存。请阅读这一版后决定是否采用。'
                 store.append_chat(run_id, 'assistant', reply)
                 return OrchestratorTurn(reply, 'done', outcome.rounds,
                                         deliverable=delivery)
@@ -239,23 +286,30 @@ def build_app(
                                         tool_log=[{'tool': 'dispatch', 'ok': True}],
                                         deliverable=delivery)
             def observe_reference(source, instruction, reference_emit, reference_cancel):
-                if not reference_connection:
-                    raise PipelineError('reference_connection', '参考观察连接未就绪，请检查当前百炼连接。')
+                if not video_connection:
+                    raise PipelineError('reference_connection', '参考观察连接未就绪，请检查视频理解设置。')
                 return app.state.observe_reference(run_id, source, instruction, reference_emit, reference_cancel,
-                    endpoint=reference_connection['base_url'], revision=reference_revision)
+                    endpoint=video_connection['base_url'], revision=reference_revision)
             def observe_product_video(source, product_emit, product_cancel):
-                if not reference_connection:
-                    raise PipelineError('product_video_connection', '商品视频观察连接未就绪，请检查当前百炼连接。')
+                if not video_connection:
+                    raise PipelineError('product_video_connection', '商品视频观察连接未就绪，请检查视频理解设置。')
                 from .product_video import observe
                 return observe(store, pipeline, connections, settings, run_id, source,
-                    product_emit, product_cancel, endpoint=reference_connection['base_url'],
+                    product_emit, product_cancel, endpoint=video_connection['base_url'],
                     revision=reference_revision, client_factory=client_factory)
             def observe_images(items, image_emit, image_cancel):
-                if not reference_connection:
-                    raise PipelineError('image_connection', '图片观察连接未就绪，请检查当前百炼连接。')
                 from .agent_images import observe
-                return observe(store, job_settings, run_id, items, endpoint=reference_connection['base_url'],
-                    emit=image_emit, check_cancel=image_cancel, client_factory=client_factory)
+                def frozen_image_route():
+                    image_cancel()
+                    if connections.public()['revision'] != image_revision:
+                        raise SafePreflightError('模型设置已变化，请重新发起任务以确认图片理解服务。')
+                    if image_frozen is None:
+                        raise SafePreflightError(image_error or '图片观察连接未就绪，请检查图片理解设置。')
+                    return image_frozen
+                return observe(store, job_settings, run_id, items,
+                    endpoint=image_connection['base_url'] if image_connection else None,
+                    emit=image_emit, check_cancel=image_cancel, client_factory=client_factory,
+                    freeze_route=frozen_image_route, cancel_event=jobs.cancelled)
             return Orchestrator(store, pipeline, job_settings, job_client,
                 Ledger(store, job_settings), run_id, on_event=emit, check_cancel=check_cancel,
                 learning_service=learning,
@@ -264,11 +318,13 @@ def build_app(
                     text, feedback_context=feedback_target, user_input_id=user_input_id,
                     source_user_input_id=source_user_input_id,
                     internal_instruction=user_input_id is None,
+                    decision_context=decision_context,
                     **({'reference_recovery_context': reference_recovery_context}
                        if reference_recovery_context is not None else {}))
         return run, summary
 
     jobs = JobManager(store, pipeline, ledger, prepare_job)
+    jobs.prepare_decision_followup = lambda rid, context: prepare_job(rid, decision_context=context)
     codex_auth = CodexAuth(jobs)
     jobs.before_submit = codex_auth.require_idle
 
@@ -390,6 +446,12 @@ def build_app(
             for error in exc.errors()
         ]}, status_code=422)
 
+    from .project_integrity import ProjectDataError
+
+    @app.exception_handler(ProjectDataError)
+    async def project_data_error(request, exc):
+        return JSONResponse({'detail': str(exc), 'integrity': exc.diagnostic}, status_code=409)
+
     @app.middleware('http')
     async def local_requests_only(request: Request, call_next):
         host = request.headers.get('host', '')
@@ -422,6 +484,13 @@ def build_app(
         # production state machine. This boundary also covers future route
         # handlers that forget to check Run.kind themselves.
         match = re.fullmatch(r'/api/runs/([a-z0-9][a-z0-9-]*)(?:/(.*))?', request.url.path)
+        if match and request.method in {'POST', 'PUT', 'PATCH', 'DELETE'}:
+            # A shared admission boundary also covers future mutation routes.
+            if store.run_dir(match[1]).exists():
+                try:
+                    store.require_healthy(match[1])
+                except ProjectDataError as exc:
+                    return JSONResponse({'detail': str(exc), 'integrity': exc.diagnostic}, status_code=409)
         if match and request.method in {'POST', 'PUT', 'PATCH'}:
             try:
                 learning_run = store.read_run(match[1]).kind == 'learning'
@@ -435,11 +504,18 @@ def build_app(
                          or suffix.startswith('recovery/'))
             if learning_run and not permitted:
                 return JSONResponse({'detail': '独立学习记录不能执行生产阶段、批准或媒体生成。'}, status_code=409)
-        return await call_next(request)
+        response = await call_next(request)
+        if request.url.path == '/' or request.url.path.startswith('/static/'):
+            # The page binds assets to content versions; revalidation also
+            # protects legacy static URLs and keeps the page itself current.
+            response.headers['Cache-Control'] = 'no-cache'
+        return response
 
     def require_run(run_id: str, *, include_deleted: bool = False) -> None:
         if not valid_run_id(run_id):
             raise HTTPException(400, "invalid run id")
+        if store.run_dir(run_id).exists():
+            store.require_healthy(run_id)
         try:
             store.read_run(run_id)
         except PipelineError as exc:
@@ -477,14 +553,15 @@ def build_app(
     # ---------------------------------------------------------------- static --
 
     if WEB_DIR.is_dir():
-        app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
+        web_dir = WEB_DIR
+        app.mount("/static", StaticFiles(directory=str(web_dir)), name="static")
 
         @app.get("/")
-        def index() -> FileResponse:
-            return FileResponse(str(WEB_DIR / "index.html"), headers={
+        def index() -> HTMLResponse:
+            return HTMLResponse(_versioned_index(web_dir), headers={
                 'X-Content-Type-Options': 'nosniff',
                 'Content-Security-Policy': "frame-ancestors 'none'",
-                'Cache-Control': 'no-store',
+                'Cache-Control': 'no-cache',
             })
 
     return app

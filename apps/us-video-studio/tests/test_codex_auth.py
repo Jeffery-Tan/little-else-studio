@@ -68,7 +68,7 @@ class FakeCLI:
 @pytest.fixture
 def setup():
     cli = FakeCLI()
-    jobs = SimpleNamespace(lock=threading.RLock(), active=None)
+    jobs = SimpleNamespace(lock=threading.RLock(), active=None, closing=False)
     auth = CodexAuth(jobs, resolver=lambda: 'fake-codex', runner=cli.run, spawn=cli.spawn)
     yield auth, cli, jobs
     auth.close()
@@ -249,10 +249,11 @@ def test_http_model_catalog_is_read_only_no_store_and_fails_closed(http):
     catalog = {'source': 'codex_cli', 'model_invoked': False,
                'models': [{'model': 'fixture-model', 'display_name': 'Fixture', 'is_default': True}]}
     app.state.codex_auth.model_catalog = lambda: catalog
+    commands_before = list(cli.commands)
     response = client.get('/api/connections/codex/models')
     assert response.status_code == 200 and response.json() == catalog
     assert response.headers['cache-control'] == 'no-store'
-    assert cli.commands == []
+    assert cli.commands == commands_before
     assert client.get('/api/connections/codex/models', headers={'Origin': 'null'}).status_code == 403
 
     def unavailable():

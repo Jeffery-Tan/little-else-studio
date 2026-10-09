@@ -23,7 +23,7 @@ from typing import Any, Callable
 
 from ..agents.budget import BudgetedClient
 from ..agents.client import (JobCancelled, ModelClient, ModelError,
-                             NonRetryableStageError, SafePreflightError, run_agent_loop)
+                             NonRetryableStageError, SafePreflightError, WriterRootClosureRejected, run_agent_loop)
 from ..agents.roles import OWNER, ROLES, readable_stages, creative_selection, production_allowed
 from ..config import Settings
 from ..ledger import Ledger
@@ -77,6 +77,7 @@ class DispatchOutcome:
     stopped_because: str = ""
     rounds: int = 0
     error: str = ""
+    failure_code: str = ""
     impact: dict = field(default_factory=dict)
 
     def receipt(self) -> str:
@@ -99,6 +100,7 @@ class DispatchOutcome:
             "limitations_truncated": len(self.limitations) > 5,
             "stop_reason": self.stopped_because or ("error" if self.error else ""),
             "error": self.error or None,
+            **({'failure_code': self.failure_code, 'retryable': False} if self.failure_code else {}),
             "next": self.impact,
             "read_more": (f"read_artifact(stage={self.stage}, version={self.artifact_version})"
                           if self.submitted else None),
@@ -203,9 +205,10 @@ class Dispatcher:
             outcome.limitations = artifact.limitations
         if row['status'] == 'failed':
             outcome.error = row.get('reason') or 'Role execution failed'
+            outcome.failure_code = row.get('failure_code') or ''
         return outcome
 
-    def wait_session(self, session_id, timeout_seconds=0):
+    def wait_session(self, session_id, timeout_seconds=0, *, propagate_failure=False):
         deadline = time.monotonic() + min(30, max(0, float(timeout_seconds)))
         with _HANDLES_LOCK:
             future = _HANDLES.get(self._key(session_id))
@@ -219,6 +222,9 @@ class Dispatcher:
             except Exception:
                 break  # Failed child is exposed below as its durable receipt.
         row = self._sessions.snapshot(session_id)
+        if propagate_failure and row.get('failure_code') == 'writer_root_closure_rejected':
+            raise WriterRootClosureRejected('格式处理后的脚本提交已被业务校验拒绝，本轮已停止；'
+                                             '请核对失败记录，不能在本轮自动重派。')
         done = row['status'] not in {'idle', 'queued', 'running'}
         outcome = self._saved_outcome(session_id) if done else None
         # Observing a failed child reports it; it does not throw its exception
@@ -263,6 +269,11 @@ class Dispatcher:
         parent_job_id = parent_job_id or (parent['parent_job_id'] if parent else None)
         user_input_id = user_input_id or (parent['source_message_id'] if parent else None)
         if parent_job_id and any(row.get('parent_job_id') == parent_job_id and row['stage'] == stage
+                and row.get('failure_code') == 'writer_root_closure_rejected'
+                for row in self._sessions.sessions()):
+            raise WriterRootClosureRejected('本轮脚本格式处理后的提交已被业务校验拒绝，不能自动重派；'
+                                             '请保留失败事实并等待新的用户任务。')
+        if parent_job_id and any(row.get('parent_job_id') == parent_job_id and row['stage'] == stage
                 and (row['stop_requested'] or row['status'] == 'cancelled') for row in self._sessions.sessions()):
             raise ToolError('本轮该项角色任务已经停止，不能重新派工或自动重试；等待新的用户任务。')
         contract = {'stage': stage, 'brief': brief, 'revision_scope': revision_scope,
@@ -276,7 +287,16 @@ class Dispatcher:
         worker = copy.copy(self)
         worker._session_id = session_id
         worker._resume_messages = self._sessions.recovery_messages(session_id) if _resume else []
-        worker.check_cancel = lambda: self._sessions.check_cancel(session_id)
+        parent_check_cancel = self.check_cancel
+
+        def check_worker_cancel():
+            # A parent stop still owns every child. The session check adds
+            # independent role cancellation without losing that boundary.
+            if parent_check_cancel:
+                parent_check_cancel()
+            self._sessions.check_cancel(session_id)
+
+        worker.check_cancel = check_worker_cancel
         if hasattr(self.client, '_snapshot'):
             worker.client = self.client._snapshot.client(check_cancel=worker.check_cancel,
                 max_tokens=self.client.max_tokens, cancel_event=threading.Event())
@@ -301,6 +321,10 @@ class Dispatcher:
             except JobCancelled:
                 self._sessions.finish(session_id, 'cancelled', reason='Role execution stopped')
                 return self._saved_outcome(session_id)
+            except WriterRootClosureRejected as exc:
+                self._sessions.finish(session_id, 'failed', reason=str(exc),
+                                      failure_code='writer_root_closure_rejected')
+                raise
             except BaseException as exc:
                 self._sessions.finish(session_id, 'failed', reason=f'{type(exc).__name__}: {exc}')
                 raise
@@ -380,6 +404,14 @@ class Dispatcher:
                 raise ToolError('派工阶段与修订计划不一致。')
             check_base(self.store, self.pipeline, self.run_id, revision_scope)
         selection = selection_override or creative_selection(self.store, self.run_id)
+        decision_context = (turn_scope or {}).get('decision_context')
+        if decision_context:
+            from ..decision_continuation import validate
+            decision_scope = validate(self.store, self.pipeline, self.run_id, decision_context)
+            if stage not in decision_scope['allowed_stages']:
+                raise ToolError('该阶段超出原 UI 决定的可逆准备范围。')
+            selection = {'intent': decision_scope['intent'], 'format': decision_scope['format'],
+                         'tags': [], 'case_ids': None}
         if not production_allowed(selection):
             raise ToolError("当前明确路由只允许读取/反馈；先明确选择 new/continue/edit 和交付格式，才能派工。")
         from ..conversation_input import project_constraints, constraints_for_scope
@@ -419,7 +451,7 @@ class Dispatcher:
         budgeted = BudgetedClient(
             self.client, self.ledger, run_id=self.run_id, role=role, stage=stage
         )
-        task_tools = tools_for(role, local_revision=local_revision)
+        task_tools = tools_for(role, local_revision=local_revision, format=selection['format'])
         allowed_tools = {tool['name'] for tool in task_tools}
         runtime = AgentRuntime(self.store, self.run_id)
         parent_id = current_task_id()
@@ -476,8 +508,11 @@ class Dispatcher:
         journal = SessionJournal(self._sessions, self._session_id, inbox_handler=inbox) if self._session_id else None
 
         def check_user_limits():
+            if decision_context:
+                from ..decision_continuation import validate
+                validate(self.store, self.pipeline, self.run_id, decision_context)
             from ..conversation_input import (message, interpretation_for, interpreted_task_constraints,
-                                               constraints_for_inputs)
+                                               constraints_for_inputs, task_constraints, validated_edit_scopes)
             if self.check_cancel:
                 self.check_cancel()
             if self._session_id and self._sessions.pending(self._session_id):
@@ -490,15 +525,21 @@ class Dispatcher:
                 if not identity:
                     continue
                 receipt = message(self.store, self.run_id, identity)
-                limits = interpreted_task_constraints(receipt, interpretation_for(self.store, self.run_id, identity))
+                interpreted = interpretation_for(self.store, self.run_id, identity)
+                limits = interpreted_task_constraints(receipt, interpreted)
+                frozen_scopes = validated_edit_scopes(receipt, interpreted)
+                stage_scopes = [scope for scope in frozen_scopes if scope['stage'] == stage]
+                if frozen_scopes and not stage_scopes:
+                    raise ToolError('新编辑范围没有授权本角色阶段，不能沿旧任务提交。')
                 if limits['readonly'] or ('allowed_stages' in limits and stage not in limits['allowed_stages']):
                     raise ToolError('本轮真实用户要求不允许修改这一阶段。')
-                if limits['local_only'] and not local_revision:
+                stage_local_only = task_constraints(receipt)['local_only'] or any(
+                    scope['mode'] == 'local' for scope in stage_scopes)
+                if stage_local_only and not local_revision:
                     raise ToolError('新要求仅限局部字段；整稿提交已停止，需由主制片绑定准确版本和字段后建立新修订任务。')
                 if local_revision:
-                    # A content condition's path is not an instruction to edit
-                    # that field. Only the trusted task/feedback binding owns
-                    # the modification scope; conditions are filtered below.
+                    # Ordinary content paths are not editing authority. Only
+                    # the exact target or source-bound typed edit scope owns it.
                     requested = []
                     target = receipt.get('feedback_target') or {}
                     if target.get('path'):
@@ -508,10 +549,20 @@ class Dispatcher:
                                 or target.get('artifact_sha256', revision_scope['sha256']) != revision_scope['sha256']):
                             raise ToolError('新反馈版本与本角色固定修订版本不一致。')
                         requested.append(target['path'])
+                    for frozen in stage_scopes:
+                        if (frozen['mode'] not in {'local', 'rework'}
+                                or frozen['version'] != revision_scope['version']
+                                or frozen['sha256'] != revision_scope['sha256']
+                                or frozen['inputs'] != revision_scope['inputs']):
+                            raise ToolError('新编辑范围与本角色固定阶段、版本或依据不一致，不能沿旧任务提交。')
+                        # Rework permits a narrower plan on this exact base;
+                        # the fixed local plan still limits every patch field.
+                        if frozen['mode'] == 'local':
+                            requested.extend(frozen['paths'])
                     allowed = [field['path'] for field in revision_scope['fields']]
                     if any(path not in allowed for path in requested):
                         raise ToolError('新要求超出本角色固定字段范围；需主制片建立新的准确修订计划。')
-                    if identity != user_input_id and limits['local_only'] and not requested:
+                    if identity != user_input_id and stage_local_only and not requested:
                         raise ToolError('新局部要求尚未绑定具体字段，先澄清或解释准确路径，不能猜测修改对象。')
             paths = [entry['path'] for entry in revision_scope['fields']] if local_revision else None
             constraints = constraints_for_inputs(self.store, self.run_id,
@@ -572,6 +623,11 @@ class Dispatcher:
                         evidence=list(dict.fromkeys([*(args.get("evidence") or []), *context_refs])),
                         limitations=args.get("limitations") or [],
                         structured=args.get("structured"), actor=f"{role}:{attempt.key}",
+                        **({'writing_source_message_ids': list(dict.fromkeys(identity for identity in
+                                (self._sessions.source_messages(self._session_id) if self._session_id
+                                 else [user_input_id, source['message_id']]) if identity)),
+                            'writing_format': selection['format'],
+                            'local_writing_revision': local_revision} if stage == 'writing' else {}),
                     )
                     if self._session_id:
                         self._sessions.commit_artifact(self._session_id, {
@@ -595,9 +651,11 @@ class Dispatcher:
             task_context = assemble_role_task(
                 self.store, self.pipeline, self.learning, self.run_id, workspace,
                 stage, brief, previous=previous, revision_scope=revision_scope,
-                method_context=context, user_input_id=user_input_id, turn_scope=turn_scope)
+                method_context=context, user_input_id=user_input_id, turn_scope=turn_scope,
+                journal_constraints=journal.current_constraints() if journal else None)
             system = role_def.system(self.store.read_run(self.run_id),
-                                     extra=task_context.system_extra, format=selection['format'])
+                                     extra=task_context.system_extra, format=selection['format'],
+                                     local_revision=local_revision)
             if revision_scope:
                 check_base(self.store, self.pipeline, self.run_id, revision_scope)
             self.store.append_event(self.run_id, 'agent_task_prepared',
@@ -643,7 +701,7 @@ class Dispatcher:
                     {"type": "agent_tool", "role": role, "stage": stage, **r}
                 ),
             )
-        except (BudgetExceeded, JobCancelled, SafePreflightError) as exc:
+        except (BudgetExceeded, JobCancelled, SafePreflightError, WriterRootClosureRejected) as exc:
             # Close the attempt *before* letting this through. An open attempt
             # blocks its stage, and an exhausted budget is precisely the case
             # where he raises the cap and expects the run to carry on — so
@@ -662,6 +720,8 @@ class Dispatcher:
         except ModelError as exc:
             self._close_attempt(attempt, f"派工失败：{type(exc).__name__}")
             runtime.transition(attempt.key, 'failed', reason=type(exc).__name__)
+            if exc.response_diagnostic or not exc.retryable:
+                raise NonRetryableStageError(exc.public_message or '模型响应校验失败，本轮已停止自动重试。') from None
             if exc.status == 0 and 'usage unconfirmed' in exc.message:
                 raise NonRetryableStageError(
                     '负责这一步的团队模型连接超时或中断，本阶段新版未保存；本次调用用量无法确认，'

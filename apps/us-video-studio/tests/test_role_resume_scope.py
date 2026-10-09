@@ -13,26 +13,31 @@ from studio.models import PipelineError
 from studio.server import build_app
 from studio.tools.dispatch import Dispatcher
 from test_role_input_boundaries import wait_job
-from test_revision_scope import env, RUN, QUOTE, plan, patch, plan_args
+from test_revision_scope import env, RUN, QUOTE, plan, patch, plan_args, revision_meaning
 
 
-def prepare(text, goal, intent):
+def prepare(text, goal, intent, *, path=None):
+    if intent == 'edit' and goal == 'revision':
+        assert path is not None, 'Synthetic natural revisions must declare their exact known field'
+        meaning = revision_meaning(text, path=path)
+    else:
+        meaning = fixture_task_interpretation(text, intent=intent, deliverable=goal)
     return tool_turn('route', 'prepare_creative_context', {
         'intent': intent, 'format': 'video', 'deliverable': goal,
-        'task_interpretation': fixture_task_interpretation(text, intent=intent, deliverable=goal)})
+        'task_interpretation': meaning})
 
 
-@pytest.mark.parametrize('text,goal,intent', [
-    ('这次重新构思整个视频方案，全文重写。', 'writing', 'new'),
-    ('只把第二句改得自然一点，其他内容保留。', 'revision', 'edit'),
+@pytest.mark.parametrize('text,goal,intent,path', [
+    ('这次重新构思整个视频方案，全文重写。', 'writing', 'new', None),
+    ('只把第二句改得自然一点，其他内容保留。', 'revision', 'edit', ['segments', 1, 'line']),
 ])
-def test_new_producer_task_cannot_borrow_old_local_scope_without_exact_proof(env, text, goal, intent):
+def test_new_producer_task_cannot_borrow_old_local_scope_without_exact_proof(env, text, goal, intent, path):
     store, pipe, settings, ledger = env
     first = Dispatcher(store, pipe, settings, ScriptedModel([final_turn('Waiting')]), ledger, RUN).dispatch(
         'writing', QUOTE, revision_scope=plan(env))
     before = store.latest_artifact(RUN, 'writing')
     model = ScriptedModel([
-        prepare(text, goal, intent),
+        prepare(text, goal, intent, path=path),
         tool_turn('resume', 'resume_role', {'session_id': first.session_id, 'quote': text}),
         final_turn('本轮新稿已经完成。'), final_turn('本轮新稿已经完成。'),
     ], legacy_task_contracts=False)
@@ -53,7 +58,7 @@ def test_fresh_producer_revision_plan_must_match_old_base_and_entire_field_set(e
         'writing', QUOTE, revision_scope=plan(env))
     text = '只把第一句改得自然一点，其他内容保留。' if same_field else '只把第二句改得自然一点，其他内容保留。'
     path = ['segments', 0 if same_field else 1, 'line']
-    turns = [prepare(text, 'revision', 'edit'),
+    turns = [prepare(text, 'revision', 'edit', path=path),
              tool_turn('plan', 'plan_revision', plan_args(store, quote=text, path=path)),
              tool_turn('resume', 'resume_role', {'session_id': first.session_id, 'quote': text})]
     if same_field:

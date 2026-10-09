@@ -6,21 +6,21 @@
 <title>Little Else Studio · US 视频制片室</title>
 <meta name="description" content="从商品灵感到视频与图文方案，你的创作工作空间。">
 <meta name="theme-color" content="#0b0b0d">
-<link rel="icon" type="image/svg+xml" href="/static/studio-mark.svg?v=creative-20260919">
-<link rel="stylesheet" href="/static/style.css?v=ux-audit-20260927">
-<link rel="stylesheet" href="/static/history.css?v=migration-20260919">
-<link rel="stylesheet" href="/static/cinema.css?v=chat-refactor-20260925">
-<link rel="stylesheet" href="/static/conversation.css?v=midflight-20260929">
-<link rel="stylesheet" href="/static/connections.css?v=codex-login-20260920">
-<link rel="stylesheet" href="/static/learning.css?v=creative-20260919">
-<link rel="stylesheet" href="/static/learning-session.css?v=learning-20260924-r1">
-<link rel="stylesheet" href="/static/reference-breakdown.css?v=reference-breakdown-20260928">
-<link rel="stylesheet" href="/static/revisions.css?v=revision-20260919">
-<link rel="stylesheet" href="/static/product-cards.css?v=reuse-20260919-final"><link rel="stylesheet" href="/static/inline-feedback.css?v=reuse-20260919-final"><link rel="stylesheet" href="/static/outcomes.css?v=production-20260919"><link rel="stylesheet" href="/static/project-costs.css?v=production-20260919"><link rel="stylesheet" href="/static/production.css?v=image-recovery-20260929"><link rel="stylesheet" href="/static/journey.css?v=conversation-decisions-20260927"><link rel="stylesheet" href="/static/creator-workspace.css?v=direction-choice-20260927"><link rel="stylesheet" href="/static/canvas-workspace.css?v=top-controls-20260927"><link rel="stylesheet" href="/static/creative-board.css?v=canvas-20261002"></head>
+<link rel="icon" type="image/svg+xml" href="/static/studio-mark.svg">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/history.css">
+<link rel="stylesheet" href="/static/cinema.css">
+<link rel="stylesheet" href="/static/conversation.css">
+<link rel="stylesheet" href="/static/connections.css">
+<link rel="stylesheet" href="/static/learning.css">
+<link rel="stylesheet" href="/static/learning-session.css">
+<link rel="stylesheet" href="/static/reference-breakdown.css">
+<link rel="stylesheet" href="/static/revisions.css">
+<link rel="stylesheet" href="/static/product-cards.css"><link rel="stylesheet" href="/static/inline-feedback.css"><link rel="stylesheet" href="/static/outcomes.css"><link rel="stylesheet" href="/static/project-costs.css"><link rel="stylesheet" href="/static/production.css"><link rel="stylesheet" href="/static/journey.css"><link rel="stylesheet" href="/static/creator-workspace.css"><link rel="stylesheet" href="/static/canvas-workspace.css"><link rel="stylesheet" href="/static/creative-board.css"></head>
 <body data-view="home">
 <a class="skip-link" href="#workspace">跳到内容</a>
 <aside class="sidebar" aria-label="主导航">
-  <button class="studio-brand" id="brand-home" aria-label="Little Else 首页"><img src="/static/studio-mark.svg?v=creative-20260919" alt="" width="34" height="34"><span><strong>little else<span class="brand-dot">.</span></strong><small>CREATIVE STUDIO</small></span></button>
+  <button class="studio-brand" id="brand-home" aria-label="Little Else 首页"><img src="/static/studio-mark.svg" alt="" width="34" height="34"><span><strong>little else<span class="brand-dot">.</span></strong><small>CREATIVE STUDIO</small></span></button>
   <button id="new-run" class="primary create-button"><span aria-hidden="true">＋</span> 开始创作</button>
   <nav class="primary-nav" aria-label="工作空间">
     <button id="nav-home" class="nav-item active" aria-label="工作空间" title="工作空间" aria-current="page"><span class="nav-icon" data-icon="grid"></span><span>工作空间</span></button>
@@ -86,6 +86,7 @@
     <aside class="composer" aria-label="制片对话">
       <div class="producer-heading"><span class="producer-avatar">le.</span><div><strong>你的制片团队</strong><span>讨论、分工与结果，都在这里</span></div><button id="conversation-latest" class="ghost small">回到最新 ↓</button></div>
       <div id="job-status" class="job-status" role="status" hidden></div>
+      <div id="project-read-status" class="job-status" data-active="false" role="status" hidden></div>
       <div id="conversation" class="conversation"><button id="conversation-toggle" class="conversation-bar" aria-expanded="true" aria-controls="conversation-body"><span>项目对话</span><span id="conversation-count" class="conversation-count">还没有对话</span><span id="conversation-caret" class="conversation-caret">收起</span></button><div id="conversation-body" class="conversation-body" aria-live="polite"></div></div>
       <div id="draft" class="draft" hidden></div><div id="feedback-target" class="feedback-target" hidden></div>
       <div class="composer-upload-actions"><button type="button" id="chat-attach" class="ghost small">＋ 商品图片/视频</button><button type="button" id="chat-reference-attach" class="ghost small">＋ 参考视频</button></div>
@@ -103,9 +104,9 @@
   <div id="materials-grid" class="materials-grid"></div>
 </section>
 <div id="reader" class="reader" hidden><div class="reader-box" role="dialog" aria-modal="true" aria-labelledby="reader-title"><div class="reader-head"><div><h2 id="reader-title">方案详情</h2><div class="reader-sub" id="reader-sub"></div></div><div class="reader-actions"><div class="versions" id="reader-versions" hidden></div><button id="reader-close" class="ghost">关闭</button></div></div><div class="reader-body" id="reader-body"></div></div></div>
-<div id="viewer" class="viewer" hidden><div class="viewer-box" role="dialog" aria-modal="true" aria-label="素材预览"><div class="viewer-head"><span id="viewer-name"></span><button id="viewer-close" class="ghost small">关闭</button></div><div id="viewer-body" class="viewer-body"></div></div></div>
+<div id="viewer" class="viewer" hidden><div class="viewer-box" role="dialog" aria-modal="true" aria-label="素材预览"><div class="viewer-head"><span id="viewer-name"></span><div class="viewer-actions"><button id="viewer-analysis" type="button" class="ghost small" hidden>分析视频</button><button id="viewer-close" class="ghost small">关闭</button></div></div><div id="viewer-body" class="viewer-body"></div></div></div>
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/learning-session.js?v=reference-link-retry-20260928"></script>
-<script src="/static/md.js?v=creative-20260919"></script><script src="/static/blocks.js?v=project-trash-20260921"></script><script src="/static/stage.js?v=conversation-decisions-20260927"></script><script src="/static/project-management.js?v=project-trash-20260921"></script><script src="/static/workspace.js?v=project-identity-20260927"></script><script src="/static/progress.js?v=direction-command-20260928"></script><script src="/static/materials.js?v=migration-20260919"></script><script src="/static/image-analysis.js?v=reference-video-20260921"></script><script src="/static/image-workspace.js?v=reference-video-20260921"></script><script src="/static/conversation-input.js?v=reference-flow-20261004-r2"></script><script src="/static/reference-video.js?v=reference-flow-20261004-r2"></script><script src="/static/material-workspace.js?v=reference-flow-20261004-r2"></script><script src="/static/team-progress.js?v=architecture-fixes-20261004-r2"></script><script src="/static/runtime.js?v=reference-flow-20261004-r2"></script><script src="/static/revisions.js?v=revision-20260919"></script><script src="/static/revision-workspace.js?v=studio-20260923-r3"></script><script src="/static/product-cards.js?v=reuse-20260919-final"></script><script src="/static/outcomes.js?v=production-20260919"></script><script src="/static/project-costs.js?v=budget-20260924-r1"></script><script src="/static/history.js?v=migration-20260919"></script><script src="/static/production.js?v=architecture-fixes-20261004-r2"></script><script src="/static/creative-board.js?v=architecture-fixes-20261004-r2"></script><script src="/static/creator-view.js?v=architecture-fixes-20261004-r2"></script><script src="/static/journey.js?v=architecture-fixes-20261004-r2"></script><script src="/static/app.js?v=architecture-fixes-20261004-r2"></script><script src="/static/codex-login.js?v=codex-login-20260920-final"></script><script src="/static/connections.js?v=architecture-fixes-20261004-r2"></script><script src="/static/learning.js?v=learning-integration-20260924"></script><script src="/static/inline-feedback.js?v=reuse-20260919-final"></script>
+<script src="/static/learning-session.js"></script>
+<script src="/static/md.js"></script><script src="/static/blocks.js"></script><script src="/static/stage.js"></script><script src="/static/project-management.js"></script><script src="/static/workspace.js"></script><script src="/static/progress.js"></script><script src="/static/materials.js"></script><script src="/static/image-analysis.js"></script><script src="/static/image-workspace.js"></script><script src="/static/conversation-input.js"></script><script src="/static/reference-video.js"></script><script src="/static/material-workspace.js"></script><script src="/static/team-progress.js"></script><script src="/static/runtime.js"></script><script src="/static/revisions.js"></script><script src="/static/revision-workspace.js"></script><script src="/static/product-cards.js"></script><script src="/static/outcomes.js"></script><script src="/static/project-costs.js"></script><script src="/static/history.js"></script><script src="/static/production.js"></script><script src="/static/design-upgrade.js"></script><script src="/static/creative-board.js"></script><script src="/static/creator-view.js"></script><script src="/static/journey.js"></script><script src="/static/app.js"></script><script src="/static/codex-login.js"></script><script src="/static/connections.js"></script><script src="/static/learning.js"></script><script src="/static/inline-feedback.js"></script>
 </body>
 </html>

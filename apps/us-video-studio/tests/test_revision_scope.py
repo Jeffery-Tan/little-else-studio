@@ -5,7 +5,9 @@ import json
 
 import pytest
 
-from fakes import ScriptedModel, tool_turn, final_turn
+from fakes import ScriptedModel, tool_turn, final_turn, fixture_task_interpretation
+from studio.conversation_input import (accept, interpreted_task_constraints, receive,
+    record_task_interpretation, start_execution)
 from studio.agents.client import JobCancelled
 from studio.agents.orchestrator import Orchestrator
 from studio.config import Settings
@@ -15,6 +17,7 @@ from studio.pipeline import Pipeline
 from studio.revision_scope import plan_revision, patch_payload, work_plan
 from studio.store import Store
 from studio.tools.dispatch import Dispatcher
+from visual_fixtures import designed_script, visual_design
 
 RUN = 'scoped-revision'
 QUOTE = '只把第一句改得自然一点，其他内容保留'
@@ -45,11 +48,12 @@ def env(tmp_path, monkeypatch):
                                         {'key': 'B', 'claim': 'Picnic', 'hook': 'Park', 'satisfies': 'goal.primary'}],
                               'recommended': 'B'})
     approve(pipe, 'direction', 'A')
-    write(pipe, 'material_plan', {'items': [{'shot': 'Desk', 'status': '不确定', 'note': 'Keep this'}]})
-    write(pipe, 'writing', {'segments': [
+    write(pipe, 'material_plan', {'items': [{'shot': 'Desk', 'status': '不确定', 'note': 'Keep this'}],
+                                  'visual_design': visual_design()})
+    write(pipe, 'writing', designed_script({'segments': [
         {'tc': '0–3', 'picture': 'Open bag', 'line': 'Original line', 'sound': 'Room', 'duration': '3'},
         {'tc': '3–6', 'picture': 'Lunch', 'line': 'Keep second line', 'sound': 'Room', 'duration': '3'}],
-        'total_duration': '6秒', 'assumptions': ['Unverified pacing']})
+        'total_duration': '6秒', 'assumptions': ['Unverified pacing']}))
     approve(pipe, 'writing')
     return store, pipe, settings, Ledger(store, settings)
 
@@ -65,8 +69,27 @@ def plan_args(store, stage='writing', path=None, mode='local', quote=QUOTE):
 def plan(env, **kwargs):
     if kwargs.get('mode') == 'rework':
         kwargs.setdefault('quote', '重新构思整个方案')
+    text = kwargs.get('quote', QUOTE)
+    receipt = receive(env[0], RUN, text, f'fixture-plan-{len(env[0].read_events(RUN))}')
+    accept(env[0], RUN, receipt)
+    start_execution(env[0], RUN, receipt)
+    meaning = revision_meaning(text, stage=kwargs.get('stage', 'writing'),
+                               mode=kwargs.get('mode', 'local'), path=kwargs.get('path'))
+    saved = record_task_interpretation(env[0], RUN, receipt, meaning)
     return plan_revision(env[0], env[1], RUN, plan_args(env[0], **kwargs), turn_id='turn-1',
-                         user_message=kwargs.get('quote', QUOTE))
+                         user_message=text, constraints=interpreted_task_constraints(receipt, saved))
+
+
+def revision_meaning(text, *, stage='writing', mode='local', path=None):
+    """An explicit synthetic edit contract, never an inference from user words."""
+    meaning = fixture_task_interpretation(text, intent='edit', deliverable='revision')
+    meaning['task']['allowed_stages'] = [stage]
+    meaning['constraints'] = [{'quote': text, 'key': 'content.edit_scope', 'value': mode,
+        'operation': 'add', 'polarity': 'require', 'intent': 'instruction',
+        'scope': {'lifetime': 'turn', 'stages': [stage],
+                  'paths': [path or ['segments', 0, 'line']] if mode == 'local' else [], 'quote': text},
+        'supersedes': [], 'conflict_with': [], 'ambiguity': ''}]
+    return meaning
 
 
 def patch(path=None, value='Try this line'):
@@ -136,19 +159,27 @@ def test_writing_revision_task_records_exact_role_tools_and_context_sources(env)
     assert 'selected_option_id=A' in call['messages'][0]['content']
 
 
-def test_out_of_scope_and_full_submit_rejected_then_valid_patch_completes(env):
+def test_out_of_scope_patch_rejected_then_valid_patch_completes(env):
     model = ScriptedModel([
-        tool_turn('full', 'submit_stage', {'content': 'Replace everything', 'summary': 'wrong'}),
         tool_turn('wide', 'submit_patch', patch(['segments', 1, 'picture'], 'Wrong shot')),
         tool_turn('caps', 'read_capabilities', {}),
         tool_turn('save', 'submit_patch', patch())])
     result = dispatch(env, model, plan(env))
     assert result.submitted == 'writing-v2'
-    for index in (1, 2):
-        assert model.calls[index]['messages'][-1]['content'][0]['is_error']
-    caps = json.loads(model.calls[3]['messages'][-1]['content'][0]['content'])
-    assert caps['tools'] == model.calls[3]['tool_names']
+    assert model.calls[1]['messages'][-1]['content'][0]['is_error']
+    caps = json.loads(model.calls[2]['messages'][-1]['content'][0]['content'])
+    assert caps['tools'] == model.calls[2]['tool_names']
     assert len(env[0].list_artifacts(RUN, 'writing')) == 2
+
+
+def test_local_revision_full_submit_is_rejected_by_current_manifest_without_retry(env):
+    from studio.agents.client import NonRetryableStageError
+    model = ScriptedModel([tool_turn('full', 'submit_stage', {'content': 'Replace everything', 'summary': 'wrong'})])
+    with pytest.raises(NonRetryableStageError):
+        dispatch(env, model, plan(env))
+    assert len(model.calls) == 1
+    assert env[0].latest_artifact(RUN, 'writing').version == 1
+    assert env[1].stage_state(RUN, 'writing').open_attempt is None
 
 
 @pytest.mark.parametrize('path', [['segments', -1, 'line'], ['segments', True, 'line'],
@@ -236,9 +267,12 @@ def test_plan_quote_identity_and_local_scope_cannot_expand(env):
     with pytest.raises(PipelineError, match='原话'):
         plan_revision(store, pipe, RUN, args, turn_id='t', user_message=QUOTE)
     scope = plan(env)
+    from studio.conversation_input import message, interpretation_for
+    receipt = message(store, RUN, scope['source_message_id'])
+    limits = interpreted_task_constraints(receipt, interpretation_for(store, RUN, receipt['message_id']))
     for args in (plan_args(store, mode='rework'), plan_args(store, path=['segments', 1, 'line'])):
         with pytest.raises(PipelineError, match='扩大'):
-            plan_revision(store, pipe, RUN, args, turn_id='t', user_message=QUOTE, previous=scope)
+            plan_revision(store, pipe, RUN, args, turn_id='t', user_message=QUOTE, previous=scope, constraints=limits)
 
 
 class PlannedModel(ScriptedModel):
@@ -252,9 +286,156 @@ def latest_plan(store):
     return next(e['scope']['plan_id'] for e in reversed(store.read_events(RUN)) if e['kind'] == 'agent_revision_planned')
 
 
-def route(intent='edit'):
+def route(intent='edit', *, text=QUOTE, stage='writing', mode='local', path=None):
     return tool_turn('route', 'prepare_creative_context', {'intent': intent, 'format': 'video',
-        'deliverable': 'revision' if intent == 'edit' else 'direction' if intent == 'continue' else 'follow_up'})
+        'deliverable': 'revision' if intent == 'edit' else 'direction' if intent == 'continue' else 'follow_up',
+        **({'task_interpretation': revision_meaning(text, stage=stage, mode=mode, path=path)}
+           if intent == 'edit' else {})})
+
+
+def production_route(**changes):
+    return tool_turn('production-route', 'prepare_creative_context', {
+        'intent': 'edit', 'format': 'video', 'deliverable': 'production_input',
+        'production_kind': 'image', **changes})
+
+
+def image_inputs(env):
+    from studio.production import DraftIn, prepare_draft
+    store, pipe, _, _ = env
+    source = store.latest_artifact(RUN, 'writing')
+    payload = {'kind': 'image', 'model': 'codex-image', 'prompt': 'Synthetic image input',
+               'source_version': source.version, 'source_sha256': source.sha256}
+    drafts = [prepare_draft(store, pipe, RUN, DraftIn(
+        **payload, request_id=f'image-{index}', shot_id=f'shot-{index:02}'), actor='agent')
+        for index in (1, 2)]
+    return payload, drafts
+
+
+def test_image_feedback_revises_one_input_without_reopening_adopted_stages(env):
+    from studio.production import draft_records
+    store, pipe, settings, ledger = env
+    payload, drafts = image_inputs(env)
+    before = {stage: store.latest_artifact(RUN, stage) for stage in STAGES}
+    approvals = store.list_approvals(RUN)
+    folder = store.run_dir(RUN) / 'materials'
+    folder.mkdir(exist_ok=True)
+    output = folder / 'synthetic-result.png'
+    output.write_bytes(b'Synthetic output, no provider used')
+    observed = {'name': output.name, 'sha256': hashlib.sha256(output.read_bytes()).hexdigest(),
+                'purpose': 'reference', 'level': 'image_observed', 'observer': 'model:fixture',
+                'method': 'Offline fixture', 'coverage': 'whole still', 'observed_at': '2026-10-07',
+                'findings': ['Synthetic hand/lid mismatch'], 'limitations': ['Offline fixture only']}
+    store.append_event(RUN, 'production_output', output={'name': output.name, 'sha256': observed['sha256']})
+    def observe(*args):
+        store.append_event(RUN, 'agent_images_observed', observations=[observed])
+        return {'observations': [observed]}
+    message = '只修第一张图的手和上盖网袋，方向和脚本保持'
+    model = ScriptedModel([
+        production_route(),
+        tool_turn('observe', 'observe_images', {'images': [{'name': output.name, 'purpose': 'reference'}]}),
+        tool_turn('plan', 'plan_revision', plan_args(store, stage='intake', mode='rework', quote=message)),
+        tool_turn('write', 'write_stage', {'stage': 'intake', 'content': 'Rewrite facts', 'summary': 'wrong'}),
+        tool_turn('dispatch', 'dispatch', {'stage': 'direction', 'brief': message}),
+        tool_turn('prepare', 'prepare_production', {**payload, 'request_id': 'revised-image',
+            'shot_id': 'shot-01', 'supersedes': drafts[0]['draft_id'], 'prompt': 'Correct hand and lid mesh'}),
+        final_turn('第一张制作输入已修改，等待查看')])
+    result = Orchestrator(store, pipe, settings, model, ledger, RUN, image_observer=observe).send(message)
+    assert [failure['tool'] for failure in result.failed_tools] == ['plan_revision', 'write_stage', 'dispatch']
+    assert result.deliverable['status'] == 'complete'
+    for stage in STAGES:
+        assert store.latest_artifact(RUN, stage) == before[stage]
+        assert not pipe.stage_state(RUN, stage).stale
+    assert store.list_approvals(RUN) == approvals
+    assert pipe.stage_state(RUN, 'direction').approval.selected_option_id == 'A'
+    records = draft_records(store, RUN)
+    assert records[drafts[0]['draft_id']]['superseded_by'] == 'revised-image'
+    assert records['revised-image']['shot_id'] == 'shot-01'
+    assert records[drafts[1]['draft_id']] == drafts[1]
+    assert not any(e['kind'] in ('agent_revision_planned', 'agent_task_prepared', 'execution_authorized')
+                   for e in store.read_events(RUN))
+    assert '不要重写需求、方向或脚本' in model.requests_text()
+    assert '继续完成本轮具体创意方向' not in model.requests_text()
+
+
+@pytest.mark.parametrize('change', [
+    {'deliverable': 'revision'}, {'deliverable': 'production_media'}, {'format': 'photo'},
+    {'production_kind': 'video'}, {'media_kind': 'video'}, {'creation_mode': 'recreate'},
+    {'reference_id': 'other-reference'}, {'reference_scope': 'Change reference scope'}])
+def test_production_turn_cannot_widen_goal_format_medium_or_reference(env, change):
+    store, pipe, settings, ledger = env
+    image_inputs(env)
+    before = {s: store.latest_artifact(RUN, s) for s in STAGES}
+    source_events = [e for e in store.read_events(RUN) if e['kind'] == 'creation_mode_selected']
+    model = ScriptedModel([production_route(), production_route(**change), final_turn('保留当前范围')])
+    result = Orchestrator(store, pipe, settings, model, ledger, RUN).send('修当前分镜')
+    assert [f['tool'] for f in result.failed_tools] == ['prepare_creative_context']
+    assert {s: store.latest_artifact(RUN, s) for s in STAGES} == before
+    assert [e for e in store.read_events(RUN) if e['kind'] == 'creation_mode_selected'] == source_events
+    assert len([e for e in store.read_events(RUN) if e['kind'] == 'creative_context_selected']) == 1
+
+
+@pytest.mark.parametrize('name,args', [
+    *[('observe_reference', {'action': action, 'source': 'https://www.tiktok.com/@fixture/video/1',
+                            'scope': 'Synthetic reference', 'quote': '修当前分镜'})
+      for action in ('analyze', 'prompt', 'recreate', 'inspiration')],
+    ('observe_product_video', {'source': 'https://www.tiktok.com/@fixture/video/1', 'quote': '修当前分镜'}),
+    ('submit_patch', patch()),
+    ('prepare_production', {'kind': 'video', 'request_id': 'wrong-medium'})])
+def test_production_lock_applies_before_observer_or_other_mutation(env, name, args):
+    store, pipe, settings, ledger = env
+    image_inputs(env)
+    before = {s: store.latest_artifact(RUN, s) for s in STAGES}
+    def forbidden(*args):
+        raise AssertionError('Out-of-scope observer must never run')
+    model = ScriptedModel([production_route(), tool_turn('bypass', name, args), final_turn('保留当前范围')])
+    result = Orchestrator(store, pipe, settings, model, ledger, RUN,
+                          reference_observer=forbidden, product_video_observer=forbidden).send('修当前分镜')
+    assert [f['tool'] for f in result.failed_tools] == [name]
+    assert '本轮' in result.failed_tools[0]['result']
+    assert {s: store.latest_artifact(RUN, s) for s in STAGES} == before
+
+
+def test_next_user_turn_can_explicitly_revise_writing_after_production_lock(env):
+    store, pipe, settings, ledger = env
+    image_inputs(env)
+    model = PlannedModel([
+        production_route(), tool_turn('too-wide', 'plan_revision', plan_args(store)), final_turn('保留分镜范围'),
+        route(), tool_turn('plan', 'plan_revision', plan_args(store)),
+        lambda: tool_turn('dispatch', 'dispatch', {'stage': 'writing', 'brief': QUOTE, 'plan_id': latest_plan(store)}),
+        tool_turn('patch', 'submit_patch', patch()), final_turn('按新要求修改脚本')])
+    main = Orchestrator(store, pipe, settings, model, ledger, RUN)
+    first = main.send('修当前分镜')
+    assert [f['tool'] for f in first.failed_tools] == ['plan_revision']
+    second = main.send(QUOTE)
+    assert not second.failed_tools
+    assert store.latest_artifact(RUN, 'writing').version == 2
+    assert store.latest_artifact(RUN, 'direction').version == 1
+    assert pipe.stage_state(RUN, 'direction').approval.selected_option_id == 'A'
+
+
+@pytest.mark.parametrize('change', [
+    {'creation_mode': 'autonomous'}, {'creation_mode': 'recreate', 'reference_scope': 'Change scope'},
+    {'reference_id': 'other-reference'}])
+def test_first_production_selection_preserves_the_existing_reference(env, change):
+    from studio.creation_mode import select
+    from studio.tools.workspace import ToolError, Workspace
+    store, pipe, settings, ledger = env
+    folder = store.run_dir(RUN) / 'materials'
+    folder.mkdir(exist_ok=True)
+    source = folder / 'fixture-reference.mp4'
+    source.write_bytes(b'Offline reference identity fixture')
+    store.append_event(RUN, 'video_analysis_candidate', candidate={
+        'reference_task_id': 'fixture-reference', 'analysis_id': 'fixture-analysis',
+        'name': source.name, 'sha256': hashlib.sha256(source.read_bytes()).hexdigest()})
+    select(store, RUN, 'recreate', 'fixture-reference', 'Keep the adopted reference scope')
+    before = store.read_events(RUN)
+    model = ScriptedModel([])
+    main = Orchestrator(store, pipe, settings, model, ledger, RUN)
+    with pytest.raises(ToolError, match='参考范围'):
+        main._execute('prepare_creative_context', production_route(**change).tool_calls[0].input,
+                      Workspace(store, pipe, RUN, 'orchestrator'))
+    assert store.read_events(RUN) == before
+    assert not model.calls
 
 
 def test_chat_routes_one_line_to_writer_and_blocks_whole_pipeline_rewrite(env):
@@ -286,7 +467,7 @@ def test_next_turn_cannot_reuse_old_plan_but_can_choose_new_scope(env):
         'options': [{'label': '保留'}, {'label': '调整'}]})
     whole = '重新构思整个方案'
     model = PlannedModel([route(), tool_turn('plan', 'plan_revision', plan_args(store)), question,
-        route(), lambda: tool_turn('old', 'dispatch', {'stage': 'writing', 'brief': QUOTE, 'plan_id': latest_plan(store)}),
+        route(text=whole, mode='rework'), lambda: tool_turn('old', 'dispatch', {'stage': 'writing', 'brief': QUOTE, 'plan_id': latest_plan(store)}),
         tool_turn('new', 'plan_revision', plan_args(store, mode='rework', quote=whole)), question])
     main = Orchestrator(store, pipe, settings, model, ledger, RUN)
     main.send(QUOTE)
@@ -311,7 +492,7 @@ def test_continue_stale_direction_skips_revision_quote_binding(env):
 
 def test_intake_patch_uses_no_worker_and_preserves_other_facts(env):
     store, pipe, settings, ledger = env
-    model = PlannedModel([route(), tool_turn('plan', 'plan_revision', plan_args(store, stage='intake', path=['facts', 0, 'value'])),
+    model = PlannedModel([route(stage='intake', path=['facts', 0, 'value']), tool_turn('plan', 'plan_revision', plan_args(store, stage='intake', path=['facts', 0, 'value'])),
         lambda: tool_turn('patch', 'submit_patch', {**patch(['facts', 0, 'value'], 'Lunch bag'), 'plan_id': latest_plan(store)}),
         final_turn('Fact updated')])
     result = Orchestrator(store, pipe, settings, model, ledger, RUN).send(QUOTE)

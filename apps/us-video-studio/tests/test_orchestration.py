@@ -57,6 +57,35 @@ def make_orchestrator(store, pipeline, ledger, model, tmp_path):
     return Orchestrator(store, pipeline, settings_for(tmp_path), model, ledger, RUN)
 
 
+@pytest.mark.parametrize('public_message', [
+    '模型返回的工具参数格式不完整，本次没有执行这些工具。已保存内容和调用用量保留。',
+    None,
+])
+def test_model_failure_keeps_safe_public_reason_after_reload_without_losing_diagnostics(
+        env, tmp_path, public_message):
+    store, pipeline, ledger = env
+    failure = ModelError(200, 'synthetic invalid arguments; received usage retained',
+                         usage=Usage(31, 17), usage_final=True, retryable=False,
+                         public_message=public_message)
+    class FailingModel:
+        def complete(self, **_request):
+            raise failure
+
+    with pytest.raises(ModelError) as raised:
+        make_orchestrator(store, pipeline, ledger, FailingModel(), tmp_path).send('只检查商品图片')
+    assert raised.value is failure
+    record = Store(tmp_path).read_chat(RUN)[-1]
+    expected = public_message if public_message else str(failure)
+    assert record['role'] == 'system' and record['text'] == 'ModelError: ' + expected
+    if public_message:
+        assert 'synthetic invalid arguments' not in record['text']
+    entry = ledger.entries(RUN)[-1]
+    assert entry.input_tokens == 31 and entry.output_tokens == 17
+    assert entry.usage_status == 'known' and not entry.ok
+    assert entry.error == str(failure)
+    assert not store.list_artifacts(RUN)
+
+
 # --------------------------------------------------------------- tool sets -- #
 
 
@@ -183,6 +212,26 @@ def test_invalid_paid_stage_response_stops_before_another_dispatch(env, tmp_path
     assert pipeline.stage_state(RUN, 'direction').open_attempt is None
     rows = ledger.entries(RUN)
     assert len(rows) == 1 and rows[0].output_tokens == 900
+
+
+def test_provider_interruption_closes_stage_and_cannot_be_automatically_redispatched(env, tmp_path):
+    from studio.agents.openai_compat import _parse
+    from studio.tools.dispatch import Dispatcher
+    store, pipeline, ledger = env
+    seed_intake(pipeline)
+    calls = []
+    class Interrupted:
+        def complete(self, **kwargs):
+            calls.append(kwargs)
+            return _parse({'usage': {'prompt_tokens': 4, 'completion_tokens': 6},
+                'choices': [{'finish_reason': 'insufficient_system_resource', 'message': {}}]}, 'fixture')
+    dispatcher = Dispatcher(store, pipeline, settings_for(tmp_path), Interrupted(), ledger, RUN)
+    with pytest.raises(NonRetryableStageError, match='推理资源不足'):
+        dispatcher.dispatch('direction', 'Draft concise directions')
+    assert len(calls) == 1
+    assert pipeline.stage_state(RUN, 'direction').open_attempt is None
+    assert pipeline.stage_state(RUN, 'direction').latest is None
+    assert ledger.entries(RUN)[0].usage_status == 'known'
 
 
 def test_unknown_usage_transport_timeout_stops_delegated_stage(env, tmp_path):
@@ -501,7 +550,7 @@ def test_a_stale_version_is_not_sent_for_review(env, tmp_path):
 def test_orchestrator_turn_dispatches_writes_and_reports(env, tmp_path):
     store, pipeline, ledger = env
     model = ScriptedModel([
-        tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video", "deliverable": "direction"}),
+        tool_turn("route", "prepare_creative_context", {"intent": "new", "format": "video", "deliverable": "direction"}),
         tool_turn("t1", "read_project_state", {}),
         tool_turn("t2", "write_stage", {
             "stage": "intake",
@@ -530,18 +579,35 @@ def test_orchestrator_turn_dispatches_writes_and_reports(env, tmp_path):
     assert chat[-1]["role"] == "assistant"
 
 
-def test_orchestrator_cannot_approve_and_is_told_so(env, tmp_path):
+def test_orchestrator_cannot_approve_and_invalid_manifest_stops_whole_batch(env, tmp_path):
     store, pipeline, ledger = env
+    batch = tool_turn('read', 'list_materials', {})
+    forbidden = tool_turn("t1", "approve_stage", {"stage": "direction"})
+    batch.tool_calls += forbidden.tool_calls
+    batch.raw_blocks += forbidden.raw_blocks
     model = ScriptedModel([
-        tool_turn("t1", "approve_stage", {"stage": "direction"}),
+        batch,
         final_turn("我试试能不能自己批。"),
     ])
     orch = make_orchestrator(store, pipeline, ledger, model, tmp_path)
-    orch.send("直接通过吧")
+    executed = []
+    original = orch._execute
+    def execute(name, args, workspace):
+        executed.append(name)
+        return original(name, args, workspace)
+    orch._execute = execute
+    with pytest.raises(ModelError) as caught:
+        orch.send("直接通过吧")
 
-    # No such tool exists; the loop reports it and nothing was approved.
+    # The entire frozen manifest is checked before its first handler executes.
     assert store.list_approvals(RUN, "direction") == []
-    assert "not available in this role's request" in model.requests_text()
+    assert not executed and len(model.calls) == 1
+    assert caught.value.retryable is False
+    assert '本轮未执行返回工具' in caught.value.public_message
+    assert caught.value.response_diagnostic['schema_rule'] == 'unavailable_tool'
+    entries = ledger.entries(RUN)
+    assert len(entries) == 1 and entries[0].usage_status == 'known'
+    assert entries[0].input_tokens == 20 and entries[0].output_tokens == 15
 
 
 def test_orchestrator_state_view_prioritizes_project_not_accounting(env, tmp_path):

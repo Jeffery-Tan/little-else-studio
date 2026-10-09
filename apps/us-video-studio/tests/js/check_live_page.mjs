@@ -27,7 +27,7 @@ const PAGE_SCRIPTS = [
   'materials.js', 'image-analysis.js', 'image-workspace.js', 'conversation-input.js',
   'reference-video.js', 'material-workspace.js', 'team-progress.js', 'runtime.js',
   'revisions.js', 'revision-workspace.js', 'product-cards.js', 'outcomes.js',
-  'project-costs.js', 'history.js', 'production.js', 'creator-view.js', 'journey.js',
+  'project-costs.js', 'history.js', 'production.js', 'design-upgrade.js', 'creative-board.js', 'creator-view.js', 'journey.js',
   'app.js', 'codex-login.js', 'connections.js', 'learning.js', 'inline-feedback.js',
 ];
 

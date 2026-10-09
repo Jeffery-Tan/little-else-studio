@@ -32,15 +32,24 @@ def api_payload(store):
     return payload
 
 
-def test_deepseek_roles_use_provider_thinking_default_not_generic_output_limit(tmp_path):
+@pytest.mark.parametrize(('role', 'effort'), [
+    ('orchestrator', 'high'), ('director', 'high'), ('material', 'high'), ('writer', 'low')])
+def test_deepseek_role_effort_and_provider_output_default(tmp_path, role, effort):
     public = {'connections': [{'id': 'ds', 'provider': 'deepseek'}], 'roles': {
-        'director': {'connection': 'ds', 'model': 'deepseek-flash'},
-        'writer': {'connection': 'ds', 'model': 'deepseek-flash'}}}
-    snapshot = ConnectionSnapshot(json.dumps(public), {'ds': 'synthetic-only'}, tmp_path)
+        role: {'connection': 'ds', 'model': 'deepseek-flash'}}}
+    original = json.dumps(public)
+    snapshot = ConnectionSnapshot(original, {'ds': 'synthetic-only'}, tmp_path)
     routed = snapshot.client(max_tokens=12000)
-    assert routed.for_role('director', 'fixture').max_tokens is None
-    assert routed.for_role('director', 'fixture').reasoning_effort == 'high'
-    assert routed.for_role('writer', 'fixture').max_tokens is None
+    client = routed.for_role(role, 'fixture')
+    assert client.max_tokens is None
+    assert client.reasoning_effort == effort
+    assert client.progress_stream is (role != 'writer')
+    payload = client._payload('deepseek-flash', 'fixture-system', [], [])
+    assert payload['thinking'] == {'type': 'enabled'}
+    assert payload['reasoning_effort'] == effort
+    assert 'max_tokens' not in payload
+    assert snapshot.public() == public
+    assert not (tmp_path / 'connections.json').exists()
 
 
 def test_default_is_codex_for_every_role_without_reading_environment_or_legacy(tmp_path, monkeypatch):
@@ -359,7 +368,7 @@ def test_subrole_connection_preflight_stops_orchestrator_without_retry_or_open_a
     if tool == 'request_review':
         attempt = pipeline.start_attempt('test-run', 'direction')
         pipeline.submit('test-run', 'direction', attempt.token, content='Synthetic directions', summary='fixture')
-    model = ScriptedModel([tool_turn("route", "prepare_creative_context", {"intent": "edit", "format": "video", "deliverable": "direction"}), tool_turn('call-1', tool, {'stage': 'direction', 'brief': 'Synthetic task'})])
+    model = ScriptedModel([tool_turn("route", "prepare_creative_context", {"intent": "continue", "format": "video", "deliverable": "direction"}), tool_turn('call-1', tool, {'stage': 'direction', 'brief': 'Synthetic task'})])
     class Router:
         def for_role(self, role, run_id):
             if role != 'orchestrator':

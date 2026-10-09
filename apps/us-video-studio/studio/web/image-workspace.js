@@ -1,4 +1,46 @@
 "use strict";
+async function openMaterialAnalysis(runId, material, opener) {
+  if (state.runId !== runId || !material.usable || material.kind !== 'video') return;
+  if (state.busy || state.decisionBusy || state.recoveryBlocked) {
+    toast('请先结束当前任务，或在制片对话中处理待恢复事项。');
+    return;
+  }
+  if (document.querySelector('.observation-dialog')) return;
+  if (opener) opener.disabled = true;
+  try {
+    const [data, images, references] = await Promise.all([
+      api(`/api/runs/${encodeURIComponent(runId)}/material-observations`),
+      api(`/api/runs/${encodeURIComponent(runId)}/image-analysis`),
+      api(`/api/runs/${encodeURIComponent(runId)}/reference-videos`),
+    ]);
+    if (state.runId !== runId || document.querySelector('.observation-dialog')) return;
+    if (state.busy || state.decisionBusy || state.recoveryBlocked) {
+      toast('请先结束当前任务，或在制片对话中处理待恢复事项。');
+      return;
+    }
+    const current = data.materials.find(m => m.name === material.name && m.kind === 'video');
+    if (!current || (material.sha256 && current.sha256 !== material.sha256)) {
+      throw Error('视频已变化，请刷新素材后重新打开。');
+    }
+    const candidate = images.candidates.slice().reverse().find(c =>
+      c.name === current.name && c.sha256 === current.sha256 && c.status !== 'stale');
+    if (candidate) {
+      openImageReview(runId, current, candidate, data, opener);
+      return;
+    }
+    const reference = references.tasks.slice().reverse().find(t =>
+      t.name === current.name && t.sha256 === current.sha256 && t.status !== 'stale' && t.intent === 'analyze');
+    if (reference) {
+      await openReferenceVideo(runId, reference, opener);
+      return;
+    }
+    openImageSetup(runId, current, images, opener);
+  } catch (error) {
+    if (state.runId === runId) toast(error.message || '视频分析入口暂时无法打开。', true);
+  } finally {
+    if (opener) opener.disabled = false;
+  }
+}
 function imageDialog(runId, material, title, content, opener) {
   const dialog = document.createElement('dialog');
   dialog.className = 'observation-dialog image-analysis-dialog';
@@ -21,7 +63,7 @@ function openImageSetup(runId, material, data, opener) {
   if (settings) {settings.onclick=()=>{dialog.close();$('connections-open').click();};return;}
   const form = dialog.querySelector('form');
   if (!form) return;
-  const connection = () => [...data.connections, ...(data.bailian_omni ? [data.bailian_omni] : [])].find(c=>c.id === form.elements.connection_id.value);
+  const connection = () => [...(data.video_connection ? [data.video_connection] : []), ...data.connections, ...(data.bailian_omni ? [data.bailian_omni] : [])].find(c=>c.id === form.elements.connection_id.value);
   function updateCost() {dialog.querySelector('[data-analysis-cost]').textContent = StudioImages.costText(connection(),form.elements.model.value.trim(),material.kind);form.elements.consent.checked = false;}
   form.elements.connection_id.onchange = () => {form.elements.model.value = connection()?.suggested_model || '';updateCost();};
   form.elements.model.oninput = updateCost;

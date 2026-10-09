@@ -7,12 +7,13 @@ import pytest
 from fakes import ScriptedModel, final_turn, tool_turn, fixture_task_interpretation
 from local_http import TestClient
 from studio.agent_sessions import AgentSessions, SessionJournal
-from studio.conversation_input import receive, accept, start_execution, record_task_interpretation
+from studio.conversation_input import (receive, accept, start_execution, record_task_interpretation,
+                                       interpreted_task_constraints)
 from studio.models import PipelineError
 from studio.server import build_app
 from studio.tools.dispatch import Dispatcher
 from studio.revision_scope import plan_revision
-from test_revision_scope import env, RUN, QUOTE, patch, plan, plan_args
+from test_revision_scope import env, RUN, QUOTE, patch, plan, plan_args, revision_meaning
 
 
 def wait_job(http, job_id):
@@ -31,7 +32,7 @@ def revision_model(store, text, value):
     model = ScriptedModel([
         tool_turn('prepare', 'prepare_creative_context', {
             'intent': 'edit', 'format': 'video', 'deliverable': 'revision',
-            'task_interpretation': fixture_task_interpretation(text, intent='edit', deliverable='revision')}),
+            'task_interpretation': revision_meaning(text)}),
         tool_turn('scope', 'plan_revision', plan_args(store, quote=text)),
         tool_turn('assign', 'dispatch', {'stage': 'writing', 'brief': text}),
         tool_turn('save', 'submit_patch', patch(value=value)),
@@ -199,14 +200,14 @@ def test_negated_stop_with_explicit_local_continuation_still_resumes(env):
     receipt = receive(store, RUN, text, 'negated-stop-resume')
     accept(store, RUN, receipt)
     start_execution(store, RUN, receipt)
-    record_task_interpretation(store, RUN, receipt,
-        fixture_task_interpretation(text, intent='edit', deliverable='revision'))
+    saved = record_task_interpretation(store, RUN, receipt, revision_meaning(text))
     # The producer has already scoped this actual input to the same baseline
     # and field; the old resume endpoint itself contributes no such meaning.
     store.append_event(RUN, 'agent_turn_scope_started', turn_id='interpreted-resume-turn',
                        user_input_id=receipt['message_id'])
     plan_revision(store, pipe, RUN, plan_args(store, quote=text),
-                  turn_id='interpreted-resume-turn', user_message=text)
+                  turn_id='interpreted-resume-turn', user_message=text,
+                  constraints=interpreted_task_constraints(receipt, saved))
     model = ScriptedModel([tool_turn('save', 'submit_patch', patch(value='Continued, not cancelled'))],
                           legacy_task_contracts=False)
     with TestClient(build_app(settings, client_factory=lambda: model)) as http:

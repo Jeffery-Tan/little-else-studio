@@ -6,7 +6,7 @@ import uuid
 from urllib.parse import urlsplit, urlunsplit
 
 from .agents import bailian_omni
-from .audiovisual_observation import prepare_video
+from . import video_understanding
 from .image_analysis import AnalysisIn, candidates, prepare_analysis
 from .material_observations import ObservationError
 from .materials import accept_upload, resolve
@@ -19,20 +19,29 @@ def observe(store, pipeline, connections, settings, run_id, source_url, emit, ch
     """Download once, observe as product, and leave the candidate for user selection."""
     checked = checked_url(source_url)
     public_url = urlunsplit(urlsplit(checked)._replace(query=''))
+    from .conversation_input import verified_video_aliases
     if revision != connections.public()['revision']:
         raise PipelineError('product_video_connection', '模型设置已变化，请重新发送商品视频链接。')
     if any(pipeline.stage_state(run_id, stage).open_attempt for stage in STAGES):
         raise PipelineError('product_video_stage', '请先处理当前未完成的策划步骤，再分析商品视频。')
-    frozen = bailian_omni.freeze(settings, endpoint)
     previous = next((e for e in reversed(store.read_events(run_id))
-                     if e['kind'] == 'product_video_source' and e.get('source_url') == public_url), None)
+                     if e['kind'] == 'product_video_source' and (e.get('source_url') == public_url
+                         or public_url in verified_video_aliases(store, run_id, e))), None)
     name = previous.get('name') if previous else None
     sha = previous.get('sha256') if previous else None
+    if name and sha and (path := resolve(store, run_id, name)) and hashlib.sha256(path.read_bytes()).hexdigest() == sha:
+        cached = next((c for c in reversed(candidates(store, run_id)) if c['name'] == name and c['sha256'] == sha
+                       and c['purpose'] == 'product' and c['status'] != 'stale'), None)
+        if cached:
+            return {'name': name, 'analysis_id': cached['analysis_id'], 'findings': cached['findings'],
+                    'limitations': cached['limitations'], 'status': cached['status'], 'reused': True,
+                    'source_url': public_url, 'model': cached['model'], 'provider': cached['provider']}
+    frozen = video_understanding.freeze(connections, settings, expected_revision=revision, expected_endpoint=endpoint)
     if not name or not sha or not (path := resolve(store, run_id, name)) or hashlib.sha256(path.read_bytes()).hexdigest() != sha:
         emit({'type': 'status', 'role': 'material', 'message': '正在获取用户指定的商品视频。'})
         raw, source = fetch_reference(checked, check_cancel)
         try:
-            prepare_video(raw, check_cancel)
+            video_understanding.prepare_video(raw, frozen, check_cancel)
         except ObservationError as exc:
             raise PipelineError('product_video_invalid', str(exc)) from None
         name = f"tiktok-product-{source['video_id']}-{source['sha256'][:12]}.mp4"
@@ -53,8 +62,8 @@ def observe(store, pipeline, connections, settings, run_id, source_url, emit, ch
                       and c['purpose'] == 'product' and c['status'] != 'stale'), None)
     if candidate is None:
         payload = AnalysisIn(request_id=uuid.uuid4().hex, name=name, expected_sha256=sha,
-                             expected_revision=revision, connection_id=bailian_omni.CONNECTION,
-                             model=bailian_omni.MODEL, purpose='product', consent=True,
+                             expected_revision=revision, connection_id=frozen[2]['id'],
+                             model=frozen[2]['suggested_model'], purpose='product', consent=True,
                              expected_endpoint=endpoint)
         runner, _ = prepare_analysis(store, pipeline, connections, settings, (run_id, payload),
                                      client_factory=client_factory, video=True, _native_frozen=frozen)

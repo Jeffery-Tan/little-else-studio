@@ -16,6 +16,11 @@ LIST_FIELDS = ('continuity', 'assumptions')
 MAX_TEXT = 4000
 MAX_ENTITIES = 20
 ID_RE = re.compile(r'^[a-z][a-z0-9_-]{0,63}$')
+IMAGE_CONTINUITY_RULE = (
+    'Use for visual continuity while applying the additional shot instructions: '
+    'preserve the specified retained elements and change only the specified elements, '
+    'including composition when requested. Create a single still image.'
+)
 
 
 def fingerprint(value):
@@ -161,7 +166,8 @@ def compile_visual_input(store, pipeline, run_id, *, source_version, source_sha2
         'product': 'Use for product appearance only. Do not inherit the supplier model, setting or printed marketing claims.',
         'character': 'Use for the designed character appearance. Do not inherit product claims or unrelated surroundings.',
         'scene': 'Use for the designed space, layout and local details. Do not import unrelated people or product claims.',
-        'continuity': 'Preserve the approved frame identity, product, wardrobe, setting and composition; animate only the specified action.',
+        'continuity': (IMAGE_CONTINUITY_RULE if kind == 'image' else
+                       'Preserve the approved frame identity, product, wardrobe, setting and composition; animate only the specified action.'),
     }
     lines = [
         'SHARED VISUAL PRODUCTION DESIGN — US / TikTok Shop',
@@ -181,6 +187,19 @@ def compile_visual_input(store, pipeline, run_id, *, source_version, source_sha2
         lines.append(f'{number}. {ref["purpose"]}' + (f' / {ref["design_id"]}' if ref.get('design_id') else '')
                      + ': ' + purpose_rules[ref['purpose']])
     lines += ['Additional shot instructions:', shot_prompt]
+    from .project_brief import content_format
+    if kind == 'image' and content_format(store.read_events(run_id)) == 'photo':
+        lines += [
+            'FINAL PHOTO PAGE OUTPUT CONTRACT',
+            'Deliver a complete static photo page, not a text-free video reference frame.',
+            'The adopted line below is on-image copy, not speech. Render it verbatim with its line breaks '
+            'in the designed copy area; keep it readable and do not cover the product evidence.',
+            'Additional instructions must not omit, rewrite or defer this copy to an unimplemented '
+            'later overlay step. An instruction to remove supplier labels does not remove the adopted copy.',
+            'Exact adopted on-image copy (JSON string; an empty string means no copy):',
+            json.dumps(shot['line'], ensure_ascii=False),
+            'Do not place the publishing caption, alt text, planning notes or supplier claims on the image.',
+        ]
     prompt = '\n'.join(lines)
     if len(prompt) > 30_000:
         raise ValueError('共同设计与分镜输入合计超过 30000 字符，请精简相关设计；内容不会被自动截断。')
@@ -196,7 +215,8 @@ def validate_visual_binding(store, pipeline, run_id, draft, *, stage_memo=None):
         shot_id=draft['shot_id'], kind=draft['kind'], shot_prompt=draft['shot_prompt'],
         references=draft.get('references', []), stage_memo=stage_memo)
     if (draft['design_binding'] != compiled['design_binding']
-            or draft.get('shot_binding') != compiled['shot_binding']
-            or draft['prompt'] != compiled['compiled_prompt']
-            or draft.get('compiled_prompt') != compiled['compiled_prompt']):
+            or draft.get('shot_binding') != compiled['shot_binding']):
         raise ValueError('人物、场景或分镜绑定已变化，请重新准备准确输入与生成确认。')
+    if (draft['prompt'] != compiled['compiled_prompt']
+            or draft.get('compiled_prompt') != compiled['compiled_prompt']):
+        raise ValueError('制作输入说明已更新或不匹配，请重新保存本镜准确输入与生成确认。')

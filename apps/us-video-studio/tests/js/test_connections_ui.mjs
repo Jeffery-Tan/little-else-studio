@@ -61,6 +61,176 @@ function harness(initial = config(), handler = async () => verified()) {
 }
 
 // Every credential in these tests is synthetic; APIs are in-memory mocks.
+test('MiMo offers its model preset and saves its own connection without reassigning roles', async () => {
+  const h = harness(config(), async () => ({revision:8}));
+  await button(h.body,'＋ 添加模型服务').onclick();
+  const card = find(h.body,node => node.dataset.connectionId?.startsWith('connection-new-id'));
+  const provider = labeled(card,'选择服务');
+  provider.value = 'mimo'; provider.onchange();
+  labeled(card,'服务名称').value = 'MiMo';
+  assert.match(visible(card),/mimo-v2.6-flash/);
+  assert.doesNotMatch(visible(card),/验证密钥与模型|输出上限参数/);
+  const writer = role(h.body,'writer');
+  const original = writer.connection.value;
+  writer.connection.value = card.dataset.connectionId; writer.connection.onchange();
+  assert.equal(writer.model().value,'mimo-v2.6-flash');
+  writer.connection.value = original; writer.connection.onchange();
+  await h.submit();
+  const saved = h.calls[0].body;
+  const mimo = saved.connections.find(c => c.provider === 'mimo');
+  assert.equal(mimo.base_url,'https://api.xiaomimimo.com/v1');
+  assert.equal(mimo.token_limit_parameter,'max_completion_tokens');
+  assert.deepEqual(saved.roles,config().roles);
+  assert.equal(mimo.api_key,undefined);
+  assert.equal(saved.video_analysis,null);
+});
+
+test('legacy video understanding remains selected until an explicit MiMo choice', async () => {
+  const initial=config();
+  initial.connections.push({id:'mimo',name:'MiMo',provider:'mimo',base_url:'https://api.xiaomimimo.com/v1',has_key:true});
+  const h=harness(initial,async()=>({revision:8}));
+  const selector=labeled(h.body,'视频理解服务');
+  assert.equal(selector.value,'');
+  assert.deepEqual(selector.children.map(option=>option.value),['','mimo']);
+  assert.match(visible(h.body),/图片生成仍由 Codex 调用工具处理/);
+  assert.equal(h.calls.length,0);
+  await h.submit();
+  assert.equal(h.calls[0].body.video_analysis,null);
+  assert.deepEqual(h.calls[0].body.roles,initial.roles);
+});
+
+test('images preserve legacy routing independently of MiMo video and team roles', async () => {
+  const initial=config();
+  initial.connections.push({id:'mimo',name:'MiMo',provider:'mimo',base_url:'https://api.xiaomimimo.com/v1',has_key:true});
+  initial.video_analysis={connection:'mimo',model:'mimo-v2.6-flash'};
+  initial.roles.orchestrator={connection:'mimo',model:'mimo-v2.6-flash'};
+  const h=harness(initial,async()=>({revision:8}));
+  assert.equal(labeled(h.body,'图片理解服务').value,'');
+  assert.match(visible(h.body),/图片理解独立于视频理解和团队角色/);
+  assert.equal(h.calls.length,0);
+  await h.submit();
+  assert.equal(h.calls[0].body.image_analysis,null);
+  assert.deepEqual(h.calls[0].body.video_analysis,initial.video_analysis);
+  assert.deepEqual(h.calls[0].body.roles,initial.roles);
+});
+
+test('choosing MiMo images saves only the image binding and preserves typed key until save', async () => {
+  const initial=config();
+  initial.connections.push({id:'mimo',name:'MiMo',provider:'mimo',base_url:'https://api.xiaomimimo.com/v1',has_key:false});
+  const h=harness(initial,async()=>({revision:8}));
+  const selector=labeled(h.body,'图片理解服务');selector.value='mimo';selector.onchange();
+  assert.match(visible(h.body),/等待填写 MiMo API Key.*可以先保存选择/);
+  const key=labeled(h.card('mimo'),'API Key');key.value='synthetic-image-key';key.oninput();
+  assert.match(visible(h.body),/实际像素.*压缩与拆批/);
+  await h.submit();
+  assert.deepEqual(h.calls[0].body.image_analysis,{connection:'mimo',model:'mimo-v2.6-flash'});
+  assert.equal(h.calls[0].body.video_analysis,null);
+  assert.deepEqual(h.calls[0].body.roles,initial.roles);
+  assert.equal(h.calls[0].body.connections.at(-1).api_key,'synthetic-image-key');
+  assert.equal(key.value,'');
+});
+
+test('saved image binding survives missing key and conflict without silently replacing it', async () => {
+  const initial=config();
+  initial.image_analysis={connection:'mimo',model:'mimo-v2.6-flash'};
+  initial.connections.push({id:'mimo',name:'MiMo',provider:'mimo',base_url:'https://api.xiaomimimo.com/v1',has_key:false});
+  const h=harness(initial,async()=>{throw Object.assign(new Error('conflict'),{status:409});});
+  assert.equal(labeled(h.body,'图片理解服务').value,'mimo');
+  await h.submit();
+  assert.deepEqual(h.calls[0].body.image_analysis,initial.image_analysis);
+  assert.equal(labeled(h.body,'图片理解服务').value,'mimo');
+  assert.match(visible(h.body),/配置已在其他窗口更新.*输入仍保留/);
+  assert.equal(h.dialog.closed,undefined);
+});
+
+test('an image-bound new service cannot be removed until its image binding changes', () => {
+  const h=harness();button(h.body,'＋ 添加模型服务').onclick();
+  const fresh=find(h.body,node=>node.dataset.connectionId?.startsWith('connection-'));
+  const provider=labeled(fresh,'选择服务');provider.value='mimo';provider.onchange();
+  const selector=labeled(h.body,'图片理解服务');selector.value=fresh.dataset.connectionId;selector.onchange();
+  const remove=button(fresh,'取消添加');assert.equal(remove.disabled,true);remove.onclick();
+  assert.ok(nodes(h.body).includes(fresh));
+  selector.value='';selector.onchange();assert.equal(remove.disabled,false);remove.onclick();
+  assert.ok(!nodes(h.body).includes(fresh));
+});
+
+test('invalid image model or changed provider requires explicit reselection and never falls back', async () => {
+  for (const invalidModel of [false,true]) {
+    const initial=config();
+    initial.image_analysis={connection:'mimo',model:invalidModel?'wrong':'mimo-v2.6-flash'};
+    initial.connections.push({id:'mimo',name:'MiMo',provider:'mimo',base_url:'https://api.xiaomimimo.com/v1',has_key:true});
+    const h=harness(initial,async()=>({revision:8}));
+    if (!invalidModel) {const provider=labeled(h.card('mimo'),'选择服务');provider.value='deepseek';provider.onchange();}
+    assert.match(visible(h.body),/不会自动改用其他服务/);
+    await h.submit();assert.equal(h.calls.length,0);
+    assert.match(visible(h.body),/图片理解服务已改变或配置无效/);
+    const selector=labeled(h.body,'图片理解服务');selector.value='';selector.onchange();
+    await h.submit();assert.equal(h.calls[0].body.image_analysis,null);
+  }
+});
+
+test('a saved MiMo video binding is preserved without a key and roles remain independent', async () => {
+  const initial=config();
+  initial.video_analysis={connection:'mimo',model:'mimo-v2.6-flash'};
+  initial.connections.push({id:'mimo',name:'MiMo',provider:'mimo',base_url:'https://api.xiaomimimo.com/v1',has_key:false});
+  const h=harness(initial,async()=>({revision:8}));
+  assert.equal(labeled(h.body,'视频理解服务').value,'mimo');
+  assert.match(visible(h.body),/等待填写 MiMo API Key.*可以先保存选择/);
+  assert.match(visible(h.card('mimo')),/原生视频声画分析已接入.*实际效果待验证/);
+  assert.equal(h.calls.length,0);
+  await h.submit();
+  assert.deepEqual(h.calls[0].body.video_analysis,initial.video_analysis);
+  assert.deepEqual(h.calls[0].body.roles,initial.roles);
+  assert.equal(h.calls[0].body.connections.at(-1).api_key,undefined);
+});
+
+test('choosing MiMo video understanding changes only its dedicated binding', async () => {
+  const initial=config();
+  initial.connections.push({id:'mimo',name:'MiMo',provider:'mimo',base_url:'https://api.xiaomimimo.com/v1',has_key:false});
+  const h=harness(initial,async()=>({revision:8}));
+  const selector=labeled(h.body,'视频理解服务');
+  selector.value='mimo';selector.onchange();
+  const key=labeled(h.card('mimo'),'API Key');
+  key.value='synthetic-mimo-key';key.oninput();
+  assert.match(visible(h.body),/默认 2 fps.*实际分析效果待验证/);
+  await h.submit();
+  assert.deepEqual(h.calls[0].body.video_analysis,{connection:'mimo',model:'mimo-v2.6-flash'});
+  assert.deepEqual(h.calls[0].body.roles,initial.roles);
+  assert.equal(h.calls[0].body.connections.at(-1).api_key,'synthetic-mimo-key');
+  assert.equal(key.value,'');
+});
+
+test('a new service bound to video cannot be removed until the binding is explicitly changed', () => {
+  const h=harness();
+  button(h.body,'＋ 添加模型服务').onclick();
+  const fresh=find(h.body,node=>node.dataset.connectionId?.startsWith('connection-'));
+  const provider=labeled(fresh,'选择服务');provider.value='mimo';provider.onchange();
+  const selector=labeled(h.body,'视频理解服务');selector.value=fresh.dataset.connectionId;selector.onchange();
+  const remove=button(fresh,'取消添加');
+  assert.equal(remove.disabled,true);remove.onclick();
+  assert.ok(nodes(h.body).includes(fresh));
+  selector.value='';selector.onchange();
+  assert.equal(remove.disabled,false);remove.onclick();
+  assert.ok(!nodes(h.body).includes(fresh));
+  assert.equal(selector.value,'');
+});
+
+test('changing the selected MiMo provider never silently falls back to legacy video understanding', async () => {
+  const initial=config();
+  initial.video_analysis={connection:'mimo',model:'mimo-v2.6-flash'};
+  initial.connections.push({id:'mimo',name:'MiMo',provider:'mimo',base_url:'https://api.xiaomimimo.com/v1',has_key:true});
+  const h=harness(initial,async()=>({revision:8}));
+  const provider=labeled(h.card('mimo'),'选择服务');provider.value='deepseek';provider.onchange();
+  assert.equal(labeled(h.body,'视频理解服务').value,'mimo');
+  assert.match(visible(h.body),/不会自动改用其他服务/);
+  await h.submit();
+  assert.equal(h.calls.length,0);
+  assert.match(visible(h.body),/视频理解服务已改变，请重新选择后保存/);
+  const selector=labeled(h.body,'视频理解服务');selector.value='';selector.onchange();
+  await h.submit();
+  assert.equal(h.calls[0].body.video_analysis,null);
+});
+
 test('service and validation precede role assignment; generic advanced fields remain collapsed', () => {
   const initial = config();
   initial.runtime = {started_at:'2026-09-23T10:00:00Z',code_fingerprint:'abc123',data_root_id:'root-12',python:'3.12.6',media_tools:{ffmpeg:false},meaning:'仅代表当前进程。'};
@@ -357,7 +527,8 @@ test('capability guidance uses the declared image, audio and generation boundari
   assert.match(text,/有限声画分析/);
   assert.match(text,/用户在制作工作区确认实际生成/);
   assert.doesNotMatch(text,/尚未接入视频声画理解/);
-  assert.match(text,/不改变正在运行的任务，也不会重写已有稿件/);
+  assert.match(text,/不会重写已有稿件或重跑观察/);
+  assert.match(text,/尚未发起的图片观察若配置变化会停止/);
   assert.match(text,/4 \/ 4 个角色配置齐全/);
   assert.match(visible(role(h.body,'material').row),/使用本机 Codex 额度/);
   assert.equal(h.calls.length,0);
