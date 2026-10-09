@@ -1,0 +1,75 @@
+name: Studio Quality Gate
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  studio-quality:
+    name: Studio offline tests (${{ matrix.os }}, shard ${{ matrix.shard }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        shard: [0, 1, 2, 3]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Install Studio test dependencies
+        run: >-
+          python -m pip install
+          -r apps/us-video-studio/requirements-runtime.txt
+          -r apps/us-video-studio/requirements-local.txt
+
+      - name: Run Studio Python and HTTP tests
+        run: >-
+          python -c "import pathlib, subprocess, sys;
+          files = sorted(pathlib.Path('apps/us-video-studio/tests').glob('test_*.py'));
+          sys.exit(subprocess.call([sys.executable, '-m', 'pytest',
+          *map(str, files[${{ matrix.shard }}::4]), '-q']))"
+
+      - name: Run Studio JavaScript tests
+        if: matrix.shard == 0
+        run: node --test apps/us-video-studio/tests/js/*.mjs
+
+  source-security:
+    name: Scan source history for secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Scan Git history for secrets
+        run: >-
+          docker run --rm
+          -v "$GITHUB_WORKSPACE:/repo"
+          -w /repo
+          ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          detect --source=. --redact --verbose

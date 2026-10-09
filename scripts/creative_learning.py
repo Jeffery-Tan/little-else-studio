@@ -1,5 +1,6 @@
 """Local US creative case curation and retrieval. No network, models or task state."""
 import argparse
+import os
 import copy
 from datetime import date
 import hashlib
@@ -9,7 +10,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(os.environ['STUDIO_BUSINESS_ROOT']).resolve() if os.environ.get('STUDIO_BUSINESS_ROOT') else Path(__file__).resolve().parents[1]
 DEFAULT = ROOT / 'tracks/us/creative/learning/library.json'
 PURPOSES = ('message', 'storyboard', 'performance')
 FEEDBACK_SCOPES = ('direction', 'persona_dialogue', 'pace', 'product_fact',

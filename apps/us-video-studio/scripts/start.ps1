@@ -41,11 +41,17 @@ try {
     $runtimeUrl = "http://127.0.0.1:$Port/api/runtime"
     $rootId = & $Python -c 'import hashlib,sys; from pathlib import Path; print(hashlib.sha256(str(Path(sys.argv[1]).resolve()).casefold().encode()).hexdigest()[:12])' $selectedRoot
     if ($LASTEXITCODE -ne 0) { throw 'Cannot identify the selected Studio data root.' }
+    $sourceIdsLines = & $Python -c 'import hashlib; from studio.paths import PROJECT_ROOT,BUSINESS_ROOT; print(hashlib.sha256(str(PROJECT_ROOT).casefold().encode()).hexdigest()[:12]); print(hashlib.sha256(str(BUSINESS_ROOT).casefold().encode()).hexdigest()[:12])'
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot identify the selected Studio code and business roots.' }
+    $sourceIds = @{ source_root_id = $sourceIdsLines[0].Trim(); business_root_id = $sourceIdsLines[1].Trim() }
     $existing = $null
     try { $existing = Invoke-RestMethod -Uri $runtimeUrl -TimeoutSec 2 } catch {}
     if ($existing -and -not $CheckOnly) {
         if ($existing.data_root_id -ne $rootId.Trim()) {
             throw "Port $Port belongs to another data root. Connect to that service or choose another port."
+        }
+        if ($existing.source_root_id -ne $sourceIds.source_root_id -or $existing.business_root_id -ne $sourceIds.business_root_id) {
+            throw 'This port uses another code or business root (or a legacy service). Wait for its jobs to finish, stop it normally, then start this Studio.'
         }
         if (-not $NoReload -and -not $existing.hot_reload.enabled) {
             throw "The current service uses the old launcher. Wait for all jobs to finish, stop that service once, then run start.ps1 again."

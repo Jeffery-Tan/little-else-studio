@@ -1,11 +1,11 @@
 ﻿# us-video-studio 目录约定
 
 本文件只约束本应用。跨项目规则见仓库根 [AGENTS.md](../../AGENTS.md) 与
-适用的全局规则，线路事实源见 [tracks/us](../../tracks/us/README.md)。
+适用的全局规则；线路事实源位于显式配置 `STUDIO_BUSINESS_ROOT` 下的 `tracks/us/`。独立仓库的代码/业务/运行数据边界见 [迁移说明](../../docs/migration.md)。本文业务约束继续生效，电商仓库链接用于外部业务约束与历史来源追溯。
 
 ## 定位
 
-US 视频与图文策划、受控图片/视频制作的本地独立工作台。站内主 Agent 调配创作角色并自检；独立审核 Agent 已停用，历史审核记录保留。Codex CLI 或用户配置的 API 作为模型连接。**业务运行不依赖当前 Codex 开发对话**，与 [Backlot](../video-workbench/README.md) 分别维护运行状态。
+US 视频与图文策划、受控图片/视频制作的本地独立工作台。站内主 Agent 调配创作角色并自检；独立审核 Agent 已停用，历史审核记录保留。Codex CLI 或用户配置的 API 作为模型连接。**业务运行不依赖当前 Codex 开发对话**，与 [Backlot](https://github.com/Jeffery-Tan/e-business/blob/main/apps/video-workbench/README.md) 分别维护运行状态。
 
 线路归属：**仅 US**。本应用不承载 SEA 任何结论，SEA 不得引用本应用的运行数据。
 
@@ -486,4 +486,4 @@ Agent 执行、局部修订、素材理解、创作者交互与学习记录的�
 | [创意包契约](docs/creative-package-contract.md) | 视频/图文 manifest 和本地编译边界 |
 | [Codex 图片](docs/codex-image-capability.md) / [Wan 视频](docs/wan-video-provider.md) | 提供方协议、能力证据、计费与结果限制 |
 | [实现与验收状态](docs/product-improvements.md) | 已实现范围、案例接档、历史验证证据及剩余缺口 |
-| [方案核验](../../tracks/us/docs/studio-plan-review-2026-09-17.md) | 2026-09-17 独立应用审查与修复证据 |
+| [方案核验](https://github.com/Jeffery-Tan/e-business/blob/main/tracks/us/docs/studio-plan-review-2026-09-17.md) | 2026-09-17 独立应用审查与修复证据 |

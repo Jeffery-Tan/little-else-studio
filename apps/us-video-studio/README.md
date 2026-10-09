@@ -22,7 +22,7 @@ HTTP 入口在 [server.py](studio/server.py) 组合依赖和本机安全边界�
 
 已明确的用途回答只保存一次；模型漏填视频用途时，可沿原任务补齐一次来源信息，不要求用户重新选择。补齐前核对真实来源与附件用途，不能改变任务或收费权限。原链接、跳转后的链接和已保存文件仅在下载记录与当前文件指纹相符时共用原来源及有效分析，避免因换了表示方式而重复下载或分析。真实模型调用仍须按当前输入的观察准入执行。
 
-[Codex 驱动工作台](../video-workbench/README.md) 与本应用分别维护、互不写入运行状态；不自动迁移历史批准。业务采用状态仍以 [US 线路](../../tracks/us/README.md)、[午餐包当前状态](../../tracks/us/docs/lunch-video-current-state.md)及飞书 Tasks 为准。开发约束见 [CLAUDE.md](CLAUDE.md)，架构与运维见 [独立运行说明](docs/independent-runtime.md)。业务操作在本应用完成，Codex 桌面开发对话不作为后台执行器。
+[Codex 驱动工作台](https://github.com/Jeffery-Tan/e-business/blob/main/apps/video-workbench/README.md) 与本应用分别维护、互不写入运行状态；不自动迁移历史批准。业务采用状态仍以 [US 线路](https://github.com/Jeffery-Tan/e-business/blob/main/tracks/us/README.md)、[午餐包当前状态](https://github.com/Jeffery-Tan/e-business/blob/main/tracks/us/docs/lunch-video-current-state.md)及飞书 Tasks 为准。开发约束见 [CLAUDE.md](CLAUDE.md)，架构与运维见 [独立运行说明](docs/independent-runtime.md)。业务操作在本应用完成，Codex 桌面开发对话不作为后台执行器。
 
 DeepSeek 对话调用设有单次 10 分钟总时限，覆盖连接等待与流式回复，保活消息不延长时限。原任务状态行显示已等待时间、是否正在接收模型数据和本次等待上限；这些统计不表示作品完成进度。超时停止本轮，不自动重试；点击停止或在执行中明确要求停止会撤销尚未接续的旧调整，刷新和重启不恢复取消任务。已有内容保留，继续时在原项目发送新指令。
 
@@ -54,6 +54,8 @@ MiMo 可用于商品图片分析及原生视频声画理解。在模型设置的
 
 ## 启动与检查
 
+独立仓库同时要求明确的业务根和 Git 外数据根。统一启动入口为仓库根 `scripts/start.ps1 -BusinessRoot <E-commerce-root> -DataRoot <existing-data-root>`；应用内启动器是实现细节。直接运行 Python 或应用开发脚本时，在当前进程设置绝对路径 `STUDIO_BUSINESS_ROOT`。软件方法卡随本仓库维护，业务 Skill 与案例从指定业务仓库读取。旧路径引用仅供迁移来源追溯，具体边界见 [迁移说明](../../docs/migration.md)。
+
 左侧「灵感与方法」已接入三项创作 Skill、原案例与方法库、研究来源和反馈迭代；独立学习记录另加载学习流程 Skill。Agent 可按角色读取[登记方法卡](studio/learning.py)，补救、视频输入与图文输入卡只提取稳定执行规则，原历史研究和反馈仍限人工审计或原资格过滤。实际角色输入保存快照；反馈绑定准确版本，先看差异再应用。视频输入与图文审阅包可在「本轮参考」打开，见 [学习迁移说明](docs/learning-migration.md)。
 
 首页「独立学习」从一句研究意图与可选原片建立 `learning` Run。上传不调用模型；如需声画分析，在学习记录里单独确认参考分析。学习对话只能读取当前来源、比较合资格方法并提出待审变更，不能提交生产阶段或媒体生成。用户可只分析后结束，或核对提案差异后保存、拒绝。正式共享库当前仍为 v1：页面提供只读 v2 迁移预览及单独确认，迁移保存原字节备份；测试不改正式库。新创作项目的方法摘要按适用条件独立召回，使用记录只表示 Agent 声明，实际脚本与效果仍需验收。
@@ -63,7 +65,7 @@ MiMo 可用于商品图片分析及原生视频声画理解。在模型设置的
 启动必须经 `scripts/start.ps1`（内部先跑 `studio.doctor`，会拒绝在已有写入进程或端口被占用时再起一个）。**手动 `python -m studio.server` 会跳过这些检查**，2026-09-30 就是这样起了一个指向默认数据根的服务：项目页打不开、报 `no such run`，而磁盘上的运行数据完好。三条硬性做法：
 
 1. **数据根必须在同一条启动命令中显式传入**，例如
-   `scripts/start.ps1 -DataRoot 'C:\...\human-test-20260927'`。
+   `scripts/start.ps1 -BusinessRoot <business-repository> -DataRoot <existing-data-root>`。
    不依赖上一条命令或另一终端设置的环境变量。
    启动后先用 `GET /api/runtime` 的 `data_root_id` 核对自己连的是哪一个数据根，再打开项目。
 2. **正常代码更新由服务自行重载**。启动器保持一个监护进程，旧工作进程正常退出并释放
@@ -77,6 +79,8 @@ MiMo 可用于商品图片分析及原生视频声画理解。在模型设置的
 $studioRuntime = Join-Path $env:LOCALAPPDATA 'LittleElse/Studio/runtime-venv'
 $studioPython = Join-Path $studioRuntime 'Scripts/python.exe'
 $studioData = Read-Host 'Enter the existing Studio data root outside Git'
+$studioBusiness = Read-Host 'Enter the E-commerce business repository absolute path'
+$env:STUDIO_BUSINESS_ROOT = $studioBusiness
 if (!(Test-Path -LiteralPath $studioPython)) { py -3.12 -m venv $studioRuntime }
 & $studioPython -m pip install -r apps/us-video-studio/requirements-runtime.txt
 & $studioPython -m pip install -r apps/us-video-studio/requirements-local.txt
@@ -101,16 +105,16 @@ node --test apps/us-video-studio/tests/js/smoke_live_server.mjs
 & $studioPython apps/us-video-studio/scripts/check_reload_live.py
 
 # 同一入口先诊断，再启动；失效解释器、依赖、数据根、writer 锁和端口有对应提示
-powershell -NoProfile -ExecutionPolicy Bypass -File apps/us-video-studio/scripts/start.ps1 -DataRoot $studioData -CheckOnly
-powershell -NoProfile -ExecutionPolicy Bypass -File apps/us-video-studio/scripts/start.ps1 -DataRoot $studioData
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start.ps1 -BusinessRoot $studioBusiness -DataRoot $studioData -CheckOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start.ps1 -BusinessRoot $studioBusiness -DataRoot $studioData
 
 # 默认独立后台 + 空闲时热重载；仅诊断不启动
 # 需要前台看日志或固定代码版本时显式选择
-& apps/us-video-studio/scripts/start.ps1 -DataRoot $studioData -Foreground
-& apps/us-video-studio/scripts/start.ps1 -DataRoot $studioData -NoReload
+& scripts/start.ps1 -BusinessRoot $studioBusiness -DataRoot $studioData -Foreground
+& scripts/start.ps1 -BusinessRoot $studioBusiness -DataRoot $studioData -NoReload
 ```
 
-GitHub 的 `quality-gate.yml` 在 main 推送或 PR 时执行独立 Studio 检查，在 Windows 与 Ubuntu 安装上述固定依赖并运行完整 Python/HTTP 与 JavaScript 离线测试；普通功能分支推送本身不会触发该工作流。仓库根目录的证据检查继续独立运行；它通过不等于 Studio 测试通过，离线测试通过也不等于真实创作验收。
+GitHub 的 `quality-gate.yml` 在 main 推送或 PR 时执行独立 Studio 检查，在 Windows 与 Ubuntu 安装上述固定依赖并运行完整 Python/HTTP 与 JavaScript 离线测试；普通功能分支推送本身不会触发该工作流。电商仓库的证据检查继续在电商仓库独立运行；它通过不等于 Studio 测试通过，离线测试通过也不等于真实创作验收。
 
 接续已有项目时选实际恢复的数据根。从零开始时先建立一个专用的 Git 外空目录，首次诊断和启动都显式加 `-AllowNew`；首次启动会写入初始化标识，之后正常重启无需再加。旧项目恢复与新工作台启动是两条独立路径。诊断不调用模型或媒体生成；FFmpeg/FFprobe 缺失显示为媒体能力警告。启动脚本可从当前用户已登记的 PATH 补上新安装的 FFmpeg 目录；正在运行的旧进程仍须正常重启才会加载。也可从应用目录运行 `python -m studio.doctor --data-root <DATA_ROOT> --json`。站内「模型设置 → 当前服务版本与环境」及 `/api/runtime` 显示本进程启动时间、后端代码与 US 方法指纹、数据根匿名标识和依赖，不返回原始路径或凭据；这些状态不能证明模型已实际调用成功。
 
@@ -356,7 +360,7 @@ python -m studio.input_import --data-root <DATA_ROOT> --run-id <RUN_ID> --path <
 
 ## 验证范围与剩余工作
 
-离线测试与隔离浏览器覆盖版本/方向绑定、任务和费用恢复、连接快照、图片分析采用、局部修订、制作流程及迁移边界。此前本机服务与多功能包接档已有读取、播放及接口验收快照；当前服务加载、最新复验和历史布局证据统一见 [实现与验收状态](docs/product-improvements.md)。2026-09-17 的领域审查见 [方案核验](../../tracks/us/docs/studio-plan-review-2026-09-17.md)。
+离线测试与隔离浏览器覆盖版本/方向绑定、任务和费用恢复、连接快照、图片分析采用、局部修订、制作流程及迁移边界。此前本机服务与多功能包接档已有读取、播放及接口验收快照；当前服务加载、最新复验和历史布局证据统一见 [实现与验收状态](docs/product-improvements.md)。2026-09-17 的领域审查见 [方案核验](https://github.com/Jeffery-Tan/e-business/blob/main/tracks/us/docs/studio-plan-review-2026-09-17.md)。
 
 已完成一次明确授权的最小真实 Codex 文本连通测试，只使用合成文本，未走业务工具或素材生成。该授权已使用；本机协议可用、模型列表可读、离线测试通过都不代表真实生成或创意质量通过。
 

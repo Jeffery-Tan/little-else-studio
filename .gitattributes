@@ -1,0 +1,10 @@
+* text=auto
+*.md text eol=lf
+*.json text eol=lf
+*.csv text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.ps1 text eol=crlf
+# Test inputs retain the exact migrated bytes, not current business authority.
+apps/us-video-studio/tests/fixtures/business/** -text

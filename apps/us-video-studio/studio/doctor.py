@@ -12,11 +12,19 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from .paths import BUSINESS_ROOT, PROJECT_ROOT, is_source_path
 
 APP_ROOT = Path(__file__).resolve().parents[1]
-REPOSITORY = APP_ROOT.parents[1]
+
+REPOSITORY = PROJECT_ROOT
 REQUIREMENTS = APP_ROOT / 'requirements-runtime.txt'
 ROOT_MARKER = '.studio-root.json'
+
+
+def _source_label(path: Path) -> str:
+    if path.is_relative_to(REPOSITORY):
+        return 'app:' + path.relative_to(REPOSITORY).as_posix()
+    return 'business:' + path.relative_to(BUSINESS_ROOT).as_posix()
 
 
 def _fingerprint_paths() -> list[Path]:
@@ -24,17 +32,17 @@ def _fingerprint_paths() -> list[Path]:
     paths = list((APP_ROOT / 'studio').rglob('*.py'))
     shared_learning = REPOSITORY / 'scripts/creative_learning.py'
     if shared_learning.is_file():
-        paths.append(shared_learning)
+        paths.extend((REPOSITORY / 'scripts').glob('*.py'))
     paths += list((APP_ROOT / 'docs/methods').glob('*.md'))
     for name in ('us-commerce-strategy', 'us-creator-video', 'us-photo-copy'):
-        paths += list((REPOSITORY / '.agents/skills' / name).rglob('*.md'))
-    return sorted(paths, key=lambda path: path.relative_to(REPOSITORY).as_posix())
+        paths += list((BUSINESS_ROOT / '.agents/skills' / name).rglob('*.md'))
+    return sorted(paths, key=lambda path: _source_label(path))
 
 
 def code_fingerprint() -> str:
     digest = hashlib.sha256()
     for path in _fingerprint_paths():
-        digest.update(path.relative_to(REPOSITORY).as_posix().encode('utf-8'))
+        digest.update(_source_label(path).encode('utf-8'))
         digest.update(path.read_bytes())
     return digest.hexdigest()[:16]
 
@@ -46,7 +54,7 @@ def source_version() -> dict:
                                   capture_output=True, text=True, timeout=2, check=True).stdout.strip()
         if not revision or any(c not in '0123456789abcdef' for c in revision):
             return {'source_revision': None, 'source_modified': None}
-        changed = subprocess.run(['git', 'status', '--porcelain', '--untracked-files=normal', '--', 'apps/us-video-studio'],
+        changed = subprocess.run(['git', 'status', '--porcelain', '--untracked-files=normal', '--', '.'],
                                  cwd=REPOSITORY, capture_output=True, timeout=2)
         return {'source_revision': revision,
                 'source_modified': bool(changed.stdout.strip()) if changed.returncode == 0 else None}
@@ -64,6 +72,8 @@ def runtime_identity(data_root: Path) -> dict:
         'hot_reload': {'enabled': False, 'state': 'disabled'},
         'code_fingerprint': code_fingerprint(),
         'data_root_id': hashlib.sha256(str(root).casefold().encode('utf-8')).hexdigest()[:12],
+        'source_root_id': hashlib.sha256(str(PROJECT_ROOT).casefold().encode('utf-8')).hexdigest()[:12],
+        'business_root_id': hashlib.sha256(str(BUSINESS_ROOT).casefold().encode('utf-8')).hexdigest()[:12],
         'python': sys.version.split()[0],
         'dependencies': {name: _version(name) for name in ('fastapi', 'uvicorn', 'pydantic', 'av')},
         'media_tools': {name: bool(shutil.which(name)) for name in ('ffmpeg', 'ffprobe')},
@@ -143,7 +153,7 @@ def inspect(data_root: Path, port: int = 4760, *, host: str = '127.0.0.1', allow
             f'{actual or "未安装"}；需要 {wanted}',
             f'在所选解释器安装 requirements-runtime.txt 后重查。' if actual != wanted else '')
 
-    safe_root = not root.is_relative_to(REPOSITORY)
+    safe_root = not is_source_path(root)
     exists = root.is_dir()
     add('data_root', 'ok' if safe_root and exists else 'error',
         '已找到所选 Git 外数据目录。' if safe_root and exists else '数据根不存在或位于 Git 仓库内。',

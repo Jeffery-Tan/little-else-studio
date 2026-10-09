@@ -1,0 +1,1796 @@
+{
+  "source_repository": "Jeffery-Tan/e-business",
+  "source_commit": "3021e396f14d0173be6bd619731a74dcf3e1cfc4",
+  "files": [
+    {
+      "path": "apps/us-video-studio/AGENTS.md",
+      "sha256": "fe7dd7d43847a56f387f003f01e040e77081eeb1d1d7bab5cc833cce8789a375"
+    },
+    {
+      "path": "apps/us-video-studio/CLAUDE.md",
+      "sha256": "bc78ed89bd5e404bbf130067e548a1397d1d0c4f1cb664004748aa92d031e17c"
+    },
+    {
+      "path": "apps/us-video-studio/README.md",
+      "sha256": "49eade8ff2586dac0ade6e8b03cd606940805ec0204912b5fb78fc752edd54e4"
+    },
+    {
+      "path": "apps/us-video-studio/design-qa.md",
+      "sha256": "5c09a8b18b504cf1ce85f3dc729aaf0b67a685a1906dbbbeb8b2e1e4b6405543"
+    },
+    {
+      "path": "apps/us-video-studio/docs/agent-architecture-interaction-audit-20261004.md",
+      "sha256": "da8b2cdb4717dc1875a3c2560850578635a00406fdc3c96f32a49a7a03809b45"
+    },
+    {
+      "path": "apps/us-video-studio/docs/agent-harness-review.md",
+      "sha256": "dd8fa925e25e85835e9441a7f1a48ce9c61a0c81c88d60db495ea5707ec9283b"
+    },
+    {
+      "path": "apps/us-video-studio/docs/bailian-omni-and-tiktok-import.md",
+      "sha256": "9be524d7df2a22ac554d5b4295300afc1064943f1b20669e5936726c731ab30b"
+    },
+    {
+      "path": "apps/us-video-studio/docs/codex-image-capability.md",
+      "sha256": "86684c500ffda8a7625d9ee89f940334e3cd7bd3bebb0b375efd396eea48d464"
+    },
+    {
+      "path": "apps/us-video-studio/docs/comfyui-audiovisual-research.md",
+      "sha256": "58cf6ebbac0664fc6740c49e36d55f8e8f85b3d7cf60a15ad246c828190c19ee"
+    },
+    {
+      "path": "apps/us-video-studio/docs/comfyui-workflow-audit.md",
+      "sha256": "2dea7714fa94ee0337c98a355c1b98cdb6236a9412fc7d8c15e6395092ecb11a"
+    },
+    {
+      "path": "apps/us-video-studio/docs/conversation-control-audit-20261003.md",
+      "sha256": "4e9e2a2610f6f156b491d160fe3197e5ca4f91a5f3bbcc61ffcbe2f242ee3ee4"
+    },
+    {
+      "path": "apps/us-video-studio/docs/conversational-control.md",
+      "sha256": "9cf90cf524fbab5da0a4b5a428366e715c73d76b1f3eead05b9f006afbdeda5e"
+    },
+    {
+      "path": "apps/us-video-studio/docs/creation-modes-design.md",
+      "sha256": "3bc14d6d54162b433e7ce2908ae7f424e29ce45c6c3311bfcca41531017b0b78"
+    },
+    {
+      "path": "apps/us-video-studio/docs/creative-package-contract.md",
+      "sha256": "c64e0a1deac8ba1cc2398018af7eab491850825a4e57e9ec078c99bf0931a799"
+    },
+    {
+      "path": "apps/us-video-studio/docs/creative-quality-validation.md",
+      "sha256": "d24f7527123fcf09336f36ecece1dd14db8a4bcaf4c5a2b79654b4dfae6c0299"
+    },
+    {
+      "path": "apps/us-video-studio/docs/creator-interaction.md",
+      "sha256": "b579bf999ccc07b17028879140b89d6b665978eb5c75968020592b187fc348fa"
+    },
+    {
+      "path": "apps/us-video-studio/docs/deepseek-harness-review-20261003.md",
+      "sha256": "f3f202f8af2c3a993a721788e27efb9ae12c4550855294c27305dd7ae64e3fd4"
+    },
+    {
+      "path": "apps/us-video-studio/docs/development-contracts.md",
+      "sha256": "c69097037ca6643e594c1f9c21cf5da6fbaff39643dc459c773aa0ce3dab8e2d"
+    },
+    {
+      "path": "apps/us-video-studio/docs/independent-runtime.md",
+      "sha256": "a6fdb0f7316ace71e238b743943e0ab28d8646250b8ee5af205b41397258149e"
+    },
+    {
+      "path": "apps/us-video-studio/docs/learning-migration.md",
+      "sha256": "f5a8839e0dc08c03d472f08563a06fc313ce9d2c15df10b9194173fb24927b18"
+    },
+    {
+      "path": "apps/us-video-studio/docs/material-understanding.md",
+      "sha256": "00ee5f1999e12d220a1edaf27e1d898e75cace10126bbf8c91482065a51603a6"
+    },
+    {
+      "path": "apps/us-video-studio/docs/methods/photo-input.md",
+      "sha256": "3011937fd33991a5859882634cddfdf21c8357a63ef675b6a915aef25bce2ebb"
+    },
+    {
+      "path": "apps/us-video-studio/docs/methods/video-input.md",
+      "sha256": "f65f8b82398945a1d89f841013837c9fe5ff5c25e7467f9a3065ae7feaeaea60"
+    },
+    {
+      "path": "apps/us-video-studio/docs/methods/video-recovery.md",
+      "sha256": "d03e034935b340584f891762856318bcc3c2b2738d4be16a5769e55b44d79acd"
+    },
+    {
+      "path": "apps/us-video-studio/docs/methods/visual-design.md",
+      "sha256": "448b416aca9754f17ae3203b7da01942365152c80400e7879abaee6b16233599"
+    },
+    {
+      "path": "apps/us-video-studio/docs/portable-projects.md",
+      "sha256": "e6cf69f6bca77dc54fda9f6699a0dc419fb31181e6721d63c525b1dd038fe6c3"
+    },
+    {
+      "path": "apps/us-video-studio/docs/problem-directed-revisions.md",
+      "sha256": "dc176dcf8227573f9efa88ff5873c86cf508a4f1446698a0d1a1d30e7c49a7df"
+    },
+    {
+      "path": "apps/us-video-studio/docs/product-director-audit-20261009.md",
+      "sha256": "9ebd1bc40ffad638d785f9a23af4dc47680419f91b9208f35e13e852aa63ae23"
+    },
+    {
+      "path": "apps/us-video-studio/docs/product-improvements.md",
+      "sha256": "05358f10716aa8eeab6c089bfed7933251d8fa1d86c0ed6d4f050de604d8d87c"
+    },
+    {
+      "path": "apps/us-video-studio/docs/reference-video-audit-20261003.md",
+      "sha256": "4b28ac6029809dd1ae3a55015e658dcc49dd10cf5d645b0df4d0f7cd044aabbd"
+    },
+    {
+      "path": "apps/us-video-studio/docs/task-context-adr.md",
+      "sha256": "cf85842f1829e393c0927d765785dbe670f8ecf0505635bc708f2e45b9ec031a"
+    },
+    {
+      "path": "apps/us-video-studio/docs/wan-video-provider.md",
+      "sha256": "6778c2ade0b8c3d6f9abad3e45113ae699300702d279a680d4c4a6d034563004"
+    },
+    {
+      "path": "apps/us-video-studio/docs/workspace-iteration-20261009.md",
+      "sha256": "08548fb4a97b078658fb1f551b4da9a22074344caf79b6d791a05ed262679ee2"
+    },
+    {
+      "path": "apps/us-video-studio/requirements-local.txt",
+      "sha256": "d61089e3fb54f56241c654279fbe37ca51fff5f2366e76110a1fd4601fede54a"
+    },
+    {
+      "path": "apps/us-video-studio/requirements-runtime.txt",
+      "sha256": "fa755949a92c1ef81b5fbbb9bdb9a98e4ee6d0703d5fa6d1e9c46b28f0ac1921"
+    },
+    {
+      "path": "apps/us-video-studio/scripts/check_confirmation_live.py",
+      "sha256": "fb013d82057e3eaab2a04c17f1c1975d49576573bee29955a8907b06260b1878"
+    },
+    {
+      "path": "apps/us-video-studio/scripts/check_reload_live.py",
+      "sha256": "de12b03b9b79d8da8f46a44508e45e64aef07f37368ffceea6a1104eb8fb65bb"
+    },
+    {
+      "path": "apps/us-video-studio/scripts/check_storyboard_live.py",
+      "sha256": "c6d6f0bc3cdb4ad2f4833cfd4243f0e8c078ae93ada23d4a276689705a9f4d16"
+    },
+    {
+      "path": "apps/us-video-studio/scripts/seed_preview.py",
+      "sha256": "f16eded40d617de4ba74339b87d8bbacda998a503df520e7d91ea444014c278b"
+    },
+    {
+      "path": "apps/us-video-studio/scripts/seed_ux_rework_preview.py",
+      "sha256": "4f89f1c6ff0b8d6105120bb772bd0581f42c18299c7d5810a8c4aaab7d881d52"
+    },
+    {
+      "path": "apps/us-video-studio/scripts/serve_with_stacks.py",
+      "sha256": "b52879f7947b4e10b25b8ad08b42dd2ba2b807514d06c98c901ed612a06f374a"
+    },
+    {
+      "path": "apps/us-video-studio/scripts/start.ps1",
+      "sha256": "40f146eb081fa1f7f8aa62de997c7ce9ae90e98cf3cdbc64185aeb2151875b5b"
+    },
+    {
+      "path": "apps/us-video-studio/studio/__init__.py",
+      "sha256": "1ddb21a0f1af32745874b6997ebbffb4f5d7e128d1558c74b254b5271bfac71c"
+    },
+    {
+      "path": "apps/us-video-studio/studio/active_brief.py",
+      "sha256": "887ac3effc49ce6d7070fbc804bb96cfbc89453d198bdc2c47b07a87c9c255fa"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agent_images.py",
+      "sha256": "f19a95b7cca0844cf4c0bb5105b83b0a5d39e4a2b6e1ad37f77306fc1ff0fd3c"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agent_runtime.py",
+      "sha256": "83c18a74963856d164d5fd48b2f79d23898cf70843ecc7768506d4512b0efca3"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agent_sessions.py",
+      "sha256": "060efabedfc002faaade278b7b29b2cbb3915a20d9907c9044465efb5d2adbfe"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agents/__init__.py",
+      "sha256": "e977c698465505642c323f55cf12af074f8164d2c6454c18c0a552d4c226742b"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agents/bailian_omni.py",
+      "sha256": "b4031a380d0890c933d38c0dcaebc3fa0a7d9b823f8b35d7da4fb23be350ba1e"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agents/bounded_http.py",
+      "sha256": "c899e2fbf36b3158430334719ed17d7721a73475c8ab3ecb52bfc80087bfed21"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agents/budget.py",
+      "sha256": "e3e92f15bc1fea247ee0444de2c8f91a5c019bf9aa66283137e1154a2415f2ea"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agents/client.py",
+      "sha256": "c8b7f21fb771ac7af8be585614abc1a60b8bbd70c44e3cdb1a0903b8ec1dd8f6"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agents/codex_client.py",
+      "sha256": "809e2c05120891b2800227b27db2d6a79840d87c35f8155985e914c68f15b15e"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agents/codex_image.py",
+      "sha256": "ca3b692add10df3fe9c8ec21daabb1ef5c9095a8a973d465e9a9cac86c5acd5b"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agents/deepseek_client.py",
+      "sha256": "57ef24914ac887205157ff46292acf5fa61b9030a408c68cf3f6df8ca21152ec"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agents/http_rejection.py",
+      "sha256": "2efba72836637af3744a72de3321782464139eaab031890a4ae4c8ba6024203a"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agents/mimo_client.py",
+      "sha256": "441c2fe51c4d051a153a71233d5c231cb6c9e97635f3591723cca5340599e454"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agents/openai_compat.py",
+      "sha256": "c5fbc0c2e896777a886d01bee008e2c91bd25f2c4f723d598369197ae1a4d682"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agents/orchestrator.py",
+      "sha256": "f8277a7df5cdb58a3d49f889cab5384dff7d8a0ddc9490c9c1527e4d71fdf97f"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agents/requests.py",
+      "sha256": "8ab4fab126ea4b2be91c5e2d3761c1ea62bb43ed10aa397d7c402dfac6f501e4"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agents/reviewer.py",
+      "sha256": "89d414d975722e446ab6d1b5c50cd97d7621c427038473bfd2e36c810c032bbf"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agents/roles.py",
+      "sha256": "b3fda365b45696005f51ddc174e4853dad6e23ba3113716506684b0623f54ef8"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agents/wan_video.py",
+      "sha256": "f30d08983aaa17b1ea2e7c7738e2d9a8e5ba026471f9bbf9279e81c6db990f19"
+    },
+    {
+      "path": "apps/us-video-studio/studio/agents/writer_root_closure.py",
+      "sha256": "9d4f52cf93e74b6a43e01a45f698f61ddebc10d4c0a135081c01ebdf53fef81c"
+    },
+    {
+      "path": "apps/us-video-studio/studio/audiovisual_observation.py",
+      "sha256": "40213059484f90f947bc0a259505fbfca547decce9f2c6a0e7fa9946caa4a6f7"
+    },
+    {
+      "path": "apps/us-video-studio/studio/backup.py",
+      "sha256": "b751c6c4e55212c8e207caeb4739103e93706a9237f52b952c24abb79901f7e7"
+    },
+    {
+      "path": "apps/us-video-studio/studio/codex_auth.py",
+      "sha256": "6f805e805b4a6c9e0cb76e30433de909a84589358670e9ccec291b192253c3d0"
+    },
+    {
+      "path": "apps/us-video-studio/studio/condition_blocker.py",
+      "sha256": "c4f5480ceb3a7d118d75b12899b7c9030183f3553c31285cdeea327e50d75578"
+    },
+    {
+      "path": "apps/us-video-studio/studio/config.py",
+      "sha256": "c01c24b27400ae2e5bc86d2806799e0f06c0433c8052729c9a3161f9b5b5ea92"
+    },
+    {
+      "path": "apps/us-video-studio/studio/connection_checks.py",
+      "sha256": "5b217bcf16e3862fd610aea4c5b19a7a6457845c4615c25e81773400dcabbcb7"
+    },
+    {
+      "path": "apps/us-video-studio/studio/connections.py",
+      "sha256": "00691f3ab9d9a099bc403737b0ba337d83aa6496e213b80528e23ac48da27270"
+    },
+    {
+      "path": "apps/us-video-studio/studio/content_input_contract.py",
+      "sha256": "10e0f04f39f3817c0a9c2993526e6d7a0f9510bc7e30dc6beb20bfdd9d466da0"
+    },
+    {
+      "path": "apps/us-video-studio/studio/context_projection.py",
+      "sha256": "77cc326499007e5ccb652d0c42130ed1c7da66b886b3c64c51c06cc639bf40e9"
+    },
+    {
+      "path": "apps/us-video-studio/studio/conversation_input.py",
+      "sha256": "b2a7799713abdfbf30f83ade923419f7fc90903bffba59052506d7a72853c21c"
+    },
+    {
+      "path": "apps/us-video-studio/studio/creation_mode.py",
+      "sha256": "02d87d3535777482fc556daf87a6f047b364a3e81f16033c524cdbd45cb11668"
+    },
+    {
+      "path": "apps/us-video-studio/studio/creative_evidence.py",
+      "sha256": "be66d2a0ea6f67019addedece051a7002ddf72c458d25879ab88e83484dca7a1"
+    },
+    {
+      "path": "apps/us-video-studio/studio/creative_packages.py",
+      "sha256": "63b5af0ad378dbba2744551e335ff7cec0ac4bd510246f29b2d2ace1a3d68f87"
+    },
+    {
+      "path": "apps/us-video-studio/studio/decision.py",
+      "sha256": "da873dcb8c96608775a7fe93ec5939463a1e96a54d926e82d2f6f9f93acd7917"
+    },
+    {
+      "path": "apps/us-video-studio/studio/decision_continuation.py",
+      "sha256": "001d8a7ced2cbe0a08c80d8799f3646c3d7c6bbfb275e356574bc4edb5957c36"
+    },
+    {
+      "path": "apps/us-video-studio/studio/delivery.py",
+      "sha256": "aa166f4236697dce15c1ce48f52e1a1d6830d35120ecba761fda16abb49623c8"
+    },
+    {
+      "path": "apps/us-video-studio/studio/delivery_check.py",
+      "sha256": "08a79e72065b37aaca9f1350613b9de7d7e435e1169443f681416d041158f929"
+    },
+    {
+      "path": "apps/us-video-studio/studio/design_upgrade.py",
+      "sha256": "3ab58086177a8d10741520b4418db907d8ffcdde5258e9536b28394b18fac433"
+    },
+    {
+      "path": "apps/us-video-studio/studio/dev_reload.py",
+      "sha256": "4e93ce45136841ef7d9edfae7cd6c05170012c65c8dfa1d6e6c122f3af179c8e"
+    },
+    {
+      "path": "apps/us-video-studio/studio/direction_command.py",
+      "sha256": "d79c0edf03efc32ab57a34447accbf302071e1144bea7f4685ecd680fa6bcacf"
+    },
+    {
+      "path": "apps/us-video-studio/studio/doctor.py",
+      "sha256": "5afb9dace69d8363dd003f68741cbdabd06c23dd1da4d948adb37da74f352ac2"
+    },
+    {
+      "path": "apps/us-video-studio/studio/evidence.py",
+      "sha256": "c48256cacf0cef4d5f1383f63a6df4fb8846ad2272b0fef5a65fddd005514307"
+    },
+    {
+      "path": "apps/us-video-studio/studio/history_import.py",
+      "sha256": "ab2f1cb4eddb6567cb0fad82d566a9c22d2a46482c8d74879f2c1c1096966a0d"
+    },
+    {
+      "path": "apps/us-video-studio/studio/http_approvals.py",
+      "sha256": "c676cbb3d97cf69f1beb45ceaa65f6407aeb5b9019f8db675823e6022927fd73"
+    },
+    {
+      "path": "apps/us-video-studio/studio/http_contracts.py",
+      "sha256": "b7b454c3628d37b36e20b0e320a3037b637e68ef633921811d9b79aaaecd75b6"
+    },
+    {
+      "path": "apps/us-video-studio/studio/http_execution.py",
+      "sha256": "9881ef486e674eec77ef856f017213dc908067618eb85c356d062c1700ac980c"
+    },
+    {
+      "path": "apps/us-video-studio/studio/http_learning.py",
+      "sha256": "1777439637a2a9cf96f673be2ea148f319c1389af06c8216ad1c050f3dcd09b1"
+    },
+    {
+      "path": "apps/us-video-studio/studio/http_materials.py",
+      "sha256": "6bea5ed41815c0b3ad57effd00a97f4bf3cd3d9420e6ce062724fed8cd832cdb"
+    },
+    {
+      "path": "apps/us-video-studio/studio/http_runs.py",
+      "sha256": "f3491eaff2db42f92fa48e38c7e033b4e05964f4ef6c3b9421bf6891f63eaf01"
+    },
+    {
+      "path": "apps/us-video-studio/studio/http_workspace.py",
+      "sha256": "bc0c9ee58871a186fa669839874c476ec4d8809eee1ffb85b42c3938de7d2c54"
+    },
+    {
+      "path": "apps/us-video-studio/studio/image_analysis.py",
+      "sha256": "76b27cf52fa4ad564a3d4463bcbefa9531fb854dd94753954b88986515536bc4"
+    },
+    {
+      "path": "apps/us-video-studio/studio/image_understanding.py",
+      "sha256": "43b1c766ca6042d91071b1d872666126f8866de737601a279bcc87ada2dff394"
+    },
+    {
+      "path": "apps/us-video-studio/studio/input_import.py",
+      "sha256": "78ef28ea50a9972e436ecffa69f1a01b42c161d508ccda0b018101351eda8904"
+    },
+    {
+      "path": "apps/us-video-studio/studio/interactions.py",
+      "sha256": "c578dd5725313a55af8fd7ee887734ff8b3576eb4016be29d186f6002a607a7c"
+    },
+    {
+      "path": "apps/us-video-studio/studio/jobs.py",
+      "sha256": "62c0278112224d57daa84ce5f986d407716796fbd8ee524164a411bf735f04c2"
+    },
+    {
+      "path": "apps/us-video-studio/studio/learning.py",
+      "sha256": "1abd6b2594e4462b95cbf282df812358c66453ab5db0e1d9eee943d56d1a84be"
+    },
+    {
+      "path": "apps/us-video-studio/studio/learning_assets.py",
+      "sha256": "375c70d3b7459d42fbedc9b493bc9c1f6a0a0d1418defa59b48fee3921748cc3"
+    },
+    {
+      "path": "apps/us-video-studio/studio/learning_session.py",
+      "sha256": "496c93e6a1d655ff734b754afcdfb29feb309b683645ad60b8eb57d1826b0080"
+    },
+    {
+      "path": "apps/us-video-studio/studio/ledger.py",
+      "sha256": "b7b884bf0d75d5d344224b64ababa14e6968c3f62af084aeb8b7c09cb63092c7"
+    },
+    {
+      "path": "apps/us-video-studio/studio/material_observations.py",
+      "sha256": "173292ab5ad14e1a697a213933bf90421051e957664e3ea1d275d2541950cf2a"
+    },
+    {
+      "path": "apps/us-video-studio/studio/materials.py",
+      "sha256": "6458f184763d0b81841a43b665445103482650651049d979a16eb545c7622e10"
+    },
+    {
+      "path": "apps/us-video-studio/studio/method_outcomes.py",
+      "sha256": "3c4e713959903abbfe585bd7a7d7ca9328781503f3973fa7a2ad7eaca7986556"
+    },
+    {
+      "path": "apps/us-video-studio/studio/method_retrieval.py",
+      "sha256": "84a3f82eb75923102e77f7cf8fbd037e5761f2b622e9dfa0b2842f6ed749fc1e"
+    },
+    {
+      "path": "apps/us-video-studio/studio/method_selection.py",
+      "sha256": "af2bb5308e8ffd131f76e0093e17a6350d7e302602e55020a1bdd5c6280b4be6"
+    },
+    {
+      "path": "apps/us-video-studio/studio/method_snapshots.py",
+      "sha256": "465b7d566fdf79f3ba8ee32a2049138bcd56c0b7f87d71f54910844283d8a2b0"
+    },
+    {
+      "path": "apps/us-video-studio/studio/models.py",
+      "sha256": "a42fe30f8ec3c25806c3379071b40d69a2daeff5e3994da928826c41915740a3"
+    },
+    {
+      "path": "apps/us-video-studio/studio/observation_image_input.py",
+      "sha256": "3c4ea5b28ffe868614461cd0dd3cab5fce7fecf4bf70423e565fa327ff994966"
+    },
+    {
+      "path": "apps/us-video-studio/studio/outcomes.py",
+      "sha256": "a61da95d6cc34f77b75b6039d9c79bea6d0e76fa11c423107caa268742f83368"
+    },
+    {
+      "path": "apps/us-video-studio/studio/pipeline.py",
+      "sha256": "8f0dfeca3c4308fd11714286f63f46d230d8be5d4e572f1db95e8dc9c618d0e2"
+    },
+    {
+      "path": "apps/us-video-studio/studio/product_cards.py",
+      "sha256": "22507b67897addf5dacb719b5bc9eb30e17524095566b7eaaadf422f22363c16"
+    },
+    {
+      "path": "apps/us-video-studio/studio/product_video.py",
+      "sha256": "af427ce33b9d6f8c0ceb1077af25363ee4310680db8fbe1d549c931bb451b0cd"
+    },
+    {
+      "path": "apps/us-video-studio/studio/production.py",
+      "sha256": "f64c2d8cb52815ea57c1ac55da72652684ec4400b3f5b06175b10bfcd9c4763f"
+    },
+    {
+      "path": "apps/us-video-studio/studio/production_feedback.py",
+      "sha256": "8b543c7779fe6579904c5af2a419bdf5c0d57441ec5d659204b5dc42e57e6679"
+    },
+    {
+      "path": "apps/us-video-studio/studio/progress.py",
+      "sha256": "82c17820ca9ffe4c893e8360cd8895f96d746b1a3026682a672b88b821c80daf"
+    },
+    {
+      "path": "apps/us-video-studio/studio/project_brief.py",
+      "sha256": "77f5b0dddd7d590486078c0e1a169437f72bbf35feb63203927d149f9894fd38"
+    },
+    {
+      "path": "apps/us-video-studio/studio/project_history.py",
+      "sha256": "b168918fa2d8ea25528fc336ad97b43a8f6a46d2d19e97a3fda6fc148c5aacff"
+    },
+    {
+      "path": "apps/us-video-studio/studio/project_integrity.py",
+      "sha256": "b40d5b6274b50227ee5d24dcaad256c4d12f3cc2c0e830f781e14b65ed580990"
+    },
+    {
+      "path": "apps/us-video-studio/studio/project_repair.py",
+      "sha256": "3c75b1ad0adc91419f1f3e7c6bf6cf8b4d029e2ce3ba5267300da497a325dd0b"
+    },
+    {
+      "path": "apps/us-video-studio/studio/project_title.py",
+      "sha256": "881dc2761712ad6ac2dd844bd79c528a53a5c12e2afeadc7cd163a8fc1547f5c"
+    },
+    {
+      "path": "apps/us-video-studio/studio/public_reply.py",
+      "sha256": "b4106289724ee6e70753370955e27ed2acc4665fb936e58ffa545741e3c39af6"
+    },
+    {
+      "path": "apps/us-video-studio/studio/recovery.py",
+      "sha256": "440ccf77bc291b2d6c1c50eda50988a4031c94c62cdd18442e6a5512d2bfbf8d"
+    },
+    {
+      "path": "apps/us-video-studio/studio/reference_video.py",
+      "sha256": "76b770c7730f25d1cddf08b7d25d3a02863f9cf7135d6a5fe9f9575618f42852"
+    },
+    {
+      "path": "apps/us-video-studio/studio/references.py",
+      "sha256": "153e3cb6dc3a0d340230dc3c0639c298d4fb685b8188a5b166605c635967dc87"
+    },
+    {
+      "path": "apps/us-video-studio/studio/reply_conditions.py",
+      "sha256": "c09c076b110fec8d07ee5f4b6b94968ddcf8411ac005b353bd44c611793bc362"
+    },
+    {
+      "path": "apps/us-video-studio/studio/result_inspection.py",
+      "sha256": "d8a8e144ef5e056e743f6cc4c8996d5b6b298bd59af55f4e943ea47daee57abf"
+    },
+    {
+      "path": "apps/us-video-studio/studio/revision_scope.py",
+      "sha256": "b7db800b3aa39e676147da93f98dbdd1c1889b8aa199b869046e1d293597f14d"
+    },
+    {
+      "path": "apps/us-video-studio/studio/revisions.py",
+      "sha256": "fc8434e486feab88abd5a4e2c471d48420eb685a959cfd795a64660d80f6b0ae"
+    },
+    {
+      "path": "apps/us-video-studio/studio/role_executor.py",
+      "sha256": "4bed543eae8940e72f0dcedb50152fce2c038dd8bdfa52cf6960d43b5ef93c0f"
+    },
+    {
+      "path": "apps/us-video-studio/studio/runtime_reload.py",
+      "sha256": "46f55651b03c3221f6c4402d689c57de86ebfdf4779cd1d4fc946986381ee7df"
+    },
+    {
+      "path": "apps/us-video-studio/studio/server.py",
+      "sha256": "b49fad04480cd80734a53b1e35a1df9763c7b889bcf97988e2e65af3eb331b2c"
+    },
+    {
+      "path": "apps/us-video-studio/studio/shot_identity.py",
+      "sha256": "41429b1edb29ed3b741bdef04dc0e1a3a06f976605e9772bf89c7065e94e0b12"
+    },
+    {
+      "path": "apps/us-video-studio/studio/stage_checkpoints.py",
+      "sha256": "5ac1ce9ac04bae6dc30f611f9d6fbe507a0511b3a90f21264a39c08f3a379aaa"
+    },
+    {
+      "path": "apps/us-video-studio/studio/steer_intent.py",
+      "sha256": "f11e86e9a2d3e1221e87223157fd49dcd8dea6ddc864fb36fc4227ed77596e9a"
+    },
+    {
+      "path": "apps/us-video-studio/studio/store.py",
+      "sha256": "73ec66755d74c2e48d48355ff2a29917a91898bd3876fbcd414ee268b34fd55b"
+    },
+    {
+      "path": "apps/us-video-studio/studio/structured.py",
+      "sha256": "d5ce6a4d4f362e839765f2ad56d9032efd92f24add236c7066da9f2398293660"
+    },
+    {
+      "path": "apps/us-video-studio/studio/task_context.py",
+      "sha256": "751a9a83f55821c06d9422fd9c567725860f78e9037615d48684253844da48a9"
+    },
+    {
+      "path": "apps/us-video-studio/studio/task_contract.py",
+      "sha256": "3f531395fef03a6e62bb5e545301572177a5198aa6d71cfd6525179858f5a561"
+    },
+    {
+      "path": "apps/us-video-studio/studio/task_execution.py",
+      "sha256": "82e8c0f34f9dfef4a0f24781197f330ca442383f0a4a3a0036fb38e0bf90f011"
+    },
+    {
+      "path": "apps/us-video-studio/studio/tiktok_reference.py",
+      "sha256": "b11b629e5564f4bb670da612fca48c85e5003d2d644f560c59a80bdb30cc47b0"
+    },
+    {
+      "path": "apps/us-video-studio/studio/timeline.py",
+      "sha256": "484bd7305957a0e702cdbb7bccef1c6210c540f567170057a4a0069f5807b30c"
+    },
+    {
+      "path": "apps/us-video-studio/studio/tools/__init__.py",
+      "sha256": "15e68b4bbe4a148382285782ee5b78e03d198d36992e0abf2305db58fdddf268"
+    },
+    {
+      "path": "apps/us-video-studio/studio/tools/context.py",
+      "sha256": "1347522275a2c68cfaa2536f2f5ef106db15f2ecc86492e2db19776dbe389d73"
+    },
+    {
+      "path": "apps/us-video-studio/studio/tools/dispatch.py",
+      "sha256": "77a1d90f0d9821d8314d13c7dd976bd5a4f6383335d031471dfb915e29a7f7fb"
+    },
+    {
+      "path": "apps/us-video-studio/studio/tools/execution.py",
+      "sha256": "342d73ec57d540d584a5ca46a2a8126ad6654b1f7c82120fa866d49004b4cc9d"
+    },
+    {
+      "path": "apps/us-video-studio/studio/tools/registry.py",
+      "sha256": "da8eb8a87395ff489bdbbbae807f9c23832acea2a152d3354519fc3d9149af39"
+    },
+    {
+      "path": "apps/us-video-studio/studio/tools/workspace.py",
+      "sha256": "858e16e416e8f4e2e524025ffe1ca2ef7a748fa0e27320c246680e4dfee61096"
+    },
+    {
+      "path": "apps/us-video-studio/studio/video_observation.py",
+      "sha256": "018d3abe1f66b04f98ba0867880804eff8d3ca9e2890f6c8137bfcdb2b975ddc"
+    },
+    {
+      "path": "apps/us-video-studio/studio/video_understanding.py",
+      "sha256": "7a4f21551dda51fea354122a78222842c553d1cc96795e04dfa4dd581b8d8eb0"
+    },
+    {
+      "path": "apps/us-video-studio/studio/visual_design.py",
+      "sha256": "a6e45461df90646b92789df784fd6aeb9eba4f3e3060f56c89ba4a6c8641e8ee"
+    },
+    {
+      "path": "apps/us-video-studio/studio/vocabulary.py",
+      "sha256": "6ea8ad16ed02de3ee1c2b46ebc9ea20ea6620d2b90cd4d55a5529004e9e9d16d"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/app.js",
+      "sha256": "69db2a15adf9bc58f79907a89c5ff6bca778ebe794c044f95db37dc202efaad6"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/blocks.js",
+      "sha256": "6fa357336a5b591d452617706bd044f3f041ebfe368361a47417c054ca78d654"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/canvas-workspace.css",
+      "sha256": "e201056bb1d664d9132da8634b1a7f05914edafa76a4a87556d888d1674255da"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/cinema.css",
+      "sha256": "1e37fca0b26c4f81c960f22a18b50f4e1e8a2d6e60dc7afa4f23edc01a64dd74"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/codex-login.js",
+      "sha256": "6a258e1b89421d7edac7f0b3b63ee651810d8542869246968805f9596a35af7c"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/connections.css",
+      "sha256": "84d5265c32891577e131ee5ddbd55a5808bdbbf0b4e4de72202fd6b94b6e4d84"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/connections.js",
+      "sha256": "630e74810a88cb1ee792b278d75433fbbbd85e8ba801c9ad881ff29abe290909"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/conversation-input.js",
+      "sha256": "6c216d9cfda545bb6702434b84f846c75758f8d395631b92b6cd9dc4c6cd3a45"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/conversation.css",
+      "sha256": "caae5a97581d2b6ea869cd3f0aacd67877227ef4bffd9ce5dd45d1ebce998f60"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/creative-board.css",
+      "sha256": "9bc6d8c36ade64378fc9f378e78692fd6efdabacb15f5479eee05c22ffc214a4"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/creative-board.js",
+      "sha256": "28274a68002f7d8bfd03a420b179f192e44439dfb2c2f90ba74fabe4dfefd22f"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/creator-view.js",
+      "sha256": "c1497bdfc037e721e997ff401b5c87411e992a6e5f06796348531746d06a1085"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/creator-workspace.css",
+      "sha256": "d48f193d0f5c2df68537f5173a0b23be2fdff731eb186d4e0e6264422f18001c"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/design-upgrade.js",
+      "sha256": "9df67f18b928b78f1368238e8eaa9f653321e95379cfef54802dc22082e4a22a"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/evidence.js",
+      "sha256": "4d4b9d1c7958e3283fb0ed62db67db39e3da00dfa9fd75d11ef509237fc7aeff"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/history.css",
+      "sha256": "51d7d84a32167331217aa58dd1bfbd949189e05e6001aae1a8f04b8a8ea238d4"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/history.js",
+      "sha256": "d388239e8dec4dbd74ba38811f8c29593618a424b68ea75fd830e38bf9d752c5"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/image-analysis.js",
+      "sha256": "8b329f2f425181c0a05f4ae43a7e51df80fb438ebae4ae93be39707e9f1738ea"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/image-workspace.js",
+      "sha256": "ce09ea5e7f18c4d00e2b12de541aceea49fff09ef4ca854d47809aac5f65cbc5"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/index.html",
+      "sha256": "213133b19cdf97666cecf678f5b47d9d69fe391c9d263929c674d36db4c5f58f"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/inline-feedback.css",
+      "sha256": "38739ae9b70c4b49e29c9bf754c9d0d628a94871b1e1392ad7f05971a5cc59c5"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/inline-feedback.js",
+      "sha256": "ee7394ff69cfb17e49651f02a14eebc47a2320ca7463472872e0ac66cab5ceb2"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/journey.css",
+      "sha256": "7c1ea9241e25b2c00a9cbfb8d9e084f87899fab28c704dc66555b2e31ffaeb95"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/journey.js",
+      "sha256": "50e1821d378ac71f6bbf3e1b00b4822eb8105920a613b01e79f63e5aea0f7e24"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/learning-session.css",
+      "sha256": "260b5111419016d9f0dbfb905d411bedfcd4c4098a675fc5bc9e9d9646dd2762"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/learning-session.js",
+      "sha256": "c11e11d0fada0c5a683475c3f8d5b69b9a181b49d3097082d93d35ccc7608db5"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/learning.css",
+      "sha256": "f1891ce7e1961650ebba12fd1a5a3dd5d0f6cecc05d3e54c77555a0368258ed4"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/learning.js",
+      "sha256": "25e1fe58fae57c7f4ae2e4481d402173a6740a38e40ba4884daff75fed7db0f9"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/material-workspace.js",
+      "sha256": "f916550f9d11d885990e48705cae784c2cb2f823bb2a53624a086c75e801596f"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/materials.js",
+      "sha256": "49f697da1a517d737af0697884e3d5d15646e6a0d3ae0e723d27b967b400499f"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/md.js",
+      "sha256": "5c6e8c750191008243638909b61e31ed0330ecb387bdc31e09a21da598841f68"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/objects.css",
+      "sha256": "1910625241798620470b04474f2f39f8918df4bb4b6f10f0c14a16025f586274"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/objects.js",
+      "sha256": "5a4c90c61068a883de946f111394827d195313fa2780d93aa3830cabf28ef826"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/outcomes.css",
+      "sha256": "be9bbe4f1179037f94aef188caf5e7acdf79a556294575587688f5d92d27ddde"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/outcomes.js",
+      "sha256": "b52bf995fb1dc21089ef611e582da4a97bd498d3c157b251d13d1a5f56488a1d"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/product-cards.css",
+      "sha256": "5766c880cef0b6efb608b509c283fe863a8270b12f70391bcbf90d4ea86ff9e8"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/product-cards.js",
+      "sha256": "98ddbc2c0166763395d9db136e270b1cd218e5bc65ff04e7d7d53749fbb6e671"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/production.css",
+      "sha256": "021d6d10050491b58d14c7b4692de51ff05008e024c284ce5766a66b32633a8e"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/production.js",
+      "sha256": "2d851522d37b517e173c229c41ae4be4ef533ae6d051eb9c3cbc32cf1d36aa1a"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/progress.js",
+      "sha256": "e02f12ae5195524b99726877cbbed3aeaa5013dffcfcfd812be1cee5ca8a3964"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/project-costs.css",
+      "sha256": "302761ba0c4ab92033461f27954477e3cea04cd51e18ab5a25c07eb4c89ea332"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/project-costs.js",
+      "sha256": "994d60122c7dcc024a0382d5d11e812199272e137bd8a094f16244d1dbd9eb03"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/project-management.js",
+      "sha256": "8357dc9d96ac3f9e211ad28bac0ad672cc4addf60179e51743d49718faadaea2"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/reference-breakdown.css",
+      "sha256": "9d2fce4026469e2b2fbb93a1d076d7e483e02b575ff0d673f788b12e8274ffca"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/reference-video.js",
+      "sha256": "fe5f5190aa34f641d95dac63a614c91dd5c6d19a2bb075141992c8e5f8d09f48"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/revision-workspace.js",
+      "sha256": "ca6013a857b454caf379295b5941e4a93f11416257d4b38206143c851038e703"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/revisions.css",
+      "sha256": "418d4d0a132d14e38724bc90fd8a7c4f16146f6fc884a9d0f857cff714bc6131"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/revisions.js",
+      "sha256": "4d98a914044964c267447cac3434eb4c059e725bb4147e62322e596119c212f7"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/runtime.js",
+      "sha256": "666a9b927c83dc436289cb518c88c777a085ac00724d114f6d4ad05b31792139"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/stage.js",
+      "sha256": "02bbe4fd314bd5374ce5d15cb871a832dd47b8644c52a789282252c384b9a45a"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/studio-mark.svg",
+      "sha256": "712f5572800f6d701b7e4a9936b4e17c6b9510d06fbb421392f466427c11d94e"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/style.css",
+      "sha256": "51646f554a2a128b4a8c86240ed6d613b029d589a0570d7a54df599881aaf532"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/team-progress.js",
+      "sha256": "d617b73a9fee0d438e9b3d30753aa2b82d563870fc6ef9d3e73dc2d351181b54"
+    },
+    {
+      "path": "apps/us-video-studio/studio/web/workspace.js",
+      "sha256": "54e9af94a800cc50ff78b3e88cb74817d0fee6664104f61b89ad73c57fe86884"
+    },
+    {
+      "path": "apps/us-video-studio/studio/workspace_export.py",
+      "sha256": "d316f9ea7cefdffa94f819b06dd65b079053a503fae3ae7da697116c95280533"
+    },
+    {
+      "path": "apps/us-video-studio/studio/workspace_objects.py",
+      "sha256": "8faf442d405b5ec015f2381e90bc9230a39768b373a476232f4ece0f8d88a335"
+    },
+    {
+      "path": "apps/us-video-studio/tests/conftest.py",
+      "sha256": "8d77bfe2caae3175a6a5d2af216e7b6630b82404dc9c87d886bfbb60e768c630"
+    },
+    {
+      "path": "apps/us-video-studio/tests/fakes.py",
+      "sha256": "15670cda48341a845a6c28b88722e8961e544f22c586c97aa4b72155c6b01d5f"
+    },
+    {
+      "path": "apps/us-video-studio/tests/fixtures/creative-evidence-cases.json",
+      "sha256": "8bcaf630f5bc9988b18e8190f863ace89d80818d0c4035a7c85d42e144fa887c"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/check_live_page.mjs",
+      "sha256": "1a1b5be587cded4737f703d1067a99b0696ca63c4cd57b3d9c833f9e18645437"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/dom-fixture.mjs",
+      "sha256": "de789457e2eb1a585b6b39522c8be1885a32b19c2963a067c94d1506c0860bf6"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/smoke_live_server.mjs",
+      "sha256": "82a122afc8097676a1a7b3bcd108e0ddf5527771120781c1f8117b827192cc2c"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_blocks.mjs",
+      "sha256": "58716dc10d8fe794e85d970a6448cbc50b6dd4c6e97bec3ae24db14eff8dacb7"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_canvas_materials.mjs",
+      "sha256": "cd38bd36d52120bbd909229bf0f35886485c985abc3974e5837604d3ece8e9aa"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_codex_login.mjs",
+      "sha256": "62bbe47efa73e89aff70475de1f84953b17cdedc5f77fec6ce6931382909a3cf"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_composer_transactions.mjs",
+      "sha256": "5b042e6b462606736287d76c9b4757527520c762c23b762429cc46d5cf4bb8ba"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_connections_ui.mjs",
+      "sha256": "9fbc39e8b3a9dca2bf613d4a64a7082d94968a8d4aa6030a51156b7008bc786d"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_conversation.mjs",
+      "sha256": "b893ba03fffe31b222a51bfbe8c6b702173918c4c0b37481fd63cc830805f533"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_conversation_input.mjs",
+      "sha256": "1ea61f7d1b209150d9516610901171893cc859fd3b97996e0e22df4db22041fa"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_conversation_tables.mjs",
+      "sha256": "3f174c5088ed8f46372a08f547027d8a1eb489f2d9c8d7a766e48300ffcdb0ff"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_creative_board.mjs",
+      "sha256": "4841f9cce57522d1cfb69a8506d49a88e264f547ab88e63585937532179f2b09"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_creative_board_integration.mjs",
+      "sha256": "c7ba8c79e89c2a585b79c805093596396e4de719e2f00a2911595638406e6e22"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_creator_view.mjs",
+      "sha256": "9022cff4457de7ef12a174c9a4e61e9d39604b6b4838a65c0b10b9f13ba71676"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_current_image_group.mjs",
+      "sha256": "8114215fdf044f40f24d993f8ffcb97c553f7c471b438bef57e600366654886c"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_design_upgrade.mjs",
+      "sha256": "0ad155a6bc5d79575dd13f81609fc7b59528931770fd709c1c02bb1beba8abda"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_direct_writing_edit.mjs",
+      "sha256": "5fc6911fb2f706dee742e2e7257498805b91710974a7986deae41df682777a13"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_direction_design_supplement.mjs",
+      "sha256": "d0cd84d296074d234c89f107b9f68360a369db22a40e7a78652a2aaf3b13a72f"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_gate_and_input.mjs",
+      "sha256": "1ac8759caee0ae593986b9bc5b293c377f09e5a69b8e249ba39a75d8aba1d2aa"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_history.mjs",
+      "sha256": "859fad89261b0b0af46af0b269819c72280972722a4dcdc1e7e81a4c334a2ee1"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_home_submission.mjs",
+      "sha256": "45c1bb3dd913e1a6d7af649fe9147592374d465cdedd66d9b5a485d35df13f14"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_image_analysis.mjs",
+      "sha256": "a6b7b6f1605fed1d52da1c5fd29f0829ef5c32b6fe0f6a69121aeb53e82a3b92"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_image_analysis_reading.mjs",
+      "sha256": "467a769b12e09fbfe2e063a9643100f447114a3b57523ab2b50aae130576f41f"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_image_recovery.mjs",
+      "sha256": "d250769f113cc95e37c0bf37560a3ef0a95449deaeafbc7f27066755d95378c0"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_inline_feedback.mjs",
+      "sha256": "275cd286225b98eaecebf02aa154f5c43bc22225ee6014b35cabf348900691ed"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_journey.mjs",
+      "sha256": "22b809c424e050512603451bad622d50d145a42f1fd5cbfa726faefac57a8ecb"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_learning.mjs",
+      "sha256": "045e20c18bc605a25b5e04b738847529177c3cb8dc53d71ab765694982f227e8"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_learning_session.mjs",
+      "sha256": "4bbe6afa24c0d3bde36fd8e8ebbcbafa424e8a0a0c0a6d3e8b937cae261b6bee"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_materials_ui.mjs",
+      "sha256": "7f9bbfa52c5511245ba4626b8bea3fb4ef0d146c92f48c46faec355c9c05a8f6"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_md.mjs",
+      "sha256": "341a96664d9a7f3bd5a4412d4c36858b253f66539cadc73991931db8ddcb416b"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_media_job_tracking.mjs",
+      "sha256": "b33e232df72db4e159a80180659267e135690f8f27c42032736eed27559229c0"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_objects.mjs",
+      "sha256": "f91f575e3b7d812de33daa9999212f51f924a97a94dd0c8d35144495c0fd63cd"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_outcomes.mjs",
+      "sha256": "9132007275f5b4df96d427e8d31a8f4f3d844f1c6227fe739594875388a6bbed"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_pending_guard.mjs",
+      "sha256": "374a4954283e1b259a43d1faeff1d5ff3daa2c27edaef5537fefbf7db7a67833"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_product_cards.mjs",
+      "sha256": "139336168013a03c17993b332aeebc9012a3d430c9a8fd7b8f825aca9e9b0460"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_production.mjs",
+      "sha256": "cb9770bbc7e40d9f2d7e893430f4e58c345df9b914dca3219740831fe7596ccd"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_production_caption.mjs",
+      "sha256": "338fe9d3c9cbc2fa71dd0d7294efc27580086f5867efdfc5bc9876e042bf6660"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_production_draft_receipt.mjs",
+      "sha256": "49667031d8fc23b4caa1d0ad50bf9706684332429d26865c939ae343549cfdfd"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_production_feedback.mjs",
+      "sha256": "c22fa1aa7d5e8d7dfce482b519aa98d671cce3fd2f1086ee96a29cec1b41ebf3"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_progress.mjs",
+      "sha256": "203a4d5aba1c1401918f26576289e6747fedfd454dc6ae224a4b75ceaa625a6c"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_project_costs.mjs",
+      "sha256": "fb14cf4c7c9bdea80eba3b5e42d4b9c973df9bba44aef25859d748c831d3f0eb"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_project_integrity.mjs",
+      "sha256": "2e4bed5f4654f5765de1aa03828d5b397929d8c40c35f82cef31283bc3ada58f"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_project_management.mjs",
+      "sha256": "9a529ac9067270a277881ad59c330edc7f1703626f9e56db54d003a50f939b9e"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_project_navigation.mjs",
+      "sha256": "48b898b47eedad2285666875daa76c5321254fb1b3257406e61ed6be1a859256"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_project_read.mjs",
+      "sha256": "98ec568cb17baa554702f8e9256d913ad8fa3d0a85db7428b641c00cfd8a7d14"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_reference_video.mjs",
+      "sha256": "9d843f0b29470ebe0df676ff33f2f71b306ad66de2108481043ff0d229deb71a"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_revisions.mjs",
+      "sha256": "5c46ab37051c1436bded8755b3a448b8a1b68458c7cbb97f3ad5dcc5027b21c6"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_role_session_controls.mjs",
+      "sha256": "40e7da2e4d29ebb3f8261b4e4c5747c9afdb7bdda593ffa9757c0d2d2ea38c9d"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_runtime.mjs",
+      "sha256": "3ca15a8f644502d1f68f9b394b28f4737e83558dcb6aff11fe40fa3bbce0cdbc"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_stage.mjs",
+      "sha256": "a658e0b9f5d8cd6a51ca03357a244bbd438efe28b55a3a2a9328d8037011ddb9"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_startup_navigation.mjs",
+      "sha256": "5b3b7358563f2098c6c66bd48d81d8acae1835f945d1c95cc1d8e775517a30b1"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_team_progress.mjs",
+      "sha256": "76926bfb349f83743304afe9d7a4a5562281688b651e5710aaac0ba11d81556d"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_video_purpose.mjs",
+      "sha256": "bda8db177be3fab7bcda89ee1fe166c618a58f6e91c18e5cd428c74f40c72cf5"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_visual_design_production.mjs",
+      "sha256": "7d64871c60b3f8a99a80db4625272e62e69b3140194a4df94d767c1f0b2f7b53"
+    },
+    {
+      "path": "apps/us-video-studio/tests/js/test_workspace.mjs",
+      "sha256": "d055096bf5753c5f97e2ac8069b1a0341997915b93e55e57b5c835519ff8e8bf"
+    },
+    {
+      "path": "apps/us-video-studio/tests/local_http.py",
+      "sha256": "96ea2603b7bdfd6f8143cefa0220c977035673c732d739df038beee789bdafe5"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_active_brief.py",
+      "sha256": "0249571c3f12294f2d01ae613acb296d1d74dbe5284954d0abaebad6e0e55fa6"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_activity_progress.py",
+      "sha256": "91b2d25c2a9d612fb52ddef50e32970a2a6d8fd0ab614569ff54d564dfb21199"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_agent_capabilities.py",
+      "sha256": "019cd650a9ed3db9f49dddecd1361cb149e9e260b559d56e894b9ae3dc82ce2d"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_agent_images.py",
+      "sha256": "0218a1a19bfdc562ed7dc76cf8d4d9a2032fe6d8e9544f5877edb05cd9326fe4"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_agent_runtime.py",
+      "sha256": "4f43ad8cbc7fc663e9d4a0e1f9c2015593b05fed60026a84d32bf7c9a6081eae"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_agent_sessions.py",
+      "sha256": "658eea6c95027cba9e04c4bfed86284dcc1d84229fbef977f4ee556ec2afc9f1"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_artifact_question_answers.py",
+      "sha256": "c36b5d74f3a87eba06354602d152c569612771cd3b722b85eddf3bbc70da7a85"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_backup.py",
+      "sha256": "07214103e547bc3f567159c485b23e364ffc0225c18224b455cfc2c25608eac3"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_bailian_omni.py",
+      "sha256": "b113f20c5ca34dd50aa3c7a68447a461d4b714640ec966a4b24ab1402aa06f1d"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_batch_generation_preflight.py",
+      "sha256": "eacc36ee75c74a9b4a3a72f8ef74e632c8a5a0a6c761e7a0a05332a1b80fd035"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_brief_authority.py",
+      "sha256": "94f4ef8c959a720a0a142801f380274a80dc1e0adf1f5128034e6323a857a1d2"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_chat_stream.py",
+      "sha256": "beeebdf850a71b85245390030d4a923c517989d306e10c4f6d8c12aed86bff8c"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_codex_auth.py",
+      "sha256": "1fbfa72422742ad5b5594e1c2e4ff1716182c051b355a081b3d867586b886077"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_codex_client.py",
+      "sha256": "5f2b338f774c2730563dd224e2a4410e7c7f8e49779fe512d33fa5e916b2f344"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_codex_image.py",
+      "sha256": "e3bf3fd7d203a4eef5d71173c995af92c5df61677911c77dd6828a118c18ae41"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_codex_image_rpc_cancel.py",
+      "sha256": "8d4ddbc309dbe439f9974c6e17a2f93cf0638ff675e08241b1b325950082f2e4"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_compat_wait.py",
+      "sha256": "f37638f0cb181832c914afe7d75320ebff38a62d760ed56f3befe29dc9ffc9bb"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_compound_stop.py",
+      "sha256": "acb41473702b19fe158daf368a7ad35e70108b2412c1f0ec41891d8ecca094b6"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_condition_blocker.py",
+      "sha256": "c4b7bcc26b0d382350cbb86ac1d54ac1f3c77d06ff7e083123fd99dc470ef0b8"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_connections.py",
+      "sha256": "a4eb3c2164c34c38a23ed95671f7408827c14cdaa7c288395ec506ecafeccd7a"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_context_projection.py",
+      "sha256": "ab1d15f94176a0137b5c1a3c491628c04ffa9f8cc4e2358275a26a02ce9614c3"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_conversation_ingress.py",
+      "sha256": "7af3b2debe262f56afac83d9b49b624222e4fda7d448ae8cc93a2737e6e19db3"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_conversation_journey.py",
+      "sha256": "6c081672ab153ca930658ef2145f81ab911a162b57e70be05169d4b1c5e35650"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_conversation_runtime_control.py",
+      "sha256": "24d7435f0c68e75af540784ba244c102cea2af62b1bf829d58d0f298113e0c59"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_conversational_decision.py",
+      "sha256": "85838a2d6440581e13072f96334e799b557cc479f0203c5fd56c77be2ddf47f3"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_creative_evidence.py",
+      "sha256": "384faafabae37be44ad337a7cbb572d9918416f19d168cd3744c90f67c0b0c1c"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_creative_packages.py",
+      "sha256": "b96ac341fa310a976f2810d9731a89a7bcad813a9f2e2fae8872b81b28629f8f"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_decision.py",
+      "sha256": "d57c2999a749e1b0078d26d481d5ccf5857d02e8d73b5326cf0b61bd8b1fff1f"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_decision_channels.py",
+      "sha256": "54c987338c72de84a4559cc808ce8c88a2a7cf9964b8875c2ba102fa397215ed"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_decision_continuation_timeline.py",
+      "sha256": "e9bfb761c2cacb94b45e08e4cc152b8c7770831384f5f8eb2be90a4443e71b82"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_decision_title_clause.py",
+      "sha256": "4e4b4653d429e3f65067d31649311494a8fcb64bfbff7fe005d23b75aca212f5"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_deepseek_client.py",
+      "sha256": "0a61a06cc44eba7d497d65573ecc71e61cbe828bef919bb5db7f9495d8285af8"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_deepseek_connections.py",
+      "sha256": "32c11f8fc063296d92c005f197843dbc6d24e056cb77c5ce00c319f7fe6671e4"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_deepseek_wait.py",
+      "sha256": "7608cfa7f73a107d51c4b9416218ce5a0c87dd3985c3956ba10a9893d18ae8b2"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_delivery_check.py",
+      "sha256": "6371c84e5ead00f28c4ba34a3f04a49042ecb96b513f3d72f8c8d43107bb0546"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_design_upgrade.py",
+      "sha256": "c3b8f2d0dc799a9f19171b69afe533967da0b19d3182c07084d9c91b5c1f3b74"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_dev_reload.py",
+      "sha256": "ceda63ce31503eccefe0d8711cfa2ad23e46a557961836360ae39a95a7fda980"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_dev_reload_live.py",
+      "sha256": "b88bc1719d14de39bde381900b2ca922c0018f01cda45ffe675613811071aecd"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_direction_clause_submission.py",
+      "sha256": "21979e60ea60f7ba83c4a82c62c37f77fa2bb18bb0d61aad3248cf873e9a7c8c"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_direction_command.py",
+      "sha256": "9928eac20910a2dccb87596051665da25c819bedc4a198fa592198bb3bd495e3"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_direction_finishing_phase.py",
+      "sha256": "5e3d6e8ed4fa821a1cc5cdad72b44786595679cc19a06772a6a23d4600d77dd6"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_doctor.py",
+      "sha256": "e6703efe952d2ec45fbbf46ac24132a54946ac5637ba2e160673ef55033f9e29"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_draft_receipt_ui_contract.py",
+      "sha256": "c11265dded42ca3294e5d158dd778cfec5486a8f8e7820b06d606c14c1b48d34"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_event_projection_cache.py",
+      "sha256": "087a0f8feabb17c4176be27ac9d4dfc2f984cd00f484eb173c65269ba3f51822"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_evidence_context.py",
+      "sha256": "e9810e15d2b43ef22b6f35cbe67bf485aad2b81120f110ff34ae1f46c9251ae0"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_final_usage.py",
+      "sha256": "d7fb80e5655356964265e8416210ff56e569cab666d1741862249ca68dfb4cd7"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_finishing_phase.py",
+      "sha256": "1703d0b5c483951fd6269fc9e58cec0ef33f9a52375338e1b849ac4c2c7355f0"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_harness_contract.py",
+      "sha256": "086994fcd7cd1d1df31039008610e7a2d9188a714c2c52212b6e5d16a37e8baa"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_history_import.py",
+      "sha256": "8d58181cb82033ebcd2c66195e672b57124f8e61dea9c53751a1e7db139d7641"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_http_rejection.py",
+      "sha256": "010a2423f74f20834cb97749e4c0b653f1f7b71f366c003b3deb09ae2860203d"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_image_analysis.py",
+      "sha256": "025db109d59caa6258faffbc84fd7a110a3f1bb69b9005b206a7d49110822d40"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_image_analysis_scope.py",
+      "sha256": "c52d8ff261efdf1698778fbf308ede501a06657efef962121babe7dd89cf2e1a"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_image_analysis_task_contract.py",
+      "sha256": "094cc279104f67be9ae59e9a0f56216fd1abb02dea2b83e227b11cd947571f44"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_image_observation_expression.py",
+      "sha256": "312d28283a07dbb0275e45e2db34e23d256ccc5c3daf6b25cd9bcda0954b7f99"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_image_recovery_contract.py",
+      "sha256": "dc8e30357e59f399e28bcc63d1e42312efbd79cabc9269f09e7688d5736c9c5f"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_image_understanding.py",
+      "sha256": "7e1a0892cc8ca8031f147d327e1d8008d2a181caadac8dbe7835eea8793a600a"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_inflight_language.py",
+      "sha256": "420add3df1535cea0fe55d94d5fa27e9c36f51c10a0a0c7b981d77bb87325ac3"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_intake_contract_diagnostics.py",
+      "sha256": "79e7ea26bb50a4a43ac6ed0cbcc2e2b2db29c543ceeed53586cd268606bb59c3"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_integrated_production_scope.py",
+      "sha256": "eabc0a9b08acacfd523eaf6ae004f4861252a12b312efb1237e518aa73d60708"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_interpretation_preflight.py",
+      "sha256": "0d0eab6ce0f2a7cd84b395133a490045e512f5be5534c6698db947526bddbc6f"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_job_projection_memo.py",
+      "sha256": "d4bb855b160f725380279a40350a3b6d30f409f571dbd8bacc89776295350a6e"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_job_queue.py",
+      "sha256": "dea1f7cfa05c799fac2e7f8708e2ff844f75b22e4cc844dc9d36421655b4fda7"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_jobs.py",
+      "sha256": "bc6345bdb83cbb09135cbb0dfa94e835226a991919935cb6831d052e3cc4d056"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_learning.py",
+      "sha256": "ab54a8de4b3161668dcd1168135a8d647d8cb11590c976bbb5e4dba1469abbac"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_learning_delta.py",
+      "sha256": "e34808c8801f63438b81834984e68645fb712ee0999ffb849aa3dd0febd85646"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_learning_runtime.py",
+      "sha256": "67d01918c4f0476779d180863a6f000d0c9c53e4a2283121b4b3192740fc3480"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_learning_server.py",
+      "sha256": "9fc8ece854109e6f2efe8cd41e23735f87a96d6dbcebd465e56079d2b5b70ef6"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_learning_session.py",
+      "sha256": "861cc757af5afbde4d39c8dcfc9416fd827c1f29ae71f475e5c8211709538580"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_ledger.py",
+      "sha256": "b8365b15d245b6a4ee5cc670fe8fbed0a85263c4a7f912fbe383c16d9addb272"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_loop_fake.py",
+      "sha256": "f474ca3597b407cd3aa5895e4f415067d326c019162dfb36e997f12ce06ea3ab"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_material_observations.py",
+      "sha256": "982e28b9c2263d32134a683887eed483fef41b69c8d4ed41bd05153bc9e5e02e"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_materials.py",
+      "sha256": "39757cfb93a423a03dc507fb226bde40b5eb4df451326910e757e5e3f97f3d8e"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_media_review_invariants.py",
+      "sha256": "c99974aa964eba8e25c77ce67a57819c77f09c98cc1054d8da12a88ead180687"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_method_outcomes.py",
+      "sha256": "00bd3678f3cc2ac4fb78c14905115682c1fa220eccce311b4b42c6cee682369a"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_method_snapshots.py",
+      "sha256": "868eb03c3575f13b998d694e60b41fe4d012910f8e73dea0ab5ce36da67191e9"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_mimo_client.py",
+      "sha256": "f80f9eaec7789d817da14a7793c3f775c986f62a5b20492ce83eb75d2a8ec3ac"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_mimo_video.py",
+      "sha256": "6a19d2a9a490f500013ab63011ced053c7c02ec9aa77d66d183715fa7404d418"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_natural_reference.py",
+      "sha256": "5c14abce49db20576cb2d1bcd4969b9a4ce43c630c9a400e3a6a584d20a432cc"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_observation_image_input.py",
+      "sha256": "618a837a4b1bd403897812433c518d211532949c5a5df6716260ff1624af4dab"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_openai_compat.py",
+      "sha256": "cecd96e5679c8867a65ea537f46ec7c8588874c3308572ff4f128af696fbde9c"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_orchestration.py",
+      "sha256": "6349edc4d64f713fd7a24ec4ce4943845c44153530a33259a42c873b904ca704"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_orchestrator_tool_profiles.py",
+      "sha256": "ca440943d861dff75d65e4c6d33ab553b12c88a78a889f239a2889990ec4ce4f"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_outcomes.py",
+      "sha256": "cec9fa346650e664107a819af809cbc54c7c14f1668f28239c21d5f7c26de774"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_parallel_ledger.py",
+      "sha256": "58a8d77d5379017df27e356e3d29bacbfea95a0e78892dc81dfac7fd2de53feb"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_pending_draft_execution.py",
+      "sha256": "e31ef8e52c2276351f675d3c89e0850fe0788c8982b30339ef39ec87dab61822"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_photo_delivery.py",
+      "sha256": "25d016a42bca51cdc2d96c8fb2d78a93b4798a537b450d0ba830cf21b90b5071"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_pipeline.py",
+      "sha256": "73780d17a869033f3c2d556972cff40565c26ac5f865d9aa624c46a1932a11f0"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_product_cards.py",
+      "sha256": "c5123cc85c9957c45813159a7849fac288b5ad2854816aaae82ac0586ab0be70"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_product_progress.py",
+      "sha256": "b875ec2bb19721b3dedefb58d2d240ff343f49c2087f768c6019364a78091b6a"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_product_video.py",
+      "sha256": "38894679d27bd00cc5295b70c260d069cd79c24602c06f6b47ccc9793adbccc4"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_production.py",
+      "sha256": "f8201e24d80b7ff5afb5f955d46cee421f5514e39b657509d78b94e082f1036a"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_production_agent_context.py",
+      "sha256": "11d6caa34fb3e3f891d56027a88e9f3a9bf2a76c504f44232ff1b4503c60038a"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_production_continuation.py",
+      "sha256": "ce2f0cac1bb4bd0fc28172c6935b598f5079f4d0546139396e5c0c7dc6cc8bf9"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_production_feedback_scope.py",
+      "sha256": "4f9245077d3e6affb2b2baa6c287271b639cc8256eb3ef984817fba42c059947"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_project_analysis_summary.py",
+      "sha256": "9bf799e38f10c5db1dde216b0fb94a68a2d71bf055b4e32af1f3acda14d8a8a0"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_project_brief.py",
+      "sha256": "3b03dedeb28f38ad48cb49a4ed68b047cb140b974ae3b785bb8b3d715260e63f"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_project_deletion.py",
+      "sha256": "d415f38b03fc28d0db1ba6b33912e02ce9fda4f3586f5243e8825a7f0dc7beaf"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_project_integrity.py",
+      "sha256": "34334c25602810c648b57ccd12b192e263fdd844f9ffa8de430d324f16a49ad7"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_project_repair.py",
+      "sha256": "5548aa3f20e721ae24fd3c150882731dc2393f544ca5b7422d438ad0e94e8f1e"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_project_title.py",
+      "sha256": "003758af64d99cee0656afc6ec93637326939f34ba3af2534e8261e01f423154"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_prompt_scope_regressions.py",
+      "sha256": "fdd0c24b5cee8e17b15221aa17c8fa3baa712aa0fc65f2a65d7e9044287f581b"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_public_reply.py",
+      "sha256": "e5c1af3e138e109667ffea5d942327bd9798f81a8602a9849a26813a2ce54d86"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_recovery_http.py",
+      "sha256": "64961366974e1b086a33683e3a92f028172d5145d451062231bdd51054898437"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_reference_admission.py",
+      "sha256": "98d565a3a0f39221576a8c64f6329ab1c6ba5c83e7ceb87f880333bb2db1d84b"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_reference_context.py",
+      "sha256": "1b72cbdd08a1cb59bab811c86a11ce476ea4f64b29b861e31c651e46a0044102"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_reference_execution.py",
+      "sha256": "b4d74e7bcba5d65e34d33155f4dc19d86745938a099ff08fe81bc74b30454659"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_reference_recovery.py",
+      "sha256": "12b5f1f5affc7458fd6733f5b9d9eb3254857d1620e6dfdf9a4c55be4ee6c968"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_reference_recovery_provider.py",
+      "sha256": "e013aacd0ee7d1a2ca688ac6e5e480b779aba270f04288611026cd92cc883dc9"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_reference_video.py",
+      "sha256": "7f2a25c7f2bcd7678850092097bb6a469898b46440a606d2dae17679cf6f62d8"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_references.py",
+      "sha256": "66a9ab0bc8aa2bf4de890167ffe61f851909bdf30f7368d2d36d6f046439955b"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_remote_wait_queue.py",
+      "sha256": "b10255f6686a46264be37dfeffc84e053da89dc9c1f41e692e6ce1dd9f7fc143"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_reply_conditions.py",
+      "sha256": "05bf4727b2406fb05c4138866761740c559977ab3bd8795f0c0c40ff9bdef079"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_request_snapshots.py",
+      "sha256": "36ab195624ca32f6f81cfca01035fd90a9c5b5772bc52c8167cd9829128f100c"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_request_task_projection.py",
+      "sha256": "633685faa2af6438c4d53bc70dbee648b38e95bee9c79b17dd302a12fb567581"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_result_inspection.py",
+      "sha256": "26267d7c50e40b7ab3f7ed6e6a3d53a44f26517727244c64802adb1f5f9637cc"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_reuse_ui_payload.py",
+      "sha256": "f16897d4bc016bc3e856064d8a0b04b872d185ea6adaff6ec84ae3c8cfc9aebf"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_revision_interpretation_scope.py",
+      "sha256": "886bf5b03ef8f4bf15fda5ccd344af6fc25f28e001f426ec07e5d1e4a5e78e9a"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_revision_scope.py",
+      "sha256": "c5109c3a0d28f432b882963cfcfba74d53e6f2f62191935b7dc0718616f48a1d"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_revisions.py",
+      "sha256": "f33b0067d6b97b6bdebc5279ba0b8c52f1385ba8f5fe29f1e920604bda03a15e"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_role_control_http.py",
+      "sha256": "4c9736bcca32e53fdead8e66f740e7962aac3df52f9c87ac3c5d2e1b130a6fa2"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_role_history.py",
+      "sha256": "4fa2af369e477323adc36bc411b3dce77f1a6417f7b48073e0ae7117deb32bcc"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_role_input_boundaries.py",
+      "sha256": "77fd1cb9d8bc909750b61333ee7f12ddee0d1bb6bd7a9b14801b3eb8a17ccc78"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_role_resume_scope.py",
+      "sha256": "9b9722565d703da746c8e4e3a2a13e4bc27dea58665784df12af71a1d04b0264"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_role_settlement.py",
+      "sha256": "b68adf9e0c0dec76e873c3c1ce11633b81e0bbdd52bdbfc6be1b0bd421c890d1"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_runtime_reload.py",
+      "sha256": "f4fe40a38eb21ecab4ffaa329c366d38e022e0e2c255e40b7dcccbb1f2ee4f0f"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_server.py",
+      "sha256": "8a92fda5398866e9e53303f851a627704b3968d06c1d51c7f4a0bfe58ba49a37"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_shared_tool_batch.py",
+      "sha256": "83acbaccd9d4109bf86c7fc2e076ac28904c02d23a180f802973c920909a06f5"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_shot_identity_versions.py",
+      "sha256": "a9c19c42b042fd6477b41f6a16aa2dc50ada53dc2132b177e558b0f14345059e"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_shots.py",
+      "sha256": "cc1e75a67bc05b5fcb8fcd1af319787037ab8cabf03f9ac17346b838f7b5d53e"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_stage_checkpoints.py",
+      "sha256": "c0f43f3a24fd5e8fcb629753411ae49bfb5a44b87684ce3a73c3bfa2b73cb23e"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_static_assets.py",
+      "sha256": "678d4cb01299bc303597549c7e83a7d5fa07503136b5601ccf6882005d8de271"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_steer_intent.py",
+      "sha256": "141fe765e79de21e22cbf31bc41e34ac2b25597c0dad11032ea864d72433e76d"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_store.py",
+      "sha256": "505e1854fa18c25a80fd5d0143c70a4eef87d8670ae04365ada4530e13f4bc0b"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_store_boundary.py",
+      "sha256": "a594b5597e482f4b2d50b2532992db106449a2f5d80ee8dfcdfc2fcae4674b1a"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_store_concurrency.py",
+      "sha256": "299ffbfe208029263d3ea7281a73c60d5241f61cdc54120c914de7852abb45ff"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_storyboard_http.py",
+      "sha256": "449f0ceece1c9278d2f0f25b386ebf6d39e019764ae4c3e8cddf90a904eef7dc"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_structured.py",
+      "sha256": "25ecd206988d285dd8eae0edf4befe0ec64c1e58271e6bdeb25d7107106d2775"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_task_contract.py",
+      "sha256": "9cff936467928d77dbc8b12872a8702b750fa214fb75b36ec6c5c592c32a1f20"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_task_execution.py",
+      "sha256": "7a40eb804e9f77cef599f9c7fa4cb5151cecd571089dd58a1c96ced30aefa443"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_three_page_workspace.py",
+      "sha256": "02b6104bf71e36738ea3acda677485ebd124fd6efc07359a48560fcfc6dd67f0"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_tiktok_reference.py",
+      "sha256": "809f28a1ac679539283d3b6059cfcd3f9b739506db9bee75b7937b6cf1e48dc6"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_timeline.py",
+      "sha256": "5cbd402db93f475d99fdad78701e5bcecf2593cb84e25999bde5f88471c064fb"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_tool_json_diagnostics.py",
+      "sha256": "c44e6bdb065c0be0fd9fc2b832990711d21ec361febb1c9560f1b47a29006407"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_transport_diagnostics.py",
+      "sha256": "352a07e643681477d8dbc6a5f1984eb5a98e0a40931a2b59264dd520dafc573e"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_transport_integrity.py",
+      "sha256": "478b3f48213f168c09485d520b1996cc9ff961877b19b1ffd64aadee1d9f7ff4"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_turn_delivery_and_questions.py",
+      "sha256": "4ca6f700cc32c34b241cbe54cbde891200c8cc39de4822cd35535a37f5b6f1f1"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_ui_decision_preparation.py",
+      "sha256": "dfc9b063695cd8de4633ed00add2188d453010c32c82cbfc834a01e9aa0f28a6"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_unresolved_production.py",
+      "sha256": "0012a05d5e19d242f701fe116e89267ea14d95650a2a4ee7dfb6a7c6ba76711e"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_unselected_task_completion.py",
+      "sha256": "e31edaf32793de538dc20bf01221658f1d0dc1bbea9c57bae6fd7294ebe165b3"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_user_task_constraints.py",
+      "sha256": "bf74e72fedf94b2170583839253de44af6861083f7c64b9c75d2875ff89c8282"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_version_selection.py",
+      "sha256": "389e08628c7f33658d1b536a13dc60029acca28a34c9704640bb554de4fbea64"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_video_input_retry_accounting.py",
+      "sha256": "9e83d65a518f31b7c76e33548cc801a9e28ef8d4b83e1b28fea3e53ef995f620"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_video_observation.py",
+      "sha256": "249a32c3bdf6ab1ad6d48727194368d3152b2967c6166e7ded831a1c0f6cf228"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_video_purpose_binding.py",
+      "sha256": "3005c30058b72c23e5efe8e5d17c2d7417bcef65be22cfb3bb05bc0285b1a77e"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_video_unknown_state.py",
+      "sha256": "ad995ee5fb311664d706cd4f96bfb5f9ae1c37a0704ef84a7e650dfbc92a4ac6"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_viewer_feedback_contract.py",
+      "sha256": "2b54ec45527940c1e792c47142e54b6be4b88bbf52d70e22a37f6ee205f9dcde"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_visual_design_contract.py",
+      "sha256": "a9bb2e29c371dead757419b8893203727097be3d8cf12bce2f11b7fba15367bf"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_visual_design_methods.py",
+      "sha256": "a88dc652d77a2beaed3f94577710adda281f36adaab80ee272edb7a2302aa913"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_visual_production.py",
+      "sha256": "58d252bb74adf5fce146e1a3898e2406ce12b81c684c4350a38d9a2730943851"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_vocabulary.py",
+      "sha256": "23e73ee71cc4ea7dab0a01f754aeae9b3d315fbd57cf32a4cbf33bfb57d0784c"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_wan_video.py",
+      "sha256": "529e4b42bd2609a8e9f4752a308c5d791f2a572a722c65d74d05ace0d9e33d05"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_workspace_object_tools.py",
+      "sha256": "c91ab5a1428cd9054ded8382ac101d95f7e90abc4a32167b0e6b93781e521d8a"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_workspace_objects.py",
+      "sha256": "bc252db8ecb4c6a2216f3d64bbd9a6332099ad1e2cee667db7db007a1980c231"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_writer_empty_fields.py",
+      "sha256": "a7675d17cfef56c64938e5eb39d53030467ff3dc1a84b5b1f379f608b9e44495"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_writer_root_closure.py",
+      "sha256": "e94cf6aa6f1a767090a5d949f6ae9fbc6942c8e32ab197229225d14eef7dc653"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_writer_strict_role_tools.py",
+      "sha256": "de8c80f3cff6c382535dcce6856bdf589628f3ab4390fcdfc08a833d6e4e83be"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_writer_submission_prompt.py",
+      "sha256": "28635afc7bfc7e6ec3626298bb0c3f18f494dcb104d8c0892df5d5b9ca532db3"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_writer_wire_execution.py",
+      "sha256": "e8a9e8575944fff6412a6472afaf2217035da5421c90f9e890a2bb76d713e806"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_writing_completeness.py",
+      "sha256": "f4128bc2f47a4b3b63c18fb8df71b750db153d850b5b1927efe963da55d58871"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_writing_task_route.py",
+      "sha256": "0f61ab433a2e75029baa8ea7e71de6bb59864611aba04cf0a13fa7c9d56a2b0f"
+    },
+    {
+      "path": "apps/us-video-studio/tests/test_writing_tool_schema.py",
+      "sha256": "3e096ab7c10334aad75a3b266249728ccc5b26cd33dc08d5dac6398fbad39170"
+    },
+    {
+      "path": "apps/us-video-studio/tests/visual_fixtures.py",
+      "sha256": "ef059daebeb3cc4fb48ed24d42c20d30016692e10c827c956475be0025d5fbaf"
+    },
+    {
+      "path": "scripts/creative_learning.py",
+      "sha256": "62eb49ee8c4728c7e440faaede74573e6dd38e0678e95948655c2436e4d9dc00"
+    },
+    {
+      "path": "scripts/creative_comparison.py",
+      "sha256": "e7e937faa25734091b9344fb7661e6ecd425697204007a73bb028bc5a797f382"
+    },
+    {
+      "path": "scripts/creative_brief.py",
+      "sha256": "eebf3724ddf3419da2a14f2ce1c8c70d5ce456d6dd54c4cdc721df73feb0b183"
+    },
+    {
+      "path": "scripts/photo_copy_pack.py",
+      "sha256": "537b9d3bf30734cdc5112eb27a0580b77f587809116c6fe941c0bd2427667939"
+    },
+    {
+      "path": "scripts/validate_text_encoding.py",
+      "sha256": "e404c0d1518872d29b1e5a32048d68a0c02d87c6af84df8dc972e0220c331a5f"
+    }
+  ],
+  "history_import": {
+    "source_ref": "main",
+    "filtered_head": "9f00ce5e62d7c3ad96b5405d4c66c59fb4f2e133",
+    "commits": 72,
+    "preserved": "authors, timestamps, messages and relevant file history; original repository unchanged"
+  }
+}

@@ -13,6 +13,7 @@ from studio.ledger import Ledger
 from studio.models import STAGES
 from studio.pipeline import Pipeline
 from studio.store import Store
+from studio.paths import document_path
 from studio.tools.dispatch import Dispatcher
 
 
@@ -30,11 +31,11 @@ def visual_env(tmp_path):
         relative = f".agents/skills/{skill}/SKILL.md"
         target = repo / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(REPOSITORY / relative, target)
+        shutil.copyfile(document_path(REPOSITORY, relative), target)
     for spec in METHOD_CARDS.values():
         target = repo / spec['file']
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(REPOSITORY / spec['file'], target)
+        shutil.copyfile(document_path(REPOSITORY, spec['file']), target)
     store = Store(tmp_path / "data")
     store.create_run(RUN, "Synthetic visual design", "Synthetic product only; no real market claim")
     return LearningService(store, repo), store, Pipeline(store)

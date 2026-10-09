@@ -4,6 +4,7 @@ import difflib
 import hashlib
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -238,7 +239,9 @@ def render(report):
 
 def write_new(path, text):
     path = Path(path).resolve()
-    if path.is_relative_to(ROOT):
+    business = os.environ.get('STUDIO_BUSINESS_ROOT')
+    roots = [ROOT] + ([Path(business).resolve()] if business else [])
+    if any(path.is_relative_to(root) for root in roots):
         raise ValueError('Runtime inputs/reports must remain outside the Git workspace')
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('x', encoding='utf-8', newline='\n') as stream:

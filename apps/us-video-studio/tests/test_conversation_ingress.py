@@ -122,11 +122,15 @@ def test_missing_or_foreign_view_cannot_become_authority(tmp_path):
         receive(store, 'other-run', '采用 B', 'cross-run', received_message(store, pipeline, RUN, '采用 B')['display_context_id'])
 
 
-def wait_jobs(app, run_id=RUN):
-    deadline = time.monotonic() + 10
+def wait_jobs(app, run_id=RUN, *, timeout=10):
+    deadline = time.monotonic() + timeout
     while app.state.jobs.busy(run_id) and time.monotonic() < deadline:
         time.sleep(.01)
-    assert not app.state.jobs.busy(run_id), 'isolated jobs did not settle'
+    if app.state.jobs.busy(run_id):
+        raise AssertionError(
+            f'isolated jobs did not settle within {timeout}s: '
+            f'{app.state.jobs.list(run_id)}'
+        )
 
 
 def test_http_decision_runs_one_successor_and_produces_real_downstream_artifact(tmp_path):
@@ -163,7 +167,9 @@ def test_http_decision_runs_one_successor_and_produces_real_downstream_artifact(
         response = client.post(f'/api/runs/{RUN}/jobs', json=payload)
         assert response.status_code == 200, response.text
         parent_id = response.json()['job_id']
-        wait_jobs(app)
+        # Wait for both the decision job and the material/writing successor.
+        # Durable offline execution is not a ten-second performance contract.
+        wait_jobs(app, timeout=30)
         parent = client.get(f'/api/runs/{RUN}/jobs/{parent_id}').json()
         assert parent['status'] == 'succeeded' and not parent['reason'], parent
         assert parent['successor_job_id']

@@ -1,5 +1,6 @@
 """Independent learning run boundaries and discussion path; offline only."""
 from __future__ import annotations
+from studio.paths import document_path
 
 import shutil
 import json
@@ -28,7 +29,8 @@ from studio.server import build_app
 from studio.store import Store
 
 
-ROOT = Path(__file__).resolve().parents[3]
+from studio.paths import BUSINESS_ROOT
+ROOT = BUSINESS_ROOT
 
 
 def setup(tmp_path):
@@ -37,7 +39,7 @@ def setup(tmp_path):
     for spec in METHOD_CARDS.values():
         method = repo / spec['file']
         method.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(ROOT / spec['file'], method)
+        shutil.copyfile(document_path(ROOT, spec['file']), method)
     target = repo / 'tracks/us/creative/learning/library.json'
     target.parent.mkdir(parents=True)
     shutil.copyfile(ROOT / 'tracks/us/creative/learning/library.json', target)

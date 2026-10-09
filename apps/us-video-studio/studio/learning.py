@@ -11,6 +11,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import posixpath
 import re
 import tempfile
 import threading
@@ -20,8 +21,10 @@ from pathlib import Path
 from .models import PipelineError, utcnow, STAGES
 from .store import _atomic_write_text
 
-REPOSITORY = Path(__file__).resolve().parents[3]
-_spec = importlib.util.spec_from_file_location("studio_creative_learning", REPOSITORY / "scripts/creative_learning.py")
+from .paths import BUSINESS_ROOT, PROJECT_ROOT, document_path
+
+REPOSITORY = BUSINESS_ROOT
+_spec = importlib.util.spec_from_file_location("studio_creative_learning", PROJECT_ROOT / "scripts/creative_learning.py")
 core = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(core)
 SKILLS = ("us-commerce-strategy", "us-creator-video", "us-photo-copy")
@@ -80,21 +83,26 @@ def validate_method_packages(repository_root=REPOSITORY):
     root = Path(repository_root).resolve()
     errors = []
 
-    def links_exist(path, label):
+    def links_exist(path, label, logical):
         for target in re.findall(r'\]\(([^)]+)\)', path.read_text(encoding='utf-8-sig')):
             if target.startswith(('http://', 'https://', 'mailto:', '#')):
                 continue
-            candidate = (path.parent / target.split('#', 1)[0]).resolve()
-            if not candidate.is_relative_to(root) or not candidate.is_file():
+            relative = posixpath.normpath((Path(logical).parent / target.split("#", 1)[0]).as_posix())
+            try:
+                candidate = document_path(root, relative)
+                valid = candidate.is_file()
+            except ValueError:
+                valid = False
+            if not valid:
                 errors.append(f'{label}: missing or unsafe link {target}')
 
     for ident, spec in METHOD_CARDS.items():
         for field in ('file', 'source'):
-            path = (root / spec[field]).resolve()
-            if not path.is_relative_to(root) or not path.is_file():
+            path = document_path(root, spec[field])
+            if not path.is_file():
                 errors.append(f'{ident}: missing or unsafe {field}')
             elif field == 'file':
-                links_exist(path, ident)
+                links_exist(path, ident, spec[field])
         if not set(spec['skills']) <= set(SKILLS):
             errors.append(f'{ident}: unknown skill')
         if not set(spec.get('default_formats', ())) <= {'video', 'photo'}:
@@ -108,7 +116,7 @@ def validate_method_packages(repository_root=REPOSITORY):
     for ident in (*SKILLS, LEARNING_SKILL):
         path = root / '.agents/skills' / ident / 'SKILL.md'
         if path.is_file():
-            links_exist(path, ident)
+            links_exist(path, ident, path.relative_to(root))
         else:
             errors.append(f'{ident}: missing Skill entry')
     return errors
@@ -427,7 +435,7 @@ class LearningService:
             '.agents/skills/us-creator-video/reference-adaptation.md', None)
         documents = {}
         for ident, (title, relative, source) in specs.items():
-            path = self.repository_root / relative
+            path = document_path(self.repository_root, relative)
             if path.is_file():
                 documents[ident] = self._text(ident, title, path)
                 if source:
@@ -502,9 +510,9 @@ class LearningService:
         if not isinstance(ident, str) or ident not in DOCUMENTS:
             raise ValueError("Unknown learning document")
         title, relative = DOCUMENTS[ident]
-        path = self.repository_root / relative
+        path = document_path(self.repository_root, relative)
         if ident == "creative-package-contract" and not path.exists():
-            path = REPOSITORY / relative
+            path = document_path(REPOSITORY, relative)
         return self._text(ident, title, path)
 
     def read_method_document(self, name, role=None, run_id=None):
@@ -518,7 +526,7 @@ class LearningService:
             if role not in spec['roles']:
                 raise ValueError('Method document is unavailable to this role')
             result = (self._method_document(name, run_id) if run_id is not None else
-                      self._text(name, spec['title'], self.repository_root / spec['file']))
+                      self._text(name, spec['title'], document_path(self.repository_root, spec['file'])))
             result['source'] = spec['source']
         elif name in (*SKILLS, LEARNING_SKILL, "creative-package-contract"):
             if name == LEARNING_SKILL and (role != "orchestrator" or run_id is None or getattr(self.store.read_run(run_id), "kind", "creative") != "learning"):

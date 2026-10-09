@@ -23,8 +23,9 @@ from studio.store import Store
 from test_server import RUN, make_run, settings_for
 
 
-def wait_job(http, job_id):
-    deadline = time.monotonic() + 5
+def wait_job(http, job_id, *, timeout=5):
+    deadline = time.monotonic() + timeout
+    job = {}
     while time.monotonic() < deadline:
         result = http.get(f'/api/runs/{RUN}/jobs/{job_id}')
         assert result.status_code == 200, result.text
@@ -32,7 +33,11 @@ def wait_job(http, job_id):
         if job['status'] in {'succeeded', 'failed', 'blocked', 'cancelled', 'interrupted'}:
             return job
         threading.Event().wait(.01)
-    raise AssertionError('synthetic job did not finish')
+    raise AssertionError(
+        f'synthetic job {job_id} did not finish within {timeout}s: '
+        f'status={job.get("status")}, cursor={job.get("cursor")}, '
+        f'successor_job_id={job.get("successor_job_id")}'
+    )
 
 
 def post_job(http, request_id='one', text='本次测试'):
@@ -848,7 +853,9 @@ def test_role_connections_are_frozen_per_job_and_keys_never_enter_events(tmp_pat
         changed = http.put('/api/connections', json=payload(1, 'synthetic-key-v2', 'model-v2'))
         assert changed.status_code == 200
         release.set()
-        final = wait_job(http, job['job_id'])
+        # Seven model turns also persist requests, role journals and domain state.
+        # This checks frozen connections, not filesystem completion latency.
+        final = wait_job(http, job['job_id'], timeout=30)
         assert final['status'] == 'succeeded', final.get('reason')
         assert len(model.calls) == 7  # Binding, routing, director submission, producer check and final reply.
         assert http.get(f"/api/runs/{RUN}/artifacts/direction/1").status_code == 200

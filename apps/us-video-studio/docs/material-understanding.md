@@ -28,7 +28,7 @@
 1. **实际观察**：可见内容、准确帧 ID 与时间点。
 2. **机制假设**：引用哪些观察、可能借鉴的画面功能/证据顺序、不可移植的身份/商品/流量因素，以及下一次需要验证的表达改变。
 
-这来自现有 [商品创意策略](../../../.agents/skills/us-commerce-strategy/SKILL.md)与[口播动作方法](../../../.agents/skills/us-creator-video/SKILL.md)的四层参考学习方式。参考分析不修改当前案例库或采用状态；它只属于本项目素材观察。
+这来自现有 [商品创意策略](https://github.com/Jeffery-Tan/e-business/blob/main/.agents/skills/us-commerce-strategy/SKILL.md)与[口播动作方法](https://github.com/Jeffery-Tan/e-business/blob/main/.agents/skills/us-creator-video/SKILL.md)的四层参考学习方式。参考分析不修改当前案例库或采用状态；它只属于本项目素材观察。
 
 用户只采用部分观察时，需要未采用观察支持的机制不会进入依据。采用的是可见观察，机制仍明确为待验证解释，不冒充用户已经认可该创意策略。商品用途不允许夹带参考迁移机制。
 

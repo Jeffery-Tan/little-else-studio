@@ -1,3 +1,4 @@
+from studio.paths import document_path
 import json
 import shutil
 
@@ -16,8 +17,8 @@ from test_server import settings_for
 def env(tmp_path):
     repo = tmp_path / 'repo'
     for name in ('.agents/skills', 'apps/us-video-studio/docs', 'tracks/us/creative/learning', 'tracks/us/creative/photo-copy', 'tracks/us/creative/comparison'):
-        if (REPOSITORY / name).exists():
-            shutil.copytree(REPOSITORY / name, repo / name)
+        if document_path(REPOSITORY, name).exists():
+            shutil.copytree(document_path(REPOSITORY, name), repo / name)
     (repo / 'tracks/us/docs').mkdir(parents=True)
     shutil.copyfile(REPOSITORY / 'tracks/us/docs/ai-video-recovery-policy.md', repo / 'tracks/us/docs/ai-video-recovery-policy.md')
     settings = settings_for(tmp_path / 'data')

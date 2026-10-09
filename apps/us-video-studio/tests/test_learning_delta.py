@@ -12,6 +12,7 @@ from studio.learning_session import model_finding_observation, session_snapshot
 from studio.material_observations import material_workspace, save_human_observation
 from studio.materials import accept_upload
 from studio.store import Store
+from studio.paths import document_path
 
 
 @pytest.fixture()
@@ -41,7 +42,7 @@ def env(tmp_path):
     for spec in METHOD_CARDS.values():
         path = repo / spec['file']
         path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(REPOSITORY / spec['file'], path)
+        shutil.copyfile(document_path(REPOSITORY, spec['file']), path)
     store = Store(tmp_path / "data")
     store.create_run("learning-one", "Study", "Study reference", kind="learning")
     service = LearningService(store, repo)

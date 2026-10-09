@@ -15,6 +15,7 @@ from urllib.parse import quote
 
 from . import materials
 from .learning_assets import REPOSITORY, digest
+from .paths import PROJECT_ROOT
 from .models import STAGES
 
 
@@ -102,7 +103,7 @@ class CreativePackages:
                 output = staging / 'compiled'
                 # Only fixed repository code is executed. Paths and manifest text
                 # are argv/data; neither is interpreted by a shell.
-                script = REPOSITORY / 'scripts' / ('creative_brief.py' if format == 'video' else 'photo_copy_pack.py')
+                script = PROJECT_ROOT / 'scripts' / ('creative_brief.py' if format == 'video' else 'photo_copy_pack.py')
                 args = [sys.executable, str(script), 'compile']
                 args += (['--brief', str(input_path), '--library', str(library_path), '--output-dir', str(output)]
                          if format == 'video' else ['--manifest', str(input_path), '--out', str(output)])

@@ -8,8 +8,10 @@ from urllib.parse import quote, unquote
 
 from .materials import resolve
 from .models import PipelineError
+from .paths import BUSINESS_ROOT
 
-REPOSITORY = Path(__file__).resolve().parents[3]
+
+REPOSITORY = BUSINESS_ROOT
 US_MEDIA = Path('J:/E-Business-Video-Data/US')
 ARCHIVES = {
     'brief-review': ('视频输入编译演练 · 审阅（非正式候选）', 'creative-learning-20260918/brief-exercise-v2/review.md'),

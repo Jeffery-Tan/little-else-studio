@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "market": "US",
+  "id": "lun-planning-exercise-v1",
+  "product_family_id": "LUN",
+  "purpose": "Planning exercise only: connect one visible pocket to a concrete packing choice. Not a production candidate.",
+  "audience_status": "hypothesis",
+  "audience_situation": "Someone arranging a lunch outing who also needs to keep a small item easy to find.",
+  "current_alternative": "Put every small item in the main compartment, then search among larger items.",
+  "buying_hesitation": "Another bag may simply become another pile of things to search through.",
+  "belief_change": "A distinct front pocket can give a suitably small item a place separate from the main compartment.",
+  "speaker_relationship": "A demonstrator explaining a present packing choice to a peer; no fabricated past purchase or long-term experience.",
+  "form_reason": "Mixed: visible speech establishes the practical choice, then a close-up makes the actual pocket legible. Full voiceover could work but is not chosen for this exercise; continuous face framing would obscure the pocket.",
+  "opening_reason_to_watch": "The demonstrator pauses with a small item and explains where they do not want it to end up.",
+  "payoff": "The viewer sees which pocket is meant and understands why it was chosen, subject to verifying fit before production.",
+  "failure_condition": "Stop before production if the real pocket cannot fit the item, imagery cannot show the intended pocket, or spoken delivery cannot be checked. This exercise does not clear any of these.",
+  "reference_decisions": [
+    {
+      "evidence": "n01-nurse-packing/semantics",
+      "decision": "adapt",
+      "reason": "Attach a current reason to a concrete choice rather than narrating the object name.",
+      "transfer_limit": "Do not copy a nurse identity, real sleep history or claims about this product."
+    },
+    {
+      "evidence": "t02-family-picnic/semantics",
+      "decision": "adapt",
+      "reason": "Describe the person’s task before stating what a feature is useful for.",
+      "transfer_limit": "The backpack benefit in that case is not inherited by this product or scenario."
+    }
+  ],
+  "product_facts": [
+    {
+      "id": "front-pocket",
+      "statement": "The supplied gray 25L product image shows a distinct front zip pocket.",
+      "source": "J:/E-Business-Video-Data/US/LUN/R25-source-preparation-v1/product-gray-outdoor.jpg; sha256 4c29f448a08084ac6dadc1614966f339749484a5eb9ac8f852ba1a0bb0c7aa5f",
+      "limit": "Image observation only. Actual internal size, key fit, ease of retrieval and performance have not been tested."
+    }
+  ],
+  "scenes": [
+    {
+      "id": "s1",
+      "start": 0,
+      "end": 5,
+      "visual": "A visible demonstrator holds one small item near the bag; the bag identity matches the supplied product.",
+      "new_information": "The choice is about finding the small item later, not carrying more.",
+      "viewer_can_infer": "The speaker has a specific concern about where to put it.",
+      "delivery": "A direct conversational thought; timing is illustrative and requires an actual read, not an instruction to stretch five seconds.",
+      "action_end_state": "Hand is ready to indicate the front pocket.",
+      "speech_mode": "on_camera",
+      "face_visible": true,
+      "spoken_text": "I want the little stuff where I can find it.",
+      "speech_function": "Explain the reason for the next packing decision.",
+      "product_fact_ids": []
+    },
+    {
+      "id": "s2",
+      "start": 5,
+      "end": 10,
+      "visual": "Close view of the actual front zip pocket; the demonstrator points to its opening. Do not show unverified item insertion.",
+      "new_information": "A visibly separate pocket is the proposed location.",
+      "viewer_can_infer": "Which pocket is being discussed; not whether any particular item has been proven to fit.",
+      "delivery": "Continue the same thought in voiceover over the detail. No repetition of pointing merely to fill the window.",
+      "action_end_state": "Pocket remains clearly visible.",
+      "speech_mode": "voiceover",
+      "face_visible": false,
+      "spoken_text": "This front pocket is separate from the main compartment.",
+      "speech_function": "Identify the visible structure; fit claims remain withheld until verified.",
+      "product_fact_ids": [
+        "front-pocket"
+      ]
+    }
+  ],
+  "exercise_limits": [
+    "Method/compilation example only, not a newly approved script or a test of persuasive quality.",
+    "No images approved for these scenes; no payment or production authorization.",
+    "Duration is a schema exercise, not a recommended video length."
+  ]
+}

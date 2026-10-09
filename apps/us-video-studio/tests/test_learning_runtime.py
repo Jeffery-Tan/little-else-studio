@@ -16,10 +16,11 @@ from studio.learning_session import proposal_for_agent
 from studio.ledger import Ledger
 from studio.pipeline import Pipeline
 from studio.store import Store
+from studio.paths import BUSINESS_ROOT, document_path
 from studio.tools.dispatch import Dispatcher
 
 RUN = "learning-runtime"
-REPO = Path(__file__).resolve().parents[3]
+REPO = BUSINESS_ROOT
 
 
 @pytest.fixture
@@ -32,7 +33,7 @@ def runtime(tmp_path):
     for spec in METHOD_CARDS.values():
         target = repository / spec['file']
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(REPO / spec['file'], target)
+        shutil.copyfile(document_path(REPO, spec['file']), target)
     library = repository / "tracks/us/creative/learning/library.json"
     library.parent.mkdir(parents=True)
     library.write_text(json.dumps({"schema_version": 1, "market": "US", "library_version": 1,
@@ -261,7 +262,7 @@ def test_propose_learning_feedback_return_is_model_safe_while_human_keeps_diff(r
 def test_model_reads_contract_and_compiles_real_local_video_pack(runtime):
     store, pipeline, settings, ledger, learning = runtime
     artifact = submit(pipeline, "intake", "Observed product fact for this isolated test")
-    contract = (REPO / "apps/us-video-studio/docs/creative-package-contract.md").read_text(encoding="utf-8-sig")
+    contract = document_path(REPO, "apps/us-video-studio/docs/creative-package-contract.md").read_text(encoding="utf-8-sig")
     manifest = json.loads(re.findall(r"```json\n(.*?)\n```", contract, re.S)[0])
     manifest["product_family_id"] = "offline-example"
     manifest["product_facts"][0].update(statement="Observed product fact for this isolated test",
@@ -297,7 +298,7 @@ def test_photo_contract_example_compiles_through_agent_without_generating_images
     material.parent.mkdir(exist_ok=True)
     Image.new("RGB", (8, 8), "white").save(material)
     artifact = submit(pipeline, "intake", "Synthetic image fixture; no real product claims")
-    contract = (REPO / "apps/us-video-studio/docs/creative-package-contract.md").read_text(encoding="utf-8-sig")
+    contract = document_path(REPO, "apps/us-video-studio/docs/creative-package-contract.md").read_text(encoding="utf-8-sig")
     manifest = json.loads(re.findall(r"```json\n(.*?)\n```", contract, re.S)[1])
     manifest["product"].update(product_family_id="offline-fixture", offer_id="offline-fixture-only", variant="fixture")
     manifest["product"]["sources"][0].update(path=material.name, sha256=hashlib.sha256(material.read_bytes()).hexdigest())

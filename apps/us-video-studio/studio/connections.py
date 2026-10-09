@@ -21,13 +21,13 @@ from urllib.parse import urlsplit
 
 from .config import ACTIVE_ROLES, ROLES, Pricing, Settings
 from .agents.client import SafePreflightError
+from .paths import is_source_path
 from .connection_checks import valid_deepseek_key
 
 PROVIDERS = ('codex_cli', 'deepseek', 'mimo', 'anthropic_compat', 'openai_compat')
 DEEPSEEK_BASE_URL = 'https://api.deepseek.com/v1'
 MIMO_BASE_URL = 'https://api.xiaomimimo.com/v1'
 _LOCK = threading.RLock()
-_REPO = Path(__file__).resolve().parents[3]
 
 
 class ConnectionConflict(ValueError):
@@ -143,7 +143,7 @@ def _pricing(raw):
 class ConnectionStore:
     def __init__(self, data_root: Path | str):
         self.root = Path(data_root).resolve()
-        if self.root.is_relative_to(_REPO):
+        if is_source_path(self.root):
             raise ValueError('Model connection credentials must remain outside the repository')
         self.path = self.root / 'connections.json'
         self._check_lock = threading.Lock()

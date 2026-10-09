@@ -97,6 +97,9 @@ def build_app(
     freezes a role-connection snapshot for each job.
     """
     settings = settings or load_settings()
+    from .paths import is_source_path
+    if is_source_path(settings.data_root):
+        raise ValueError('Studio data must stay outside application and business repositories')
     store = Store(settings.data_root)
     pipeline = Pipeline(store)
     connections = ConnectionStore(settings.data_root)

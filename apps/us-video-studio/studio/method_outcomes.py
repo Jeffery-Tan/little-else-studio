@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from .learning import LearningConflict
+from .paths import PROJECT_ROOT
 
 
 def _sha(value):
@@ -112,7 +113,7 @@ def compare_methods(store, learning, run_id, baseline, candidate):
     # Reuse the established offline comparison schema, without invoking video
     # probing or accepting caller-supplied local paths.
     spec = importlib.util.spec_from_file_location('studio_creative_comparison',
-        Path(__file__).resolve().parents[3] / 'scripts/creative_comparison.py')
+        PROJECT_ROOT / 'scripts/creative_comparison.py')
     core = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(core)
     report = core.template('studio-method-' + _sha([run_id, baseline, candidate])[:20])
