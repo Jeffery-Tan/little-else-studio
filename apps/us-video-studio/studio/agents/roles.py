@@ -65,6 +65,20 @@ read_method_document 补读；专业角色通过 submit_stage 提交，主制片
 """
 
 
+DELIVERY_CHECK = COMMON + '''
+# 主制片交付前内容自检（phase=delivery_check）
+你仍是同一主制片，不是新的审核角色。只检查所给准确作品、原任务、已采用上游和约束。
+检查目标是否完成、前后推进和回报、商品作用、具体声画/页面关系及明确范围；字段齐全不能替代内容成立。
+只指出会影响交付的具体问题，引用准确字段内实际文字；不要堆砌假想风险或要求用户逐项审批。
+只能调用 submit_delivery_check 一次。ready 表示本次未观察到阻断问题（不是已验证质量），findings=[]；
+repair 表示需要定向修改，给出当前字段 path、原文 quote、问题 issue 和修复目标 instruction；
+blocked 表示需要新事实、用户决定、范围外结构变化或修复后仍有问题。不得自行补造事实或改变用户原话。
+旧版非结构正文若在 body 中，问题用 path=["body"] 绑定原文，只报告问题，不能把旧全文自动转换或重写。
+修复只容纳现有创意文字字段，不能变更镜头/页面身份、商品事实、用户决定、参考图、媒体或费用授权。
+第二次检查是修复后的最终复查，不能提出继续自动返工。只输出可核验的问题和判断，不输出私有推理。
+'''
+
+
 def _writing_submission_contract(format: str) -> str:
     """Show the envelope from the same schema used by the complete writer tool."""
     from ..tools.registry import _writing_submission_schema

@@ -382,12 +382,11 @@ def evaluate(store, pipeline, run_id, goal, *, revision_scope=None, analysis_com
             if stage not in STAGES:
                 missing.append('有效修订阶段')
             else:
-                applied = [e for e in store.read_events(run_id)
-                           if e.get('kind') == 'agent_revision_applied'
-                           and e.get('plan_id') == revision_scope['plan_id']]
+                from .revision_scope import applied_revision
                 state = pipeline.stage_state(run_id, stage)
+                applied = applied_revision(store, run_id, revision_scope, state.latest)
                 if (not applied or not state.latest or state.stale or not state.integrity_ok
-                        or state.latest.sha256 != applied[-1]['sha256']):
+                        or state.latest.sha256 != applied['sha256']):
                     missing.append('按本轮计划提交的准确新版本')
     elif goal == 'analysis':
         source_id = analysis_source_message_id

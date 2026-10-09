@@ -49,6 +49,9 @@ from .http_runs import install_run_routes
 from .http_materials import install_material_routes
 from .http_approvals import install_approval_routes
 from .http_execution import install_execution_routes
+from .http_workspace import install_workspace_routes
+from .result_inspection import install_routes as install_result_inspection_routes
+from .workspace_export import install_routes as install_workspace_export_routes
 from .active_brief import load_amendments
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -549,6 +552,10 @@ def build_app(
                             amendment_redo_job)
 
     install_execution_routes(app, connections, settings, ledger, jobs, store, pipeline, require_run, prepare_job, client_factory)
+    install_workspace_routes(app, store, pipeline, jobs, require_run, prepare_job)
+    install_result_inspection_routes(app, store, pipeline, jobs, connections, settings, require_run,
+                                     client_factory=client_factory)
+    install_workspace_export_routes(app, store, pipeline, require_run)
 
     # ---------------------------------------------------------------- static --
 

@@ -427,8 +427,10 @@ class Dispatcher:
             reference_context(self.store, self.run_id, selection=reference)
             if current(self.store, self.run_id) != reference:
                 raise ToolError('本任务绑定的参考与当前创作依据不一致，请回主制片核对，不能换用其他参考派工。')
+        from ..conversation_input import message as original_message
         context = self.learning.prepare_context(
             self.run_id, role, **selection,
+            task_query=original_message(self.store, self.run_id, user_input_id)['text'] if user_input_id else brief,
             purpose="message" if role == "director" else "storyboard",
             **({'reference_selection': reference} if reference else {}),
         )
@@ -452,6 +454,11 @@ class Dispatcher:
             self.client, self.ledger, run_id=self.run_id, role=role, stage=stage
         )
         task_tools = tools_for(role, local_revision=local_revision, format=selection['format'])
+        internal_repair = bool(revision_scope and revision_scope.get('origin') == 'delivery_self_check')
+        if internal_repair:
+            from ..delivery_check import validate_repair_scope
+            validate_repair_scope(self.store, self.run_id, revision_scope, user_input_id)
+            task_tools = [tool for tool in task_tools if tool['name'] != 'propose_task_interpretation']
         allowed_tools = {tool['name'] for tool in task_tools}
         runtime = AgentRuntime(self.store, self.run_id)
         parent_id = current_task_id()
@@ -538,6 +545,11 @@ class Dispatcher:
                 if stage_local_only and not local_revision:
                     raise ToolError('新要求仅限局部字段；整稿提交已停止，需由主制片绑定准确版本和字段后建立新修订任务。')
                 if local_revision:
+                    if internal_repair:
+                        validate_repair_scope(self.store, self.run_id, revision_scope, identity)
+                        # The original edit scope still owns these fields; the
+                        # backend plan binds its newly-created exact revision.
+                        continue
                     # Ordinary content paths are not editing authority. Only
                     # the exact target or source-bound typed edit scope owns it.
                     requested = []

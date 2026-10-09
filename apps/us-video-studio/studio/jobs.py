@@ -1,7 +1,7 @@
 """Durable conversation executions in the existing run event journal.
 
 Browser connections only observe jobs. Restart never repeats a model request.
-One writer lease and one active job cover this data root's shared cost ledger.
+One writer lease, one creative slot and bounded existing-video queries.
 """
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import threading
+import time
 import uuid
 from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
@@ -25,6 +26,8 @@ from .agent_runtime import AgentRuntime, bind_task, reset_task
 from .tools.registry import tool_names_for
 
 TERMINAL = frozenset({'succeeded', 'failed', 'blocked', 'cancelled', 'interrupted'})
+QUEUEABLE = frozenset({'conversation', 'writing_revision', 'direction_resume'})
+QUERY_LIMIT = 2
 
 
 def _pending_steer_work(corrections):
@@ -130,6 +133,14 @@ class JobManager:
         self.changed = threading.Condition(self.lock)
         self.active: tuple[str, str] | None = None
         self.cancelled = threading.Event()
+        # Only live callbacks/tokens live here; states and admission order are
+        # journal facts. Restart interrupts queued jobs and never rebuilds work.
+        self._queue_handles = {}
+        self._query_active = {}
+        self._controls = {}
+        self._local = threading.local()
+        self._admission_sequence = 0
+        self._queue_role_waiters = set()
         self.initialized = False
         self.closing = False
         self.before_submit: Callable[[], None] | None = None
@@ -177,7 +188,7 @@ class JobManager:
         def drain():
             self._settle_roles(stop=True)
             with self.lock:
-                if self.active is None:
+                if self.active is None and not self._query_active:
                     self.lease.close()
         threading.Thread(target=drain, name='studio-closing-roles', daemon=True).start()
 
@@ -272,6 +283,8 @@ class JobManager:
             out['cursor'] = row['seq']
             if row['kind'] == 'job_status':
                 out['status'], out['reason'] = row['status'], row.get('reason', '')
+            if row['kind'] == 'job_remote_waiting':
+                out['lane'], out['phase'] = 'query', 'remote_waiting'
             if row['kind'] == 'job_deliverable':
                 out['deliverable'] = row['deliverable']
             if row['kind'] == 'job_progress':
@@ -340,6 +353,9 @@ class JobManager:
         if out['status'] == 'interrupted':
             out['recovery'] = ('不会自动重发旧请求。用量缺失仅保留记录；'
                                '在恢复面板关闭遗留阶段尝试，再由你明确发起下一轮。')
+        queued = self._queued_order_locked()
+        out.setdefault('lane', created.get('lane', 'creative'))
+        out['queue_position'] = queued.index((run_id, job_id)) + 1 if (run_id, job_id) in queued else None
         return out
 
     def latest(self, run_id, after_seq=0, *, include_project_state=False):
@@ -392,8 +408,156 @@ class JobManager:
                     reason='用户已要求停止；本轮尚未执行的调整已撤销，不自动接续。')
         return True
 
+    def _queue_snapshot(self, run_id):
+        """Hash the existing domain facts, excluding job/chat/progress events."""
+        from .active_brief import fingerprint_for
+        from .evidence import evidence_fingerprint, evidence_generation
+        from .references import reference_fingerprint, reference_generation
+        with self.store.run_lock(run_id):
+            memo = {}
+            stages = [self.pipeline.stage_state(run_id, stage, memo) for stage in STAGES]
+            return {
+                'brief': fingerprint_for(self.store, run_id),
+                'evidence': evidence_fingerprint(self.store, run_id),
+                'evidence_generation': evidence_generation(self.store, run_id),
+                'references': reference_fingerprint(self.store, run_id),
+                'reference_generation': reference_generation(self.store, run_id),
+                'stages': [{'stage': s.stage, 'version': s.latest.version if s.latest else None,
+                            'sha256': s.latest.sha256 if s.latest else None,
+                            'stale': s.stale, 'integrity_ok': s.integrity_ok,
+                            'status': s.status,
+                            'open_attempt': s.open_attempt.key if s.open_attempt else None,
+                            'approval': s.approval.to_dict() if s.approval else None}
+                           for s in stages],
+            }
+
+    def queue(self):
+        """Read-only projection; GET never claims or resumes an execution."""
+        with self.lock:
+            items = []
+            pending = self._queued_order_locked()
+            for run in self.store.list_runs():
+                for job in self.list(run.run_id):
+                    if job['status'] in TERMINAL:
+                        continue
+                    rows = self.store.read_events(run.run_id)
+                    created = next(r for r in rows
+                                   if r.get('kind') == 'job_created' and r['job_id'] == job['job_id'])
+                    remote = any(r.get('kind') == 'job_remote_waiting' and r.get('job_id') == job['job_id'] for r in rows)
+                    identity = (run.run_id, job['job_id'])
+                    items.append({**job, 'run_id': run.run_id, 'text': created['text'],
+                                  'job_kind': created.get('job_kind', 'conversation'),
+                                  'lane': 'query' if remote else created.get('lane', 'creative'),
+                                  'phase': 'remote_waiting' if remote else None,
+                                  'position': pending.index(identity) + 1 if identity in pending else None,
+                                  'at': created['at']})
+            items.sort(key=lambda item: (item['position'] is not None, item['position'] or 0, item['at']))
+            return {'items': items, 'creative_active': (
+                {'run_id': self.active[0], 'job_id': self.active[1]} if self.active else None),
+                'query_limit': QUERY_LIMIT}
+
+    def _queued_order_locked(self):
+        """Admission order comes from job_queued, never callback-map order."""
+        ordered = []
+        for run_id in {rid for rid, _ in self._queue_handles}:
+            states = {job['job_id']: job['status'] for job in self.list(run_id)}
+            for row in self.store.read_events(run_id):
+                identity = (run_id, row.get('job_id'))
+                if (row.get('kind') == 'job_queued' and identity in self._queue_handles
+                        and states.get(row['job_id']) == 'queued'):
+                    ordered.append((row['order'], identity))
+        return [identity for _, identity in sorted(ordered)]
+
+    def _start_locked(self, run_id, job_id, text, runner, *, lane='creative'):
+        from .task_execution import freeze
+        budget = freeze(self.store, run_id, job_id, self.ledger.settings)
+        control = {'cancelled': threading.Event(),
+                   'deadline': time.monotonic() + budget['timeout_seconds']}
+        self._controls[(run_id, job_id)] = control
+        if lane == 'query':
+            self._query_active[(run_id, job_id)] = self.get(run_id, job_id).get('job_payload') or {}
+        else:
+            self.active = (run_id, job_id)
+            self.cancelled = control['cancelled']
+        self._event(run_id, job_id, 'job_execution_started', lane=lane)
+        self._event(run_id, job_id, 'job_status', status='running')
+        threading.Thread(target=self._work, args=(run_id, job_id, text, runner, control, lane), daemon=True).start()
+
+    def release_for_remote_wait(self, run_id, attempt_id, task_id):
+        """Single-video submission is over; this same worker can only query it.
+
+        Called after releasing the exclusive submission lease. A batch never
+        enters here because it may still have further authorized submissions.
+        """
+        from .agent_runtime import current_task_id
+        with self.lock:
+            job_id = current_task_id()
+            identity = (run_id, job_id)
+            if (self.active != identity or not task_id
+                    or self.get(run_id, job_id)['job_kind'] != 'production_generation'):
+                return False
+            if len(self._query_active) >= QUERY_LIMIT:
+                return False
+            self._query_active[identity] = {'attempt_id': attempt_id}
+            self._event(run_id, job_id, 'job_remote_waiting', attempt_id=attempt_id, task_id=task_id)
+            self.active = None
+            self._drain_queue_locked()
+            return True
+
+    def has_executions(self):
+        # Read-only liveness hint used from production run locks; never acquire
+        # jobs.lock there (the required order is jobs -> run).
+        return self.active is not None or bool(self._query_active) or bool(self._queue_handles)
+
+    def _drain_queue_locked(self):
+        if self.closing or self.active is not None:
+            return
+        futures = self._role_futures()
+        if futures:
+            def settled(future):
+                with self.lock:
+                    self._queue_role_waiters.discard(future)
+                    self._drain_queue_locked()
+            for future in futures:
+                if future not in self._queue_role_waiters:
+                    self._queue_role_waiters.add(future)
+                    future.add_done_callback(settled)
+            return
+        while self._queue_handles:
+            pending = self._queued_order_locked()
+            if not pending:
+                self._queue_handles.clear()
+                return
+            run_id, job_id = pending[0]
+            prepare = self._queue_handles.pop((run_id, job_id))
+            try:
+                self.store.require_healthy(run_id)
+                current = self.get(run_id, job_id)
+                if current['status'] != 'queued':
+                    continue
+                if self.store.deletion_state(run_id):
+                    raise PipelineError('project_deleted', '项目已移入回收站。')
+                if self.before_submit:
+                    self.before_submit()
+                if self._queue_snapshot(run_id) != current['queue_snapshot']:
+                    raise PipelineError('queue_context_changed', '排队期间资料、采用决定或作品版本已变化；请核对当前内容后重新发起，本次未调用模型。')
+                runner, config = prepare(run_id)
+                if config != current['model_config']:
+                    raise PipelineError('queue_connection_changed', '排队期间模型连接或配置已变化；请核对后重新发起，本次未调用模型。')
+                self._event(run_id, job_id, 'job_queue_claimed')
+                self._start_locked(run_id, job_id, current['text'], runner)
+                return
+            except ProjectDataError:
+                # Do not append to damaged originals; integrity diagnostics own it.
+                continue
+            except Exception as exc:
+                reason = str(exc) if isinstance(exc, (PipelineError, ValueError, CodexUnavailable, ConnectionUnavailable)) else '排队任务执行前核验失败；未调用模型，请检查连接与资料后重新发起。'
+                AgentRuntime(self.store, run_id).transition(job_id, 'failed', reason=reason)
+                self._event(run_id, job_id, 'job_status', status='blocked', reason=reason)
+
     def submit(self, run_id, text, request_id, *, kind='conversation', payload=None,
-               prepare=None, parent_job_id=None, user_input_id=None):
+               prepare=None, parent_job_id=None, user_input_id=None, enqueue=False,
+               query_only=False):
         with self.lock:
             self.initialize()
             self.store.require_healthy(run_id)
@@ -407,12 +571,28 @@ class JobManager:
                             or row.get('job_payload') != payload):
                         raise PipelineError('request_conflict', '相同 request_id 对应另一条指令，请使用新的请求标识。')
                     return self.get(run_id, row['job_id'])
-            if self.active is not None or self._role_futures():
+            if enqueue and kind not in QUEUEABLE:
+                raise PipelineError('queue_kind', '只有文字创作任务可排队；媒体生成仍须准确输入与独立授权。')
+            if query_only and kind != 'production_refresh':
+                raise PipelineError('query_kind', '独立查询槽只接收已经提交的视频任务。')
+            occupied = self.active is not None or self._role_futures() or bool(self._queue_handles)
+            if query_only:
+                if len(self._query_active) >= QUERY_LIMIT:
+                    raise PipelineError('query_busy', '已有两个视频任务正在查询，请稍后再查询原任务。')
+                if self.active and self.get(*self.active)['job_kind'] not in QUEUEABLE:
+                    raise PipelineError('job_busy', '制作提交仍在执行，请等待其结束后查询。')
+                if any(rid == run_id and original == payload
+                       for (rid, _), original in self._query_active.items()):
+                    raise PipelineError('query_busy', '该原视频任务已经在查询，没有再次提交查询。')
+            elif (occupied and not enqueue) or (self._query_active and kind not in QUEUEABLE):
                 active_run = self.active[0] if self.active else '已有项目'
                 raise PipelineError('job_busy', f'制片室正在运行 {active_run} 的任务或等待角色收尾；本次未排队、未调用模型。')
             if self.before_submit is not None:
                 self.before_submit()
             runner, config = (prepare or self.prepare)(run_id)
+            if query_only and (config.get('new_generation') is not False or not config.get('task_id')):
+                raise PipelineError('query_identity', '没有核验到已提交的视频任务，不能进入查询槽。')
+            queue_snapshot = self._queue_snapshot(run_id) if enqueue else None
             job_id = str(uuid.uuid4())
             with self.store.run_lock(run_id):
                 artifacts = self.store.list_artifacts(run_id)
@@ -422,7 +602,10 @@ class JobManager:
                         'artifacts': [{'stage': a.stage, 'version': a.version, 'sha256': a.sha256} for a in artifacts]}
                 self._event(run_id, job_id, 'job_created', request_id=request_id, text=text,
                             model_config=config, context_refs=refs, job_kind=kind,
-                            job_payload=payload, parent_job_id=parent_job_id, user_input_id=user_input_id)
+                            job_payload=payload, parent_job_id=parent_job_id, user_input_id=user_input_id,
+                            queue_snapshot=queue_snapshot, lane='query' if query_only else 'creative')
+                from .task_execution import freeze
+                freeze(self.store, run_id, job_id, self.ledger.settings)
                 if user_input_id:
                     from .conversation_input import message, accept
                     accept(self.store, run_id, message(self.store, run_id, user_input_id))
@@ -434,10 +617,13 @@ class JobManager:
                     receipt = message(self.store, run_id, user_input_id)
                     runtime.post_message(job_id, user_input_id, receipt['text'],
                                          source_message_id=user_input_id)
-            self.active = (run_id, job_id)
-            self.cancelled = threading.Event()
-            self._event(run_id, job_id, 'job_status', status='running')
-            threading.Thread(target=self._work, args=(run_id, job_id, text, runner), daemon=True).start()
+            if enqueue:
+                self._admission_sequence += 1
+                self._event(run_id, job_id, 'job_queued', order=self._admission_sequence)
+                self._queue_handles[(run_id, job_id)] = prepare or self.prepare
+                self._drain_queue_locked()
+            else:
+                self._start_locked(run_id, job_id, text, runner, lane='query' if query_only else 'creative')
             return self.get(run_id, job_id)
 
     def submit_decision_followup(self, run_id, text, request_id, *, parent_job_id=None):
@@ -460,7 +646,7 @@ class JobManager:
                 if decision_context:
                     payload['decision_context'] = decision_context
                 job = self.submit(run_id, text, request_id, parent_job_id=parent_job_id,
-                    payload=payload or None,
+                    payload=payload or None, enqueue=bool(self._queue_handles),
                     prepare=(lambda rid: self.prepare_decision_followup(rid, decision_context))
                         if decision_context and self.prepare_decision_followup else
                         (lambda rid: self.prepare_followup(rid, source_id))
@@ -682,13 +868,20 @@ class JobManager:
             payload['reference_consent'] = True
         return self.submit(run_id, _continuation_text(original, [row], original_kind),
                            f'steer:{current["job_id"]}', parent_job_id=current['job_id'],
-                           payload=payload, user_input_id=receipt['message_id'],
+                           payload=payload, user_input_id=receipt['message_id'], enqueue=bool(self._queue_handles),
                            prepare=(lambda rid: self.prepare_input(rid, receipt))
                                if self.prepare_input else None)
 
     def check_cancel(self):
-        if self.cancelled.is_set():
+        control = getattr(self._local, 'control', None) or {'cancelled': self.cancelled}
+        self._check_control(control)
+
+    @staticmethod
+    def _check_control(control):
+        if control['cancelled'].is_set():
             raise JobCancelled('用户已请求停止；未启动下一次模型调用或工具。')
+        if control.get('deadline') is not None and time.monotonic() >= control['deadline']:
+            raise BudgetExceeded('本次任务执行时间已用完；已保存进度，尚未完成的工作等待明确继续。')
 
     def resume_steer(self, run_id, job_id):
         """Explicitly continue a correction left behind by recovery or restart.
@@ -715,20 +908,24 @@ class JobManager:
                                                    '请直接发送新的指令。')
             return self._submit_pending_inputs(run_id, current, pending)
 
-    def _work(self, run_id, job_id, text, runner):
+    def _work(self, run_id, job_id, text, runner, control, lane='creative'):
         def emit(event):
             self._event(run_id, job_id, 'job_progress', event=event)
         status, reason = 'succeeded', ''
         runtime = AgentRuntime(self.store, run_id)
         activation = bind_task(job_id)
+        self._local.control = control
+        cancelled = control['cancelled']
+        def check_cancel():
+            self._check_control(control)
         try:
             with self.lock:
-                self.check_cancel()
                 runtime.transition(job_id, 'running')
+                check_cancel()
                 for message in runtime.pending_messages(job_id):
                     runtime.ack_message(job_id, message['message_id'])
-            result = runner(text, emit, self.check_cancel)
-            self.check_cancel()
+            result = runner(text, emit, check_cancel)
+            check_cancel()
             if result.stopped_because == 'repeated_failure':
                 # Why it stopped is the actionable fact — more so than the
                 # unfinished deliverable, which is a consequence of it. Words
@@ -782,20 +979,21 @@ class JobManager:
                 # process bookkeeping; the diagnostic remains derived on disk.
                 self._settle_roles(run_id, job_id, stop=False)
                 with self.lock:
-                    self.active = None
+                    self._release_locked(run_id, job_id)
+                    self._drain_queue_locked()
                     self.changed.notify_all()
-                    if self.closing:
+                    if self.closing and self.active is None and not self._query_active:
                         self.lease.close()
             else:
                 # An error (including non-Orchestrator runners) may leave an
                 # independent child in a provider call. Keep active and the writer
                 # lease until the child has saved its actual outcome and returned.
                 self._settle_roles(run_id, job_id,
-                                   stop=status != 'succeeded' or self.cancelled.is_set())
+                                   stop=status != 'succeeded' or cancelled.is_set())
                 with self.lock:
                     # Cancellation can arrive after the last provider check but
                     # before this lock. It must remain a stop, not a completion error.
-                    if self.cancelled.is_set() and status in {'succeeded', 'blocked'}:
+                    if cancelled.is_set() and status in {'succeeded', 'blocked'}:
                         status, reason = 'cancelled', '用户已请求停止；已保存的产物保留，不自动重跑。'
                     task_status = {'succeeded': 'completed', 'failed': 'failed',
                                    'blocked': 'waiting', 'cancelled': 'cancelled'}.get(status, 'interrupted')
@@ -806,7 +1004,7 @@ class JobManager:
                         status, reason = 'failed', str(exc)
                         runtime.transition(job_id, 'failed', reason=reason)
                     self._event(run_id, job_id, 'job_status', status=status, reason=reason)
-                    self.active = None
+                    self._release_locked(run_id, job_id)
                     rows = self.store.read_events(run_id)
                     corrections = [r for r in rows
                                    if r.get('job_id') == job_id and r.get('kind') == 'job_steer_received']
@@ -856,12 +1054,21 @@ class JobManager:
                         except (PipelineError, ValueError, CodexUnavailable, ConnectionUnavailable) as exc:
                             self._event(run_id, job_id, 'decision_followup_blocked',
                                         request_id=followup['request_id'], reason=str(exc))
-                    if self.closing:
+                    self._drain_queue_locked()
+                    if self.closing and self.active is None and not self._query_active:
                         if self._role_futures():
                             self._start_close_drain_locked()
                         else:
                             self.lease.close()
             reset_task(activation)
+            self._local.control = None
+
+    def _release_locked(self, run_id, job_id):
+        identity = (run_id, job_id)
+        self._controls.pop(identity, None)
+        self._query_active.pop(identity, None)
+        if self.active == identity:
+            self.active = None
 
     def cancel(self, run_id, job_id):
         with self.lock:
@@ -871,9 +1078,15 @@ class JobManager:
                 if successor:
                     return self.cancel(run_id, successor)
                 return current
-            if self.active != (run_id, job_id):
+            identity = (run_id, job_id)
+            if current['status'] == 'queued' and identity in self._queue_handles:
+                self._queue_handles.pop(identity)
+                AgentRuntime(self.store, run_id).transition(job_id, 'cancelled', reason='用户取消排队；未调用模型。')
+                self._event(run_id, job_id, 'job_status', status='cancelled', reason='已取消排队，未调用模型；当前执行不受影响。')
+                return self.get(run_id, job_id)
+            if identity not in self._controls:
                 raise PipelineError('job_not_active', '任务不在此进程运行；请重新加载中断记录。')
-            self.cancelled.set()
+            self._controls[identity]['cancelled'].set()
             AgentRuntime(self.store, run_id).request_stop(job_id)
             if current['steer_status'] == 'received' or (current.get('job_payload') or {}).get('pending_user_inputs'):
                 self._event(run_id, job_id, 'job_steer_discarded')
@@ -887,6 +1100,8 @@ class JobManager:
     def busy(self, run_id):
         with self.lock:
             return ((self.active is not None and self.active[0] == run_id)
+                    or any(rid == run_id for rid, _ in self._query_active)
+                    or any(rid == run_id for rid, _ in self._queue_handles)
                     or bool(self._role_futures(run_id)))
 
     def event_marks(self, run_id, job_id, after_seq=0):
@@ -919,7 +1134,7 @@ class JobManager:
         its steer continuation hold the same lock, so reload cannot split them.
         """
         with self.lock:
-            if self.closing or self.active is not None:
+            if self.closing or self.active is not None or self._query_active or self._queue_handles:
                 return False
             if self.before_submit is not None:
                 try:
@@ -933,7 +1148,13 @@ class JobManager:
         with self.lock:
             self.closing = True
             self.cancelled.set()
-            if self.active is None:
+            for control in self._controls.values():
+                control['cancelled'].set()
+            for run_id, job_id in list(self._queue_handles):
+                AgentRuntime(self.store, run_id).transition(job_id, 'interrupted', reason='服务停止，排队任务未执行，不自动恢复。')
+                self._event(run_id, job_id, 'job_status', status='interrupted', reason='服务停止，排队任务未执行；请核对后重新发起，不自动重发。')
+            self._queue_handles.clear()
+            if self.active is None and not self._query_active:
                 if self._role_futures():
                     self._start_close_drain_locked()
                 else:
@@ -942,7 +1163,7 @@ class JobManager:
     def close_when_idle(self):
         """Atomically stop accepting jobs for reload, without cancelling work."""
         with self.lock:
-            if self.active is not None or self._role_futures():
+            if self.active is not None or self._query_active or self._queue_handles or self._role_futures():
                 return False
             self.closing = True
             return True

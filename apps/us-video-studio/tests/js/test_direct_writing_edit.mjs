@@ -45,6 +45,18 @@ function selectLine(app) {
   return app.document.getElementById('feedback-target');
 }
 
+test('an original remote video query releases the composer for a new queued conversation without steering it',async()=>{
+  const app=await page({'/jobs?enqueue=true':{job_id:'new-text',job_kind:'conversation',status:'queued',events:[]}});
+  vm.runInContext(`showJob({job_id:'original-video',job_kind:'production_video_generation',status:'running',lane:'query',phase:'remote_waiting',events:[]});`,app.ctx);
+  assert.equal(vm.runInContext('state.busy',app.ctx),false);
+  assert.equal(app.document.getElementById('send').dataset.mode,'send');
+  assert.equal(app.document.getElementById('job-stop').dataset.mode,'stop-query');
+  app.document.getElementById('chat-input').value='先讨论下一页，保留原视频任务';
+  await vm.runInContext('submit()',app.ctx);
+  const posts=app.observed.filter(row=>row.method==='POST');assert.equal(posts.length,1);
+  assert.equal(posts[0].path,'/api/runs/run-1/jobs?enqueue=true');assert.equal(posts[0].body.text,'先讨论下一页，保留原视频任务');
+});
+
 function retainedLine(app) {
   const host=app.document.getElementById('stage');
   const node=host.querySelectorAll('[data-creator-path]')
@@ -147,14 +159,14 @@ test('selected script line offers an explicit edit action bound to its current f
   assert.ok(button);
   app.document.getElementById('chat-input').value='只改第一句，让语气自然一点';
   await button.click();
-  const post=app.observed.find(row=>row.path.endsWith('/actions/revise-writing'));
+  const post=app.observed.find(row=>row.path.endsWith('/actions/revise-writing?enqueue=true'));
   assert.ok(post);
   assert.equal(post.body.request_kind,'writing_revision');
   assert.equal(post.body.text,'只改第一句，让语气自然一点');
   assert.equal(post.body.feedback_target.artifact_sha256,SHA);
   assert.deepEqual(Array.from(post.body.feedback_target.path),['segments',0,'line']);
   assert.equal(post.body.feedback_target.quote,'Original line');
-  assert.equal(app.observed.filter(row=>row.path.endsWith('/jobs')&&row.method==='POST').length,0);
+  assert.equal(app.observed.filter(row=>row.path.split('?')[0].endsWith('/jobs')&&row.method==='POST').length,0);
 });
 
 test('ordinary send with a selected line remains a conversation request',async()=>{
@@ -163,12 +175,12 @@ test('ordinary send with a selected line remains a conversation request',async()
   assert.ok(chip.textContent.includes('Original line'));
   app.document.getElementById('chat-input').value='这句为什么这样写？';
   await app.ctx.submit();
-  const post=app.observed.find(row=>row.path.endsWith('/jobs')&&row.method==='POST');
+  const post=app.observed.find(row=>row.path.split('?')[0].endsWith('/jobs')&&row.method==='POST');
   assert.ok(post);
   assert.equal(post.body.text,'这句为什么这样写？');
   assert.equal(post.body.feedback_target.quote,'Original line');
   assert.equal(post.body.request_kind,undefined);
-  assert.equal(app.observed.filter(row=>row.path.endsWith('/actions/revise-writing')).length,0);
+  assert.equal(app.observed.filter(row=>row.path.endsWith('/actions/revise-writing?enqueue=true')).length,0);
 });
 
 test('changed script version preserves the edit text and sends no request',async()=>{
@@ -181,7 +193,7 @@ test('changed script version preserves the edit text and sends no request',async
   assert.equal(result,undefined); // click handler intentionally does not expose the async result
   for(let i=0;i<4;i++) await new Promise(resolve=>setImmediate(resolve));
   assert.equal(app.document.getElementById('chat-input').value,'只改第一句');
-  assert.equal(app.observed.filter(row=>row.path.endsWith('/actions/revise-writing')).length,0);
+  assert.equal(app.observed.filter(row=>row.path.endsWith('/actions/revise-writing?enqueue=true')).length,0);
 });
 
 test('server version conflict explains the rejection and leaves the text for a fresh selection',async()=>{
@@ -192,15 +204,15 @@ test('server version conflict explains the rejection and leaves the text for a f
   app.document.getElementById('chat-input').value='只改第一句';
   button.click();
   for(let i=0;i<4;i++) await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(app.observed.filter(row=>row.path.endsWith('/actions/revise-writing')).length,1);
+  assert.equal(app.observed.filter(row=>row.path.endsWith('/actions/revise-writing?enqueue=true')).length,1);
   assert.equal(app.document.getElementById('chat-input').value,'只改第一句');
   assert.equal(chip.hidden,false);
   assert.equal(vm.runInContext('state.composerRequestKind',app.ctx),'writing_revision');
   assert.equal(vm.runInContext('state.feedbackTarget.artifact_sha256',app.ctx),SHA);
   assert.match(app.document.getElementById('toast').textContent,/版本已变化.*重新选择/);
   await app.ctx.submit();
-  assert.equal(app.observed.filter(row=>row.path.endsWith('/actions/revise-writing')).length,2);
-  assert.equal(app.observed.filter(row=>row.path.endsWith('/jobs')&&row.method==='POST').length,0);
+  assert.equal(app.observed.filter(row=>row.path.endsWith('/actions/revise-writing?enqueue=true')).length,2);
+  assert.equal(app.observed.filter(row=>row.path.split('?')[0].endsWith('/jobs')&&row.method==='POST').length,0);
 });
 
 test('an older approval in the conversation names its version beside a newer script',async()=>{

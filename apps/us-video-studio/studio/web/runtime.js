@@ -20,7 +20,7 @@ const JOB_ROLE_NAMES = { orchestrator: "主制片", director: "创意导演", ma
 function restoredProjectStatus(job) {
   return !job.deliverable?.blocker && !JOB_ACTIVE.has(job.status) && job.brief?.phase === 'ready' &&
     job.brief?.execution?.project_restored === true &&
-    ['conversation','stage_review','direction_resume','writing_revision','design_upgrade'].includes(job.job_kind || 'conversation');
+    ['conversation','stage_review','direction_resume','writing_revision','annotation_revision','design_upgrade'].includes(job.job_kind || 'conversation');
 }
 function jobCreativeNames(job) {
   const project = state.timeline?.run;
@@ -135,6 +135,9 @@ function jobPresentation(job, recovery = null) {
   if (['image_analysis','video_analysis'].includes(job.job_kind)) return {active, label:JOB_LABELS[job.status] || '状态待确认',
     detail:active ? '视觉策划正在分析素材。可以离开页面，任务会继续；不会自动重试。'
       :job.status==='succeeded' ? '素材分析已保存，请核对并选择要采用的观察。' : '',guidance:jobGuidance(job)};
+  if(job.job_kind==='result_inspection')return {active,label:JOB_LABELS[job.status]||'状态待确认',
+    detail:active?'正在检查准确结果的实际画面；检查不触发重新生成。':job.status==='succeeded'
+      ?'结果检查已保存，请在媒体对象详情阅读发现与限制；仍需人工确认。':'请核对本次检查的停止原因，原结果已保留。',guidance:jobGuidance(job)};
   if (job.brief) return {active, label:job.brief.title,
     detail:active ? team.current : job.brief.detail,
     guidance:active || job.status === 'succeeded' ? '' : jobGuidance(job)};
@@ -163,7 +166,8 @@ function liveJobStatus(job, view) {
       ? '原任务继续执行，结束后单独回答讨论；不会自动改稿。'
       : '正在等待当前模型调用结束，再按你的调整接续。'), recordedAt};
   if (job.status === 'queued') return {
-    label: view.label, detail: '任务已排队，尚未开始处理。', recordedAt};
+    label: '已排队', detail: `任务已排队${Number.isInteger(job.queue_position)&&job.queue_position>0?`，当前第 ${job.queue_position} 位`:''}，尚未开始处理。`, recordedAt};
+  if(job.job_kind==='result_inspection')return {label:view.label,detail:withWaiting(view.detail),recordedAt};
   if (job.status === 'cancelling') return {
     label: '正在停止', detail: withWaiting('等待当前调用结束；不会启动下一步。'), recordedAt};
   if (job.job_kind === 'direction_resume') {
@@ -248,12 +252,13 @@ async function refreshSavedArtifacts(runId, job, generation) {
   if (record.pending === pending) record.pending = null;
 }
 function canSteerJob(job) {
-  return Boolean(job &&
+  return Boolean(job && job.lane!=='query' &&
     (job.status === 'running' || (job.status === 'cancelling' && job.steer_status === 'received')));
 }
 function syncComposerAction(job = currentJob) {
   if (typeof StudioComposer !== 'undefined') StudioComposer.syncControls?.();
-  const active = Boolean(job && JOB_ACTIVE.has(job.status));
+  const querying = Boolean(job?.lane==='query'&&JOB_ACTIVE.has(job.status));
+  const active = Boolean(job && job.lane!=='query' && JOB_ACTIVE.has(job.status));
   const canInsert = canSteerJob(job);
   const directRevision = state.composerRequestKind === 'writing_revision';
   const roleTarget = state.roleTarget?.run_id === state.runId ? state.roleTarget : null;
@@ -292,8 +297,10 @@ function syncComposerAction(job = currentJob) {
       : '中途补充会先保存，当前调用结束后由主制片处理 · Shift + Enter 换行'
     : job.status === 'queued' ? '任务正在排队，草稿可继续编辑；开始执行后可插入调整'
     : '任务正在停止，草稿可继续编辑；结束后可发送'
+    : querying ? '原任务仍在查询；可以发送新的文字任务 · Shift + Enter 换行'
     : directRevision ? 'Enter 按意见直接修改 · Shift + Enter 换行' : 'Enter 发送 · Shift + Enter 换行';
   if (stop) {
+    if(querying){stop.hidden=false;stop.disabled=blocked||job.status==='cancelling';stop.textContent='停止本地查询';stop.setAttribute?.('aria-label','停止当前原任务的本地查询');stop.setAttribute?.('data-mode','stop-query');return;}
     // Only advertise an adjustment when the current job can actually accept it.
     stop.hidden = !active;
     stop.disabled = Boolean(blocked || !canInsert || directRevision);
@@ -417,6 +424,12 @@ function clearPendingSteer(runId, requestId, accepted = true) {
   if (typeof settleComposerRequest === 'function') settleComposerRequest(runId, requestId, accepted);
 }
 
+function appendTaskEvidence(host,job){
+  if(!job?.job_id||typeof StudioEvidence==='undefined')return;
+  const runId=state.runId,details=box('details','task-evidence-entry'),action=box('button','ghost small','读取本任务用量');
+  action.onclick=()=>StudioEvidence.openUsage({runId,jobId:job.job_id});
+  details.append(box('summary','','任务详情'),action);host.append(details);
+}
 function showJob(job, notice = "") {
   if (job && currentJob?.job_id === job.job_id && Number(currentJob.cursor || 0) > Number(job.cursor || 0)) return;
   currentJob = job;
@@ -425,7 +438,7 @@ function showJob(job, notice = "") {
   if (job?.brief) state.projectBrief = job.brief;
   const view = jobPresentation(job, currentRecovery);
   const unresolved = readPendingJob(state.runId) || readPendingSteer(state.runId);
-  state.busy = view.active || Boolean(unresolved);
+  state.busy = (view.active&&job?.lane!=='query') || Boolean(unresolved);
   // An open stage attempt belongs to a running role. It becomes a recovery
   // concern only after that job has ended without closing the attempt.
   state.recoveryBlocked = !view.active && Boolean((currentRecovery && !currentRecovery.can_continue)
@@ -451,11 +464,11 @@ function showJob(job, notice = "") {
   host.hidden = !job && !notice && !state.recoveryBlocked;
   if (host.hidden) return;
   host.setAttribute?.('data-active', String(view.active));
-  host.setAttribute?.('data-chat-job', String(Boolean(job && ['conversation','stage_review','direction_resume','design_upgrade'].includes(job.job_kind))));
+  host.setAttribute?.('data-chat-job', String(Boolean(job && ['conversation','stage_review','direction_resume','annotation_revision','design_upgrade'].includes(job.job_kind))));
   const copy = box("div", "job-copy");
   // Project status is above both views. This strip is only the live execution
   // observer; historical usage cannot turn it back into a second status panel.
-  if (job && !notice && !state.recoveryBlocked && ['conversation','stage_review','direction_resume','design_upgrade'].includes(job.job_kind)) {
+  if (job && !notice && !state.recoveryBlocked && ['conversation','stage_review','direction_resume','annotation_revision','design_upgrade'].includes(job.job_kind)) {
     if (view.active) {
       const summary = box('div','job-live-summary');
       summary.append(box('strong','job-live-title',live.label),
@@ -493,6 +506,7 @@ function showJob(job, notice = "") {
     const activity = box('button','text-button job-activity-open','团队工作记录 ↗');
     activity.onclick = openTeamProgress;
     copy.append(activity);
+    appendTaskEvidence(copy,job);
     host.append(copy);
     return;
   }
@@ -516,6 +530,7 @@ function showJob(job, notice = "") {
     const activity = box('button','text-button job-activity-open','团队工作记录 ↗');
     activity.onclick = openTeamProgress;
     copy.append(activity);
+    appendTaskEvidence(copy,job);
   }
   host.append(copy);
   if (!view.active && (job?.job_kind || '').startsWith('production_')) {
@@ -873,7 +888,8 @@ async function submitJob(runId, payload, options = {}) {
       ? `edits/${encodeURIComponent(payload.stage)}/${encodeURIComponent(payload.draft_id)}/generate` : payload.request_kind === 'design_upgrade' ? 'production/design-upgrade/propose' : 'jobs';
     const wire = {...payload};
     if (payload.request_kind === 'design_upgrade') delete wire.request_kind;
-    job = await api(`/api/runs/${runId}/${route}`, { method: "POST", body: JSON.stringify(wire) });
+    const queueable=['jobs','actions/revise-writing','actions/resume-direction'].includes(route);
+    job = await api(`/api/runs/${runId}/${route}${queueable?'?enqueue=true':''}`, { method: "POST", body: JSON.stringify(wire) });
   } catch (err) {
     const rejected = err.status >= 400 && err.status < 500;
     // Receipt ownership follows the project that sent the request, even after

@@ -253,9 +253,24 @@ def test_exact_local_patch_is_not_treated_as_a_short_full_new_script(project):
     artifact = submit(pipe, script(2), writing_source_message_ids=[receipt['message_id']],
                       local_writing_revision=True)
     assert len(artifact.structured['segments']) == 2
-    store.append_event(RUN, 'agent_revision_applied', plan_id='exact-local-plan', sha256=artifact.sha256)
+    store.append_event(RUN, 'agent_revision_applied', plan_id='exact-local-plan',
+                       stage='writing', version=artifact.version, sha256=artifact.sha256)
     assert evaluate(store, pipe, RUN, 'revision', revision_scope={
         'plan_id': 'exact-local-plan', 'stage': 'writing'})['status'] == 'complete'
+
+
+@pytest.mark.parametrize('version', [None, 999, True])
+def test_incomplete_or_wrong_applied_version_is_a_readonly_delivery_gap(project, version):
+    store, pipe = project
+    artifact = store.latest_artifact(RUN, 'writing')
+    store.append_event(RUN, 'agent_revision_applied', plan_id='legacy-plan',
+        sha256=artifact.sha256, **({'version': version} if version is not None else {}))
+    before = store.read_events(RUN)
+    result = evaluate(store, pipe, RUN, 'revision', revision_scope={
+        'plan_id': 'legacy-plan', 'stage': 'writing'})
+    assert result['status'] == 'incomplete' and '准确新版本' in result['missing'][0]
+    assert store.read_events(RUN) == before
+    assert store.latest_artifact(RUN, 'writing') == artifact
 
 
 def test_dispatcher_does_not_replace_bound_user_count_with_model_brief(project, tmp_path, monkeypatch):

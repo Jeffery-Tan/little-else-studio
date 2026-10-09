@@ -819,6 +819,8 @@ def test_role_connections_are_frozen_per_job_and_keys_never_enter_events(tmp_pat
         tool_turn('i', 'write_stage', {'stage': 'intake', 'content': '需求', 'summary': '需求'}),
         tool_turn('d', 'dispatch', {'stage': 'direction', 'brief': '两个方向'}),
         tool_turn('s', 'submit_stage', {'content': '方案', 'summary': '方向'}),
+        tool_turn('quality', 'submit_delivery_check', {'verdict': 'ready',
+            'summary': 'Synthetic producer assessment only.', 'findings': []}),
         final_turn('主控结束'),
     ])
     seen = []
@@ -848,7 +850,7 @@ def test_role_connections_are_frozen_per_job_and_keys_never_enter_events(tmp_pat
         release.set()
         final = wait_job(http, job['job_id'])
         assert final['status'] == 'succeeded', final.get('reason')
-        assert len(model.calls) == 6  # Initial task binding, routing, and a real director submission.
+        assert len(model.calls) == 7  # Binding, routing, director submission, producer check and final reply.
         assert http.get(f"/api/runs/{RUN}/artifacts/direction/1").status_code == 200
         assert {c['model'] for c in model.calls} == {'model-v1'}
         assert {token for _, token in seen} == {'synthetic-key-v1'}

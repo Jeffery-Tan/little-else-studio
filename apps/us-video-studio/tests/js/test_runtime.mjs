@@ -6,6 +6,14 @@ import vm from 'node:vm';
 const source = fs.readFileSync(new URL('../../studio/web/team-progress.js', import.meta.url), 'utf8') + '\n' + fs.readFileSync(new URL('../../studio/web/runtime.js', import.meta.url), 'utf8');
 const appSource = fs.readFileSync(new URL('../../studio/web/app.js', import.meta.url), 'utf8');
 const boundedReadSource = appSource.slice(appSource.indexOf('async function boundedProjectRead('),appSource.indexOf('async function loadProjectView('));
+
+test('server queue position remains explicit and query lane never accepts conversational steer',()=>{
+  const h=harness(async()=>{});
+  const status=h.context.liveJobStatus({status:'queued',queue_position:3,events:[]},{label:'正在创作'});
+  assert.equal(status.label,'已排队');assert.match(status.detail,/第 3 位/);
+  assert.equal(h.context.canSteerJob({status:'running',lane:'query',phase:'remote_waiting'}),false);
+  assert.equal(h.context.canSteerJob({status:'running',lane:'creative'}),true);
+});
 test('production prerequisite shows its exact next action without generic retry copy',()=>{
   const h=harness(async()=>{throw Error('render must not execute');});
   const note='当前方案缺共同设计。请打开「补齐制作设计，保留原脚本」确认。';
@@ -324,7 +332,7 @@ test('uncertain selected-field edit retries its exact target on the dedicated en
   await h.context.submitJob('run-a',payload);
   await h.nodes.get('job-status').children.at(-1).onclick();
   assert.equal(calls.length,2);
-  assert.ok(calls.every(c=>c.url==='/api/runs/run-a/actions/revise-writing'));
+  assert.ok(calls.every(c=>c.url==='/api/runs/run-a/actions/revise-writing?enqueue=true'));
   assert.deepEqual(calls[0].body,calls[1].body);
 });
 test('resolved accounting uses current recovery state without hiding actual budget caps', () => {
@@ -716,7 +724,7 @@ test('bounded diagnosis failure preserves an unsent composer draft', async () =>
   }, {preserveComposerOnError:true});
   assert.equal(h.nodes.get('chat-input').value, '我还在写的反馈');
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, '/api/runs/run-a/jobs');
+  assert.equal(calls[0].url, '/api/runs/run-a/jobs?enqueue=true');
   assert.equal(calls[0].body.reference_consent, false);
   assert.equal(calls[0].body.feedback_target.draft_id, 'draft-a');
 });
@@ -841,7 +849,7 @@ test('legacy uncertain idle input retries its exact envelope without new metadat
   h.context.state.timeline={display_context_id:'new-display'};
   const result=await h.context.submitJob('run-a',payload);
   assert.equal(result.accepted,true);
-  assert.deepEqual(calls,[{url:'/api/runs/run-a/jobs',body:payload}]);
+  assert.deepEqual(calls,[{url:'/api/runs/run-a/jobs?enqueue=true',body:payload}]);
   assert.equal(h.storage.has('studio-job-pending:run-a'),false);
 });
 

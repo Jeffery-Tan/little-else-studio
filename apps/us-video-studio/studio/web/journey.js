@@ -214,6 +214,23 @@ function syncJourneyTabs() {
 function renderCreativeBoard() {
   const host=$('creative-board');
   if(!host || typeof StudioCreativeBoard==='undefined')return;
+  const modeKey=`studio-canvas-mode:${state.runId}`;
+  let objectMode=false;
+  try{objectMode=localStorage.getItem(modeKey)==='objects';}catch(_){}
+  const chooseMode=objects=>{try{localStorage.setItem(modeKey,objects?'objects':'overview');}catch(_){}
+    state.objectCanvasMode={runId:state.runId,objects};renderCreativeBoard();};
+  if(state.objectCanvasMode?.runId===state.runId)objectMode=state.objectCanvasMode.objects;
+  if(objectMode && typeof StudioObjects!=='undefined') {
+    const signature=JSON.stringify([(state.rail||[]).map(row=>[row.stage,row.version,row.artifact_sha256,row.stale]),
+      state.productionData?.drafts,state.materials]);
+    const mounted=host.querySelector('.object-canvas-embedded');
+    if(mounted?.dataset.runId===state.runId){if(mounted.dataset.projection!==signature){mounted.dataset.projection=signature;void mounted.studioRefresh?.();}return;}
+    StudioCreativeBoard.destroy(host);
+    void StudioObjects.openCanvas(state.runId,{mount:host,onClose:()=>{host.replaceChildren();chooseMode(false);}});
+    const created=host.querySelector('.object-canvas-embedded');if(created)created.dataset.projection=signature;
+    return;
+  }
+  if(host.querySelector('.object-canvas-embedded'))host.replaceChildren();
   const run=(state.runs||[]).find(row=>row.run_id===state.runId)||state.timeline?.run||{};
   const boundRun=state.runId;
   const boundStages=new Map((state.rail||[]).map(step=>[step.stage,{...step}]));
@@ -225,6 +242,14 @@ function renderCreativeBoard() {
     referenceSelectedId:state.referenceSelectedId,
     format:state.creatorView?.format||run.content_format,
     analysisOnly:Boolean(state.creatorView?.analysisOnly)}, {
+    loadLayout: typeof StudioObjects !== 'undefined' ? () => StudioObjects.readCanvas(boundRun).then(result => result.layout) : undefined,
+    saveLayout: typeof StudioObjects !== 'undefined' ? payload => StudioObjects.saveLayout(boundRun,payload) : undefined,
+    openObjects(){if(state.runId===boundRun && typeof StudioObjects!=='undefined')chooseMode(true);},
+    openAnnotations(){if(state.runId===boundRun && typeof StudioObjects!=='undefined')StudioObjects.openAnnotations({runId:boundRun});},
+    annotateMedia(item,atSeconds){if(state.runId!==boundRun||typeof StudioObjects==='undefined'||!item.attemptId||!item.outputSha256)return;
+      StudioObjects.openAnnotations({runId:boundRun,target:{kind:'media',run_id:boundRun,attempt_id:item.attemptId,
+        output_sha256:item.outputSha256},title:`第 ${item.ordinal} ${item.kind==='video'?'镜':run.content_format==='photo'?'页':'镜'}`,
+        media:{kind:item.kind,url:item.url,at_seconds:atSeconds||0}});},
     openStage(stage,version){
       if(state.runId!==boundRun)return;
       const displayed=boundStages.get(stage);

@@ -89,6 +89,9 @@ def harness(tmp_path, monkeypatch, *, dispatch_round=11, finish=None, before_fin
 
     def handle(payload):
         tools = {item['function']['name'] for item in payload.get('tools', [])}
+        if 'submit_delivery_check' in tools:
+            return reply(('submit_delivery_check', {'verdict': 'ready',
+                'summary': 'Synthetic assessment only, no external quality claim.', 'findings': []}))
         if 'submit_stage' in tools:
             if independent:
                 started.set()
@@ -130,9 +133,9 @@ def test_exact_three_direction_candidates_get_one_conclusion_without_last_artifa
     before_approvals = store.list_approvals(RUN)
     before_intake = store.latest_artifact(RUN, 'intake')
     result = send()
-    assert result.stopped_because == 'done' and result.rounds == dispatch_round + 1
+    assert result.stopped_because == 'done' and result.rounds == dispatch_round + 2
     assert result.text == ANSWER and result.deliverable['status'] == 'complete'
-    assert len(work) == dispatch_round and len(seen) == dispatch_round + 2 and len(contexts) == 1
+    assert len(work) == dispatch_round and len(seen) == dispatch_round + 3 and len(contexts) == 1
     assert not seen[-1].get('tools') and seen[-1]['messages'][0]['content'].find('phase=finishing') >= 0
     assert not any(row['tool'] in {'read_artifact', 'observe_images'} for row in result.tool_log)
     artifact = store.latest_artifact(RUN, 'direction')
@@ -236,7 +239,7 @@ def test_late_source_stop_or_reply_change_is_not_published_or_retried(tmp_path, 
         tmp_path, monkeypatch, dispatch_round=3, before_finish=before, check_cancel=cancel)
     with pytest.raises(JobCancelled if change in {'stop', 'parent_stop', 'child_stop'} else NonRetryableStageError):
         send()
-    assert len(seen) == len(ledger.entries(RUN)) == 5 and len(work) == 3 and len(contexts) == 1
+    assert len(seen) == len(ledger.entries(RUN)) == 6 and len(work) == 3 and len(contexts) == 1
     assistants = [row['text'] for row in store.read_chat(RUN) if row['role'] == 'assistant']
     if change == 'interaction':
         assert len(assistants) == 1 and 'Synthetic unanswered fact' in assistants[0]
@@ -255,7 +258,7 @@ def test_direction_finishing_failure_retains_candidate_and_usage_without_extra_r
         tmp_path, monkeypatch, dispatch_round=3, finish=final)
     with pytest.raises(ModelError):
         send()
-    assert len(seen) == len(ledger.entries(RUN)) == 5 and len(work) == 3 and len(contexts) == 1
+    assert len(seen) == len(ledger.entries(RUN)) == 6 and len(work) == 3 and len(contexts) == 1
     assert store.latest_artifact(RUN, 'direction').version == 1
     assert not pipeline.is_complete(RUN, 'direction') and not store.list_reviews(RUN, 'direction')
     assert not any(row['role'] == 'assistant' for row in store.read_chat(RUN))
@@ -273,8 +276,8 @@ def test_independent_director_finishes_once_after_original_work_cap(tmp_path, mo
         original_wait()
     monkeypatch.setattr(orch, '_wait_owned_roles', wait)
     result = send()
-    assert result.stopped_because == 'done' and result.rounds == 13
-    assert len(work) == 12 and len(contexts) == 1 and len(seen) == len(ledger.entries(RUN)) == 14
+    assert result.stopped_because == 'done' and result.rounds == 14
+    assert len(work) == 12 and len(contexts) == 1 and len(seen) == len(ledger.entries(RUN)) == 15
     assert len([p for p in seen if not p.get('tools')]) == 1
 
 
@@ -294,5 +297,5 @@ def test_stop_after_reply_before_publication_keeps_candidate_without_assistant_c
     with pytest.raises(JobCancelled):
         send()
     assert store.latest_artifact(RUN, 'direction').version == 1
-    assert len(seen) == len(ledger.entries(RUN)) == 5
+    assert len(seen) == len(ledger.entries(RUN)) == 6
     assert not any(row['role'] == 'assistant' for row in store.read_chat(RUN))

@@ -319,6 +319,10 @@ test('saved and live agent progress stays in the chat turn without duplicate lin
   `, p.ctx);
   const host = p.el('conversation-body');
   const progress = host.querySelector('.turn-progress');
+  assert.equal(progress.querySelector('.turn-progress-history').open,false,
+    'tool narration is preserved in a collapsed journal by default');
+  assert.equal(progress.querySelector('.turn-working')?.parentNode,progress,
+    'the current working receipt remains visible outside the collapsed journal');
   assert.equal(progress.querySelectorAll('.progress-line').length, 2,
     'the persisted narration and new dispatch appear once each');
   assert.match(progress.textContent, /我先核对旧方案/);

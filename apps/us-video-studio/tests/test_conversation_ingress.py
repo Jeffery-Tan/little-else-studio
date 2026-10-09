@@ -141,6 +141,8 @@ def test_http_decision_runs_one_successor_and_produces_real_downstream_artifact(
                   tool_turn('writing', 'dispatch', {'stage': 'writing', 'brief': '开头生活化一点'}),
                   tool_turn('writing-doc', 'submit_stage', {'stage': 'writing', 'content': 'Synthetic writing', 'summary': 'writing',
                       'structured': {'segments': [{'tc': '0-2s', 'picture': 'office lunch', 'line': 'Everyday.', 'sound': 'room', 'duration': 2}], 'total_duration': 2}}),
+                  tool_turn('delivery-check', 'submit_delivery_check', {'verdict': 'ready',
+                      'summary': 'Synthetic saved script check for this offline lifecycle.', 'findings': []}),
                   final_turn('当前完整方案已保存，请阅读。')])]
     factory_calls = []
     def factory():
@@ -180,6 +182,9 @@ def test_http_decision_runs_one_successor_and_produces_real_downstream_artifact(
         assert continued.status_code == 200, continued.text
         assert continued.json()['job_id'] == successor['job_id']
         assert len(factory_calls) == 2 and provider_calls == []
+        assert models[1].calls[-2]['tool_names'] == ['submit_delivery_check']
+        assert models[1].calls[-1]['tool_names'] == []
+        assert len([e for e in store.read_events(RUN) if e['kind'] == 'delivery_self_check']) == 1
         assert len([e for e in store.read_events(RUN) if e['kind'] == 'decision_followup_consumed']) == 1
         assert len([e for e in store.read_events(RUN) if e['kind'] == 'user_message_received']) == 1
         assert [e['text'] for e in store.read_chat(RUN) if e['role'] == 'user'] == [payload['text']]

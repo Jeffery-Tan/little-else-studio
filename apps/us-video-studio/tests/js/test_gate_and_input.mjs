@@ -1079,7 +1079,10 @@ test('Enter and send submit while stop has a separate button', () => {
   // Both buttons dispatch on the mode the renderer set, so a press can never do
   // the opposite of the word printed on it.
   assert.match(source, /dataset\.mode === 'stop'/, 'the primary button reads its own mode');
-  assert.match(source, /\$\("job-stop"\)\.onclick = \(\) => \{ void submit\(\); \}/);
+  const secondary=source.slice(source.indexOf('$("job-stop").onclick'),source.indexOf('$("chat-input").addEventListener("keydown"'));
+  assert.match(secondary,/dataset\.mode==='stop-query'/,'query cancellation reads the rendered secondary mode');
+  assert.match(secondary,/stopCurrentJob\(\);return;/);
+  assert.match(secondary,/void submit\(\);/,'ordinary adjustment still goes through submit');
 });
 
 test('the composer draft tray also clears only after the request is accepted', async () => {

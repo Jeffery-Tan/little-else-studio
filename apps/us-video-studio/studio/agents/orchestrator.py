@@ -119,6 +119,8 @@ class Orchestrator:
         self._product_video_report = None
         self._product_video_used = False
         self._finishing_guard = None
+        self._delivery_check_result = None
+        self._delivery_repair_scope = None
         if learning_service is None:
             from ..learning import LearningService
             learning_service = LearningService(store)
@@ -234,6 +236,8 @@ class Orchestrator:
         self._deliverable_stalls = 0
         self._analysis_completed = False
         self._finishing_guard = None
+        self._delivery_check_result = None
+        self._delivery_repair_scope = None
         self._scope_selected = False
         self._revision_scope = None
         self._turn_id = uuid.uuid4().hex
@@ -243,7 +247,7 @@ class Orchestrator:
                             and e.get('user_input_id') == source_id and 'artifact_baseline' in e), None)
         baseline = (prior_scope['artifact_baseline'] if prior_scope else {
             stage: {'version': artifact.version, 'sha256': artifact.sha256} if artifact else None
-            for stage in ('intake', 'direction', 'writing')
+            for stage in ('intake', 'direction', 'material_plan', 'writing')
             for artifact in [self.store.latest_artifact(self.run_id, stage)]})
         self._artifact_baseline = baseline
         self._dispatched_stages = set()
@@ -285,7 +289,7 @@ class Orchestrator:
                                 user_input_id=self._task_user_input['message_id'] if self._task_user_input else None,
                                 constraints=self._task_constraints, project_constraints=self._project_constraints)
         self.method_context = self.learning.prepare_context(
-            self.run_id, "orchestrator", **self.selection, purpose="message")
+            self.run_id, "orchestrator", **self.selection, purpose="message", task_query=self._current_user_message)
         self._context_refs = [self.method_context["evidence_ref"]]
 
         history = self._build_messages(allow_empty=internal_instruction)
@@ -340,7 +344,8 @@ class Orchestrator:
             if historical_readonly:
                 allowed_readonly = {'read_project_state', 'read_conversation_history',
                                     'read_artifact', 'read_work_plan', 'read_capabilities',
-                                    'read_production', 'list_reviews', 'list_materials', 'ask_user'}
+                                    'read_production', 'list_reviews', 'list_materials', 'ask_user',
+                                    'read_workspace_object', 'compare_workspace_objects'}
                 available_tools = [tool for tool in available_tools if tool['name'] in allowed_readonly]
             # run_agent_loop selects tools before system for each request. Freeze
             # that single trusted branch for both factories, not two state reads.
@@ -385,6 +390,7 @@ class Orchestrator:
                         'evidence_ref': self.method_context['evidence_ref']})
             if self.check_cancel:
                 self.check_cancel()
+            from ..stage_checkpoints import checkpoint, reserve_work_round
             result = (LoopResult(text='', messages=history, rounds=0, stopped_because='done')
                       if self._condition_blocker() else run_agent_loop(
                 budgeted,
@@ -403,7 +409,10 @@ class Orchestrator:
                 check_cancel=self.check_cancel,
                 stop_when=lambda: bool(self._turn_blocker()),
                 completion_check=self._completion_check,
-                finishing_context=self._finishing_context,
+                finishing_context=lambda: self._checked_finishing_context(budgeted),
+                stage_checkpoint=lambda: checkpoint(self, budgeted),
+                before_work_round=lambda: reserve_work_round(self),
+                settle_stage=self._wait_owned_roles,
                 on_activity=lambda event: self._emit({"role": "orchestrator", "stage": "", **event}),
                 on_turn=lambda t: self._emit(
                     {"type": "agent_turn", "role": "orchestrator", "stage": "",
@@ -413,11 +422,12 @@ class Orchestrator:
                     {"type": "agent_tool", "role": "orchestrator", "stage": "", **r}
                 ),
             ))
-            self._wait_owned_roles()
+            if self._owned_active_roles():
+                self._wait_owned_roles()
             if result.stopped_because == 'max_rounds' and self._finishing_guard is None:
                 # Independent work may settle only after the final tool round.
                 # This uses the same one-call conclusion, never another work loop.
-                context = self._finishing_context()
+                context = self._checked_finishing_context(budgeted)
                 if context is not None:
                     result = complete_finishing_turn(budgeted,
                         model=self.settings.model_for('orchestrator'), context=context,
@@ -477,6 +487,14 @@ class Orchestrator:
             result.tool_log.append({'tool': 'dispatch', 'ok': True})
             result.text = '新版创意方向已保存。请阅读 A/B/C 的差异，在对话区点选或提出修改意见。'
         delivery = self._deliverable_status()
+        if self._delivery_check_result:
+            check = self._delivery_check_result
+            delivery = {**delivery, 'producer_check': check}
+            if check['verdict'] != 'ready':
+                delivery = {**delivery, 'status': 'incomplete',
+                    'missing': [*delivery.get('missing', []), check.get('repair_blocker') or check['summary']],
+                    'note': '作品已保存，但交付前自检仍有未解决的问题。' + (check.get('repair_blocker') or check['summary'])}
+                result.stopped_because = 'incomplete'
         if asked_user:
             # ask_user persisted the question and ended the turn. Do not add a
             # generic unfinished-deliverable reply below that question.
@@ -791,6 +809,12 @@ class Orchestrator:
             return None
         return source
 
+    def _checked_finishing_context(self, client):
+        from dataclasses import replace
+        from ..delivery_check import prepare
+        context = self._finishing_context()
+        return replace(context, prepare=lambda: prepare(self, client, context)) if context else None
+
     def _finishing_context(self):
         """Only an owned, settled new artifact may enter its narrow conclusion."""
         from ..agent_runtime import AgentRuntime, current_task_id
@@ -798,7 +822,11 @@ class Orchestrator:
         if goal == 'direction':
             return self._direction_finishing_context()
         source = self._task_user_input or self._current_user_input
-        if (goal not in {'writing', 'revision'} or not source or not self._scope_selected
+        decision = self._decision_context
+        if decision:
+            from ..decision_continuation import validate
+            validate(self.store, self.pipeline, self.run_id, decision)
+        if (goal not in {'writing', 'revision'} or (not source and not decision) or not self._scope_selected
                 or self._decision_recorded or not production_allowed(self.selection)
                 or self._task_constraints.get('task_mode') in {'stop', 'status', 'discuss', 'clarify'}
                 or self._production_scope or self._production_feedback or self._turn_blocker()):
@@ -813,13 +841,14 @@ class Orchestrator:
         scope = self._revision_scope
         if goal == 'revision' and (not scope or scope['stage'] != 'writing'):
             return None
-        source_id, turn_id = source['message_id'], self._turn_id
+        source_id, turn_id = source['message_id'] if source else None, self._turn_id
         if parent.get('source_message_id') != source_id:
             return None
         def reply_rows():
             return self._reply_constraints if (self._current_user_input or {}).get('message_id') == source_id else []
         def binding():
             return json.dumps({'source': self._task_user_input or self._current_user_input,
+                               'decision_context': self._decision_context,
                                'task': self._task_constraints, 'revision': self._revision_scope,
                                'project_constraints': self._project_constraints,
                                **({'reply_constraints': reply_rows()} if reply_rows() else {})},
@@ -868,7 +897,8 @@ class Orchestrator:
             sources = [artifact]
             old = None
             data = {'phase': 'finishing', 'goal': goal, 'source_message_id': source_id,
-                    'user_text': source['text'], 'task_constraints': self._task_constraints,
+                    'user_text': source['text'] if source else None, 'task_constraints': self._task_constraints,
+                    **({'decision_context': decision} if decision else {}),
                     **({'reply_constraints': json.loads(json.dumps(reply_rows()))} if reply_rows() else {}),
                     'project_constraints': self._project_constraints, 'current_script': full_saved(artifact),
                     'user_adopted': self.pipeline.is_complete(self.run_id, 'writing'),
@@ -887,10 +917,8 @@ class Orchestrator:
                 old = self.store.read_artifact(self.run_id, 'writing', scope['version'])
                 if old.sha256 != scope['sha256'] or not self.store.verify_artifact(self.run_id, 'writing', old.version):
                     return None
-                applied = next((event for event in reversed(self.store.read_events(self.run_id))
-                                if event['kind'] == 'agent_revision_applied'
-                                and event.get('plan_id') == scope['plan_id']
-                                and event.get('sha256') == artifact.sha256), None)
+                from ..revision_scope import applied_revision
+                applied = applied_revision(self.store, self.run_id, scope, artifact)
                 if applied is None:
                     return None
                 data.update(revision_scope=scope, old_baseline=full_saved(old),
@@ -900,6 +928,8 @@ class Orchestrator:
             with self.store.run_lock(self.run_id):
                 if self.check_cancel:
                     self.check_cancel()
+                if decision:
+                    validate(self.store, self.pipeline, self.run_id, decision)
                 if (current_task_id() != parent_id or self._turn_id != turn_id or binding() != frozen_binding
                         or (self._task_user_input or self._current_user_input or {}).get('message_id') != source_id):
                     raise NonRetryableStageError('收尾对应的用户来源已变化，未发布旧任务回答。')
@@ -1305,6 +1335,8 @@ class Orchestrator:
             'read_capabilities 是全局能力目录，不是本次请求的工具权限；只能使用本次已发送工具。'
             '涉及迁移或旧项目限制时读取 read_project_history；核对在途角色时读取准确工作计划与角色记录。'
             '需要制作原描述时先读 read_production 状态，再按准确 draft_id 与 expected_sha256 读详情。'
+            '画布准确对象用 read_workspace_object，两个明确文字版本用 compare_workspace_objects 获取逐字差异；'
+            '只读比较不需重新加载创作方法，不把差异当作内容或市场效果评分。'
             '详情中的 source_shot 是核对过来源指纹的该段原文；历史来源仍是历史，不换成最新方案。'
             '原输入、来源或结果无法核对时说明具体缺失，不宣称已看像素、不自动重试。'
             'ask_user 只用于必要澄清，不把本轮回答改成新的采用、图审或费用批准。'),
@@ -1321,12 +1353,13 @@ class Orchestrator:
             self._spend_line(),
             '# 本轮完整用户原话\n' + json.dumps(self._current_user_message, ensure_ascii=False),
             REPLY_GUIDANCE,
-            self.method_context['text'] if self.method_context else '',
         ])
 
     def _current_task_extra(self, *, historical_readonly=False):
         """Request-local facts survive history compaction without new authority."""
         source = self._task_user_input or self._current_user_input
+        from ..workspace_objects import annotation_context
+        annotations = annotation_context(self.store, self.run_id, source['message_id']) if source else []
         if historical_readonly:
             instruction = '旧方法只读回放：只交付已保存状态，不选择创作范围或调用观察。'
         elif self._decision_recorded:
@@ -1351,6 +1384,7 @@ class Orchestrator:
             instruction = '内部接续只有已保存来源，没有新用户原话；不能创造新解释或条件，原范围不足时如实说明。'
         return '\n# 本轮绑定的真实用户来源与仍有效的项目条件\n' + json.dumps({
             'current_input': self._task_constraints, 'project_constraints': self._project_constraints,
+            **({'selected_annotations': annotations} if annotations else {}),
             **({'reply_constraints': self._reply_constraints} if self._reply_constraints else {}),
             **({'production_feedback_binding': self._production_feedback} if self._production_feedback else {}),
             'input_authority': 'current_user_receipt' if self._current_user_input else
@@ -1470,7 +1504,7 @@ class Orchestrator:
             workspace.render_state(),
             workspace.render_context('writing' if self.store.latest_artifact(self.run_id, 'intake') else 'intake',
                 reference_selection=self._reference_binding, include_reference=self._reference_binding is not None),
-            "# Studio 方法目录与显式路由\n" + json.dumps(self.learning.skill_catalog(), ensure_ascii=False),
+            "# Studio 方法目录与显式路由\n" + json.dumps(self.learning.skill_catalog(run_id=self.run_id), ensure_ascii=False),
             "本轮当前解释和显式路由以请求末尾的真实任务与范围投影为准，历史路由不能提供当前权限。",
             "确定本次创作目标后，按任务条件查看合资格方法及其不适用条件；可以拒绝现有方法。决定参考某方法时先用 read_learning_method 读取准确正文、支持与反例。若方法确实影响了已保存稿件，用 record_method_usage 绑定准确段落。该记录只是使用声明，不能代替自检或效果验证。",
             ("本轮可逆准备范围已由真实 UI 决定冻结并选择。直接按准确已采用版本完成绑定交付，不创建任务解释或改选范围。"
@@ -1496,6 +1530,13 @@ class Orchestrator:
     # --------------------------------------------------------------- tools -- #
 
     def _execute(self, name: str, args: dict[str, Any], workspace: Workspace) -> str | ToolResult:
+        if name in {'read_workspace_object', 'compare_workspace_objects'}:
+            from ..workspace_objects import read_object, compare
+            with self.store.run_lock(self.run_id):
+                result = (read_object(self.store, self.pipeline, self.run_id, args['target'])
+                    if name == 'read_workspace_object' else compare(self.store, self.pipeline,
+                        self.run_id, args['left'], args['right']))
+            return json.dumps(result, ensure_ascii=False)
         if self._decision_context and name in {'observe_images', 'observe_reference', 'observe_product_video'}:
             raise ToolError('本轮只按已采用版本准备后续内容；请读取已保存观察，不能增设来源或重新观察。')
         if self._decision_context and name in {
@@ -1838,6 +1879,7 @@ class Orchestrator:
                 elif not current(self.store, self.run_id):
                     select(self.store, self.run_id, 'autonomous')
             context = self.learning.prepare_context(self.run_id, "orchestrator", **selection, purpose="message",
+                task_query=self._current_user_message,
                 **({'reference_selection': reference} if reference else {}))
             self.store.append_event(self.run_id, "creative_context_selected", selection=selection,
                                     snapshot_sha256=context["snapshot_sha256"], turn_id=self._turn_id,
@@ -2062,6 +2104,7 @@ class Orchestrator:
             selection.update({k: args[k] for k in ("tags", "case_ids") if k in args})
             reference = self._bound_reference()
             context = self.learning.prepare_context(self.run_id, "orchestrator", **selection, purpose="message",
+                task_query=self._current_user_message,
                 **({'reference_selection': reference} if reference else {}))
             self._context_refs.append(context["evidence_ref"])
             return context["text"]

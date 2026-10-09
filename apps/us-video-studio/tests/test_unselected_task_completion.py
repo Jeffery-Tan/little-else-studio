@@ -43,6 +43,9 @@ def test_real_http_binding_then_early_end_reminds_scope_and_delivers_same_task(t
         names = {item['function']['name'] for item in payload.get('tools', [])}
         if 'submit_stage' in names:
             return wire(submission(format))
+        if 'submit_delivery_check' in names:
+            return reply(('submit_delivery_check', {'verdict': 'ready',
+                'summary': 'Synthetic saved script check for this offline lifecycle.', 'findings': []}))
         if not names:
             return reply(text='完整稿件已保存，等待阅读；本轮没有生成媒体。')
         work.append(payload)
@@ -69,7 +72,9 @@ def test_real_http_binding_then_early_end_reminds_scope_and_delivers_same_task(t
     finally:
         reset_task(token)
     assert result.stopped_because == 'done' and result.deliverable['status'] == 'complete'
-    assert len(seen) == 6 and len(work) == 4  # one writer and one tool-free conclusion
+    assert len(seen) == 7 and len(work) == 4  # writer, producer check, and tool-free conclusion
+    assert [tool['function']['name'] for tool in seen[-2]['tools']] == ['submit_delivery_check']
+    assert not seen[-1].get('tools')
     assert sum(e.get('phase') == 'continuing' for e in events) == 1
     saved = interpretation_for(store, run, receipt['message_id'])
     assert saved['task'] == declared['task']
@@ -79,6 +84,8 @@ def test_real_http_binding_then_early_end_reminds_scope_and_delivers_same_task(t
     assert len(sessions) == 1 and sessions[0]['stage'] == 'writing'
     assert sessions[0]['source_message_id'] == receipt['message_id']
     assert sessions[0]['parent_job_id'] == 'scope-job'
+    checks = [e for e in store.read_events(run) if e['kind'] == 'delivery_self_check']
+    assert len(checks) == 1 and checks[0]['source_message_id'] == receipt['message_id']
     assert all(e['kind'] not in {'production_execution_authorized', 'production_generation_started'}
                for e in store.read_events(run))
 

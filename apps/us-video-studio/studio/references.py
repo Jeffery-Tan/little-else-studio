@@ -199,7 +199,7 @@ def install_reference_routes(app, jobs, require_run, learning):
     def change(run_id, payload, remove_case=None):
         require_run(run_id)
         with jobs.lock, jobs.store.run_lock(run_id):
-            if jobs.active is not None:
+            if jobs.has_executions():
                 raise HTTPException(409, '请等待当前任务结束，再调整项目参考。')
             if any(s.open_attempt for s in jobs.pipeline.state(run_id).stages.values()):
                 raise HTTPException(409, '项目还有未完成的创作，请先完成或结束该轮任务。')

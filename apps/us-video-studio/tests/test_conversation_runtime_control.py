@@ -164,6 +164,8 @@ def test_actual_http_role_hierarchy_requires_saved_artifact_and_exposes_no_promp
                   {'stage': 'intake', 'content': 'Known isolated facts', 'summary': 'fixture'}),
         tool_turn('director', 'dispatch', {'stage': 'direction', 'brief': 'Isolated direction task'}),
         tool_turn('submit', 'submit_stage', {'content': 'Synthetic direction', 'summary': 'fixture'}),
+        tool_turn('delivery-check', 'submit_delivery_check', {'verdict': 'ready',
+            'summary': 'Synthetic saved direction check for this offline lifecycle.', 'findings': []}),
         final_turn('方向已保存')])
     with TestClient(build_app(settings_for(tmp_path), client_factory=lambda: model)) as http:
         make_run(http)
@@ -180,6 +182,9 @@ def test_actual_http_role_hierarchy_requires_saved_artifact_and_exposes_no_promp
         child = next(t for t in tasks if t['role'] == 'director')
         assert primary['task_id'] == http.app.state.jobs.latest(RUN)['job_id']
         assert primary['status'] == child['status'] == 'completed'
+        assert len([e for e in before if e['kind'] == 'delivery_self_check']) == 1
+        assert model.calls[-2]['tool_names'] == ['submit_delivery_check']
+        assert model.calls[-1]['tool_names'] == []
         assert child['parent_task_id'] == child['parent_job_id'] == primary['task_id']
         assert child['source_message_id'] == primary['source_message_id']
         artifact = store.latest_artifact(RUN, 'direction')

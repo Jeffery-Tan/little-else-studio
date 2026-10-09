@@ -259,7 +259,7 @@ test('photo conversation cannot open a new video batch from historical video rec
   assert.equal(app.read('currentBatchIntent()'),null);
   const posts=app.observed.filter(call=>call.method==='POST');
   assert.equal(posts.length,1);
-  assert.equal(posts[0].path,`/api/runs/${RUN}/jobs`);
+  assert.equal(posts[0].path,`/api/runs/${RUN}/jobs?enqueue=true`);
   assert.equal(posts[0].body.text,'准备全部视频输入');
   assert.equal(app.observed.some(call=>/batch\/continue|batch-generate|\/assemble/.test(call.path)),false);
 });

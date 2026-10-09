@@ -105,7 +105,7 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
         raise HTTPException(410, '独立审核 Agent 已停用；请查看当前稿并直接决定采用或退回。')
 
     @app.post('/api/runs/{run_id}/actions/revise-writing')
-    def revise_writing_action(run_id: str, payload: WritingRevisionIn):
+    def revise_writing_action(run_id: str, payload: WritingRevisionIn, enqueue: bool = False):
         require_run(run_id)
         try:
             from .conversation_input import receive
@@ -117,12 +117,12 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
                 return prepare_job(rid, writing_revision=payload, user_input_id=receipt['message_id'])
             return present_job(jobs.submit(run_id, payload.text, payload.request_id,
                 kind='writing_revision', payload=payload.model_dump(exclude={'request_id'}),
-                prepare=prepare_revision, user_input_id=receipt['message_id']))
+                prepare=prepare_revision, user_input_id=receipt['message_id'], enqueue=enqueue))
         except (PipelineError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @app.post('/api/runs/{run_id}/actions/resume-direction')
-    def resume_direction_action(run_id: str, payload: DirectionResumeIn):
+    def resume_direction_action(run_id: str, payload: DirectionResumeIn, enqueue: bool = False):
         require_run(run_id)
         from .direction_command import require_current
         try:
@@ -132,7 +132,7 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
             return present_job(jobs.submit(run_id, '按当前有效资料重做创意方向，完成后交给我点选。',
                 payload.request_id, kind='direction_resume',
                 payload={'expected_context_sha256': payload.expected_context_sha256},
-                prepare=prepare_direction))
+                prepare=prepare_direction, enqueue=enqueue))
         except (PipelineError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -198,7 +198,7 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
     jobs.prepare_followup = lambda rid, source_id: prepare_job(rid, source_user_input_id=source_id)
 
     @app.post("/api/runs/{run_id}/jobs")
-    def create_job(run_id: str, payload: JobIn):
+    def create_job(run_id: str, payload: JobIn, enqueue: bool = False):
         require_run(run_id)
         try:
             from .conversation_input import receive
@@ -223,7 +223,7 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
                 return present_job(jobs.submit(run_id, payload.text, payload.request_id,
                     kind='reference_recovery', payload=recovery_payload,
                     parent_job_id=recovery_meta['parent_job_id'], user_input_id=receipt['message_id'],
-                    prepare=lambda rid: app.state.prepare_reference_recovery(rid, receipt)))
+                    prepare=lambda rid: app.state.prepare_reference_recovery(rid, receipt), enqueue=enqueue))
             target = payload.feedback_target
             if target and payload.question_id:
                 raise ValueError('作品反馈不能同时回答待决问题。')
@@ -250,12 +250,16 @@ def install_execution_routes(app, connections, settings, ledger, jobs, store, pi
                                        user_input_id=receipt['message_id'])
                 return present_job(jobs.submit(run_id, payload.text, payload.request_id,
                     payload={'question_id': payload.question_id, **media_meta, **({'reference_consent': True} if payload.reference_consent else {})}, prepare=prepare_answer,
-                    user_input_id=receipt['message_id']))
+                    user_input_id=receipt['message_id'], enqueue=enqueue))
             return present_job(jobs.submit(run_id, message, payload.request_id,
                 payload={**target_meta, **media_meta, **({'reference_consent': True} if payload.reference_consent else {})} or None,
-                prepare=prepare_target, user_input_id=receipt['message_id']))
+                prepare=prepare_target, user_input_id=receipt['message_id'], enqueue=enqueue))
         except (PipelineError, ValueError, SafePreflightError) as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @app.get('/api/jobs/queue')
+    def execution_queue():
+        return jobs.queue()
 
     @app.get("/api/runs/{run_id}/jobs/latest")
     def latest_job(run_id: str, after_seq: int = 0):

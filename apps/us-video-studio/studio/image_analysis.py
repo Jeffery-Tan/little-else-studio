@@ -381,7 +381,7 @@ def install_image_analysis_routes(app, jobs, require_run, connections, settings,
     def confirm(run_id: str, analysis_id: str, payload: ConfirmIn):
         require_run(run_id)
         with jobs.lock:
-            if jobs.active is not None:
+            if jobs.has_executions():
                 raise HTTPException(409, '制作团队正在运行，请结束本轮后再确认素材观察。')
             try:
                 return confirm_candidate(store, run_id, analysis_id, **payload.model_dump())

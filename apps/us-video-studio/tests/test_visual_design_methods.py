@@ -122,8 +122,14 @@ def test_new_method_revision_preserves_saved_context_bytes(visual_env):
     card_path = service.repository_root / METHOD_CARDS['visual-design']['file']
     card_path.write_bytes(card_path.read_bytes() + b'\nFixture-only later revision\n')
     second = service.context(RUN, 'material', purpose='storyboard')
-    assert second['snapshot_sha256'] != first['snapshot_sha256']
-    assert second['method_cards'][0]['sha256'] != first['method_cards'][0]['sha256']
+    assert second['snapshot_sha256'] == first['snapshot_sha256']
+    status = service.pin_status(RUN)
+    service.refresh_run_pin(RUN, status['run_library_sha256'], status['current_library_sha256'],
+        'reviewed-method-update', expected_run_methods_sha256=status['run_methods_sha256'],
+        expected_current_methods_sha256=status['current_methods_sha256'])
+    updated = service.context(RUN, 'material', purpose='storyboard')
+    assert updated['snapshot_sha256'] != first['snapshot_sha256']
+    assert updated['method_cards'][0]['sha256'] != first['method_cards'][0]['sha256']
     assert old_path.read_bytes() == original
     assert 'Fixture-only later revision' not in json.loads(original)['text']
 

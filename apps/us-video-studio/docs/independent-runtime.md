@@ -19,12 +19,14 @@
       → ledger.py：调用 intent → settlement，未知用量留作诊断，不阻止新调用
       → image_analysis.py / revisions.py：分析候选及采用、局部修改新版本
       → learning.py / references.py：唯一学习库、实际输入快照、差异入库
+      → workspace_objects.py / http_workspace.py：准确对象与关系、项目布局、批注及选择执行
+      → method_snapshots.py / delivery_check.py / stage_checkpoints.py：方法快照、有界自检与阶段预算
       → production.py → codex_image.py / wan_video.py：显式制作、原任务回收
       → project_history.py：受控历史阅读；history_import.py 仅离线迁移
       → product_cards.py / outcomes.py：来源明确的资料复用、作品表现登记
 ```
 
-业务与费用记录继续使用文件和追加事件，没有新建任务数据库或第二套学习库。每个数据根只有一个写入服务，同一时刻执行一轮 Agent 任务；冲突明确拒绝，不隐藏排队。单 run 的版本锁不能替代数据根的 OS writer 锁。服务、离线恢复和导入共同取得 writer 锁，因此离线操作前必须停止相应服务。
+业务与费用记录继续使用文件和追加事件，没有新建任务数据库或第二套学习库。每个数据根只有一个写入服务、一个前台执行槽；文字入口可显式使用 `enqueue=true` 按 FIFO 排队，不选择排队的忙时请求仍拒绝。已提交的视频可占最多两个独立查询槽；单条视频等待远端结果时释放前台槽，仍有待提交项的视频批次继续独占。排队执行前重验资料、准确版本和模型配置，重启只标中断，不重放。单 run 的版本锁不能替代数据根的 OS writer 锁。服务、离线恢复和导入共同取得 writer 锁，因此离线操作前必须停止相应服务。详细限制见[工作台迭代契约](workspace-iteration-20261009.md)。
 
 ### 存储
 

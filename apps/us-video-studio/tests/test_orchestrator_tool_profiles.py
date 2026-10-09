@@ -302,7 +302,7 @@ def test_readonly_send_freezes_context_branch_and_preserves_full_grounded_condit
         assert request['tool_names'] == names(orchestrator_profile_tools('read_only'))
         assert 'CREATIVE_CONTEXT_NOT_FOR_READONLY' not in system and len(system) < 20000
         assert text in system and store.read_run(LOCAL_RUN).brief in system
-        assert 'Exact method\n\nOriginal method limits.' in system
+        assert 'Exact method\n\nOriginal method limits.' not in system
         marker = '# 本轮绑定的真实用户来源与仍有效的项目条件'
         context, _ = json.JSONDecoder().raw_decode(system.split(marker)[1].lstrip())
         assert context['current_input'] == orch._task_constraints

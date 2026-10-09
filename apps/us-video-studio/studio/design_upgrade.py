@@ -336,7 +336,7 @@ def install_routes(app, service, require_run):
         require_run(run_id)
         try:
             with service.jobs.lock, service.store.run_lock(run_id):
-                if service.jobs.active is not None:
+                if service.jobs.has_executions():
                     raise PipelineError('design_upgrade_busy', '团队正在执行，请本轮结束后保存设计补充。')
                 return save_proposal(service, run_id, payload)
         except (PipelineError, ValueError) as exc:

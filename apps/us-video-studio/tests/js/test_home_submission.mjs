@@ -47,7 +47,7 @@ async function page({data=server(),storage,fault}={}){
       assert.ok(!data.materials.has(key)||data.materials.get(key)===material[2],'same-name bytes cannot be replaced');
       data.materials.set(key,material[2]);return response({name:body.name});
     }
-    const job=String(url).match(/^\/api\/runs\/([^/]+)\/jobs$/);
+    const job=String(url).match(/^\/api\/runs\/([^/]+)\/jobs\?enqueue=true$/);
     if(job&&method==='POST'){
       const accepted={job_id:`job-${body.request_id}`,request_id:body.request_id,
         job_kind:'conversation',status:'succeeded',events:[]};
@@ -65,7 +65,7 @@ async function page({data=server(),storage,fault}={}){
   const submit=()=>app.document.getElementById('start-conversation').onsubmit({preventDefault(){}});
   return {...app,run,data,select,text,submit,status:()=>app.document.getElementById('start-status').textContent};
 }
-const posts=(data,suffix)=>data.calls.filter(call=>call.method==='POST'&&call.url.endsWith(suffix));
+const posts=(data,suffix)=>data.calls.filter(call=>call.method==='POST'&&call.url.split('?')[0].endsWith(suffix));
 
 test('home preflight remains editable and creates no identity or project for invalid attachments',async()=>{
   for(const [files,message] of [
@@ -88,7 +88,7 @@ test('home preflight remains editable and creates no identity or project for inv
 test('confirmed first-message rejection allows changes and reload, reuses its project/upload, then a fresh project starts clean',async()=>{
   let refuse=true;
   const p=await page({fault:call=>{
-    if(refuse&&call.method==='POST'&&call.url.endsWith('/jobs')){refuse=false;return response({detail:'Fixture job refused'},409);}
+    if(refuse&&call.method==='POST'&&call.url.endsWith('/jobs?enqueue=true')){refuse=false;return response({detail:'Fixture job refused'},409);}
   }});
   p.select('start-reference-files',[file()]);p.text('Original request');await p.submit();
   const rejected=posts(p.data,'/jobs')[0];
@@ -111,7 +111,7 @@ test('confirmed first-message rejection allows changes and reload, reuses its pr
   assert.equal(posts(p.data,'/api/conversations').length,2);
   assert.equal(p.data.calls.filter(call=>call.url.includes('/materials?')).length,2,
     'a previous project upload is not borrowed by a new project');
-  assert.match(posts(p.data,'/jobs')[2].url,/created-2\/jobs$/);
+  assert.match(posts(p.data,'/jobs')[2].url,/created-2\/jobs\?enqueue=true$/);
 });
 
 test('a definite partial-upload rejection can remove the bad attachment and send under a new identity without uploading confirmed files',async()=>{
@@ -167,7 +167,7 @@ test('unknown partial upload retains the same frozen request and confirmed files
 
 test('unknown accepted home job belongs to runtime receipt recovery after refresh, without another create, upload or job',async()=>{
   const p=await page({fault:(call,data)=>{
-    if(call.method==='POST'&&call.url.endsWith('/jobs')){
+    if(call.method==='POST'&&call.url.endsWith('/jobs?enqueue=true')){
       const job={job_id:'accepted-unknown',request_id:call.body.request_id,job_kind:'conversation',status:'succeeded',events:[]};
       data.accepted.set(call.body.request_id,job);data.latest.set('created-1',job);
       throw new TypeError('lost accepted job response');

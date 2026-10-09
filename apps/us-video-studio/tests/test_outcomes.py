@@ -19,7 +19,9 @@ def scene(tmp_path):
     store = Store(tmp_path)
     pipeline, _ = seed(store)
     app = FastAPI()
-    jobs = SimpleNamespace(store=store, pipeline=pipeline, lock=threading.RLock(), active=None)
+    jobs = SimpleNamespace(store=store, pipeline=pipeline, lock=threading.RLock(), active=None,
+                           remote_waiting=False, queued=False)
+    jobs.has_executions = lambda: jobs.active is not None or jobs.remote_waiting or jobs.queued
     def require_run(run_id):
         if not (store.run_dir(run_id) / 'run.json').exists():
             raise HTTPException(404, 'missing run')
@@ -177,6 +179,16 @@ def test_tampered_record_rejected(scene):
     path.write_text(path.read_text('utf-8').replace('Commute story', 'Tampered story'), encoding='utf-8')
     assert scene[0].get(f'/api/runs/{RUN}/outcomes').status_code == 409
     assert snapshot(scene).status_code == 409
+
+
+@pytest.mark.parametrize('state', ['remote_waiting', 'queued'])
+def test_pending_execution_prevents_reporting_before_writing_events(scene, state):
+    http, store, jobs = scene
+    setattr(jobs, state, True)
+    before = store.read_events(RUN)
+    assert jobs.active is None
+    assert publication(scene).status_code == 409
+    assert store.read_events(RUN) == before
 
 
 def test_busy_service_and_non_us_rejected(scene):

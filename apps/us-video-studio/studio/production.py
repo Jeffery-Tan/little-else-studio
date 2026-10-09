@@ -1748,7 +1748,7 @@ class Production:
 
     def attempts(self, run_id):
         return attempt_records(self.store, run_id, self.jobs.ledger.entries(run_id),
-                               execution_active=self.jobs.active is not None)
+                               execution_active=self.jobs.has_executions())
 
     def status(self, run_id, attempt_id, **update):
         self.event(run_id, 'production_status', attempt_id=attempt_id, update=update)
@@ -1826,8 +1826,8 @@ class Production:
         with self.store.run_lock(run_id):
             result = _read_state_without_service(
                 self.store, self.pipeline, run_id, ledger=self.jobs.ledger,
-                execution_active=self.jobs.active is not None)
-            result['active'] = bool(self.jobs.active)
+                execution_active=self.jobs.has_executions())
+            result['active'] = self.jobs.has_executions()
             result['unresolved_calls'] = self.jobs.ledger.totals().unknown_calls
         return result
 
@@ -1907,7 +1907,8 @@ class Production:
             return done('制作检查已保存，请在制作页面查看。')
         return run, frozen[2] if frozen else snapshot.public()
 
-    def prepare_generation(self, run_id, draft_id, payload, *, authorized=None, _draft_reader=None):
+    def prepare_generation(self, run_id, draft_id, payload, *, authorized=None, _draft_reader=None,
+                           _allow_remote_wait=True):
         self.require_nonce(run_id, payload.nonce)
         if not payload.consent:
             raise ValueError('请核对图片、实际描述与费用后确认本次生成。')
@@ -1955,6 +1956,7 @@ class Production:
             raise ValueError('此生成记录已经存在，请查询原任务，不要重新提交。')
         def run(_text, emit, check_cancel):
             check_cancel()
+            submitted = False
             with self.jobs.ledger.call_guard():
                 self.validate_generation_set(run_id, authorized)
                 if image_model and self.image_model_selection() != image_model:
@@ -1970,11 +1972,17 @@ class Production:
                 self.status(run_id, attempt_id, status='submitting', message='已记录本次请求，正在提交。')
                 emit({'type': 'status', 'message': '正在生成；关闭页面不取消提供方任务。'})
                 if d['kind'] == 'video':
-                    self.submit_video(run_id, attempt_id, d, raw[0], client, check_cancel, authorized)
+                    submitted = self.submit_video(run_id, attempt_id, d, raw[0], client, check_cancel,
+                                                  authorized, poll=not _allow_remote_wait)
                 else:
                     self.submit_image(run_id, attempt_id, d, raw, client, check_cancel,
                                       image_model['model'], authorized)
                 attempt = self.attempts(run_id)[attempt_id]
+            if submitted and _allow_remote_wait:
+                released = self.jobs.release_for_remote_wait(run_id, attempt_id, attempt['task_id'])
+                with self.jobs.ledger.call_guard(concurrent=released, check_cancel=check_cancel):
+                    self.poll_video(run_id, attempt_id, d, client, check_cancel)
+                    attempt = self.attempts(run_id)[attempt_id]
             return outcome(attempt, '本次制作状态已保存，请在制作页查看结果与用量。')
         return run, {'provider': 'dashscope' if d['kind'] == 'video' else 'codex_cli',
                      'model': (image_model['model'] or 'codex-default') if image_model else d['model'],
@@ -2057,7 +2065,7 @@ class Production:
                               consent=True, nonce=payload.nonce,
                               expected_connection_revision=image_connection_revision)
             runner, _ = self.prepare_generation(run_id, item.draft_id, action, authorized=authorized,
-                                                _draft_reader=draft_reader)
+                                                _draft_reader=draft_reader, _allow_remote_wait=False)
             prepared.append(runner)
 
         def run(_text, emit, check_cancel):
@@ -2215,7 +2223,7 @@ class Production:
             self.event(run_id, 'production_output', attempt_id=attempt_id, output=out)
             return out
 
-    def submit_video(self, run_id, attempt_id, d, raw, client, check_cancel, authorized):
+    def submit_video(self, run_id, attempt_id, d, raw, client, check_cancel, authorized, *, poll=True):
         from .agents.wan_video import WanVideoRequest, WanVideoError
         self.validate_submission_authorization(run_id, attempt_id, authorized)
         try:
@@ -2237,7 +2245,9 @@ class Production:
             return
         self.status(run_id, attempt_id, status='submitted', task_id=result.task_id, endpoint=result.endpoint,
                     message='百炼已接收任务，正在等待视频。')
-        self.poll_video(run_id, attempt_id, d, client, check_cancel)
+        if poll:
+            self.poll_video(run_id, attempt_id, d, client, check_cancel)
+        return True
 
     def poll_video(self, run_id, attempt_id, d, client, check_cancel):
         a = self.attempts(run_id)[attempt_id]
@@ -2262,7 +2272,14 @@ class Production:
                     self.status(run_id, attempt_id, status='succeeded',
                         message='视频已保存，待观看验收。' + ('费用请在百炼平台查看。' if quantity is None else ''))
                     return
-                if result.status in {'FAILED', 'CANCELED', 'UNKNOWN'}:
+                if result.status == 'UNKNOWN':
+                    # UNKNOWN also covers expired task queries. It is not
+                    # evidence that generation failed or that no cost accrued.
+                    self.status(run_id, attempt_id, status='unknown',
+                        message='百炼返回 UNKNOWN，原任务结果仍待核实。任务查询有效期为 24 小时，过期后无法通过此接口取回结果；'
+                                '请核对提供方原任务记录与账单，不能据此认定失败或重新提交生成。')
+                    return
+                if result.status in {'FAILED', 'CANCELED'}:
                     # A failed task is not proof of zero usage. Keep it explicit.
                     self.status(run_id, attempt_id, status='failed', message='百炼任务未完成；可检查输入后再发起新任务。')
                     return
@@ -2345,7 +2362,9 @@ class Production:
         d = self.get_draft(run_id, a['draft_id'])
         client = self.video_client()
         def run(_text, emit, check_cancel):
-            with self.jobs.ledger.call_guard():
+            # Querying a known task never submits generation. Share the existing
+            # process lease so text calls can run; reconciliation stays excluded.
+            with self.jobs.ledger.call_guard(concurrent=True, check_cancel=check_cancel):
                 self.poll_video(run_id, attempt_id, d, client, check_cancel)
                 attempt = self.attempts(run_id)[attempt_id]
             return outcome(attempt, '原视频任务查询完成，没有提交新的生成请求。')
@@ -2361,7 +2380,7 @@ def install_production_routes(app, jobs, require_run, connections, settings, lea
     install_design_upgrade_routes(app, service, require_run)
 
     def idle():
-        if jobs.active is not None:
+        if jobs.has_executions():
             raise ValueError('制作团队正在执行，请本轮结束后再保存或确认。')
 
     def continue_after_image_approval(run_id: str, name: str, sha256: str, *, retry_request_id: str | None = None):
@@ -2717,7 +2736,8 @@ def install_production_routes(app, jobs, require_run, connections, settings, lea
         require_run(run_id)
         try:
             return jobs.submit(run_id, '查询原视频任务：' + attempt_id, payload.request_id, kind='production_refresh',
-                payload={'attempt_id': attempt_id}, prepare=lambda _: service.prepare_refresh(run_id, attempt_id))
+                payload={'attempt_id': attempt_id}, prepare=lambda _: service.prepare_refresh(run_id, attempt_id),
+                query_only=True)
         except (ValueError, PipelineError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -2793,8 +2813,17 @@ def install_production_routes(app, jobs, require_run, connections, settings, lea
                         ok=bool(a.get('output')), note='用户核账：' + payload.evidence_note,
                         request_id=a.get('task_id', ''), estimated_cny=cny,
                         pricing_source=d['estimate']['source'])
-                    service.status(run_id, attempt_id, status=a['status'] if a.get('output') else 'failed',
-                        message='已保留提供方核账依据；没有重新生成。', recovery_evidence=payload.evidence_note)
+                    # A billing receipt resolves usage, not the outcome of a
+                    # submitted video. Keep its unknown result blocking repeats.
+                    keep_outcome = bool(a.get('output')) or (
+                        a['media_kind'] == 'video' and a.get('task_id')
+                        and a['status'] in UNRESOLVED_MEDIA_PHASES)
+                    message = '已保留提供方核账依据；没有重新生成。'
+                    if keep_outcome and a['status'] == 'unknown' and not a.get('output'):
+                        message += ('原视频结果仍待核实；任务查询有效期为 24 小时，过期后无法通过此接口取回结果。'
+                                    '费用记录不能证明生成失败，不能重新提交生成。')
+                    service.status(run_id, attempt_id, status=a['status'] if keep_outcome else 'failed',
+                        message=message, recovery_evidence=payload.evidence_note)
                 return {'recovered': True, 'new_generation': False}
         except (ValueError, PipelineError) as exc:
             raise HTTPException(409, str(exc)) from exc

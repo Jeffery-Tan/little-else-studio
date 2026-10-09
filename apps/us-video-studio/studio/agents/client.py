@@ -125,6 +125,8 @@ class FinishingContext:
     messages: list[dict[str, Any]]
     check_current: Callable[[], None]
     stage: str = 'writing'
+    prepare: Callable[[], 'FinishingContext'] | None = None
+    preparation_rounds: int = 0
 
 
 class ModelClient(Protocol):
@@ -591,8 +593,10 @@ def complete_finishing_turn(client: ModelClient, *, model: str, context: Finishi
     """One tool-free call; no continuation, fallback, execution or second attempt."""
     if check_cancel:
         check_cancel()
+    if context.prepare is not None:
+        context = context.prepare()
     context.check_current()
-    finishing_round = work_result.rounds + 1
+    finishing_round = work_result.rounds + context.preparation_rounds + 1
     if on_activity:
         on_activity({'type': 'agent_activity', 'phase': 'finishing',
                      'stage': context.stage, 'round': finishing_round})
@@ -643,6 +647,9 @@ def run_agent_loop(
     tools_for_request: Callable[[], list[dict[str, Any]]] | None = None,
     system_for_request: Callable[[], str] | None = None,
     preserve_final_text: Callable[[], bool] | None = None,
+    stage_checkpoint: Callable[[], str | None] | None = None,
+    before_work_round: Callable[[], None] | None = None,
+    settle_stage: Callable[[], None] | None = None,
 ) -> LoopResult:
     """Drive a tool-use conversation to completion.
 
@@ -671,9 +678,15 @@ def run_agent_loop(
     if hasattr(client, 'public_progress'):
         client.public_progress = on_activity
 
-    for round_index in range(1, max_rounds + 1):
+    round_index, phase_rounds = 0, 0
+    completed_phases: set[str] = set()
+    while phase_rounds < max_rounds:
+        round_index += 1
+        phase_rounds += 1
         if check_cancel is not None:
             check_cancel()
+        if before_work_round is not None:
+            before_work_round()
         request_tools = copy.deepcopy(tools_for_request() if tools_for_request is not None else tools)
         if (not isinstance(request_tools, list) or any(not isinstance(tool, dict)
                 or not isinstance(tool.get('name'), str) or not tool['name'] for tool in request_tools)
@@ -757,7 +770,7 @@ def run_agent_loop(
             if completion_check and turn.stop_reason == 'end_turn':
                 reminder = completion_check()
                 incomplete = bool(reminder)
-                if reminder and completion_reminders and round_index < max_rounds:
+                if reminder and completion_reminders and phase_rounds < max_rounds:
                     convo.append({'role': 'assistant', 'content': turn.text or '准备结束本轮。'})
                     convo.append({'role': 'user', 'content': reminder})
                     text_seen.clear()
@@ -897,6 +910,16 @@ def run_agent_loop(
             # batch before returning. No dangling tool_use blocks on resume.
             return LoopResult(text="", messages=convo, rounds=round_index,
                               stopped_because="done", tool_log=tool_log)
+        if phase_rounds >= max_rounds and settle_stage is not None:
+            settle_stage()
+        if stage_checkpoint is not None:
+            checkpoint = stage_checkpoint()
+            # At most four distinct creative stages. Rewriting or polling the
+            # same stage never renews its budget; root calls remain shared.
+            if checkpoint is not None and checkpoint not in completed_phases and len(completed_phases) < 3:
+                completed_phases.add(checkpoint)
+                phase_rounds = 0
+                completion_reminders = 1
         if finishing_context is not None:
             context = finishing_context()
             if context is not None:
@@ -909,7 +932,7 @@ def run_agent_loop(
     return LoopResult(
         text=_final_reply_text("\n".join(text_seen), preserve_final_text),
         messages=convo,
-        rounds=max_rounds,
+        rounds=round_index,
         stopped_because="max_rounds",
         tool_log=tool_log,
     )

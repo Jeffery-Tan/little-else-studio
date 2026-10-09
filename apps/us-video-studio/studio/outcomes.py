@@ -258,7 +258,7 @@ def install_outcome_routes(app, jobs, require_run):
         require_run(run_id)
         try:
             with jobs.lock:
-                if jobs.active is not None:
+                if jobs.has_executions():
                     raise ValueError('请等待当前创作任务结束，再记录作品表现。')
                 return action()
         except (ValueError, OSError, PipelineError) as exc:

@@ -37,9 +37,9 @@ import re
 #: Work must stop. Deliberately narrow: only phrases that are unambiguously an
 #: instruction to stop, never a question that happens to contain 停.
 STOP_PATTERNS = (
-    r'^(?:请|先|马上|立刻|赶紧|快)?(?:暂停|停(?:止|下|一?下)?)(?:一下)?[。.!！~\s]*$',
+    r'^(?:请)?(?:先|马上|立刻|赶紧|快)?(?:暂停|停(?:止|下|一?下)?)(?:一下)?[。.!！~\s]*$',
     r'^(?:这次|本轮)?(?:先|马上|立刻)?(?:别|不要|不用)(?:再)?(?:做|继续|生成|跑|干)了?[。.!！~\s]*$',
-    r'^(?:请|先)?(?:停止|暂停|停下|停掉|取消)(?:一下)?(?:当前|这个|这次|本轮|整个|正在执行的|正在进行的|在跑的)?(?:任务|生成|制作|工作)(?:吧)?[。.!！~\s]*$',
+    r'^(?:请)?(?:先|马上|立刻)?(?:停止|暂停|停下|停掉|取消)(?:一下)?(?:当前|这个|这次|本轮|整个|正在执行的|正在进行的|在跑的)?(?:任务|生成|制作|工作)(?:吧)?[。.!！~\s]*$',
     r'^(?:停|停止|停下|停一下|取消|取消吧|算了|别做了|不做了)[吧了。.!！~\s]*$',
 )
 
@@ -65,6 +65,31 @@ def _normalised(text: str) -> str:
     return re.sub(r'\s+', ' ', str(text or '')).strip()
 
 
+def _immediate_stop(value: str) -> bool:
+    """Recognize a complete stop clause without discarding its qualifiers.
+
+    Explanations or a new request after an unconditional stop cannot turn it
+    into permission to start a successor. Quoted, conditional and deferred
+    stops remain ordinary input for the producer, rather than immediate stop
+    controls extracted from somebody else's words or a future condition.
+    """
+    unquoted = re.sub(r'"[^"\n]*"|“[^”\n]*”|「[^」\n]*」|『[^』\n]*』|\'[^\'\n]*\'',
+                      'quoted_text', value)
+    qualifier = re.compile(
+        r'^(?:如果|假如|要是|倘若|除非|只有|当.+(?:时|的时候)|等|待|做完|完成后|结束后|'
+        r'先.+(?:做完|完成|结束)|(?:你|他|她|他们|别人)(?:刚才)?说|'
+        r'原话|台词|口播|按钮|标题|写上|写成)')
+    for sentence in re.split(r'[。.!！；;]+', unquoted):
+        parts = [part.strip() for part in re.split(r'[，,]+', sentence) if part.strip()]
+        if any(re.match(r'^(?:如果|假如|要是|倘若|除非|只有)', part) for part in parts):
+            continue
+        for index, part in enumerate(parts):
+            if (any(re.fullmatch(pattern, part) for pattern in STOP_PATTERNS)
+                    and not any(qualifier.match(previous) for previous in parts[:index])):
+                return True
+    return False
+
+
 def classify(text: str) -> dict:
     """Return ``{'class', 'reason'}`` for one in-flight message.
 
@@ -84,9 +109,13 @@ def classify(text: str) -> dict:
     # Interpret the full instruction, including negation and wait clauses. A
     # prohibition on future video generation inside a writing request is not a
     # command to cancel all current work.
-    if clauses and all(stop(part) or re.fullmatch(wait, part) for part in clauses):
+    if (clauses and not re.search(r'[?？]', value)
+            and all(stop(part) or re.fullmatch(wait, part) for part in clauses)):
         return {'class': 'stop', 'reason': '用户明确要求停止或等待确认'}
     keep_running = r'^(?:请|先)?(?:不要|别|不用|不必)(?:再)?(?:停止|停下|暂停|停|取消)(?:(?:当前|这个|这次|本轮|正在执行的|正在进行的)?(?:任务|生成|制作|工作))?(?:了)?$'
+    if (not any(re.fullmatch(keep_running, part) for part in clauses)
+            and _immediate_stop(value)):
+        return {'class': 'stop', 'reason': '用户明确要求立即停止，附带原话保留但不自动接续'}
     def status(part):
         part = re.sub(r'^(?:我)?(?:只是|只想)(?:想)?(?:(?:问|询问)(?:一下)?|看(?:一下)?)?', '', part)
         part = re.sub(r'^(?:请你|麻烦你|帮我|你|请)', '', part)

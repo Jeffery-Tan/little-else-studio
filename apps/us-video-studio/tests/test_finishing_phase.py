@@ -52,7 +52,7 @@ def mock_http(monkeypatch, handle):
 
 def harness(tmp_path, monkeypatch, *, dispatch_round=2, finish=None, check_cancel=None,
             before_finish=None, local=False, independent=False, legacy_intake=False, source_text=None,
-            reply_rows=()):
+            reply_rows=(), check_results=None, repair_value=None):
     store, pipe, settings, ledger, run_id = seed(tmp_path, monkeypatch)
     if legacy_intake:
         saved = {stage: store.latest_artifact(run_id, stage) for stage in ('direction', 'material_plan')}
@@ -107,14 +107,20 @@ def harness(tmp_path, monkeypatch, *, dispatch_round=2, finish=None, check_cance
     orch.send = send
     def handle(payload):
         tools = {item['function']['name'] for item in payload.get('tools', [])}
+        if 'submit_delivery_check' in tools:
+            assessment = check_results.pop(0) if check_results else {'verdict': 'ready',
+                'summary': 'Synthetic assessment: no blocking content finding in this fixture.', 'findings': []}
+            return reply(('submit_delivery_check', assessment))
         if 'submit_stage' in tools:
             if independent:
                 started_role.set()
                 assert release_role.wait(10), 'Synthetic worker must be released by its owning test'
             return wire(submission())
         if 'submit_patch' in tools and 'dispatch' not in tools:
+            value = (repair_value if repair_value and any(row['kind'] == 'delivery_repair_planned'
+                for row in store.read_events(run_id)) else 'Pack a little room for your day.')
             return reply(('submit_patch', {'changes': [{'path': ['segments', 0, 'line'],
-                                                       'value': 'Pack a little room for your day.'}],
+                                                       'value': value}],
                                            'summary': 'One precise line changed'}))
         if not tools:
             if before_finish:
@@ -155,10 +161,10 @@ def test_exact_saved_script_gets_one_tool_free_http_conclusion_even_on_round_twe
     approvals = store.list_approvals(run)
     upstream = {s: store.latest_artifact(run, s) for s in ('intake', 'direction', 'material_plan')}
     result = orch.send(TEXT)
-    assert result.rounds == dispatch_round + 1 and result.stopped_because == 'done'
+    assert result.rounds == dispatch_round + 2 and result.stopped_because == 'done'
     assert result.text == ANSWER and result.deliverable['status'] == 'complete'
     assert len(work) == dispatch_round and len(contexts) == 1
-    assert len(seen) == dispatch_round + 2  # work + writer + one finish
+    assert len(seen) == dispatch_round + 3  # work + writer + producer check + one finish
     final = seen[-1]
     assert not final.get('tools')
     assert 'phase=finishing' in final['messages'][0]['content']
@@ -203,7 +209,7 @@ def test_bad_finishing_keeps_script_and_actual_usage_without_continuation_or_too
     approvals = store.list_approvals(run)
     with pytest.raises(ModelError):
         orch.send(TEXT)
-    assert len(seen) == 4 and len(work) == 2 and len(contexts) == 1
+    assert len(seen) == 5 and len(work) == 2 and len(contexts) == 1
     assert store.latest_artifact(run, 'writing').version == 1
     assert store.list_approvals(run) == approvals and not pipe.is_complete(run, 'writing')
     assert not any(row['role'] == 'assistant' for row in store.read_chat(run))
@@ -245,9 +251,9 @@ def test_late_change_or_stop_discards_finishing_response_without_replay(tmp_path
         tmp_path, monkeypatch, check_cancel=cancel, before_finish=before)
     with pytest.raises(JobCancelled if change == 'cancel' else NonRetryableStageError):
         orch.send(TEXT)
-    assert len(seen) == 4 and store.latest_artifact(run, 'writing') is not None
+    assert len(seen) == 5 and store.latest_artifact(run, 'writing') is not None
     assert not any(row['role'] == 'assistant' for row in store.read_chat(run))
-    assert len(ledger.entries(run)) == 4
+    assert len(ledger.entries(run)) == 5
 
 
 def test_cancel_after_http_before_chat_commit_keeps_usage_and_draft(tmp_path, monkeypatch):
@@ -264,7 +270,7 @@ def test_cancel_after_http_before_chat_commit_keeps_usage_and_draft(tmp_path, mo
     monkeypatch.setattr('studio.agents.orchestrator.creator_reply', late_stop)
     with pytest.raises(JobCancelled):
         orch.send(TEXT)
-    assert len(seen) == 4 and ledger.entries(run)[-1].input_tokens == 31
+    assert len(seen) == 5 and ledger.entries(run)[-1].input_tokens == 31
     assert store.latest_artifact(run, 'writing').version == 1
     assert not any(row['role'] == 'assistant' for row in store.read_chat(run))
 
@@ -313,7 +319,7 @@ def test_local_revision_finishing_reads_entire_old_and_new_scripts_and_actual_pa
     old = store.latest_artifact(run, 'writing')
     approvals = store.list_approvals(run)
     result = orch.send(LOCAL)
-    assert result.stopped_because == 'done' and result.rounds == 4 and len(seen) == 5
+    assert result.stopped_because == 'done' and result.rounds == 5 and len(seen) == 6
     assert result.deliverable['status'] == 'complete' and len(contexts) == 1
     data = json.loads(contexts[0].messages[0]['content'])
     new = store.latest_artifact(run, 'writing')
@@ -395,9 +401,9 @@ def test_independent_writer_settled_after_cap_uses_same_single_finishing_call(tm
         original_wait()
     monkeypatch.setattr(orch, '_wait_owned_roles', wait)
     result = orch.send(TEXT)
-    assert waited == [True] and result.rounds == 13 and result.stopped_because == 'done'
+    assert waited == [True] and result.rounds == 14 and result.stopped_because == 'done'
     assert result.text == ANSWER and len(contexts) == 1
-    assert len(seen) == len(ledger.entries(run)) == 14 and len(work) == 12
+    assert len(seen) == len(ledger.entries(run)) == 15 and len(work) == 12
     assert len([p for p in seen if not p.get('tools')]) == 1
     assert store.latest_artifact(run, 'writing').version == 1 and not pipe.is_complete(run, 'writing')
 

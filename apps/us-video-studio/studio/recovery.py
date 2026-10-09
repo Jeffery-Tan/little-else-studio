@@ -69,8 +69,8 @@ def recovery_snapshot(jobs, run_id):
         return {"run_id": run_id, "revision": revision, "unresolved_calls": calls,
                 "open_attempts": public_attempts, "saved_artifacts": saved,
                 "active_run_id": jobs.active[0] if jobs.active else None,
-                "can_recover": jobs.active is None,
-                "can_continue": jobs.active is None and not attempts}
+                "can_recover": not jobs.has_executions(),
+                "can_continue": not jobs.has_executions() and not attempts}
 
 
 def install_recovery_routes(app, jobs, require_run):
@@ -78,7 +78,7 @@ def install_recovery_routes(app, jobs, require_run):
     def repair_idle(run_id):
         require_run(run_id)
         jobs.initialize()
-        if jobs.active is not None:
+        if jobs.has_executions():
             raise PipelineError('job_busy', '制作团队仍在执行，请等待结束后恢复项目。')
 
     @app.post('/api/runs/{run_id}/recovery/artifacts/preview')
@@ -101,7 +101,7 @@ def install_recovery_routes(app, jobs, require_run):
 
     def validate_action(run_id, revision):
         jobs.initialize()
-        if jobs.active is not None:
+        if jobs.has_executions():
             raise PipelineError("job_busy", "制作团队仍在执行。请等待本轮结束，再处理恢复事项。")
         snapshot = recovery_snapshot(jobs, run_id)
         if snapshot["revision"] != revision:

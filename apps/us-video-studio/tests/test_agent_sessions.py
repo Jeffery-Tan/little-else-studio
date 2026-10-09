@@ -412,7 +412,9 @@ def test_multiple_consumed_messages_keep_turn_conditions_at_submit(env):
     assert entered.wait(5)
     handle.update(dispatch=dispatch, sid=row['session_id'])
     release.set()
-    result = dispatch.wait_session(row['session_id'], timeout_seconds=5)
+    # This checks inbox ordering, not a five-second performance target. Allow
+    # bounded headroom for journal I/O when offline suites run concurrently.
+    result = dispatch.wait_session(row['session_id'], timeout_seconds=30)
     failures = [block['content'] for call in model.calls for message in call['messages']
                 if isinstance(message.get('content'), list) for block in message['content']
                 if block.get('type') == 'tool_result' and block.get('is_error')]

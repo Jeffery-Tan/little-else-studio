@@ -147,7 +147,9 @@ def test_http_busy_and_unfinished_attempts_prevent_selection(env):
     from fastapi import FastAPI, HTTPException
     from local_http import TestClient
     service, store, _ = env
-    jobs = SimpleNamespace(store=store, pipeline=Pipeline(store), lock=threading.RLock(), active=object())
+    jobs = SimpleNamespace(store=store, pipeline=Pipeline(store), lock=threading.RLock(), active=object(),
+                           remote_waiting=False, queued=False)
+    jobs.has_executions = lambda: jobs.active is not None or jobs.remote_waiting or jobs.queued
     app = FastAPI()
     def require_run(run_id):
         if run_id != 'run-one': raise HTTPException(404,'Project not found')
@@ -157,6 +159,10 @@ def test_http_busy_and_unfinished_attempts_prevent_selection(env):
         assert client.get('/api/runs/missing/references').status_code == 404
         assert client.post('/api/runs/run-one/references',json=payload).status_code == 409
         jobs.active = None
+        for state in ('remote_waiting', 'queued'):
+            setattr(jobs, state, True)
+            assert client.post('/api/runs/run-one/references',json=payload).status_code == 409
+            setattr(jobs, state, False)
         attempt = jobs.pipeline.start_attempt('run-one','intake')
         assert client.post('/api/runs/run-one/references',json=payload).status_code == 409
         jobs.pipeline.reject('run-one','intake',attempt.token,'fixture')

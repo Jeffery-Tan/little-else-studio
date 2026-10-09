@@ -90,3 +90,39 @@ def test_cross_origin_and_stale_artifact_cannot_propose(env):
     assert client.post(url, json=payload, headers={'origin': 'https://evil.example'}).status_code == 403
     payload['payload']['artifact_sha256'] = '0'*64
     assert client.post(url, json=payload).status_code == 409
+
+
+def test_method_upgrade_http_requires_reviewed_fingerprints_and_idle_job(env):
+    client, repo, store, _, app = env
+    learning = LearningService(store, repo)
+    original = learning.context('learning-test', 'writer')
+    skill = repo / '.agents/skills/us-creator-video/SKILL.md'
+    skill.write_text(skill.read_text(encoding='utf-8-sig') + '\nHTTP reviewed change\n', encoding='utf-8')
+    status = client.get('/api/runs/learning-test/learning').json()['pin_status']
+    assert status['methods_refresh_available']
+    assert any('HTTP reviewed change' in item['diff'] for item in status['method_changes'])
+    payload = {'expected_run_sha256': status['run_library_sha256'],
+               'expected_current_sha256': status['current_library_sha256'],
+               'expected_run_methods_sha256': status['run_methods_sha256'],
+               'expected_current_methods_sha256': status['current_methods_sha256'],
+               'request_id': 'reviewed-method-upgrade'}
+    url = '/api/runs/learning-test/learning/refresh'
+    assert client.post(url, json={**payload, 'expected_current_methods_sha256': '0' * 64}).status_code == 409
+    assert learning.context('learning-test', 'writer')['methods_sha256'] == original['methods_sha256']
+    app.state.jobs.active = ('learning-test', 'busy')
+    assert client.post(url, json=payload).status_code == 409
+    app.state.jobs.active = None
+    response = client.post(url, json=payload)
+    assert response.status_code == 200, response.text
+    assert learning.context('learning-test', 'writer')['methods_sha256'] == status['current_methods_sha256']
+    assert client.post(url, json=payload).status_code == 200
+
+
+def test_method_result_http_is_readonly_and_rejects_unknown_comparison(env):
+    client, _, store, _, _ = env
+    before = store.read_events('learning-test')
+    assert client.get('/api/runs/learning-test/learning/method-results').json() == {'results': []}
+    result = client.get('/api/runs/learning-test/learning/method-comparison?baseline=missing&candidate=other')
+    assert result.status_code == 409
+    assert client.get('/api/runs/missing/learning/method-results').status_code == 404
+    assert store.read_events('learning-test') == before

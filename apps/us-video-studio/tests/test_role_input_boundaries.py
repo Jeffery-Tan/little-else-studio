@@ -17,7 +17,9 @@ from test_revision_scope import env, RUN, QUOTE, patch, plan, plan_args, revisio
 
 
 def wait_job(http, job_id):
-    deadline = time.monotonic() + 10
+    # Six model/ledger round trips now include a producer check. Allow for
+    # concurrent offline suites on Windows without changing terminal assertions.
+    deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         response = http.get(f'/api/runs/{RUN}/jobs/{job_id}')
         assert response.status_code == 200, response.text
@@ -36,6 +38,8 @@ def revision_model(store, text, value):
         tool_turn('scope', 'plan_revision', plan_args(store, quote=text)),
         tool_turn('assign', 'dispatch', {'stage': 'writing', 'brief': text}),
         tool_turn('save', 'submit_patch', patch(value=value)),
+        tool_turn('delivery-check', 'submit_delivery_check', {'verdict': 'ready',
+            'summary': 'Synthetic exact revision check for this offline lifecycle.', 'findings': []}),
         final_turn('本轮准确修改已保存。'),
     ], legacy_task_contracts=False)
     complete = model.complete
@@ -100,12 +104,14 @@ def test_late_targeted_input_is_durably_rejected_then_new_feedback_uses_saved_ba
             release.set()
         finished = wait_job(http, job['job_id'])
         assert finished['status'] == 'succeeded' and not finished.get('successor_job_id')
-        assert len(model.calls) == 5 and text not in model.requests_text()
+        assert len(model.calls) == 6 and text not in model.requests_text()
+        assert model.calls[-2]['tool_names'] == ['submit_delivery_check']
+        assert model.calls[-1]['tool_names'] == []
         assert sessions.snapshot(role['session_id'])['status'] == 'completed'
         closed_resume = http.post(f'/api/runs/{RUN}/role-sessions/{role["session_id"]}/resume', json={
             'text': text, 'request_id': 'closed-role-resume', 'expected_task_id': role['task_id']})
         assert closed_resume.status_code == 409 and 'session_new_baseline' in closed_resume.text
-        assert len(model.calls) == 5
+        assert len(model.calls) == 6
 
         # A genuinely new correction freezes v2, rather than replaying the old v1 plan.
         monkeypatch.setattr(SessionJournal, 'tool_result', original)
@@ -120,6 +126,10 @@ def test_late_targeted_input_is_durably_rejected_then_new_feedback_uses_saved_ba
         assert store.latest_artifact(RUN, 'writing').structured['segments'][0]['line'] == 'New feedback against the saved v2'
         assert store.latest_artifact(RUN, 'writing').structured['segments'][1]['line'] == 'Keep second line'
         assert pipe.stage_state(RUN, 'writing').approval is None
+        events = store.read_events(RUN)
+        sources = {e['request_id']: e['message_id'] for e in events if e['kind'] == 'user_message_received'}
+        assert {e['source_message_id'] for e in events if e['kind'] == 'delivery_self_check'} == {
+            sources['original-revision'], sources['new-baseline-feedback']}
 
 
 def test_legacy_saved_output_with_pending_input_cannot_return_a_false_cached_resume(env):

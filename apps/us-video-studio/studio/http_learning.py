@@ -1,6 +1,7 @@
 """Learning and delivery HTTP routes."""
 from __future__ import annotations
 from fastapi import HTTPException, Query
+from pydantic import Field
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 from .delivery import delivery_snapshot, delivery_zip, photo_delivery_zip
@@ -8,6 +9,11 @@ from .http_contracts import LearningProposalIn, LearningApplyIn, LearningRejectI
 from .learning import LearningConflict
 from .learning_session import session_snapshot
 from .models import PipelineError
+
+
+class LearningMethodRefreshIn(LearningRefreshIn):
+    expected_run_methods_sha256: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
+    expected_current_methods_sha256: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
 
 
 def install_learning_routes(app, learning, learning_assets, creative_packages, store, pipeline, jobs, require_run):
@@ -75,15 +81,36 @@ def install_learning_routes(app, learning, learning_assets, creative_packages, s
                                  if event['kind'] == 'method_usage_recorded']}
 
     @app.post('/api/runs/{run_id}/learning/refresh')
-    def refresh_creative_library(run_id: str, payload: LearningRefreshIn):
+    def refresh_creative_library(run_id: str, payload: LearningMethodRefreshIn):
         require_run(run_id)
         try:
             with jobs.lock:
-                if jobs.active is not None:
+                if jobs.has_executions():
                     raise HTTPException(409, '当前任务仍在运行，请结束后再刷新学习库。')
                 return learning.refresh_run_pin(run_id, payload.expected_run_sha256,
-                                                payload.expected_current_sha256, payload.request_id)
+                    payload.expected_current_sha256, payload.request_id,
+                    expected_run_methods_sha256=payload.expected_run_methods_sha256,
+                    expected_current_methods_sha256=payload.expected_current_methods_sha256)
         except (LearningConflict, ValueError, PipelineError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get('/api/runs/{run_id}/learning/method-results')
+    def learning_method_results(run_id: str):
+        require_run(run_id)
+        from .method_outcomes import method_results
+        try:
+            return {'results': method_results(store, learning, run_id)}
+        except (ValueError, PipelineError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get('/api/runs/{run_id}/learning/method-comparison')
+    def learning_method_comparison(run_id: str, baseline: str = Query(min_length=1, max_length=128),
+                                   candidate: str = Query(min_length=1, max_length=128)):
+        require_run(run_id)
+        from .method_outcomes import compare_methods
+        try:
+            return compare_methods(store, learning, run_id, baseline, candidate)
+        except (ValueError, PipelineError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @app.get('/api/runs/{run_id}/learning/session')
@@ -106,7 +133,7 @@ def install_learning_routes(app, learning, learning_assets, creative_packages, s
             raise HTTPException(409, '独立学习变更需要学习记录。')
         try:
             with jobs.lock:
-                if jobs.active is not None:
+                if jobs.has_executions():
                     raise HTTPException(409, '当前制作仍在运行，请结束后再整理学习记录。')
                 return (methods[payload.type](run_id, actor='user') if payload.type == 'migration'
                         else methods[payload.type](run_id, payload.payload, actor='user'))
@@ -120,7 +147,7 @@ def install_learning_routes(app, learning, learning_assets, creative_packages, s
         require_run(run_id)
         try:
             with jobs.lock:
-                if jobs.active is not None:
+                if jobs.has_executions():
                     raise HTTPException(409, '当前制作仍在运行，请结束后再应用学习变更。')
                 proposal = learning.proposal(run_id, proposal_id)
                 if proposal['type'] in {'delta', 'migration'} and (
@@ -139,7 +166,7 @@ def install_learning_routes(app, learning, learning_assets, creative_packages, s
         require_run(run_id)
         try:
             with jobs.lock:
-                if jobs.active is not None:
+                if jobs.has_executions():
                     raise HTTPException(409, '当前任务仍在运行，请结束后再拒绝提案。')
                 return learning.reject(run_id, proposal_id, payload.expected_proposal_sha256,
                                        payload.request_id)
@@ -154,7 +181,7 @@ def install_learning_routes(app, learning, learning_assets, creative_packages, s
         if store.read_run(run_id).kind != 'learning':
             raise HTTPException(409, '只有独立学习记录可以结束学习。')
         with jobs.lock:
-            if jobs.active is not None:
+            if jobs.has_executions():
                 raise HTTPException(409, '当前任务仍在运行，请结束后再关闭。')
             with store.run_lock(run_id):
                 rows = store.read_events(run_id)
@@ -194,7 +221,7 @@ def install_learning_routes(app, learning, learning_assets, creative_packages, s
         require_run(run_id)
         try:
             payload, version = photo_delivery_zip(store, pipeline, run_id, expected_snapshot_sha256,
-                                                  ledger=jobs.ledger, execution_active=bool(jobs.active))
+                                                  ledger=jobs.ledger, execution_active=jobs.has_executions())
         except (ValueError, PipelineError) as exc:
             raise HTTPException(409, str(exc)) from exc
         async def chunks():

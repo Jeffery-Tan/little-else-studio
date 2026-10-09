@@ -16,8 +16,8 @@
 
 | 路径 | 入口 | 现在做什么 |
 | --- | --- | --- |
-| 按钮 | `POST /nonce` → `POST /decision` | `pipeline.record_approval(nonce=…)` 后 `continuation_job` |
-| 对话 | `POST /jobs` → Orchestrator 循环 | 保存真实消息凭据；模型提候选，服务端复核后写决定 |
+| 按钮（对话及作品阅读页共用） | `POST /nonce` → `POST /decision` | `pipeline.record_approval(nonce=…)` 后 `continuation_job` |
+| 对话 | `POST /jobs?enqueue=true` → 原 Job 队列与 Orchestrator 循环 | 保存真实消息凭据；模型提候选，服务端复核后写决定 |
 | 接续 | `POST /decision-continuation`、`/resume-steer` | 按已保存的批准派生固定 request_id 的任务 |
 
 统一后的形状：

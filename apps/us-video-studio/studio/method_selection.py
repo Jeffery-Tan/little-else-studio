@@ -62,4 +62,8 @@ def record_method_usage(store, learning, run_id: str, payload: dict) -> dict:
             if existing == canonical:
                 return event
             raise LearningConflict('The method usage request_id already has different content')
-        return store.append_event(run_id, 'method_usage_recorded', **canonical)
+        detail = learning.read_learning_method(run_id, method['id'], method['revision'],
+            summary['library_sha256'], purpose=purpose, role='orchestrator')
+        return store.append_event(run_id, 'method_usage_recorded', **canonical,
+            method_sha256=detail['method_sha256'], method_snapshot_ref=detail['evidence_ref'],
+            methods_sha256=learning._method_bundle(run_id)['sha256'])

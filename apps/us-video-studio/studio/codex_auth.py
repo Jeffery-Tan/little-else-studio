@@ -98,7 +98,7 @@ class CodexAuth:
                 raise HTTPException(409, '服务正在停止，请重新连接工作台。')
             if self.process is not None:
                 return self.status()
-            if self.jobs.active is not None:
+            if self.jobs.has_executions():
                 raise HTTPException(409, '当前制作仍在运行，请结束后再授权登录。')
             self.result = self._probe()
             self.checked_at = time.monotonic()

@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import threading
+from copy import deepcopy
 from functools import wraps
 from pathlib import Path
 from typing import Any, Iterable
@@ -138,6 +139,7 @@ class Store:
     def __init__(self, data_root: Path | str):
         self.root = Path(data_root)
         (self.root / "runs").mkdir(parents=True, exist_ok=True)
+        self._event_cache = {}
 
     def run_lock(self, run_id: str):
         key = os.path.normcase(str(self.run_dir(run_id).resolve()))
@@ -230,14 +232,40 @@ class Store:
     def append_event(self, run_id: str, kind: str, **fields: Any) -> dict[str, Any]:
         self.require_healthy(run_id)
         path = self.run_dir(run_id) / "events.jsonl"
-        existing = _read_jsonl(path)
+        existing = self.read_events(run_id)
         record = {"seq": len(existing) + 1, "at": utcnow(), "kind": kind, **fields}
         _append_jsonl_after_check(path, record)
+        # An external writer may have changed the file around this append.
+        # Only an actual read can prove which rows belong to its next stamp.
+        self._event_cache.pop(run_id, None)
         return record
+
+    @staticmethod
+    def _event_stamp(path):
+        try:
+            value = path.stat()
+            return (value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+        except FileNotFoundError:
+            return None
+
+    def _cache_events(self, run_id, rows, stamp):
+        # A bounded read projection, never another journal or writable truth.
+        if len(self._event_cache) >= 64 and run_id not in self._event_cache:
+            self._event_cache.pop(next(iter(self._event_cache)))
+        self._event_cache[run_id] = (stamp, deepcopy(rows))
 
     @serialized_run
     def read_events(self, run_id: str) -> list[dict[str, Any]]:
-        return _read_jsonl(self.run_dir(run_id) / "events.jsonl")
+        path = self.run_dir(run_id) / "events.jsonl"
+        stamp = self._event_stamp(path)
+        cached = self._event_cache.get(run_id)
+        if cached and cached[0] == stamp:
+            return deepcopy(cached[1])
+        rows = _read_jsonl(path)
+        # Concurrent external writes must be read afresh, never assigned a newer stamp.
+        if self._event_stamp(path) == stamp:
+            self._cache_events(run_id, rows, stamp)
+        return rows
 
     # ----------------------------------------------------------- artifacts --
 

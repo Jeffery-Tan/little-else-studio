@@ -104,6 +104,8 @@ class Settings:
     max_tool_rounds: int = 12
     max_tokens: int = DEFAULT_MAX_TOKENS
     max_continuations: int = 1
+    task_max_calls: int = 48
+    task_timeout_seconds: int = 1800
     connection_by_role: dict[str, str] = field(default_factory=dict)
     provider_by_role: dict[str, str] = field(default_factory=dict)
     pricing_by_route: dict[tuple[str, str], Pricing] = field(default_factory=dict)
@@ -192,6 +194,11 @@ def load_settings(data_root: Path | str | None = None) -> Settings:
                                     or isinstance(token_limit, bool) or token_limit < 0):
         raise ValueError("budget_limit_tokens must be a non-negative whole number or null")
 
+    task_limits = {key: raw.get(key, default) for key, default in
+                   (("task_max_calls", 48), ("task_timeout_seconds", 1800))}
+    if any(type(value) is not int or value < 1 for value in task_limits.values()):
+        raise ValueError('task limits must be positive whole numbers')
+
     return Settings(
         data_root=root,
         base_url=raw.get("base_url") or os.environ.get("STUDIO_BASE_URL") or DEFAULT_BASE_URL,
@@ -202,6 +209,7 @@ def load_settings(data_root: Path | str | None = None) -> Settings:
         max_tool_rounds=int(raw.get("max_tool_rounds", 12)),
         max_tokens=int(raw.get("max_tokens", DEFAULT_MAX_TOKENS)),
         max_continuations=int(raw.get("max_continuations", 1)),
+        **task_limits,
     )
 
 

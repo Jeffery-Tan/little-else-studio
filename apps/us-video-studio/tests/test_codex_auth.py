@@ -65,10 +65,23 @@ class FakeCLI:
         self.output, self.code = 'Logged in using ChatGPT', 0
 
 
+class FakeJobs:
+    """Explicit login-gate contract, without starting any real job worker."""
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.active = None
+        self.closing = False
+        self.remote_waiting = False
+        self.queued = False
+
+    def has_executions(self):
+        return self.active is not None or self.remote_waiting or self.queued
+
+
 @pytest.fixture
 def setup():
     cli = FakeCLI()
-    jobs = SimpleNamespace(lock=threading.RLock(), active=None, closing=False)
+    jobs = FakeJobs()
     auth = CodexAuth(jobs, resolver=lambda: 'fake-codex', runner=cli.run, spawn=cli.spawn)
     yield auth, cli, jobs
     auth.close()
@@ -142,6 +155,17 @@ def test_active_job_refuses_login_before_checking_or_spawning(setup):
         auth.start()
     assert caught.value.status_code == 409
     assert cli.commands == []
+
+
+@pytest.mark.parametrize('state', ['remote_waiting', 'queued'])
+def test_pending_execution_refuses_login_without_a_foreground_job(setup, state):
+    auth, cli, jobs = setup
+    setattr(jobs, state, True)
+    assert jobs.active is None
+    with pytest.raises(HTTPException) as caught:
+        auth.start()
+    assert caught.value.status_code == 409
+    assert cli.commands == [] and cli.processes == []
 
 
 def test_cancel_is_attempt_bound_and_does_not_logout(setup):

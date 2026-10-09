@@ -179,6 +179,8 @@ def drive_intake_and_direction(box, structured=None):
         tool_turn("t3", "submit_stage", {
             "content": "方向正文", "summary": "两个方向", "structured": structured,
         }),
+        tool_turn('fixture-check', 'submit_delivery_check', {
+            'verdict': 'ready', 'summary': 'Explicit offline fixture assessment; no quality claim.', 'findings': []}),
         final_turn("intake 和 direction 都好了，等审核。"),
     ])
     res = http.post(f"/api/runs/{RUN}/message", json={"text": "做个保温袋视频"})

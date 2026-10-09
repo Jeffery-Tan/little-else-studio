@@ -81,7 +81,7 @@ def install_run_routes(app, store, pipeline, ledger, jobs, settings, require_run
     def delete_project(run_id: str):
         with jobs.lock:
             require_run(run_id, include_deleted=True)
-            if jobs.active and jobs.active[0] == run_id:
+            if jobs.busy(run_id):
                 raise HTTPException(409, '项目正在执行。请先停止任务，等待结束后再删除。')
             store.set_deleted(run_id, True)
         return {'run_id': run_id, 'deleted': True}

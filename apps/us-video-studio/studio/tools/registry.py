@@ -44,6 +44,14 @@ def _obj(properties: dict[str, Any], required: list[str] | None = None) -> dict[
 
 _STAGE = {"type": "string", "enum": ["intake", "direction", "material_plan", "writing"]}
 
+_WORKSPACE_TARGET = _obj({
+    'kind': {'type': 'string', 'enum': ['artifact', 'writing', 'design', 'shot', 'production_draft', 'media', 'material']},
+    'run_id': {'type': 'string'}, 'stage': _STAGE, 'version': {'type': 'integer'},
+    'artifact_sha256': {'type': 'string'}, 'design_kind': {'type': 'string', 'enum': ['character', 'scene']},
+    'design_id': {'type': 'string'}, 'shot_id': {'type': 'string'}, 'draft_id': {'type': 'string'},
+    'draft_sha256': {'type': 'string'}, 'attempt_id': {'type': 'string'}, 'output_sha256': {'type': 'string'},
+    'name': {'type': 'string'}, 'sha256': {'type': 'string'}}, ['kind', 'run_id'])
+
 #: The shape a stage's payload may take, keyed by stage.
 #:
 #: Declared here as prose rather than as a per-stage JSON Schema because one tool
@@ -507,6 +515,13 @@ _TOOLS += (Tool(name=TASK_INTERPRETATION_TOOL['name'],
                 input_schema=TASK_INTERPRETATION_TOOL['input_schema'],
                 roles=('orchestrator', 'director', 'material', 'writer')),)
 
+_TOOLS += (
+    Tool('read_workspace_object', '读取准确画布对象。target须照抄当前对象身份，不猜测版本或指纹；返回原记录，不观察媒体、不改稿。',
+         _obj({'target': _WORKSPACE_TARGET}, ['target']), ('orchestrator',)),
+    Tool('compare_workspace_objects', '逐字比较两份准确文字作品或制作输入，输出服务端diff。原对象只读；不是内容评分。媒体使用已有观察或并排查看，不据此声称重新看图。',
+         _obj({'left': _WORKSPACE_TARGET, 'right': _WORKSPACE_TARGET}, ['left', 'right']), ('orchestrator',)),
+)
+
 REGISTRY: dict[str, Tool] = {t.name: t for t in _TOOLS}
 
 
@@ -624,7 +639,8 @@ def orchestrator_profile_tools(profile):
                  'read_conversation_history', 'read_project_history', 'read_production',
                  'read_project_state', 'read_artifact', 'list_reviews', 'list_materials',
                  'read_role_sessions', 'read_learning_cases', 'read_method_document',
-                 'retrieve_learning_methods', 'read_learning_method', 'ask_user']
+                 'retrieve_learning_methods', 'read_learning_method', 'ask_user',
+                 'read_workspace_object', 'compare_workspace_objects']
         return [copy.deepcopy(REGISTRY[name].to_api()) for name in names]
     if profile not in {'initial', 'image_analysis'}:
         raise ValueError('Unknown orchestrator tool profile')

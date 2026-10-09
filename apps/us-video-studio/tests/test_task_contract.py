@@ -42,7 +42,7 @@ def test_revision_requires_this_turns_applied_plan():
     scope = {'plan_id': 'plan-1', 'stage': 'writing', 'version': 1, 'sha256': 'old'}
     pipeline = FakePipeline(writing=stage(version=2, sha='new', verdict='pass'))
     assert evaluate(FakeStore(), pipeline, 'fixture', 'revision', revision_scope=scope)['status'] == 'incomplete'
-    events = [{'kind': 'agent_revision_applied', 'plan_id': 'plan-1', 'sha256': 'new'}]
+    events = [{'kind': 'agent_revision_applied', 'plan_id': 'plan-1', 'version': 2, 'sha256': 'new'}]
     assert evaluate(FakeStore(events), pipeline, 'fixture', 'revision', revision_scope=scope)['status'] == 'complete'
 
 

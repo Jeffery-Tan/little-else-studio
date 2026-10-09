@@ -172,7 +172,7 @@ def install_product_card_routes(app, jobs, require_run):
         require_run(run_id)
         try:
             with jobs.lock:
-                if jobs.active is not None:
+                if jobs.has_executions():
                     raise ValueError('请等待制作任务结束后再整理商品资料。')
                 return save_card(store, pipeline, run_id, payload)
         except (ValueError, PipelineError) as exc:

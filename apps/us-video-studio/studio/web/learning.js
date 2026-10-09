@@ -213,8 +213,11 @@
     const fileNames={"review.md":"阅读方案","index.html":"打开图文包","prompt.txt":"生成提示词","caption.txt":"发布文案","prompts.md":"逐页文案与提示词"};
     const fileLink=f=>{const url=localFileURL(f.url);return url?`<a class="learning-file-link" href="${esc(url)}" target="_blank" rel="noopener">${esc(fileNames[f.name]||f.name)} ↗</a>`:"";};
     const pin=run.pin_status;
-    const refreshCard=pin?.refresh_available?`<article class="learning-card"><h3>当前项目沿用旧版学习库</h3><p class="learning-note">${pin.historical_readonly?'旧库完整备份无法核对，当前只能回看既有项目记录。':'原项目知识版本仍固定，已有稿件和批准保留原版本。'}明确刷新后，仅后续任务使用当前共享库；这一步不会重写旧稿或恢复旧批准。</p><p class="learning-meta">项目库 ${esc(pin.run_library_sha256)} · 当前库 ${esc(pin.current_library_sha256)}</p>${button('后续任务采用当前库','refresh-library','','primary')}</article>`:'';
-    setContent(`${refreshCard}${projectReferences(referenceState.references,referenceState.capability)}<h3>这次创作参考了什么</h3><p class="learning-note">以下记录对应实际提供给各角色的内容。提供过，不等于内容或效果已经通过验证。</p><div class="learning-context-list">${list(run.contexts).map(c=>contextCard(c,prose)).join("")||empty("还没有本轮参考记录。开始创作后，这里会留下实际提供的方法和案例。")}</div><h3>方法选择与使用记录</h3><p class="learning-note">区分方法已提供、制片选择和稿件实际体现；以下选择记录仍待作品核实。</p><div class="learning-context-list">${list(run.method_usage).map(methodUsageCard).join("")||empty("尚无方法选择记录。")}</div><h3>方案与制作文件</h3><p class="learning-note">可阅读的方案、文案和制作输入。待生成的素材仍保持待生成。</p><div class="learning-grid">${list(run.packages).map(p=>`<article class="learning-card"><h4>${p.format==='photo'?'图文方案':'视频方案'} · ${esc(stages[p.stage]||p.stage)} 第 ${esc(p.version)} 版</h4><div class="learning-file-links">${list(p.files).filter(f=>fileNames[f.name]).map(fileLink).join("")}</div><details class="learning-details learning-audit"><summary>全部文件与版本记录</summary>${meta(p.artifact_sha256)}${list(p.files).map(fileLink).join("")}</details></article>`).join("")||empty("还没有保存的制作文件。")}</div>`);
+    const libraryAvailable=pin?.library_refresh_available ?? pin?.refresh_available;
+    const libraryCard=libraryAvailable?`<article class="learning-card"><h3>项目学习库可更新</h3><p class="learning-note">${pin.historical_readonly?'旧库完整备份无法核对，当前只能回看既有项目记录。':'原项目知识版本仍固定，已有稿件和批准保留原版本。'}更新后，仅后续任务使用当前共享库；方法正文仍保持原项目版本。</p><p class="learning-meta">项目库 ${esc(pin.run_library_sha256)} · 当前库 ${esc(pin.current_library_sha256)}</p>${button('后续任务采用当前库','refresh-library','','primary')}</article>`:'';
+    const methodCard=pin?.methods_refresh_available?`<article class="learning-card"><h3>创意方法可更新</h3><p class="learning-note">${esc(pin.method_note)}更新将把下方方法版本用于后续任务；原作品、采用记录与生成授权保留原绑定。</p>${list(pin.method_changes).map(change=>`<details class="learning-details"><summary>${esc(change.title||change.id)}</summary><p class="learning-meta">原版：${esc(change.before_sha256||'正文缺失')}<br>当前：${esc(change.after_sha256||'当前已不存在')}</p>${change.diff?`<pre class="object-diff">${esc(change.diff)}</pre>`:'<p class="learning-note">该项未提供正文差异；旧正文缺失时不能推断变化内容。</p>'}</details>`).join('')}<p class="learning-meta">项目方法 ${esc(pin.run_methods_sha256)}<br>当前方法 ${esc(pin.current_methods_sha256)}</p><label class="learning-note"><input type="checkbox" data-methods-reviewed> 我已核对上述方法变化及缺失项，用当前方法处理后续任务</label>${button('采用当前方法版本','refresh-methods','','primary')}</article>`:pin?.method_note?`<p class="learning-note">${esc(pin.method_note)}</p>`:'';
+    const refreshCard=libraryCard+methodCard;
+    setContent(`${refreshCard}${projectReferences(referenceState.references,referenceState.capability)}<h3>这次创作参考了什么</h3><p class="learning-note">以下记录对应实际提供给各角色的内容。提供过，不等于内容或效果已经通过验证。</p><div class="learning-context-list">${list(run.contexts).map(c=>contextCard(c,prose)).join("")||empty("还没有本轮参考记录。开始创作后，这里会留下实际提供的方法和案例。")}</div><h3>方法选择与使用记录</h3>${button("查看方法与作品证据","method-results")}<p class="learning-note">区分方法已提供、制片选择和稿件实际体现；以下选择记录仍待作品核实。</p><div class="learning-context-list">${list(run.method_usage).map(methodUsageCard).join("")||empty("尚无方法选择记录。")}</div><h3>方案与制作文件</h3><p class="learning-note">可阅读的方案、文案和制作输入。待生成的素材仍保持待生成。</p><div class="learning-grid">${list(run.packages).map(p=>`<article class="learning-card"><h4>${p.format==='photo'?'图文方案':'视频方案'} · ${esc(stages[p.stage]||p.stage)} 第 ${esc(p.version)} 版</h4><div class="learning-file-links">${list(p.files).filter(f=>fileNames[f.name]).map(fileLink).join("")}</div><details class="learning-details learning-audit"><summary>全部文件与版本记录</summary>${meta(p.artifact_sha256)}${list(p.files).map(fileLink).join("")}</details></article>`).join("")||empty("还没有保存的制作文件。")}</div>`);
   }
   function localFileURL(url){return typeof url==="string"&&/^\/api\/(runs|learning)\/[a-zA-Z0-9%_./?=&-]+$/.test(url)&&!url.includes("..")?url:null;}
   function renderFeedback(){
@@ -229,15 +232,23 @@
   }
   async function act(action,id){
     if(action==="tab"){tab=id;proposal=null;notify("");render();return;}
-    if(action==="refresh-library"){
+    if(action==='method-results'){
+      if(!runId||typeof StudioEvidence==='undefined')throw new Error('请先打开项目，再读取方法证据。');
+      await StudioEvidence.openMethodResults(runId);return;
+    }
+    if(action==="refresh-library"||action==="refresh-methods"){
       if(!runId||!run.pin_status?.refresh_available)throw new Error('请重新打开项目知识版本。');
-      const target=main.querySelector('[data-learning-action="refresh-library"]');
+      const methods=action==='refresh-methods';
+      if(methods&&(!run.pin_status.methods_refresh_available||!main.querySelector('[data-methods-reviewed]')?.checked))throw new Error('请先核对方法版本变化并明确选择。');
+      const target=main.querySelector(`[data-learning-action="${action}"]`);
       if(target&&!target.dataset.requestId)target.dataset.requestId=crypto.randomUUID();
       await request(runPath('/refresh'),{method:'POST',body:JSON.stringify({
         expected_run_sha256:run.pin_status.run_library_sha256,
         expected_current_sha256:run.pin_status.current_library_sha256,
+        ...(methods?{expected_run_methods_sha256:run.pin_status.run_methods_sha256,
+          expected_current_methods_sha256:run.pin_status.current_methods_sha256}:{}),
         request_id:target?.dataset.requestId||crypto.randomUUID()})});
-      await refresh();notify('当前共享库已用于这个项目的后续任务；旧稿和旧批准仍属原版本。');return;
+      await refresh();notify(methods?'当前方法版本已用于后续任务；旧稿、采用与授权仍属原版本。':'当前共享库已用于这个项目的后续任务；方法版本、旧稿和旧批准保持原样。');return;
     }
     if(action==="skill"||action==="document"){
       const doc=action==="skill"?list(catalog.skills).find(s=>s.id===id):await request(`/api/learning/documents/${encodeURIComponent(id)}`);

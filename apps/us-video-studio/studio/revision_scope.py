@@ -91,6 +91,9 @@ def _cell(data, path):
 
 
 def check_base(store, pipeline, run_id, scope):
+    if scope.get('origin') == 'delivery_self_check':
+        from .delivery_check import validate_repair_scope
+        validate_repair_scope(store, run_id, scope, scope.get('source_message_id'))
     stage = scope['stage']
     state = pipeline.stage_state(run_id, stage)
     base = state.latest
@@ -156,6 +159,12 @@ def plan_revision(store, pipeline, run_id, args, *, turn_id, user_message, previ
     if ingress['local_only'] and args['mode'] != 'local':
         raise PipelineError('revision_scope', '用户本轮限定局部修改，首次修订也不能选 rework 扩大范围；有冲突请先澄清。')
     target = limits.get('feedback_target') or {}
+    from .workspace_objects import annotation_context
+    selected_annotations = annotation_context(store, run_id, limits.get('message_id'))
+    selected_fields = [row['target']['path'] for row in selected_annotations if row['target'].get('path')]
+    if selected_fields and (args['mode'] != 'local' or any(
+            not isinstance(field, dict) or field.get('path') not in selected_fields for field in fields)):
+        raise PipelineError('revision_scope', '本次只能修改用户所选批注绑定的字段，不能扩展到其他页或整稿。')
     from .production_feedback import PRODUCTION_TARGETS
     if target.get('kind') in PRODUCTION_TARGETS:
         raise PipelineError('revision_scope', '所选镜头的制作反馈不能重写需求、方向或脚本。')
@@ -274,3 +283,39 @@ def record_applied(store, pipeline, run_id, scope, artifact, changes):
                        version=artifact.version, sha256=artifact.sha256, changes=changes,
                        affected_stages=scope['affected_stages'])
     return impact
+
+
+def applied_revision(store, run_id, scope, artifact):
+    """Resolve the exact original patch plus its sole bounded producer repair."""
+    if not artifact:
+        return None
+    rows = store.read_events(run_id)
+    original = next((row for row in reversed(rows) if row['kind'] == 'agent_revision_applied'
+                     and row.get('plan_id') == scope['plan_id']), None)
+    if not original:
+        return None
+    # Real applied receipts always include the saved version. An incomplete
+    # historical/imported receipt is a read-only delivery gap, not a crash or
+    # enough evidence to authorize following a producer repair chain.
+    if (type(original.get('version')) is not int or original['version'] < 1
+            or not isinstance(original.get('sha256'), str) or not original['sha256']):
+        return None
+    if original['sha256'] == artifact.sha256 and original['version'] == artifact.version:
+        return original
+    plans = [row['scope'] for row in rows if row['kind'] == 'delivery_repair_planned'
+             and row['scope'].get('original_plan_id') == scope['plan_id']]
+    if len(plans) != 1:
+        return None
+    repair = plans[0]
+    if (repair['stage'] != scope['stage'] or repair['sha256'] != original['sha256']
+            or repair['version'] != original['version']
+            or scope['mode'] == 'local' and any(field['path'] not in [f['path'] for f in scope['fields']]
+                                               for field in repair['fields'])):
+        return None
+    from .delivery_check import validate_repair_scope
+    validate_repair_scope(store, run_id, repair, repair['source_message_id'])
+    final = next((row for row in rows if row['kind'] == 'agent_revision_applied'
+                  and row.get('plan_id') == repair['plan_id']
+                  and row.get('version') == artifact.version and row.get('sha256') == artifact.sha256
+                  and row.get('base_sha256') == original['sha256']), None)
+    return {**final, 'changes': [*original['changes'], *final['changes']]} if final else None

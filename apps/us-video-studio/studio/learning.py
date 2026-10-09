@@ -272,6 +272,9 @@ class LearningService:
                                 "旧项目使用过另一版学习库，但当时未保存完整库快照。"
                                 "原库备份也无法按哈希核对；只可回看旧上下文，后续采用新库须明确刷新。")
                         raw, doc = restored
+            # Freeze creative documents before creating a new library pin. An
+            # already-existing legacy pin without document bodies is a gap.
+            self._method_bundle(run_id)
             _atomic_write_text(path, _json({"raw_text": raw.decode("utf-8"),
                                             "sha256": _sha(raw), "applied_seq": applied_seq}))
             self.store.append_event(run_id, "learning_library_pinned",
@@ -339,13 +342,29 @@ class LearningService:
             previous_sha = next((event.get('library_sha256')
                 for event in reversed(self.contexts(run_id)) if event.get('library_sha256')), None)
             source = 'historical_unpinned' if previous_sha else 'new'
+        from .method_snapshots import pinned, document_changes
+        current_methods = self._current_method_bundle()
+        with self.store.run_lock(run_id):
+            old_methods = pinned(self, run_id, current_methods, persist=False)
+        changes = document_changes(old_methods, current_methods)
+        methods_available = bool(changes or old_methods['missing'] != current_methods['missing'])
         return {'source': source, 'run_library_sha256': previous_sha,
                 'current_library_sha256': current_sha,
-                'refresh_available': bool(previous_sha and previous_sha != current_sha),
+                'refresh_available': bool(previous_sha and previous_sha != current_sha) or methods_available,
+                'library_refresh_available': bool(previous_sha and previous_sha != current_sha),
+                'run_methods_sha256': old_methods['sha256'],
+                'current_methods_sha256': current_methods['sha256'],
+                'methods_refresh_available': methods_available,
+                'method_status': 'partial' if old_methods['missing'] else 'ready',
+                'missing_methods': old_methods['missing'], 'method_changes': changes,
+                'method_note': ('旧方法正文未完整保存；缺失内容不会用当前正文代替。'
+                                '已有作品可阅读，后续需要该方法时请明确升级。'
+                                if old_methods['missing'] else '创意方法正文已固定；运行权限与工具契约仍使用当前代码。'),
                 'historical_readonly': bool(source == 'historical_unpinned' and
                     previous_sha != current_sha and self._historical_library(previous_sha) is None)}
 
-    def refresh_run_pin(self, run_id, expected_run_sha256, expected_current_sha256, request_id):
+    def refresh_run_pin(self, run_id, expected_run_sha256, expected_current_sha256, request_id, *,
+                        expected_run_methods_sha256=None, expected_current_methods_sha256=None):
         """User-only choice to use the current library in later creative turns."""
         if (not isinstance(request_id, str) or
                 not re.fullmatch(r'[A-Za-z0-9_.:-]{8,128}', request_id)):
@@ -357,15 +376,35 @@ class LearningService:
                           event.get('request_id') == request_id), None)
             if prior:
                 if (prior.get('from_sha256') != expected_run_sha256 or
-                        prior.get('to_sha256') != expected_current_sha256):
+                        prior.get('to_sha256') != expected_current_sha256 or
+                        prior.get('from_methods_sha256') != expected_run_methods_sha256 or
+                        prior.get('to_methods_sha256') != expected_current_methods_sha256):
                     raise LearningConflict('Refresh request ID was used for another library version')
                 return self.pin_status(run_id)
             status = self.pin_status(run_id)
+            upgrade_methods = expected_run_methods_sha256 is not None or expected_current_methods_sha256 is not None
             if (status['run_library_sha256'] != expected_run_sha256 or
                     status['current_library_sha256'] != expected_current_sha256 or
                     not status['refresh_available']):
                 raise LearningConflict('Learning library changed; review the current version again')
+            if upgrade_methods:
+                if (expected_run_methods_sha256 != status['run_methods_sha256'] or
+                        expected_current_methods_sha256 != status['current_methods_sha256']):
+                    raise LearningConflict('Method documents changed; review the exact method versions again')
+            elif not status['library_refresh_available']:
+                raise LearningConflict('方法更新需要确认所展示的准确新旧方法版本。')
             raw, doc = self._read()
+            if _sha(raw) != expected_current_sha256:
+                raise LearningConflict('Learning library changed; review the current version again')
+            from .method_snapshots import pinned, write_bundle
+            current_methods = self._current_method_bundle()
+            if upgrade_methods and current_methods['sha256'] != expected_current_methods_sha256:
+                raise LearningConflict('Method documents changed; review the exact method versions again')
+            # A library-only refresh preserves the separately reviewed creative
+            # documents, including legacy gaps; it cannot silently upgrade them.
+            pinned(self, run_id, current_methods, persist=True)
+            if upgrade_methods:
+                write_bundle(self, run_id, current_methods)
             applied_seq = max((event['seq'] for event in events
                                if event['kind'] == 'learning_applied'), default=0)
             _atomic_write_text(self._run_root(run_id) / 'library-pin.json', _json({
@@ -373,8 +412,47 @@ class LearningService:
             self.store.append_event(run_id, 'learning_library_refreshed',
                                     from_sha256=expected_run_sha256,
                                     to_sha256=_sha(raw), library_version=doc.get('library_version', 1),
+                                    from_methods_sha256=expected_run_methods_sha256,
+                                    to_methods_sha256=expected_current_methods_sha256,
                                     request_id=request_id)
             return self.pin_status(run_id)
+
+    def _current_method_bundle(self):
+        """Creative methods only: no role prompts, tools or runtime safety rules."""
+        from .method_snapshots import bundle
+        specs = {name: (name, f'.agents/skills/{name}/SKILL.md', None) for name in SKILLS}
+        specs.update({name: (spec['title'], spec['file'], spec['source'])
+                      for name, spec in METHOD_CARDS.items()})
+        specs['reference-adaptation'] = ('指定参考的视频改编方法',
+            '.agents/skills/us-creator-video/reference-adaptation.md', None)
+        documents = {}
+        for ident, (title, relative, source) in specs.items():
+            path = self.repository_root / relative
+            if path.is_file():
+                documents[ident] = self._text(ident, title, path)
+                if source:
+                    documents[ident]['source'] = source
+        return bundle(documents, specs, 'repository_snapshot')
+
+    def _method_bundle(self, run_id, *, persist=True):
+        from .method_snapshots import pinned, read_bundle
+        if run_id is None or self.store.read_run(run_id).kind != 'creative':
+            return self._current_method_bundle()
+        with self.store.run_lock(run_id):
+            try:
+                path = self._run_root(run_id) / 'method-pin.json'
+                if path.is_file():
+                    return read_bundle(path)
+                current = self._current_method_bundle()
+                return pinned(self, run_id, current, persist=persist)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise LearningConflict('固定方法快照无法核对；原件保留，请查看学习记录。') from exc
+
+    def _method_document(self, ident, run_id):
+        value = self._method_bundle(run_id)
+        if ident not in value['documents']:
+            raise LearningConflict('旧项目缺少准确方法正文：' + ident + '；已有作品仍可阅读，请先明确升级方法。')
+        return copy.deepcopy(value['documents'][ident])
 
     def _text(self, ident, title, path):
         raw = path.read_bytes()
@@ -383,9 +461,10 @@ class LearningService:
         return {"id": ident, "title": title, "text": text, "content": text,
                 "sha256": digest, "version": digest[:12]}
 
-    def _skills(self, include_learning=False):
+    def _skills(self, include_learning=False, run_id=None):
         names = (*SKILLS, LEARNING_SKILL) if include_learning else SKILLS
-        return [self._text(s, s, self.repository_root / ".agents/skills" / s / "SKILL.md") for s in names]
+        return [(self._method_document(s, run_id) if run_id is not None and s in SKILLS else
+                 self._text(s, s, self.repository_root / ".agents/skills" / s / "SKILL.md")) for s in names]
 
     def skill_catalog(self, role="orchestrator", run_id=None):
         """Model-safe directory. Never exposes the human audit catalog."""
@@ -393,7 +472,11 @@ class LearningService:
         if role not in ('orchestrator', 'director', 'material', 'writer', 'reviewer'):
             raise ValueError('Unknown creative role')
         learning_run = run_id is not None and getattr(self.store.read_run(run_id), "kind", "creative") == "learning"
-        return {"skills": [{k: s[k] for k in ("id", "title", "sha256", "version")} for s in self._skills(learning_run and role == "orchestrator")],
+        frozen = self._method_bundle(run_id, persist=False) if run_id is not None and not learning_run else None
+        skills = ([row for name, row in frozen['documents'].items() if name in SKILLS] if frozen else
+                  self._skills(learning_run and role == 'orchestrator'))
+        return {"skills": [{k: s[k] for k in ("id", "title", "sha256", "version")} for s in skills],
+                **({'methods_sha256': frozen['sha256'], 'missing_methods': frozen['missing']} if frozen else {}),
                 "documents": ([{"id": s, "title": s} for s in ((*SKILLS, LEARNING_SKILL) if learning_run and role == "orchestrator" else SKILLS)]
                               + [{"id": "creative-package-contract", "title": "创作包格式与提交契约"}]
                               + [{"id": ident, "title": spec['title'], "skills": list(spec['skills']),
@@ -434,12 +517,15 @@ class LearningService:
             spec = METHOD_CARDS[name]
             if role not in spec['roles']:
                 raise ValueError('Method document is unavailable to this role')
-            result = self._text(name, spec['title'], self.repository_root / spec['file'])
+            result = (self._method_document(name, run_id) if run_id is not None else
+                      self._text(name, spec['title'], self.repository_root / spec['file']))
             result['source'] = spec['source']
         elif name in (*SKILLS, LEARNING_SKILL, "creative-package-contract"):
             if name == LEARNING_SKILL and (role != "orchestrator" or run_id is None or getattr(self.store.read_run(run_id), "kind", "creative") != "learning"):
                 raise ValueError("Learning Skill is limited to the learning orchestrator")
-            result = self.document(name) if name == "creative-package-contract" else next(s for s in self._skills(name == LEARNING_SKILL) if s["id"] == name)
+            result = (self.document(name) if name == "creative-package-contract" else
+                      self._method_document(name, run_id) if name in SKILLS and run_id is not None else
+                      next(s for s in self._skills(name == LEARNING_SKILL) if s["id"] == name))
         else:
             raise ValueError("Model document access is limited to registered Skills and method cards; research is human audit only")
         if run_id is not None:
@@ -470,7 +556,7 @@ class LearningService:
         return doc
 
     def context(self, run_id, role, intent="new", format="video", tags=(), case_ids=None, purpose="message",
-                reference_selection=None):
+                reference_selection=None, task_query=None):
         if not isinstance(tags, (list, tuple)) or any(not isinstance(t, str) for t in tags):
             raise ValueError("Tags must be a text list")
         if case_ids is not None and (not isinstance(case_ids, (list, tuple, set)) or any(not isinstance(cid, str) for cid in case_ids)):
@@ -481,6 +567,9 @@ class LearningService:
             raise ValueError("Unsupported creative intent/format")
         if purpose not in (*core.PURPOSES, "review"):
             raise ValueError("Unknown learning purpose")
+        if task_query is not None and (not isinstance(task_query, str) or len(task_query) > 50000):
+            raise ValueError('Method retrieval task query must be bounded text')
+        task_query = self.store.read_run(run_id).brief if task_query is None else task_query
         root = self._run_root(run_id)
         try:
             raw, original = self._read_for_run(run_id)
@@ -541,19 +630,19 @@ class LearningService:
         wanted = skills_by_role.get(role, set()) if active else set()
         if intent == "feedback" and active:
             wanted = {"us-commerce-strategy"} if role == "orchestrator" else set()
-        skills = [s for s in self._skills() if s["id"] in wanted]
+        methods_snapshot = self._method_bundle(run_id)
+        skills = [self._method_document(name, run_id) for name in SKILLS if name in wanted]
         method_cards = []
         if active:
             for ident, spec in METHOD_CARDS.items():
                 if role in spec['roles'] and format in spec.get('default_formats', ()):
-                    card = self._text(ident, spec['title'], self.repository_root / spec['file'])
+                    card = self._method_document(ident, run_id)
                     card['source'] = spec['source']
                     method_cards.append(card)
         from .creation_mode import context as creation_context
         creation = creation_context(self.store, run_id, selection=reference_selection) if active else None
         if creation and creation['mode'] in ('recreate', 'inspiration') and format == 'video':
-            skills.append(self._text('reference-adaptation', '指定参考的视频改编方法',
-                self.repository_root / '.agents/skills/us-creator-video/reference-adaptation.md'))
+            skills.append(self._method_document('reference-adaptation', run_id))
         run_feedback = []
         if active and not reviewer:
             for case in original["cases"]:
@@ -569,13 +658,31 @@ class LearningService:
         if not reviewer:
             text += "\n\n" + core.render(doc, seeds, effective_purpose)
         method_directory = None
+        selected_methods = []
         if active:
             method_directory = self.method_summaries(run_id=run_id, purpose=effective_purpose,
-                                                     include_trial=False, reviewer=reviewer)
+                include_trial=False, reviewer=reviewer, query=task_query, tags=tags, role=role, limit=8)
             if method_directory["library_sha256"] != _sha(raw):
                 raise LearningConflict("Learning library changed while preparing context; retry")
             text += "\n\n共享方法目录（仅为合资格短摘要，未表示本轮选用；结合任务、素材和排除条件判断，允许不用）：\n"
             text += _json(method_directory)
+            # Retrieval provides a small amount of evidence, not a selection
+            # decision. Full documents keep their positive and negative sources.
+            full_method_chars = 0
+            for row in method_directory['methods']:
+                if row.get('relevance', 0) <= 0 or len(selected_methods) >= 2:
+                    continue
+                detail = self.read_learning_method(run_id, row['id'], row['revision'],
+                    _sha(raw), purpose=effective_purpose, role=role)
+                size = len(_json(detail))
+                if full_method_chars + size > 12000:
+                    method_directory['omitted'].append({'id': row['id'], 'reason': 'full_method_budget'})
+                    continue
+                selected_methods.append(detail)
+                full_method_chars += size
+            if selected_methods:
+                text += ('\n\n与本轮内容相关的完整方法及正反证据（仅检索，不表示选用、事实或效果通过）：\n'
+                         + _json(selected_methods))
         if not reviewer:
             text += "\n\n来源材料仅作表达方法观察，不能迁移他品规格、卖点、价格、身份或未经核验的市场效果。依赖案例不因此获得当前用途资格。"
         else:
@@ -594,9 +701,15 @@ class LearningService:
                          '独立审核结论或执行授权，任务不适合时可以不用）：\n' + _json(preferences))
         result = {"role": role, "intent": intent, "format": format, "purpose": purpose, "tags": list(tags),
                   "library_sha256": _sha(raw), "library_version": original.get("library_version", 1),
+                  "methods_sha256": methods_snapshot['sha256'],
+                  "method_bundle_sha256": _sha(_json({'library_sha256': _sha(raw), 'methods_sha256': methods_snapshot['sha256']})),
+                  "method_status": 'partial' if methods_snapshot['missing'] else 'ready',
+                  "missing_methods": methods_snapshot['missing'],
                   "skills": skills, "method_cards": method_cards,
                   "seed_case_ids": [c["id"] for c in seeds], "case_ids": [c["id"] for c in subset["cases"]],
                   "library": subset, "method_directory": method_directory,
+                  "retrieved_methods": selected_methods,
+                  "retrieval_query_sha256": _sha(task_query),
                   "run_feedback": run_feedback, "selected_references": selected_references,
                   "preferences": preferences, "text": text,
                   "creation_mode": creation}
@@ -1170,7 +1283,8 @@ class LearningService:
             raise ValueError("; ".join(errors))
         return result
 
-    def method_summaries(self, run_id=None, purpose="message", include_trial=False, max_chars=12000, reviewer=False):
+    def method_summaries(self, run_id=None, purpose="message", include_trial=False, max_chars=12000, reviewer=False,
+                         query='', tags=(), role=None, limit=None):
         """Versioned, evidence-qualified method directory for task comparison."""
         if purpose not in core.PURPOSES:
             raise ValueError("Unknown method purpose")
@@ -1178,12 +1292,19 @@ class LearningService:
             raise ValueError("max_chars must be 256..50000")
         if include_trial and run_id is None:
             raise ValueError("Trial methods require an explicit project context")
+        if not isinstance(query, str) or len(query) > 50000 or not isinstance(tags, (tuple, list)) or any(
+                not isinstance(tag, str) for tag in tags):
+            raise ValueError('Invalid method retrieval query')
+        if role is not None and role not in ('orchestrator', 'director', 'material', 'writer', 'reviewer'):
+            raise ValueError('Invalid method retrieval role')
+        if limit is not None and (type(limit) is not int or not 1 <= limit <= 20):
+            raise ValueError('Method retrieval limit must be 1..20')
         raw, doc = self._read_for_run(run_id)
         if reviewer:
             doc = self._review_library(doc)
         cases = {c["id"]: c for c in doc["cases"] if c.get("partition") == "calibration"
                  and purpose in c.get("eligible_for", [])}
-        included, omitted = [], []
+        included, omitted, eligible = [], [], []
         used = 0
         for method in doc["methods"]:
             status = method.get("status")
@@ -1210,12 +1331,17 @@ class LearningService:
                 row["activation"] = method["activation"]
             if status == "trial":
                 row["trial_scope"] = method["trial_scope"]
-            for field in ("required_inputs", "procedure", "must_preserve", "can_vary", "checks", "limitations"):
-                if method.get(field):
-                    row[field] = method[field]
+            from .method_retrieval import relevance
+            row['relevance'] = relevance(method, cases, query=query, tags=tags, role=role)
+            eligible.append(row)
+        eligible.sort(key=lambda row: (-row['relevance'], row['id']))
+        for row in eligible:
+            if limit is not None and len(included) >= limit:
+                omitted.append({'id': row['id'], 'reason': 'relevance_limit'})
+                continue
             length = len(_json(row))
             if used + length > max_chars:
-                omitted.append({"id": method["id"], "reason": "context_budget"})
+                omitted.append({"id": row["id"], "reason": "context_budget"})
                 continue
             included.append(row)
             used += length

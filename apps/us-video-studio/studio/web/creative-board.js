@@ -1,4 +1,4 @@
-/* Read-only creative work; movable image cards and view live only in this browser. */
+/* Canonical creative work with project-owned layouts and exact-object actions. */
 "use strict";
 (function (root) {
   const controllers = new WeakMap();
@@ -247,6 +247,7 @@
     let bounds = {width: 1460, height: 680}, autoFit = false, initialViewPending = false,
       restoringFocus = false, dragging = null, destroyed = false, renderKey = '';
     let positions = {}, imageDrag = null, photoCollection = null;
+    let layoutRevision = null, layoutSequence = 0, layoutTimer = null, layoutSaving = false, layoutExtras = {groups:[],notes:[]};
     const layoutNote = el('span', 'creative-board-layout-note', '布局仅保存在本机');
     layoutNote.setAttribute('role', 'status');
     const layoutKey = () => `studio-creative-board-layout-v1:${encodeURIComponent(runId)}`;
@@ -272,8 +273,49 @@
       try {
         if (!root.localStorage) throw Error('storage unavailable');
         root.localStorage.setItem(layoutKey(), JSON.stringify({version: 1, view, positions}));
-        layoutNote.textContent = '布局仅保存在本机';
+        layoutNote.textContent = typeof callbacks.saveLayout === 'function' ? '布局待保存到项目' : '布局仅保存在本机';
       } catch (_) { layoutNote.textContent = '布局未保存；仅本次页面保留'; }
+      layoutSequence += 1;
+      if (typeof callbacks.saveLayout === 'function' && layoutRevision !== null) {
+        root.clearTimeout(layoutTimer); layoutTimer = root.setTimeout(saveProjectLayout, 400);
+      }
+    }
+    async function saveProjectLayout() {
+      if (destroyed || layoutSaving || layoutRevision === null || typeof callbacks.saveLayout !== 'function') return;
+      const savedRun = runId, sequence = layoutSequence, snapshot = {view:{...view},positions:JSON.parse(JSON.stringify(positions))};
+      layoutSaving = true; layoutNote.textContent = '正在保存项目布局…';
+      try {
+        const result = await callbacks.saveLayout({expected_revision:layoutRevision,...snapshot,...layoutExtras});
+        if (destroyed || savedRun !== runId) return;
+        if(!Number.isInteger(result?.revision)||result.revision!==layoutRevision+1)throw new Error('项目布局回执版本无法核对。');
+        layoutRevision = result.revision;
+        layoutNote.textContent = '布局已保存到项目';
+      } catch (error) {
+        if (destroyed || savedRun !== runId) return;
+        layoutNote.textContent = error.status === 409 ? '布局已在其他窗口更新；本机摆放保留，重新打开核对后再保存' : '项目布局未保存；本机摆放保留';
+        layoutRevision = null;
+      } finally {
+        layoutSaving = false;
+        if (!destroyed && savedRun === runId && sequence !== layoutSequence && layoutRevision !== null) void saveProjectLayout();
+      }
+    }
+    async function restoreProjectLayout() {
+      if (typeof callbacks.loadLayout !== 'function') return;
+      const savedRun = runId, sequence = layoutSequence;
+      try {
+        const saved = await callbacks.loadLayout();
+        if (destroyed || savedRun !== runId || !Number.isInteger(saved?.revision)) return;
+        layoutRevision = saved.revision;
+        layoutExtras = {groups:list(saved.groups),notes:list(saved.notes)};
+        if (sequence !== layoutSequence) { void saveProjectLayout(); return; }
+        if (saved.revision > 0) {
+          positions = Object.fromEntries(Object.entries(saved.positions || {}).filter(([,point]) => point && coordinate(point.x) && coordinate(point.y)));
+          if (saved.view && coordinate(saved.view.x) && coordinate(saved.view.y) && Number.isFinite(saved.view.zoom)) {
+            view = {...saved.view,zoom:clamp(saved.view.zoom)}; initialViewPending = false;
+          }
+          positionImages(); updateBounds(); apply(); layoutNote.textContent = '布局已保存到项目';
+        } else { layoutNote.textContent = '当前本机布局；调整后保存到项目'; }
+      } catch (_) { if (savedRun === runId && !destroyed) layoutNote.textContent = '项目布局暂未读取；本机摆放保留'; }
     }
     const listeners = [];
     const listen = (node, name, handler, options) => { node.addEventListener(name, handler, options);
@@ -346,6 +388,7 @@
             page.append(el('p', 'creative-board-warning', '请关闭后重新打开核对当前结果；不会用旧图替代。'));
           };
           page.append(image, download);
+          page.append(button('保存这一页的批注',`annotate:${item.attemptId}`,()=>call('annotateMedia',item)));
         } else page.append(el('p', 'creative-photo-collection-missing', item.issue || item.reason || '这一页尚无可核对的当前图片。'));
         const rows = data.rows.filter(row => row.shotId === item.shotId);
         if (rows.length === 1 && rows[0].line) {
@@ -434,7 +477,9 @@
     const plus = button('+', 'zoom-in', () => zoomBy(1.2)); plus.setAttribute('aria-label', '放大画布');
     const focus = button('看分镜', 'focus-plan', focusPlan);
     const overview = button('看图文', 'photo-collection', showPhotoCollection);
-    toolbar.append(hint, focus, overview, button('看图片', 'focus-images', () => focusImage(data.images[0]?.key)),
+    toolbar.append(hint, focus, overview, button('对象与关系', 'objects', () => call('openObjects')),
+      button('批注汇总', 'annotations', () => call('openAnnotations')),
+      button('看图片', 'focus-images', () => focusImage(data.images[0]?.key)),
       minus, label, plus, button('适配视图', 'fit', fit), button('重置布局', 'reset-layout', resetLayout), layoutNote);
     viewport.append(world); shell.append(toolbar, viewport); host.replaceChildren(shell);
     const interactive = target => target?.closest?.('button,a,input,textarea,select,video,summary,[role="button"],[data-board-scroll]');
@@ -553,6 +598,7 @@
       try { root.localStorage?.removeItem(layoutKey()); layoutNote.textContent = '已重置本项目的本机布局'; }
       catch (_) { layoutNote.textContent = '本次已重置；本机保存的布局无法清除'; }
       positionImages(); fit(false);
+      if(typeof callbacks.saveLayout==='function')persistLayout();
     }
     function positionImages() {
       const cards = [...world.querySelectorAll('[data-board-image]')];
@@ -570,7 +616,7 @@
         const handle = button('⠿ 移动图片', `move:${item.key}`, () => {}, 'creative-board-image-handle');
         handle.setAttribute('data-image-drag', '');
         handle.setAttribute('aria-label', `移动 ${item.title}；方向键移动，Shift 加速`);
-        handle.title = '拖动此手柄摆放图片；方向键移动，Shift 加速。仅保存本机布局。';
+        handle.title = '拖动此手柄摆放图片；方向键移动，Shift 加速。';
         card.append(handle, el('h3', '', item.title));
         const preview = button('', item.source ? `source:${item.name}` : `output:${item.name}`,
           () => call('openMedia', item.name), 'creative-board-output');
@@ -712,7 +758,8 @@
               const image = data.images.find(row => row.name === item.name);
               card.append(button('定位图片 ↗', `locate:${image?.key}`, () => focusImage(image?.key)));
             } else { const video = el('video'); video.src = item.url; video.controls = true; video.playsInline = true; video.preload = 'metadata';
-              video.setAttribute('aria-label', `播放镜头 ${item.ordinal} 视频`); card.append(video); }
+              video.setAttribute('aria-label', `播放镜头 ${item.ordinal} 视频`); card.append(video,
+                button('批注当前时间',`annotate:${item.attemptId}`,()=>call('annotateMedia',item,video.currentTime))); }
           } else { card.append(note(item.issue || item.reason || (data.photo ? '这一页尚无可核对的当前图片。' : data.video ? '这面镜头尚无可核对的当前结果。' : '这一画面尚无可核对的当前结果。'))); }
           card.append(button(data.photo ? '查看这一页' : data.video ? '查看这一镜' : '查看画面', `shot:${item.kind}:${shotId}`, () => call('openShot', item.kind, shotId))); section.append(card);
         }
@@ -764,7 +811,8 @@
       data = nextData; renderKey = nextKey; runId = data.runId;
       focus.textContent = data.analysisOnly ? '看报告' : data.video ? '看分镜' : '看方案';
       overview.hidden = !data.photo || data.analysisOnly;
-      if (changedRun) { view = {zoom: 1, x: 32, y: 32}; autoFit = false;
+      if (changedRun) { root.clearTimeout(layoutTimer); layoutRevision = null; layoutSequence = 0; layoutExtras = {groups:[],notes:[]};
+        view = {zoom: 1, x: 32, y: 32}; autoFit = false;
         layoutNote.textContent = '布局仅保存在本机'; initialViewPending = !restoreLayout(); }
       const active = doc.activeElement, focusKey = host.contains(active) ? active?.getAttribute?.('data-board-action') : null;
       bounds = {width: data.analysisOnly ? 1020 : 1460, height: 680};
@@ -776,6 +824,7 @@
         if (node) { node.scrollTop = saved.top; node.scrollLeft = saved.left; } }
       updateBounds();
       if (!initializeReadingView()) apply();
+      if (changedRun) void restoreProjectLayout();
       if (focusKey && !changedRun) { const button = [...host.querySelectorAll('[data-board-action]')].find(item => item.getAttribute('data-board-action') === focusKey);
         // Restore the focused control after new saved content without treating
         // that refresh as a new keyboard navigation request to move the view.
@@ -783,7 +832,7 @@
         try { button?.focus({preventScroll: true}); } finally { restoringFocus = false; } }
       return api;
     }
-    function destroy() { if (destroyed) return; destroyed = true; closePhotoCollection(false); stopDrag(); resize?.disconnect();
+    function destroy() { if (destroyed) return; destroyed = true; root.clearTimeout(layoutTimer); closePhotoCollection(false); stopDrag(); resize?.disconnect();
       for (const dispose of listeners) dispose(); shell.remove(); controllers.delete(host); }
     const api = {update, destroy, fit, zoomBy, focusPlan, getView: () => ({...view}), getProjection: () => data};
     return api;

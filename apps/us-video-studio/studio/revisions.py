@@ -312,7 +312,7 @@ def install_revision_routes(app, jobs, require_run, connections, settings, learn
     def save(run_id: str, stage: Literal['direction', 'writing'], payload: DraftIn):
         require_run(run_id)
         with jobs.lock:
-            if jobs.active is not None: raise HTTPException(409, '请等待当前任务结束后再保存修改。')
+            if jobs.has_executions(): raise HTTPException(409, '请等待当前任务结束后再保存修改。')
             try: return save_draft(store, pipeline, run_id, stage, payload)
             except PipelineError as exc: raise HTTPException(409, error_message(exc)) from exc
 

@@ -74,6 +74,15 @@ def assemble_role_task(store, pipeline, learning, run_id, workspace: Workspace,
                   '原话里的条件在本阶段范围内同样适用；派工摘要不得删改这些条件。'
                   '只完成本阶段，不重新记录决定，不扩大局部范围，也不授予媒体或费用执行权限。'
                   '原话与本阶段或已采用版本冲突时说明冲突，不自行更换方向或重做其他阶段。', '']
+        from .workspace_objects import annotation_context
+        annotations = annotation_context(store, run_id, user_input_id)
+        if annotations:
+            parts += ['# 用户本次选择的准确批注', json.dumps(annotations, ensure_ascii=False),
+                '每条批注保留自己的 target、region、at_seconds 和原文；同一媒体上的多个时间点不能合并成第一条位置。'
+                '这些位置只限定各条意见的适用对象，不增加修改上游、观察媒体或费用执行权限。', '']
+            sources += tuple({'kind': 'workspace_annotation', 'annotation_id': row['annotation_id'],
+                'sha256': hashlib.sha256(json.dumps(row, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()}
+                for row in annotations)
         recovery = (turn_scope or {}).get('reference_recovery') or {}
         recovery_message_id = recovery.get('recovery_message_id')
         if recovery_message_id and recovery_message_id != user_input_id:
@@ -163,7 +172,7 @@ def assemble_role_task(store, pipeline, learning, run_id, workspace: Workspace,
         f'你可以读取这些阶段的产物：{readable}。其他阶段读不到，也不需要读到。\n'
         '你看不到任何一个同事的对话、推理或自我评价——你手上是产物本身和给你的说明。\n'
         'read_capabilities 可查能力边界；read_method_document 可读登记方法。方法目录：\n'
-        + json.dumps(learning.skill_catalog(role), ensure_ascii=False)
+        + json.dumps(learning.skill_catalog(role, run_id=run_id), ensure_ascii=False)
         + '\n\n' + method_context['text']
         + ('\n本任务为局部修订，前述 submit_stage 提交要求在本任务改为 submit_patch；'
            '只能修改绑定字段，不重写全文。' if local_revision else '')

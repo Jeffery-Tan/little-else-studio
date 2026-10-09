@@ -49,7 +49,7 @@ def install_material_routes(app, store, jobs, require_run):
     def write_material_observation(run_id: str, payload: MaterialObservationIn):
         require_run(run_id)
         with jobs.lock:
-            if jobs.active is not None:
+            if jobs.has_executions():
                 raise HTTPException(409, '制作团队正在运行，请结束本轮后再更新素材观察。')
             try:
                 return save_human_observation(store, run_id, **payload.model_dump())

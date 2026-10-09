@@ -11,6 +11,7 @@ deliberately bypass this class to do it.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from ..ledger import Ledger
@@ -68,7 +69,12 @@ class BudgetedClient:
             request = json.loads(encode(dict(model=model, system=system, messages=messages, tools=tools)))
         except (TypeError, ValueError):
             raise SafePreflightError('模型输入无法完整记录，尚未发起请求。') from None
-        call_id = self.ledger.begin_call(self.run_id, role=self.role, stage=self.stage, model=model)
+        from .. import task_execution
+        with self.ledger.store.run_lock(self.run_id):
+            task_execution.check(self.ledger.store, self.run_id, reserve=True)
+            call_id = self.ledger.begin_call(self.run_id, role=self.role, stage=self.stage, model=model)
+            task_execution.record_call(self.ledger.store, self.run_id, call_id,
+                role=self.role, stage=self.stage, system=system, messages=messages, tools=tools)
         try:
             save_request(self.ledger.store, self.run_id, call_id, role=self.role, stage=self.stage,
                          request=request, route={
@@ -87,6 +93,7 @@ class BudgetedClient:
                                    usage_status='known', ok=False, error='cancelled before provider invocation')
             raise
         turn = None
+        request_started = time.monotonic()
         try:
             progress_call = getattr(target, 'complete_with_progress', None)
             turn = (progress_call(**request, on_progress=self.public_progress)
@@ -111,6 +118,7 @@ class BudgetedClient:
                 ok=False,
                 error=str(exc)[:300] if isinstance(exc, ModelError) else f"{type(exc).__name__}: call failed; usage unconfirmed",
             )
+            task_execution.record_response(self.ledger.store, self.run_id, call_id, time.monotonic() - request_started)
             if isinstance(exc, ModelError) and isinstance(exc.response_diagnostic, dict):
                 try:
                     record_response_rejection(self.ledger.store, self.run_id, call_id,
@@ -140,6 +148,7 @@ class BudgetedClient:
             usage_status="known" if turn.usage.input_tokens is not None and turn.usage.output_tokens is not None else "unknown",
             ok=True,
         )
+        task_execution.record_response(self.ledger.store, self.run_id, call_id, time.monotonic() - request_started)
         # A cancellation arriving with a complete response retains real usage,
         # but must not persist/execute this exceptional format-processing path.
         if turn.writer_root_closure is not None and cancel:

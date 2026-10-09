@@ -266,7 +266,8 @@ def test_reply_limits_are_only_in_root_finishing_not_writer_input(tmp_path, monk
     assert result.text == output and result.deliverable['status'] == 'complete'
     check = result.deliverable['reply_check']
     assert check['status'] == 'satisfied' and check['char_count'] == 200
-    assert len(contexts) == 1 and len(seen) == len(ledger.entries(run)) == 4
+    assert len(contexts) == 1 and len(seen) == len(ledger.entries(run)) == 5
+    assert [tool['function']['name'] for tool in seen[-2]['tools']] == ['submit_delivery_check']
     final = seen[-1]
     assert not final.get('tools')
     data = json.loads(final['messages'][-1]['content'])
@@ -293,7 +294,8 @@ def test_late_reply_condition_change_cannot_publish_stale_finishing(tmp_path, mo
         finish=reply(text='Saved real script.'), before_finish=changed)
     with pytest.raises(NonRetryableStageError, match='来源已变化'):
         orch.send(text)
-    assert len(seen) == len(ledger.entries(run)) == 4
+    assert len(seen) == len(ledger.entries(run)) == 5  # Includes one producer check before finishing.
+    assert not seen[-1].get('tools')
     assert store.latest_artifact(run, 'writing').version == 1
     assert not any(row['role'] == 'assistant' for row in store.read_chat(run))
 
@@ -311,7 +313,8 @@ def test_finishing_keeps_provider_outer_whitespace_and_counts_it(tmp_path, monke
     assert result.deliverable['reply_check']['char_count'] == 403
     assert result.deliverable['reply_check']['table_data_rows'] == 2
     assert store.read_chat(run)[-1]['text'] == output
-    assert len(seen) == len(ledger.entries(run)) == 4
+    assert len(seen) == len(ledger.entries(run)) == 5  # Includes one producer check before finishing.
+    assert not seen[-1].get('tools')
 
 
 @pytest.mark.parametrize('preserve', [False, True])

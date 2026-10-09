@@ -116,6 +116,27 @@ function resizeFixture(run) {
   finally { if (previous === undefined) delete globalThis.ResizeObserver; else globalThis.ResizeObserver = previous; }
 }
 
+test('project layout is restored without writing and changes save against the displayed revision',async()=>{
+  const {host}=dom(),saved=[];
+  const input=fixture(),view={zoom:.8,x:120,y:40};
+  const notes=[{id:'one',text:'Project note',node_ids:[]}],groups=[{id:'group',title:'Review',node_ids:['node-one']}];
+  const board=Board.render(host,input,{loadLayout:async()=>({revision:3,view,positions:{},notes,groups}),
+    saveLayout:async payload=>{saved.push(payload);return {revision:4,...payload};}});
+  await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(board.getView(),view);assert.equal(saved.length,0);
+  board.zoomBy(1.2);await new Promise(resolve=>setTimeout(resolve,430));
+  assert.equal(saved.length,1);assert.equal(saved[0].expected_revision,3);assert.equal(saved[0].view.zoom,.96);
+  assert.deepEqual(saved[0].notes,notes);assert.deepEqual(saved[0].groups,groups);
+  assert.match(host.querySelector('.creative-board-layout-note').textContent,/保存到项目/);board.destroy();
+});
+
+test('a late project layout cannot replace the next project canvas',async()=>{
+  const {host}=dom();let resolveLayout;
+  const board=Board.render(host,fixture(),{loadLayout:()=>new Promise(resolve=>{resolveLayout=resolve;})});
+  const next={...fixture(),runId:'other-project'};board.update(next,{});const view=board.getView();
+  resolveLayout({revision:5,view:{zoom:.5,x:999,y:999},positions:{}});await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(board.getView(),view);assert.equal(board.getProjection().runId,'other-project');board.destroy();
+});
+
 test('first open with six pictures and a tall plan uses a readable 100 percent top anchor', () => localStorageFixture(values => resizeFixture(observers => {
   const {host} = dom({planHeight:1800}); host.clientWidth = 750; host.clientHeight = 560;
   const input = fixture();

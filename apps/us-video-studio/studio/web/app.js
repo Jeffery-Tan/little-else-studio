@@ -1200,7 +1200,9 @@ function viewerGeneratedImageTarget(runId, material) {
   return matches.length === 1 ? matches[0] : null;
 }
 
+let viewerOpener = null;
 function openViewer(m) {
+  if ($('viewer').hidden) viewerOpener = document.activeElement;
   $("viewer-name").textContent = `${m.name} · ${humanBytes(m.bytes)}`;
   const body = $("viewer-body");
   body.innerHTML = "";
@@ -1232,6 +1234,27 @@ function openViewer(m) {
   const material = {name:m.name, kind:m.kind, bytes:m.bytes, usable:m.usable};
   const target = viewerGeneratedImageTarget(runId, material);
   const actions = viewer.querySelector('.viewer-actions');
+  const origins = (state.productionData?.drafts || []).flatMap(draft => (draft.attempts || [])
+    .filter(attempt => attempt.output?.name === m.name).map(attempt => ({draft, attempt})));
+  const origin = origins.length === 1 ? origins[0] : null;
+  if (origin) {
+    const provenance = box('section', 'viewer-provenance');
+    const ordinal = feedbackShotOrdinal(origin.draft);
+    provenance.append(box('strong', '', `${m.kind === 'video' ? '视频' : '图片'} · 方案第 ${origin.draft.source_version} 版${ordinal ? ` · 第 ${ordinal} ${state.timeline?.run?.content_format === 'photo' ? '页' : '镜'}` : ''}`),
+      box('p', '', origin.draft.is_current === true && origin.draft.source_ready === true
+        ? '对应当前制作输入；生成状态和图审状态分别保留。'
+        : '历史结果：原图与来源保留。此版本不能作为当前制作的批准或授权。'));
+    const input = box('button', 'ghost small', '查看原制作输入'); input.type = 'button';
+    input.onclick = () => { closeViewer(); openProduction({kind:origin.draft.kind, focusDraft:origin.draft.draft_id}); };
+    provenance.append(input); body.append(provenance);
+    if (typeof StudioObjects !== 'undefined') {
+      const annotation = box('button', 'ghost small', '保存批注'); annotation.type = 'button';
+      annotation.onclick = () => StudioObjects.openAnnotations({runId, target:{kind:'media',run_id:runId,
+        attempt_id:origin.attempt.attempt_id,output_sha256:origin.attempt.output.sha256}, title:provenance.querySelector('strong').textContent,
+        media:{kind:m.kind,url:materialUrl(m.name),at_seconds:body.querySelector('video')?.currentTime || 0}});
+      provenance.append(annotation);
+    }
+  }
   if (target && actions) {
     const feedback = box('button', 'ghost small', '批注这张生成图');
     feedback.type = 'button'; feedback.setAttribute('data-viewer-feedback', '');
@@ -1247,6 +1270,7 @@ function openViewer(m) {
     actions.prepend(feedback);
   }
   viewer.hidden = false;
+  $('viewer-close').focus();
 }
 
 function closeViewer() {
@@ -1254,6 +1278,8 @@ function closeViewer() {
   $("viewer-body").innerHTML = "";
   $("viewer").querySelector("[data-viewer-feedback]")?.remove();
   $("viewer").hidden = true;
+  if (viewerOpener?.isConnected) viewerOpener.focus({preventScroll:true});
+  viewerOpener = null;
 }
 
 /* ------------------------------------------------------------- the shelf -- */
@@ -1519,15 +1545,23 @@ function renderTurn(turn, live = false) {
 
   const progress = box('div','turn-progress');
   progress.setAttribute('aria-label','本轮进展');
-  for (const item of turn.items.filter(item => item.kind === 'progress')) {
+  const journal = box('details','turn-progress-history');
+  journal.open = state.machineDetail;
+  const progressItems = turn.items.filter(item => item.kind === 'progress');
+  journal.append(box('summary','',`工作过程 · ${progressItems.length} 条`));
+  const progressLog = box('div','progress-journal');
+  for (const item of progressItems) {
     const line = renderProgressLine(item);
-    if (line) progress.append(line);
+    if (line) progressLog.append(line);
   }
+  journal.append(progressLog);
+  if (progressLog.children.length) progress.append(journal);
   wrap.append(progress);
 
   const history = box('details','turn-work');
   const work = turn.items.filter(item => item.kind === 'note' || item.kind === 'artifact');
-  if(work.length && state.machineDetail) {
+  if(work.length) {
+    history.open = state.machineDetail;
     history.append(box('summary','',`本轮工作记录 · ${work.length} 项`));
     for(const item of work) history.append(item.kind==='artifact' ? renderArtifactLine(item) : renderNote(item));
     wrap.append(history);
@@ -1535,12 +1569,14 @@ function renderTurn(turn, live = false) {
   // One link per stage, bound to the version produced in this turn. Intermediate
   // drafts stay in the expandable journal, not between the user and the answer.
   const delivered = new Map();
+  let deliveredLinks = null;
   for(const item of work) if(item.kind==='artifact') {
     const current=(state.rail||[]).find(step=>step.stage===item.stage);
     if(current?.has_doc && String(current.version)===String(item.version)) delivered.set(item.stage,item);
   }
   if(delivered.size) {
     const links = box('div','turn-deliverables');
+    deliveredLinks = links;
     for(const item of delivered.values()) {
       const link=box('button','ghost small',`${item.stage==='writing'?'查看完整方案':item.stage==='direction'?'查看方向方案':item.stage==='intake'?'查看需求理解':'查看素材安排'} ↗`);
       link.onclick=()=>{
@@ -1637,6 +1673,11 @@ function renderTurn(turn, live = false) {
     wrap.appendChild(bubble);
   }
 
+  // Keep the answer and decision together, then the exact works, live receipt
+  // and collapsed history. Moving existing nodes preserves their bindings.
+  if (deliveredLinks) wrap.append(deliveredLinks);
+  wrap.append(progress);
+  if (history.parentNode === wrap) wrap.append(history);
   const detail = state.machineDetail ? renderMachineDetail(turn.detail) : null;
   if (detail) wrap.appendChild(detail);
 
@@ -1659,7 +1700,7 @@ function renderProgressLine(item) {
 function renderJobProgress(job) {
   const conversation = $('conversation-body');
   if (!job || !JOB_ACTIVE.has(job.status) ||
-      !['conversation','stage_review'].includes(job.job_kind || 'conversation')) {
+      !['conversation','stage_review','writing_revision','annotation_revision'].includes(job.job_kind || 'conversation')) {
     conversation.querySelector('.turn-working')?.remove();
     return;
   }
@@ -1674,14 +1715,22 @@ function renderJobProgress(job) {
   }
   const host = turn.querySelector('.turn-progress');
   if (!host) return;
+  let journal = host.querySelector('.turn-progress-history');
+  if (!journal) {
+    journal = box('details','turn-progress-history'); journal.open = state.machineDetail;
+    journal.append(box('summary','','工作过程'),box('div','progress-journal')); host.append(journal);
+  }
+  const progressLog = journal.querySelector('.progress-journal');
   const present = new Set([...host.querySelectorAll('.progress-line')]
     .map(line => line.getAttribute('data-progress-seq')));
   let appended = false;
   for (const event of job.events || []) {
     if (event.seq == null || present.has(String(event.seq))) continue;
     const line = renderProgressLine(event);
-    if (line) { host.append(line); present.add(String(event.seq)); appended = true; }
+    if (line) { progressLog.append(line); present.add(String(event.seq)); appended = true; }
   }
+  journal.querySelector('summary').textContent = `工作过程 · ${progressLog.children.length} 条`;
+  journal.hidden = !progressLog.children.length;
   let working = host.querySelector('.turn-working');
   if (working) working.remove();
   else working = box('div','turn-working');
@@ -2169,10 +2218,13 @@ function renderMachineDetail(detail) {
 
 let readerState = { stage: null, version: null, runId: null };
 let readerRequestId = 0;
+let readerOpener = null;
 
 async function openReader(stage, version) {
+  if ($('reader').hidden) readerOpener = document.activeElement;
   readerState = { stage, version, runId: state.runId };
   $("reader").hidden = false;
+  $('reader-close').focus();
   await loadReader();
 }
 
@@ -2196,12 +2248,31 @@ async function loadReader() {
   if (!current()) return;
 
   $("reader-title").textContent = record.numbered || '方案详情';
-  const sub = `${record.author}写于 ${record.created_at}`;
+  const latest = (state.rail || []).find(row => row.stage === stage);
+  const exactCurrent = record.integrity_ok && !record.withdrawn && latest?.version === version &&
+    latest.artifact_sha256 === record.sha256 && !latest.stale && latest.integrity_ok !== false;
+  const sub = `第 ${version} 版 · ${exactCurrent ? '当前版本' : '历史版本，只读追溯'} · ${record.author}写于 ${record.created_at}`;
   $("reader-sub").textContent = record.integrity_ok
     ? sub
     : `${sub} · 这份文件保存后被改动过，不能作为依据`;
 
   body.innerHTML = "";
+  const actions = box('div','reader-object-actions');
+  if (typeof StudioObjects !== 'undefined' && record.integrity_ok) {
+    const target = {kind:'artifact',run_id:runId,stage,version,artifact_sha256:record.sha256};
+    const annotate = box('button','ghost small','保存批注'); annotate.type = 'button';
+    annotate.onclick = () => StudioObjects.openAnnotations({runId,target,title:`${record.stage_label} · 第 ${version} 版`});
+    const compare = box('button','ghost small','与其他版本比较'); compare.type = 'button';
+    compare.onclick = () => StudioObjects.openCompare({runId,target,title:record.stage_label});
+    actions.append(annotate,compare);
+  }
+  if (exactCurrent && state.timeline?.pending?.stage === stage && state.timeline.pending.version === version &&
+      state.timeline.pending.artifact_sha256 === record.sha256 && typeof gateHtml === 'function') {
+    const decide = box('details','reader-decision'); decide.append(box('summary','','对这份准确版本作决定'));
+    const gate = box('div'); gate.innerHTML = gateHtml(state.timeline.pending,latest); decide.append(gate);
+    wireGate(gate); actions.append(decide);
+  }
+  body.append(actions);
   if (record.summary) {
     body.appendChild(box("h3", null, "摘要"));
     body.appendChild(box("p", null, record.summary));
@@ -2210,7 +2281,7 @@ async function loadReader() {
   // what the document says. The raw text stays below it, unchanged: the layout
   // is a reading of the document, and the document is the thing of record.
   if (record.blocks && record.blocks.length) {
-    body.appendChild(box("h3", null, "排好版的样子"));
+    body.appendChild(box("h3", null, "作品内容"));
     body.appendChild(blocksElement(record.blocks));
   }
   if (record.questions && record.questions.length) {
@@ -2224,10 +2295,12 @@ async function loadReader() {
     }
     body.appendChild(ul);
   }
-  body.appendChild(box("h3", null, "原文"));
+  const raw = box('details','reader-original');
+  raw.open = !(record.blocks && record.blocks.length);
+  raw.append(box('summary','','完整原文'));
   const article = box("article", "doc");
   article.innerHTML = renderMarkdown(record.content);
-  body.appendChild(article);
+  raw.append(article); body.append(raw);
   if (record.evidence && record.evidence.length) {
     body.appendChild(box("h3", null, "作者列出的证据"));
     const ul = box("ul", "plain");
@@ -2244,15 +2317,32 @@ async function loadReader() {
   body.scrollTop = 0;
 }
 
-$("reader-close").onclick = () => { $("reader").hidden = true; };
+function closeReader() {
+  $('reader').hidden = true; readerRequestId += 1;
+  if (readerOpener?.isConnected) readerOpener.focus({preventScroll:true});
+  readerOpener = null;
+}
+$("reader-close").onclick = closeReader;
 $("reader").addEventListener("click", (e) => {
-  if (e.target === $("reader")) $("reader").hidden = true;
+  if (e.target === $("reader")) closeReader();
 });
 document.addEventListener("keydown", (e) => {
+  if (e.key === 'Tab') {
+    const modal = !$('viewer').hidden ? $('viewer') : !$('reader').hidden ? $('reader') : null;
+    if (modal && !document.querySelector('dialog[open]')) {
+      const controls = [...modal.querySelectorAll('button,a[href],input,textarea,select,video,[tabindex="0"]')]
+        .filter(node => !node.disabled && !node.hidden &&
+          (typeof node.getClientRects!=='function'||node.getClientRects().length>0));
+      const first = controls[0], last = controls.at(-1);
+      if (first && e.shiftKey && (document.activeElement === first || !modal.contains(document.activeElement))) {e.preventDefault();last.focus();}
+      else if (first && !e.shiftKey && (document.activeElement === last || !modal.contains(document.activeElement))) {e.preventDefault();first.focus();}
+    }
+  }
   if (e.key !== "Escape") return;
+  if (document.querySelector('dialog[open]')) return;
   // Innermost first: Escape out of the picture, then out of the document.
   if (!$("viewer").hidden) closeViewer();
-  else $("reader").hidden = true;
+  else closeReader();
 });
 
 /* ------------------------------------------------------------ decisions -- */
@@ -2379,7 +2469,7 @@ async function send(text, requestKind = null, clarificationId = null) {
         throw Error('原任务已变化。原话已保留，请刷新后重新选择接续。');
       if (state.busy) throw Error('请等本轮结束后再接续原任务；原话已保留。');
     }
-    if (requestKind === 'writing_revision' && currentJob && JOB_ACTIVE.has(currentJob.status))
+    if (requestKind === 'writing_revision' && currentJob && currentJob.lane!=='query' && JOB_ACTIVE.has(currentJob.status))
       throw Error('直接修改需要等本轮任务结束后再发送；原话、目标和直接修改模式已保留。');
     if (state.busy && canSteerJob(currentJob)) {
       if (typeof StudioComposer !== 'undefined' && StudioComposer.files(runId).length)
@@ -2420,7 +2510,7 @@ async function send(text, requestKind = null, clarificationId = null) {
       }
     }
     if (state.busy && !canSteerJob(currentJob)) {
-      const stillRunning = currentJob && ['queued', 'running', 'cancelling'].includes(currentJob.status);
+      const stillRunning = currentJob && currentJob.lane!=='query' && ['queued', 'running', 'cancelling'].includes(currentJob.status);
       if (stillRunning) {
         const message = '团队仍在执行本轮；请先停止本轮，或等结束后再发送新的对话。';
         toast(message, true);
@@ -2477,7 +2567,7 @@ async function send(text, requestKind = null, clarificationId = null) {
       state.clarificationChoices.delete(runId);
     return result === undefined ? {accepted: true} : {...result, run_id: runId};
   } catch(error){
-    state.busy=Boolean(currentJob && JOB_ACTIVE.has(currentJob.status));
+    state.busy=Boolean(currentJob && currentJob.lane!=='query' && JOB_ACTIVE.has(currentJob.status));
     if (typeof syncComposerAction === 'function') syncComposerAction();
     else $('send').disabled=false;
     // The composer is *not* written here. Whether these words can go back into
@@ -2523,7 +2613,7 @@ async function submit(requestKind = null) {
   requestKind = state.composerRequestKind;
   if (requestKind) renderFeedbackTarget();
   persistComposerDraft();
-  const active = currentJob && JOB_ACTIVE.has(currentJob.status);
+  const active = currentJob && currentJob.lane!=='query' && JOB_ACTIVE.has(currentJob.status);
   if (active && (requestKind === 'writing_revision' || !canSteerJob(currentJob))) {
     const reason = requestKind === 'writing_revision'
       ? '直接修改需要等本轮任务结束后再发送；原话、目标和直接修改模式已保留。'
@@ -2614,7 +2704,10 @@ $("send").onclick = () => {
   if ($("send").dataset.mode === 'stop') { void stopCurrentJob(); return; }
   void submit();
 };
-if ($("job-stop")) $("job-stop").onclick = () => { void submit(); };
+if ($("job-stop")) $("job-stop").onclick = () => {
+  if($('job-stop').dataset.mode==='stop-query'){void stopCurrentJob();return;}
+  void submit();
+};
 $("chat-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
