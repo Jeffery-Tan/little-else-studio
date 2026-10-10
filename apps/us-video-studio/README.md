@@ -54,7 +54,7 @@ MiMo 可用于商品图片分析及原生视频声画理解。在模型设置的
 
 ## 启动与检查
 
-独立仓库要求明确的 Git 外数据根。统一启动入口为仓库根 `scripts/start.ps1 -DataRoot <existing-data-root>`；应用内启动器是实现细节。四个 US Skills、学习库、案例及方法随本仓库维护，无须外部业务根。引用经营事实时可传 `-BusinessRoot <E-commerce-root>`，或设置进程级绝对路径 `STUDIO_BUSINESS_ROOT`；它不会改变知识读写路径。旧路径引用仅供迁移来源追溯，具体边界见 [迁移说明](../../docs/migration.md)。
+本仓库是唯一开发与运行入口，电商旧入口已退役。新工作台从 Git 外新空目录启动：`scripts/start.ps1 -DataRoot <new-empty-directory-outside-Git> -AllowNew`；应用内启动器是实现细节，不要求导入旧项目。四个 US Skills、学习库、案例及方法随本仓库维护，无须外部业务根。引用经营事实时可额外传 `-BusinessRoot <E-commerce-root>`；它不会改变知识读写路径。旧路径引用仅供来源追溯，具体边界见 [迁移说明](../../docs/migration.md)。
 
 左侧「灵感与方法」已接入三项创作 Skill、原案例与方法库、研究来源和反馈迭代；独立学习记录另加载学习流程 Skill。Agent 可按角色读取[登记方法卡](studio/learning.py)，补救、视频输入与图文输入卡只提取稳定执行规则，原历史研究和反馈仍限人工审计或原资格过滤。实际角色输入保存快照；反馈绑定准确版本，先看差异再应用。视频输入与图文审阅包可在「本轮参考」打开，见 [学习迁移说明](docs/learning-migration.md)。
 
@@ -65,7 +65,7 @@ MiMo 可用于商品图片分析及原生视频声画理解。在模型设置的
 启动必须经 `scripts/start.ps1`（内部先跑 `studio.doctor`，会拒绝在已有写入进程或端口被占用时再起一个）。**手动 `python -m studio.server` 会跳过这些检查**，2026-09-30 就是这样起了一个指向默认数据根的服务：项目页打不开、报 `no such run`，而磁盘上的运行数据完好。三条硬性做法：
 
 1. **数据根必须在同一条启动命令中显式传入**，例如
-   `scripts/start.ps1 -BusinessRoot <business-repository> -DataRoot <existing-data-root>`。
+   `scripts/start.ps1 -DataRoot <new-empty-directory-outside-Git> -AllowNew`。
    不依赖上一条命令或另一终端设置的环境变量。
    启动后先用 `GET /api/runtime` 的 `data_root_id` 核对自己连的是哪一个数据根，再打开项目。
 2. **正常代码更新由服务自行重载**。启动器保持一个监护进程，旧工作进程正常退出并释放
@@ -78,9 +78,7 @@ MiMo 可用于商品图片分析及原生视频声画理解。在模型设置的
 ```powershell
 $studioRuntime = Join-Path $env:LOCALAPPDATA 'LittleElse/Studio/runtime-venv'
 $studioPython = Join-Path $studioRuntime 'Scripts/python.exe'
-$studioData = Read-Host 'Enter the existing Studio data root outside Git'
-$studioBusiness = Read-Host 'Enter the E-commerce business repository absolute path'
-$env:STUDIO_BUSINESS_ROOT = $studioBusiness
+$studioData = Read-Host 'Enter a new empty Studio data directory outside Git'
 if (!(Test-Path -LiteralPath $studioPython)) { py -3.12 -m venv $studioRuntime }
 & $studioPython -m pip install -r apps/us-video-studio/requirements-runtime.txt
 & $studioPython -m pip install -r apps/us-video-studio/requirements-local.txt
@@ -105,13 +103,13 @@ node --test apps/us-video-studio/tests/js/smoke_live_server.mjs
 & $studioPython apps/us-video-studio/scripts/check_reload_live.py
 
 # 同一入口先诊断，再启动；失效解释器、依赖、数据根、writer 锁和端口有对应提示
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start.ps1 -BusinessRoot $studioBusiness -DataRoot $studioData -CheckOnly
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start.ps1 -BusinessRoot $studioBusiness -DataRoot $studioData
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start.ps1 -DataRoot $studioData -AllowNew -CheckOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start.ps1 -DataRoot $studioData -AllowNew
 
 # 默认独立后台 + 空闲时热重载；仅诊断不启动
 # 需要前台看日志或固定代码版本时显式选择
-& scripts/start.ps1 -BusinessRoot $studioBusiness -DataRoot $studioData -Foreground
-& scripts/start.ps1 -BusinessRoot $studioBusiness -DataRoot $studioData -NoReload
+& scripts/start.ps1 -DataRoot $studioData -Foreground
+& scripts/start.ps1 -DataRoot $studioData -NoReload
 ```
 
 GitHub 的 `quality-gate.yml` 在 main 推送或 PR 时执行独立 Studio 检查，在 Windows 与 Ubuntu 安装上述固定依赖并运行完整 Python/HTTP 与 JavaScript 离线测试；普通功能分支推送本身不会触发该工作流。电商仓库的证据检查继续在电商仓库独立运行；它通过不等于 Studio 测试通过，离线测试通过也不等于真实创作验收。
