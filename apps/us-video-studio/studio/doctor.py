@@ -12,7 +12,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from .paths import BUSINESS_ROOT, PROJECT_ROOT, is_source_path
+from .paths import BUSINESS_ROOT, KNOWLEDGE_ROOT, PROJECT_ROOT, is_source_path
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 
@@ -24,7 +24,7 @@ ROOT_MARKER = '.studio-root.json'
 def _source_label(path: Path) -> str:
     if path.is_relative_to(REPOSITORY):
         return 'app:' + path.relative_to(REPOSITORY).as_posix()
-    return 'business:' + path.relative_to(BUSINESS_ROOT).as_posix()
+    return 'knowledge:' + path.relative_to(KNOWLEDGE_ROOT).as_posix()
 
 
 def _fingerprint_paths() -> list[Path]:
@@ -34,8 +34,8 @@ def _fingerprint_paths() -> list[Path]:
     if shared_learning.is_file():
         paths.extend((REPOSITORY / 'scripts').glob('*.py'))
     paths += list((APP_ROOT / 'docs/methods').glob('*.md'))
-    for name in ('us-commerce-strategy', 'us-creator-video', 'us-photo-copy'):
-        paths += list((BUSINESS_ROOT / '.agents/skills' / name).rglob('*.md'))
+    for name in ('us-commerce-strategy', 'us-creator-video', 'us-photo-copy', 'us-creative-learning'):
+        paths += list((KNOWLEDGE_ROOT / '.agents/skills' / name).rglob('*.md'))
     return sorted(paths, key=lambda path: _source_label(path))
 
 
@@ -73,7 +73,9 @@ def runtime_identity(data_root: Path) -> dict:
         'code_fingerprint': code_fingerprint(),
         'data_root_id': hashlib.sha256(str(root).casefold().encode('utf-8')).hexdigest()[:12],
         'source_root_id': hashlib.sha256(str(PROJECT_ROOT).casefold().encode('utf-8')).hexdigest()[:12],
-        'business_root_id': hashlib.sha256(str(BUSINESS_ROOT).casefold().encode('utf-8')).hexdigest()[:12],
+        'knowledge_root_id': hashlib.sha256(str(KNOWLEDGE_ROOT).casefold().encode('utf-8')).hexdigest()[:12],
+        'business_root_id': (hashlib.sha256(str(BUSINESS_ROOT).casefold().encode('utf-8')).hexdigest()[:12]
+                             if BUSINESS_ROOT is not None else 'not-configured'),
         'python': sys.version.split()[0],
         'dependencies': {name: _version(name) for name in ('fastapi', 'uvicorn', 'pydantic', 'av')},
         'media_tools': {name: bool(shutil.which(name)) for name in ('ffmpeg', 'ffprobe')},

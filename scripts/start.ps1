@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)][string]$BusinessRoot,
+    [string]$BusinessRoot,
     [Parameter(Mandatory = $true)][string]$DataRoot,
     [int]$Port = 4760,
     [string]$Python = (Join-Path $env:LOCALAPPDATA 'LittleElse/Studio/runtime-venv/Scripts/python.exe'),
@@ -9,10 +9,13 @@ param(
     [switch]$NoReload
 )
 $ErrorActionPreference = 'Stop'
-if ($BusinessRoot -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)') { throw 'BusinessRoot must be an absolute Windows path.' }
-$studioBusinessPath = [IO.Path]::GetFullPath($BusinessRoot)
-if (-not (Test-Path -LiteralPath (Join-Path $studioBusinessPath 'tracks/us/creative/learning/library.json') -PathType Leaf)) {
-    throw 'BusinessRoot must contain the existing US learning library.'
+$studioBusinessPath = $null
+if ($BusinessRoot) {
+    if ($BusinessRoot -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)') { throw 'BusinessRoot must be an absolute Windows path.' }
+    $studioBusinessPath = [IO.Path]::GetFullPath($BusinessRoot)
+    if (-not (Test-Path -LiteralPath $studioBusinessPath -PathType Container)) {
+        throw 'BusinessRoot must be an existing business directory; it does not supply Studio knowledge.'
+    }
 }
 $studioPreviousBusinessRoot = $env:STUDIO_BUSINESS_ROOT
 try {

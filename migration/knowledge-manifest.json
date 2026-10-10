@@ -1,0 +1,232 @@
+{
+  "source_repository": "Jeffery-Tan/e-business",
+  "source_commit": "59e0a850a3e8088c88f3e87185907954011d47d4",
+  "library_policy": "Original library bytes and identifiers preserved; Studio is the canonical writable owner. Frozen case evidence is historical, not current product authority.",
+  "files": [
+    {
+      "path": ".agents/skills/us-commerce-strategy/SKILL.md",
+      "source_sha256": "23c651c4fa07b2bc71c3b763bf4e3fd59da2ee8572de6d56c6222263c3b5cc67",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": ".agents/skills/us-creative-learning/SKILL.md",
+      "source_sha256": "da1abfe3d9de91d9fa9408bb9ec56f97d85890b11b1b93ee0ca0bf0010bc011e",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": ".agents/skills/us-creator-video/SKILL.md",
+      "source_sha256": "c9f3829e908220166adeba66e525cc70357aefefe809e879877316ad591a7765",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": ".agents/skills/us-creator-video/reference-adaptation.md",
+      "source_sha256": "e547528cc3b13683468a92dc4c841717bd7eac8701a74f9145219c64a0a02403",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": ".agents/skills/us-photo-copy/SKILL.md",
+      "source_sha256": "e791616ae33cee38c892b3657908d235d836d8eb90d51ef1cb9355641187d6ee",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "scripts/creative_learning_hub.py",
+      "source_sha256": "0e52db2c61bad76e40be55bc85940789c3625b275358930a8cfb8edc49504f7e",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "scripts/creative_session.py",
+      "source_sha256": "10df023b404f51c33c28fb7253d6cc1512c539db51cad52936d1545910efc0b3",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "scripts/photo_music_video.py",
+      "source_sha256": "4087e74b365853373a28472a4eada3e2359f84efce3b3474827fa65f6ab1617b",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tests/test_creative_brief.py",
+      "source_sha256": "1c7ae3737c24eb5705e4e1e880c64f742fb780230ad95aab82d7debbc2fd5bfe",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tests/test_creative_comparison.py",
+      "source_sha256": "47e08f6d1383826a682c3190f10a0d9272513d784a38e59731156adb7ff17d0b",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tests/test_creative_learning.py",
+      "source_sha256": "69ec9c2b0683f677e4e0c1903df45efc33423171c7826909a3b33ecc82c42791",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tests/test_creative_learning_hub.py",
+      "source_sha256": "5e7db8e653b61c5a58a7952bb05151d4a88db1df3a36d332cd3933c9fc01284f",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tests/test_creative_session.py",
+      "source_sha256": "b1f3f8430dedb12beb9f287cf98dc51ad760940a14c78d753cd778fa04470fcb",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tests/test_photo_copy_pack.py",
+      "source_sha256": "272998dd3e7fd69ef10ac3e993dae02c51b05622b5d134700cf262926789f5d2",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tests/test_photo_music_video.py",
+      "source_sha256": "104b884e4d7f2c5eaea608a7e3176f7fbe23089c5c817ba21f08b92d591a9bee",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/creative/comparison/README.md",
+      "source_sha256": "0133f9a59404711e533a21bfec17ba91dd0a3f1d2627b99d6ffac7d00a2fa27f",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/creative/comparison/baseline-001.md",
+      "source_sha256": "b47e0054b5cbf5bde1bc6e4f73f4f4d797e14875932e50ed6da8cdc9e81fea6c",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/creative/learning/README.md",
+      "source_sha256": "84d077755b38e8f7127311d26f51794da0b5fc11ecf2ba59dd6f2699bc2b7a7e",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/creative/learning/batch-001.md",
+      "source_sha256": "a1568bbad623e5d50e5bbef4b1ad780d54dbf818a6d544458e0d256dc3b182ad",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/creative/learning/brief-example.json",
+      "source_sha256": "a479343a2020ba596c1f251bc6178f3253de31b53d7f087458facea6363db1c9",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/creative/learning/commerce-methods-research.md",
+      "source_sha256": "3839f6ee028af1a798ae39202255ece9f3213ec45fa9394556c642840f386e98",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/creative/learning/commerce-methods-sources.json",
+      "source_sha256": "bd3b767e1b109c949e2c09c7c7d412dc928155876b2d270b3e7238dc4cb44e3d",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/creative/learning/execution.md",
+      "source_sha256": "d8a69bb6e4aa921f0a37b8d1311072c2a67d6382ac2653bc627eb7930d1c2e9d",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/creative/learning/library.json",
+      "source_sha256": "a40f564750f82305d1ccf1c7deedf1b7b54ca2d16d87624de4fe4bfbe301ce3c",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/creative/learning/photo-copy-methods-research.md",
+      "source_sha256": "50042199918b333b30b449b6c9940bcfb94c798e32f8feee68548dba9f957cba",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/creative/learning/photo-copy-methods-sources.json",
+      "source_sha256": "d47de72701ebdea4ab9eb7aa08bd85da03af525951092f6779486a700ac608dd",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/creative/learning/strategy-guide.md",
+      "source_sha256": "04db93d16d869884690e853d3485b2dc26696e3066351eab19557865d62f9713",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/creative/learning/tiktok-field-study.md",
+      "source_sha256": "d38130381bb222cb605856e50dc6aa0ed9b28cac548042b506a6e40f3340d6fe",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/creative/learning/workflow-skills.md",
+      "source_sha256": "7fbc829310461c3b625736e4d7cdc62a1cf419dec383abf8d112cf374417eabe",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/creative/lunch/R15-commerce-v2/reference-audio-study.md",
+      "source_sha256": "b4e8824b68bdafd0d6634b5c12604a756a4630bb586bfad44d39c8091bd4d3c2",
+      "ownership": "frozen-case-evidence"
+    },
+    {
+      "path": "tracks/us/creative/lunch/R15-reference-remake-v2/result-review.md",
+      "source_sha256": "e78bef32999ace91fa629d66b67e0a2c90fe15aa6cbc0f436e2effab41e33bc1",
+      "ownership": "frozen-case-evidence"
+    },
+    {
+      "path": "tracks/us/creative/lunch/R15-reference-remake-v2/user-calibration-followup.json",
+      "source_sha256": "5b5c1a6af587bc0749c129ab3795e0bc724d4684a9e73ce1a5f875cd6be45fb0",
+      "ownership": "frozen-case-evidence"
+    },
+    {
+      "path": "tracks/us/creative/lunch/R25-content-plan-v1/A-v7-continuous-script.md",
+      "source_sha256": "fbaee36671bba434fef6ddb1e7f61903222d536c072bb076ad8241395a46e539",
+      "ownership": "frozen-case-evidence"
+    },
+    {
+      "path": "tracks/us/creative/lunch/R25-content-plan-v1/reference-audio-study.md",
+      "source_sha256": "2ccec7c8fbb6110d8cf316a0392cb9187b24bd2f11c30edb16346cfb4f9a174a",
+      "ownership": "frozen-case-evidence"
+    },
+    {
+      "path": "tracks/us/creative/lunch/core-videos/README.md",
+      "source_sha256": "51f1949c3059078dcfe0f224f55b69519b97f0cc9fc66545c49c96f423cc4e57",
+      "ownership": "frozen-case-evidence"
+    },
+    {
+      "path": "tracks/us/creative/lunch/review-calibration-v1/evaluation-key.json",
+      "source_sha256": "1be728cb19cf02ade3bc2148d9d560d5b1f8909530aca35983474136836d6a2d",
+      "ownership": "frozen-case-evidence"
+    },
+    {
+      "path": "tracks/us/creative/photo-copy/README.md",
+      "source_sha256": "86189ff9742fe90e4285ee2699338623c44e04e1609f6821660690d7cb7de9d4",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/creative/photo-music/README.md",
+      "source_sha256": "2ae21f2764398eb4f5e378b4a74ab62aebf2d99f857c926aad313dfcaa4b2b7c",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/creative/photo-music/pilot-review.md",
+      "source_sha256": "d2a0ce80559de9857095fe00f1c3b4dfccf6936af0e0524cb27859f0441dbdd9",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/docs/ai-video-recovery-policy.md",
+      "source_sha256": "04819eb9da7feccf7c4d32d519b518e4c2777ae4ed7c8091103581561ad574f9",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/docs/ai-video-workflow-development-plan.md",
+      "source_sha256": "7f130315ba2b40016494f4ea8b55583162e85638907df4a6be056b5d8227d715",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/docs/lunch-video-current-state.md",
+      "source_sha256": "3538915ae80130da765cdb42c8e0d4b419e43bb174e7a5e45da6b9dc7bab06bf",
+      "ownership": "frozen-case-evidence"
+    },
+    {
+      "path": "tracks/us/docs/owned-ai-video-workflow.md",
+      "source_sha256": "8782d26add2f0e3cbd15416d359f11a5424581117e882d4f005294088f17f3f4",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/docs/shoppable-photo-workflow.md",
+      "source_sha256": "64e163d9f5688d028bf40435670d2d84527a394cb66bb0343d7055f37bd4288e",
+      "ownership": "studio-knowledge-or-tool"
+    },
+    {
+      "path": "tracks/us/research/2026-09-15-lunch-25l-reference-observation.md",
+      "source_sha256": "32bae3018bc88f43468c6f91ec8cee1fac75f1a8e5a9558522c6468bc7b969ff",
+      "ownership": "frozen-case-evidence"
+    }
+  ]
+}

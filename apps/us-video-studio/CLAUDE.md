@@ -1,7 +1,7 @@
 ﻿# us-video-studio 目录约定
 
 本文件只约束本应用。跨项目规则见仓库根 [AGENTS.md](../../AGENTS.md) 与
-适用的全局规则；线路事实源位于显式配置 `STUDIO_BUSINESS_ROOT` 下的 `tracks/us/`。独立仓库的代码/业务/运行数据边界见 [迁移说明](../../docs/migration.md)。本文业务约束继续生效，电商仓库链接用于外部业务约束与历史来源追溯。
+适用的全局规则；当前创作知识位于本仓库 `.agents/skills/` 和 `tracks/us/creative/learning/`；经营事实仍位于可选 `STUDIO_BUSINESS_ROOT` 下的 `tracks/us/`，未连接时需由用户提供准确商品事实。独立仓库的代码/业务/运行数据边界见 [迁移说明](../../docs/migration.md)。本文业务约束继续生效，电商仓库链接用于外部业务约束与历史来源追溯。
 
 ## 定位
 

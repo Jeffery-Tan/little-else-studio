@@ -41,7 +41,7 @@ try {
     $runtimeUrl = "http://127.0.0.1:$Port/api/runtime"
     $rootId = & $Python -c 'import hashlib,sys; from pathlib import Path; print(hashlib.sha256(str(Path(sys.argv[1]).resolve()).casefold().encode()).hexdigest()[:12])' $selectedRoot
     if ($LASTEXITCODE -ne 0) { throw 'Cannot identify the selected Studio data root.' }
-    $sourceIdsLines = & $Python -c 'import hashlib; from studio.paths import PROJECT_ROOT,BUSINESS_ROOT; print(hashlib.sha256(str(PROJECT_ROOT).casefold().encode()).hexdigest()[:12]); print(hashlib.sha256(str(BUSINESS_ROOT).casefold().encode()).hexdigest()[:12])'
+    $sourceIdsLines = & $Python -c 'import hashlib,sys; from studio.paths import PROJECT_ROOT,BUSINESS_ROOT; print(hashlib.sha256(str(PROJECT_ROOT).casefold().encode()).hexdigest()[:12]); print(hashlib.sha256(str(BUSINESS_ROOT).casefold().encode()).hexdigest()[:12] if BUSINESS_ROOT is not None else sys.argv[1])' not-configured
     if ($LASTEXITCODE -ne 0) { throw 'Cannot identify the selected Studio code and business roots.' }
     $sourceIds = @{ source_root_id = $sourceIdsLines[0].Trim(); business_root_id = $sourceIdsLines[1].Trim() }
     $existing = $null

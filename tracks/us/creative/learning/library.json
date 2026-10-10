@@ -1,0 +1,592 @@
+{
+  "schema_version": 1,
+  "market": "US",
+  "updated_at": "2026-09-18",
+  "purpose": "Curated learning and scoped retrieval; not task/product/market evidence authority.",
+  "cases": [
+    {
+      "id": "t01-tote-reference",
+      "title": "原参考：多袋位托特演示",
+      "source_key": "tiktok:7676412956501953823",
+      "market": "US",
+      "source_market_status": "US研究用途；原发布者/受众地域不由英文或品牌自动确认",
+      "source_url": "https://www.tiktok.com/@253096781user/video/7676412956501953823",
+      "platform": "tiktok",
+      "origin": "user_reference",
+      "comparison_group": "tote-reference-chain",
+      "partition": "calibration",
+      "tags": [
+        "packing",
+        "organization",
+        "speech",
+        "proof",
+        "pace"
+      ],
+      "media": {
+        "path": "J:/E-Business-Video-Data/US/LUN/R25-audio-study-20260915/T01-original.mp4",
+        "sha256": "990698fd40f95d6eefa05d339c1b08426ed116b7d947927022a0764eac4d5511",
+        "seconds": 15.1,
+        "has_audio": true
+      },
+      "eligible_for": [
+        "message",
+        "storyboard"
+      ],
+      "strategy": {
+        "audience_hypothesis": "带午餐及随身小物、关心能否收纳归位的人；推断，不是已验证买家画像",
+        "situation": "一次准备日常携带物品",
+        "belief_change": "从“东西只能堆一起”到“不同小物可各有位置”",
+        "speaker_relationship": "第一人称商品演示者；不推断真实长期使用",
+        "proof": "连续段落里展示不同袋位及携带结果；不是容量实测",
+        "form": "功能演示与画外音，声音可先于同语义段落中的动作"
+      },
+      "evidence": [
+        {
+          "id": "semantics",
+          "kind": "historical_report",
+          "source": "tracks/us/creative/lunch/R25-content-plan-v1/reference-audio-study.md",
+          "observation": "既有ASR研究：约7.04–8.26秒瓶伞各有位置，8.58–11.30秒小物/背袋用途，11.5秒后场景及查看颜色邀请；本轮读记录，不冒充完整听片。"
+        },
+        {
+          "id": "coverage",
+          "kind": "historical_report",
+          "source": "tracks/us/creative/lunch/R15-commerce-v2/reference-audio-study.md",
+          "observation": "原文件前约5.72秒缺音；约9.24秒有声窗口44词，不等于15秒全片286词/分钟。"
+        },
+        {
+          "id": "metrics",
+          "kind": "historical_report",
+          "source": "tracks/us/creative/lunch/R25-content-plan-v1/reference-audio-study.md",
+          "observation": "2026-09-15公开播放页快照230万播放；源媒体同hash。无留存、成交或投放因果证据。"
+        }
+      ],
+      "limits": [
+        "不能恢复未知开场口播、复制竞品袋位/容量/稀缺话术或推断高速口播导致高播放。",
+        "下载可用不等于已理解；资料为历史计数，不是当前数据。",
+        "没有本轮完整原速听评；不得据此判断声线自然、精确口型或停顿表现。"
+      ],
+      "user_feedback": {
+        "scope": "用户提供为参考；不代表每句台词、商品事实或生成版本都获认可。",
+        "source": "tracks/us/creative/lunch/core-videos/README.md"
+      },
+      "market_effect": null
+    },
+    {
+      "id": "t02-family-picnic",
+      "title": "家庭野餐：功能与带娃负担连接",
+      "source_key": "tiktok:7652463216852815134",
+      "market": "US",
+      "source_market_status": "US研究用途；原发布者/受众地域不由英文或品牌自动确认",
+      "source_url": "https://www.tiktok.com/@ayomadelyn/video/7652463216852815134",
+      "platform": "tiktok",
+      "origin": "discovered_reference",
+      "comparison_group": "t02-family-picnic",
+      "partition": "calibration",
+      "tags": [
+        "packing",
+        "persona",
+        "benefit",
+        "speech",
+        "family"
+      ],
+      "media": {
+        "path": "J:/E-Business-Video-Data/US/LUN/R25-audio-study-20260915/T02-original.mp4",
+        "sha256": "1379c2deff70304ca94c5dd11f2ffcf11a9843e25e5d915f973fa47a004c22f2",
+        "seconds": 26.566667,
+        "has_audio": true
+      },
+      "eligible_for": [
+        "message",
+        "storyboard"
+      ],
+      "strategy": {
+        "audience_hypothesis": "为家庭出游准备餐饮、手上事务多的照顾者；推断",
+        "situation": "出门透气，购物、准备、带孩子野餐",
+        "belief_change": "背负结构的价值在于带娃时腾出携带能力",
+        "speaker_relationship": "同类家长分享一次具体安排，不是参数播报员",
+        "proof": "商品出现于准备中，随后背着出门并出现家庭目的地",
+        "form": "生活叙述加画外音，并不需要全片对镜开口"
+      },
+      "evidence": [
+        {
+          "id": "visual",
+          "kind": "visual_sample",
+          "source": "J:/E-Business-Video-Data/US/LUN/R25-audio-study-20260915/T02-contact.jpg",
+          "observation": "2026-09-18重看每2秒接触表覆盖0–24秒：购物、草地装包、背包/出行、野餐和水边亲子；最后约2.57秒未逐帧查。"
+        },
+        {
+          "id": "semantics",
+          "kind": "asr_semantics",
+          "source": "J:/E-Business-Video-Data/US/LUN/R25-audio-study-20260915/T02-asr.json",
+          "observation": "本轮读取原ASR：0–4.62交代想出门；9.76–15.78准备餐饮；16.06–19.94将背包偏好解释为带孩子时已有很多东西要拿；20.38–25.24回到家庭出游。"
+        },
+        {
+          "id": "context",
+          "kind": "historical_report",
+          "source": "tracks/us/creative/lunch/R25-content-plan-v1/reference-audio-study.md",
+          "observation": "历史记录归类品牌合作，13.11万播放是2026-09-15快照；本轮不新增成交结论。"
+        }
+      ],
+      "limits": [
+        "背负利益只适用确有背负结构的商品，不迁移给手提款。",
+        "旁白形式可承载具体生活叙述，是“所有真人感都必须全程开口”的反例；是否亲近仍未听评。",
+        "无证据证明该购物前奏对我们的19秒功能片合适。",
+        "没有本轮完整原速听评；不得据此判断声线自然、精确口型或停顿表现。"
+      ],
+      "user_feedback": null,
+      "market_effect": null
+    },
+    {
+      "id": "n01-nurse-packing",
+      "title": "护士装午餐：每次选择背后有当下理由",
+      "source_key": "tiktok:7647167627319643422",
+      "market": "US",
+      "source_market_status": "US研究用途；原发布者/受众地域不由英文或品牌自动确认",
+      "source_url": "https://www.tiktok.com/@ly.ssanicole/video/7647167627319643422",
+      "platform": "tiktok",
+      "origin": "discovered_reference",
+      "comparison_group": "n01-nurse-packing",
+      "partition": "calibration",
+      "tags": [
+        "packing",
+        "persona",
+        "speech",
+        "reason",
+        "relationship"
+      ],
+      "media": {
+        "path": "J:/E-Business-Video-Data/US/LUN/R25-audio-study-20260915/N01-original.mp4",
+        "sha256": "3c23fff060b758bb13f3c7fe0e95df7d12bff5385ca5ffb5f5484c05099dc1a6",
+        "seconds": 48.333333,
+        "has_audio": true
+      },
+      "eligible_for": [
+        "message",
+        "storyboard"
+      ],
+      "strategy": {
+        "audience_hypothesis": "需要准备长班餐食的人；并未证明是午餐包购买者",
+        "situation": "为12小时班次准备餐食和备用饮品",
+        "belief_change": "此片主要让同类观众理解这次安排，购买判断未核实",
+        "speaker_relationship": "同事/同类生活分享者，承认不确定、解释备用选择",
+        "proof": "人物与拿放物品同屏，物品和个人处境连接",
+        "form": "厨房对镜展示、讲述和装包；不是15秒购物广告模板"
+      },
+      "evidence": [
+        {
+          "id": "visual",
+          "kind": "visual_sample",
+          "source": "J:/E-Business-Video-Data/US/LUN/R25-audio-study-20260915/N01-contact.jpg",
+          "observation": "2026-09-18重看每2秒采样覆盖0–46秒，最后约2.33秒未逐帧查：厨房人物拿餐盒、饮品、小食并装黑包，收尾合包；可见不同口部姿态，不据此验收口型。"
+        },
+        {
+          "id": "semantics",
+          "kind": "asr_semantics",
+          "source": "J:/E-Business-Video-Data/US/LUN/R25-audio-study-20260915/N01-asr.json",
+          "observation": "本轮读取原ASR：0–2.04以长班任务开场；7.1–14.42承认食物未尝、希望好吃；17.32–23.54说明备用饮品与没睡够；29.96–32.02联系喝水不足。"
+        },
+        {
+          "id": "scope",
+          "kind": "historical_report",
+          "source": "tracks/us/creative/lunch/R25-content-plan-v1/reference-audio-study.md",
+          "observation": "48.333秒，未核实包的带货或成交，4.98万播放是旧快照。"
+        }
+      ],
+      "limits": [
+        "可学“选择+情境理由+个人态度”，不能复制护士身份、没睡够的经历或暗示真人购买体验。",
+        "十余秒讨论食谱服务生活内容，不自动适合短商品广告；不能把加词/口头禅当人格。",
+        "没有本轮完整原速听评；不得据此判断声线自然、精确口型或停顿表现。"
+      ],
+      "user_feedback": null,
+      "market_effect": null
+    },
+    {
+      "id": "m01-family-preparation",
+      "title": "RTIC准备聚会：用真实任务组织功能",
+      "source_key": "media:rtic-m01-72f17567",
+      "market": "US",
+      "source_market_status": "US研究用途；原发布者/受众地域不由英文或品牌自动确认",
+      "source_url": null,
+      "platform": "meta_ad_library",
+      "origin": "discovered_reference",
+      "comparison_group": "m01-family-preparation",
+      "partition": "calibration",
+      "tags": [
+        "packing",
+        "family",
+        "proof",
+        "benefit",
+        "storyboard"
+      ],
+      "media": {
+        "path": "J:/E-Business-Video-Data/US/LUN/R25-reference-research-20260915/M01-family-gathering.mp4",
+        "sha256": "72f17567ffd612268e90f1a89fb0f44b5b7335d894fedd86a1f0ce93e683df1d",
+        "seconds": 22.733333,
+        "has_audio": true
+      },
+      "eligible_for": [
+        "message",
+        "storyboard"
+      ],
+      "strategy": {
+        "audience_hypothesis": "负责带餐饮去聚会的人；由语言推断",
+        "situation": "把自制食物、饮品、冷源装好并运走",
+        "belief_change": "产品可以服务一次具体准备与搬运任务",
+        "speaker_relationship": "准备者边演示边解释",
+        "proof": "展开、装载、小件收纳、拉杆运走形成状态推进",
+        "form": "以任务组织功能，不是已展示亲子互动回报的剧情"
+      },
+      "evidence": [
+        {
+          "id": "visual",
+          "kind": "visual_sample",
+          "source": "J:/E-Business-Video-Data/US/LUN/R25-reference-research-20260915/M01-family-gathering-contact-1.jpg ; J:/E-Business-Video-Data/US/LUN/R25-reference-research-20260915/M01-family-gathering-contact-3.jpg",
+          "observation": "2026-09-18本轮重看0–7.5和16–22秒采样：从折叠到展开、放冰袋及餐盒，末段前袋小件和拉杆移动；8–15.5秒本轮未重看。"
+        },
+        {
+          "id": "history",
+          "kind": "historical_report",
+          "source": "tracks/us/research/2026-09-15-lunch-25l-reference-observation.md",
+          "observation": "既有全时段抽帧及ASR支持聚会准备任务；原片来自第三方Meta广告库，未核原投放效果。"
+        }
+      ],
+      "limits": [
+        "跨平台仅作表达参考，不能算TikTok Shop高转化证据。",
+        "拉杆、开瓶器、40罐、24小时不能迁移给本款；后两项也非片内实测。",
+        "没有本轮完整原速听评；不得据此判断声线自然、精确口型或停顿表现。"
+      ],
+      "user_feedback": null,
+      "market_effect": null
+    },
+    {
+      "id": "oumomo-style-anchor",
+      "title": "Oumomo旧成片：用户风格比较锚点",
+      "source_key": "media:oumomo-1e0fd486",
+      "market": "US",
+      "source_market_status": "US研究用途；原发布者/受众地域不由英文或品牌自动确认",
+      "source_url": null,
+      "platform": "user_supplied",
+      "origin": "user_reference",
+      "comparison_group": "tote-reference-chain",
+      "partition": "calibration",
+      "tags": [
+        "reference",
+        "comparison",
+        "pace"
+      ],
+      "media": {
+        "path": "J:/E-Business/tracks/us/creative/lunch/core-videos/reference-oumomo.mp4",
+        "sha256": "1e0fd486aa4e3dbe24b25565e36fe0ab8001e974434f159a53298cfcaa7432d4",
+        "seconds": 15.022993,
+        "has_audio": true
+      },
+      "eligible_for": [],
+      "strategy": {
+        "audience_hypothesis": "未知，未从用户认可倒推买家画像",
+        "situation": "未知",
+        "belief_change": "仅用作用户认可的带货观感比较，不自行补全策略",
+        "speaker_relationship": "未知",
+        "proof": "未知，尚待完整输入与输出对照",
+        "form": "旧成片比较；没有后台处理链证据"
+      },
+      "evidence": [
+        {
+          "id": "preference",
+          "kind": "historical_report",
+          "source": "tracks/us/creative/lunch/review-calibration-v1/evaluation-key.json",
+          "observation": "记录用户喜欢其TikTok带货观感；不是本款商品物理依据，也不是已核实爆款。"
+        },
+        {
+          "id": "archive",
+          "kind": "historical_report",
+          "source": "tracks/us/creative/lunch/core-videos/README.md",
+          "observation": "原片已归档，本轮核hash/媒体参数但未重新听看完整声画。"
+        }
+      ],
+      "limits": [
+        "没有同一请求的用户Prompt、后台Prompt及执行参数，不能逆推出内部模型、downloader、分镜链路或系统提示。",
+        "用户本次提出将来提供成套对照材料，是后续需求；当前不开展逆向试验。",
+        "没有本轮完整原速听评；不得据此判断声线自然、精确口型或停顿表现。"
+      ],
+      "user_feedback": {
+        "scope": "认可带货观感，不等于所有内容/结构/效果。",
+        "source": "tracks/us/creative/lunch/review-calibration-v1/evaluation-key.json"
+      },
+      "market_effect": null
+    },
+    {
+      "id": "lun-remake-v2",
+      "title": "功能复刻v2：可接受瑕疵与重复结尾",
+      "source_key": "media:lun-remake-v2",
+      "market": "US",
+      "source_market_status": "US研究用途；原发布者/受众地域不由英文或品牌自动确认",
+      "source_url": null,
+      "platform": "generated",
+      "origin": "reference_derivative",
+      "comparison_group": "tote-reference-chain",
+      "partition": "calibration",
+      "tags": [
+        "reference",
+        "packing",
+        "pace",
+        "recovery",
+        "proof"
+      ],
+      "media": {
+        "path": "J:/E-Business/tracks/us/creative/lunch/core-videos/reference-remake-v2-original.mp4",
+        "sha256": "c5035d6fc0462fa36f02151552b1067ec6a3e91e23a28083f516413c1e9d03f2",
+        "seconds": 15.022993,
+        "has_audio": true
+      },
+      "eligible_for": [
+        "message",
+        "storyboard"
+      ],
+      "strategy": {
+        "audience_hypothesis": "个人工作日带餐者，是当时策划定位而非已测人群",
+        "situation": "装餐与携带",
+        "belief_change": "收纳与携带证据可信",
+        "speaker_relationship": "功能演示者",
+        "proof": "正确商品和收纳动作需在片内兑现，重复背包镜头不增加证据",
+        "form": "参考复刻，原片与14.4秒派生采用严格区分"
+      },
+      "evidence": [
+        {
+          "id": "feedback",
+          "kind": "user_feedback",
+          "source": "tracks/us/creative/lunch/R15-reference-remake-v2/user-calibration-followup.json",
+          "observation": "用户接受酸奶和小手部痕迹，指出纸巾网袋动作与后面三个携带镜头过长，并纠正不要把反馈自动理解成逐条修片。"
+        },
+        {
+          "id": "result",
+          "kind": "historical_report",
+          "source": "tracks/us/creative/lunch/R15-reference-remake-v2/result-review.md",
+          "observation": "原片有2.6–3.2秒异品串入；不能用功能其余部分成立抵消商品身份错误。"
+        },
+        {
+          "id": "adoption",
+          "kind": "historical_report",
+          "source": "tracks/us/creative/lunch/core-videos/README.md",
+          "observation": "2026-09-15用户采用的是14.4秒功能介绍派生版，不是原片全项通过。"
+        }
+      ],
+      "limits": [
+        "不能把这次小手痕容错扩展为商品结构失真可接受。",
+        "同源原片、剪辑版、Oumomo锚点不计成多个独立验证成功。",
+        "没有本轮完整原速听评；不得据此判断声线自然、精确口型或停顿表现。"
+      ],
+      "user_feedback": {
+        "scope": "具体小瑕疵容忍；采用范围只覆盖14.4秒功能介绍版。",
+        "source": "tracks/us/creative/lunch/core-videos/README.md"
+      },
+      "market_effect": null
+    },
+    {
+      "id": "lun-25l-speed",
+      "title": "25L家庭片：1.5倍节奏采用",
+      "source_key": "media:lun-25l-speed150",
+      "market": "US",
+      "source_market_status": "US研究用途；原发布者/受众地域不由英文或品牌自动确认",
+      "source_url": null,
+      "platform": "generated",
+      "origin": "own_result",
+      "comparison_group": "lun-25l-speed",
+      "partition": "calibration",
+      "tags": [
+        "packing",
+        "family",
+        "pace",
+        "speech",
+        "recovery"
+      ],
+      "media": {
+        "path": "J:/E-Business-Video-Data/US/LUN/R25-source-preparation-v1/assembled-speed-150-v1/full-video-150-hq-v1.mp4",
+        "sha256": "44113778d4d4e406a0aee67d8dce94e3d4a797fc8caebb96f92eef542afaca58",
+        "seconds": 22.7,
+        "has_audio": true
+      },
+      "eligible_for": [
+        "message",
+        "storyboard"
+      ],
+      "strategy": {
+        "audience_hypothesis": "家庭餐饮准备者，是制作定位",
+        "situation": "家庭出游前装载与到场取用",
+        "belief_change": "用途证据随安排推进",
+        "speaker_relationship": "准备者向观众讲解",
+        "proof": "用户确认的是后期1.5倍后的节奏",
+        "form": "先生成较长素材，再用后期速度处理；不是原生节奏成功"
+      },
+      "evidence": [
+        {
+          "id": "feedback",
+          "kind": "user_feedback",
+          "source": "tracks/us/docs/lunch-video-current-state.md",
+          "observation": "Jeffery对1.5倍约22.69秒版评价“这个差不多了”，确认范围为节奏，不能补记口型听评或市场效果。"
+        },
+        {
+          "id": "recovery",
+          "kind": "historical_report",
+          "source": "tracks/us/creative/lunch/R25-content-plan-v1/A-v7-continuous-script.md",
+          "observation": "原速34.0333秒经1.5倍变速；后续用户要求避免为可删时长付生成费。当前仅核媒体/读原记录，不重新调速。"
+        }
+      ],
+      "limits": [
+        "1.5倍不是所有片子固定速度或统一时长准则。",
+        "不能为减少秒数把叙述理由全部删除；短但空仍可能失败。",
+        "没有本轮完整原速听评；不得据此判断声线自然、精确口型或停顿表现。"
+      ],
+      "user_feedback": {
+        "scope": "用户认可1.5倍版节奏，不等于整套工作流或市场验证。",
+        "source": "tracks/us/docs/lunch-video-current-state.md"
+      },
+      "market_effect": null
+    },
+    {
+      "id": "gym-19s-rejected",
+      "title": "小号包19秒：字数和动作预算不能替代人物表达",
+      "source_key": "media:gym-19s-ef5e4bd9",
+      "market": "US",
+      "source_market_status": "US研究用途；原发布者/受众地域不由英文或品牌自动确认",
+      "source_url": null,
+      "platform": "generated",
+      "origin": "own_result",
+      "comparison_group": "gym-19s-rejected",
+      "partition": "calibration",
+      "tags": [
+        "packing",
+        "persona",
+        "speech",
+        "reason",
+        "pace",
+        "recovery",
+        "proof"
+      ],
+      "media": {
+        "path": "J:/E-Business-Video-Data/workbench-discovery/projects/bag-small-gym-resume-20260917/renders/wan-19s-v1/original.mp4",
+        "sha256": "ef5e4bd93056eb83f624bce8bac1209cbe48205fa8de926d20d8fb4e31e44c95",
+        "seconds": 19.04,
+        "has_audio": true
+      },
+      "eligible_for": [
+        "message",
+        "storyboard"
+      ],
+      "strategy": {
+        "audience_hypothesis": "“Gym girl”仍停留在标签，未建立已验证的购买顾虑",
+        "situation": "健身后继续外出是稿件设定",
+        "belief_change": "目标为一次装好、多种携带；实际台词停在卖点概括",
+        "speaker_relationship": "原意希望像朋友分享，实际指令让人物全程不做口型",
+        "proof": "拉链/背法部分呈现，钥匙重复消失影响装载可信度",
+        "form": "19秒38词，画外音；生成成功但用户否决表达"
+      },
+      "evidence": [
+        {
+          "id": "feedback",
+          "kind": "user_feedback",
+          "source": "J:/E-Business-Video-Data/workbench-discovery/projects/bag-small-gym-resume-20260917/renders/wan-19s-v1/review/user-feedback-v2.md",
+          "observation": "用户成片反馈口播空而无用，需要密集自然聊天与人物存在，并指出女主未开口；先前文本批准不覆盖成片表达。"
+        },
+        {
+          "id": "input",
+          "kind": "request_text",
+          "source": "J:/E-Business-Video-Data/workbench-discovery/projects/bag-small-gym-resume-20260917/documents/gym-girl-video-prompt-v4.txt",
+          "observation": "实际Prompt两次No lip sync并指定voice-over；不开口由输入直接要求，不能归为模型擅自漏做。"
+        },
+        {
+          "id": "review",
+          "kind": "historical_report",
+          "source": "J:/E-Business-Video-Data/workbench-discovery/projects/bag-small-gym-resume-20260917/renders/wan-19s-v1/review/result-review.md",
+          "observation": "原片19秒未加速，约9.8–11.5秒钥匙重复消失；抽帧/ASR不能支持原速表演通过。"
+        },
+        {
+          "id": "pause",
+          "kind": "user_feedback",
+          "source": "J:/E-Business-Video-Data/workbench-discovery/projects/bag-small-gym-resume-20260917/documents/gym-girl-method-pause-v1.md",
+          "observation": "用户要求暂停单片修补，先解决创意方法、受众人设与机械纠错。"
+        }
+      ],
+      "limits": [
+        "用户此片需要人物交流，不推出所有带货视频必须全程开口；T02是不同形式对照。",
+        "不能把字数增加至55或加入口头禅记为自然感已改善。",
+        "当前制作暂停；此案例只供方法校准，不构成续做授权。",
+        "没有本轮完整原速听评；不得据此判断声线自然、精确口型或停顿表现。"
+      ],
+      "user_feedback": {
+        "scope": "否决成片口播/人物表达并暂停制作；此前图片和脚本批准保留历史。",
+        "source": "J:\\E-Business-Video-Data\\workbench-discovery\\projects\\bag-small-gym-resume-20260917\\renders\\wan-19s-v1\\review\\user-feedback-v2.md"
+      },
+      "market_effect": null
+    }
+  ],
+  "methods": [
+    {
+      "id": "role-to-benefit",
+      "status": "hypothesis",
+      "decision": "先把功能接到该角色的具体负担，再决定说法；角色不是年龄、衣着的列表。",
+      "when": "准备型日常分享，商品事实足以兑现用途。",
+      "countercondition": "没有该结构/负担证据时不能挪用；生活内容的受众不自动等于买家。",
+      "supports": [
+        "t02-family-picnic/semantics",
+        "n01-nurse-packing/semantics"
+      ]
+    },
+    {
+      "id": "reason-not-filler",
+      "status": "hypothesis",
+      "decision": "从“拿什么”延伸到“为什么此刻这样选”，允许相关态度和不确定性；不靠凑口头禅。",
+      "when": "需要同类朋友式聊天关系。",
+      "countercondition": "只求快的强演示广告未必需长个人叙述；不得虚构真人经历。",
+      "supports": [
+        "n01-nurse-packing/semantics",
+        "gym-19s-rejected/feedback"
+      ]
+    },
+    {
+      "id": "choose-speaking-form",
+      "status": "hypothesis",
+      "decision": "依据交流关系选择对镜、旁白或混合，并核对实际Prompt；不把局部脸部限制扩大成全片禁口型。",
+      "when": "角色交流属于本条表达任务。",
+      "countercondition": "T02可用生活叙述旁白，不能机械全改对镜；自然听感仍未核。",
+      "supports": [
+        "t02-family-picnic/visual",
+        "gym-19s-rejected/input",
+        "gym-19s-rejected/feedback"
+      ]
+    },
+    {
+      "id": "pace-preserves-reasons",
+      "status": "user_calibrated",
+      "decision": "压缩没有新增信息的等待/重复，保留使购买理由成立的话和动作；时长、词速只是预算。",
+      "when": "需要节奏紧凑的短演示。",
+      "countercondition": "必要理解、接触动作、情绪停顿不应因赶秒数被删除。",
+      "supports": [
+        "lun-25l-speed/feedback",
+        "lun-remake-v2/feedback",
+        "gym-19s-rejected/feedback"
+      ]
+    },
+    {
+      "id": "audio-can-lead",
+      "status": "hypothesis",
+      "decision": "同一语义段的讲述可跨多个镜头，让声音引出即将出现的证据。",
+      "when": "音画仍在同一用途，稍后确实兑现。",
+      "countercondition": "不能掩盖关键性能证据缺失或长期说画不符；开头缺音不可推导未知Hook。",
+      "supports": [
+        "t01-tote-reference/semantics"
+      ]
+    },
+    {
+      "id": "diagnose-before-repair",
+      "status": "user_calibrated",
+      "decision": "先分传播任务、表达、输入执行和局部瑕疵，再按业务影响决定是否修；保留用户容错范围。",
+      "when": "结果反馈与补救选择。",
+      "countercondition": "商品身份错误不能用用户曾接受手部小痕来豁免；只批一次不允许连续重做。",
+      "supports": [
+        "lun-remake-v2/feedback",
+        "gym-19s-rejected/input",
+        "gym-19s-rejected/pause"
+      ]
+    }
+  ]
+}

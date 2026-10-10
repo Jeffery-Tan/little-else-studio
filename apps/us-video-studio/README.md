@@ -54,7 +54,7 @@ MiMo 可用于商品图片分析及原生视频声画理解。在模型设置的
 
 ## 启动与检查
 
-独立仓库同时要求明确的业务根和 Git 外数据根。统一启动入口为仓库根 `scripts/start.ps1 -BusinessRoot <E-commerce-root> -DataRoot <existing-data-root>`；应用内启动器是实现细节。直接运行 Python 或应用开发脚本时，在当前进程设置绝对路径 `STUDIO_BUSINESS_ROOT`。软件方法卡随本仓库维护，业务 Skill 与案例从指定业务仓库读取。旧路径引用仅供迁移来源追溯，具体边界见 [迁移说明](../../docs/migration.md)。
+独立仓库要求明确的 Git 外数据根。统一启动入口为仓库根 `scripts/start.ps1 -DataRoot <existing-data-root>`；应用内启动器是实现细节。四个 US Skills、学习库、案例及方法随本仓库维护，无须外部业务根。引用经营事实时可传 `-BusinessRoot <E-commerce-root>`，或设置进程级绝对路径 `STUDIO_BUSINESS_ROOT`；它不会改变知识读写路径。旧路径引用仅供迁移来源追溯，具体边界见 [迁移说明](../../docs/migration.md)。
 
 左侧「灵感与方法」已接入三项创作 Skill、原案例与方法库、研究来源和反馈迭代；独立学习记录另加载学习流程 Skill。Agent 可按角色读取[登记方法卡](studio/learning.py)，补救、视频输入与图文输入卡只提取稳定执行规则，原历史研究和反馈仍限人工审计或原资格过滤。实际角色输入保存快照；反馈绑定准确版本，先看差异再应用。视频输入与图文审阅包可在「本轮参考」打开，见 [学习迁移说明](docs/learning-migration.md)。
 

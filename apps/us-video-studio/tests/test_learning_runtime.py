@@ -16,11 +16,11 @@ from studio.learning_session import proposal_for_agent
 from studio.ledger import Ledger
 from studio.pipeline import Pipeline
 from studio.store import Store
-from studio.paths import BUSINESS_ROOT, document_path
+from studio.paths import KNOWLEDGE_ROOT, document_path
 from studio.tools.dispatch import Dispatcher
 
 RUN = "learning-runtime"
-REPO = BUSINESS_ROOT
+REPO = KNOWLEDGE_ROOT
 
 
 @pytest.fixture

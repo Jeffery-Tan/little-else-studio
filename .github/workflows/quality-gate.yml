@@ -56,6 +56,25 @@ jobs:
         if: matrix.shard == 0
         run: node --test apps/us-video-studio/tests/js/*.mjs
 
+  knowledge-quality:
+    name: Creative knowledge and CLI tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: >-
+          python -m pip install
+          -r apps/us-video-studio/requirements-runtime.txt
+          -r apps/us-video-studio/requirements-local.txt
+      - name: Run knowledge and CLI regression tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
   source-security:
     name: Scan source history for secrets
     runs-on: ubuntu-latest

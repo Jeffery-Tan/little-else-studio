@@ -1,6 +1,6 @@
 ﻿# 视频制作输入方法卡
 
-适用：US 视频方案已确认，准备本工作台的分镜参考图或视频输入。来源：[从案例到实际制作输入](https://github.com/Jeffery-Tan/e-business/blob/main/tracks/us/creative/learning/execution.md)及[创作包契约](../creative-package-contract.md)。来源中的旧执行器与校准样例不作为 Studio 当前操作指令。
+适用：US 视频方案已确认，准备本工作台的分镜参考图或视频输入。来源：[从案例到实际制作输入](../../../../tracks/us/creative/learning/execution.md)及[创作包契约](../creative-package-contract.md)。来源中的旧执行器与校准样例不作为 Studio 当前操作指令。
 
 1. 绑定当前 run 已采用的准确方案版本、摘要、商品证据与素材字节。旧批准不继承到新版本。
 2. 按[共同视觉设计](visual-design.md)核对本镜 `character_ids` 与 `scene_id`；人物、服装道具、场景、商品形态和连续性来自同一份素材设计。每镜写清画面、动作、口播或环境声、时长、购买作用及可核验依据。说话方式与台词须进入完整实际制作输入，不能只留在策划解释里。

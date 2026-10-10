@@ -7,4 +7,15 @@
 *.yaml text eol=lf
 *.ps1 text eol=crlf
 # Test inputs retain the exact migrated bytes, not current business authority.
-apps/us-video-studio/tests/fixtures/business/** -text
+apps/us-video-studio/tests/fixtures/business/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+
+# Historical case evidence retains its source bytes and fingerprints.
+tracks/us/creative/lunch/R15-commerce-v2/reference-audio-study.md -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+tracks/us/creative/lunch/R15-reference-remake-v2/result-review.md -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+tracks/us/creative/lunch/R15-reference-remake-v2/user-calibration-followup.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+tracks/us/creative/lunch/R25-content-plan-v1/A-v7-continuous-script.md -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+tracks/us/creative/lunch/R25-content-plan-v1/reference-audio-study.md -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+tracks/us/creative/lunch/core-videos/README.md -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+tracks/us/creative/lunch/review-calibration-v1/evaluation-key.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+tracks/us/docs/lunch-video-current-state.md -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+tracks/us/research/2026-09-15-lunch-25l-reference-observation.md -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

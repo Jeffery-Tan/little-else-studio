@@ -11,8 +11,11 @@ from pathlib import Path
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 TESTS_DIR = Path(__file__).resolve().parent
-# Offline tests use a versioned snapshot, never the operator's live business library.
-os.environ['STUDIO_BUSINESS_ROOT'] = str(TESTS_DIR / 'fixtures/business')
+# Optional business inputs are independent of the disposable knowledge snapshot.
+os.environ.pop('STUDIO_BUSINESS_ROOT', None)
 for path in (APP_ROOT, TESTS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
+
+from studio import paths
+paths.KNOWLEDGE_ROOT = TESTS_DIR / 'fixtures/business'

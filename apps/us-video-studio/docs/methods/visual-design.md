@@ -1,6 +1,6 @@
 ﻿# US 人物、场景与共同视觉设计方法卡
 
-适用：本工作台的 US 视频与图文创作，包括人物交流、情境演绎、手部演示和纯商品画面。沿用 [US 商品创意策略](https://github.com/Jeffery-Tan/e-business/blob/main/.agents/skills/us-commerce-strategy/SKILL.md)、[US 口播与动作分镜](https://github.com/Jeffery-Tan/e-business/blob/main/.agents/skills/us-creator-video/SKILL.md)和[US 图文方法](https://github.com/Jeffery-Tan/e-business/blob/main/.agents/skills/us-photo-copy/SKILL.md)。本卡是这些方法在现有阶段和实际制作输入中的承接规范，不是已验证的美国消费者偏好或市场效果结论。
+适用：本工作台的 US 视频与图文创作，包括人物交流、情境演绎、手部演示和纯商品画面。沿用 [US 商品创意策略](../../../../.agents/skills/us-commerce-strategy/SKILL.md)、[US 口播与动作分镜](../../../../.agents/skills/us-creator-video/SKILL.md)和[US 图文方法](../../../../.agents/skills/us-photo-copy/SKILL.md)。本卡是这些方法在现有阶段和实际制作输入中的承接规范，不是已验证的美国消费者偏好或市场效果结论。
 
 ## 从购买处境形成视觉选择
 

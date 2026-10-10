@@ -21,9 +21,9 @@ from pathlib import Path
 from .models import PipelineError, utcnow, STAGES
 from .store import _atomic_write_text
 
-from .paths import BUSINESS_ROOT, PROJECT_ROOT, document_path
+from .paths import KNOWLEDGE_ROOT, PROJECT_ROOT, document_path
 
-REPOSITORY = BUSINESS_ROOT
+REPOSITORY = KNOWLEDGE_ROOT
 _spec = importlib.util.spec_from_file_location("studio_creative_learning", PROJECT_ROOT / "scripts/creative_learning.py")
 core = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(core)

@@ -1,0 +1,25 @@
+{
+  "market": "US",
+  "evaluation_kind": "historical_media_with_answers_hidden_from_stateless_analyzer_not_new_content_blind_test",
+  "freeze_rule": "Written before the three analysis requests. Neither this file, generation prompts, previous reports, nor user preference labels are sent to the analyzer. Candidate prompt must be identical for both candidates.",
+  "inputs": {
+    "R11": {"role": "style_reference", "source": "user Oumomo example, Desktop/1.mp4", "evaluation_basis": "User likes its TikTok selling-video taste; not product-physics authority or a verified viral result"},
+    "K03": {"role": "candidate", "source": "R15-reference-remake-v2/output.mp4", "source_sha256": "c5035d6fc0462fa36f02151552b1067ec6a3e91e23a28083f516413c1e9d03f2"},
+    "K08": {"role": "candidate_holdout", "source": "R15-reference-remake-v1/output.mp4", "source_sha256": "52b2bfe890af27799087b0794423235f0bdbc4cdb80d918b33742fd814a49c56", "holdout_scope": "Not used to adapt the candidate prompt after seeing K03 response; not unseen by the parent assistant"}
+  },
+  "checks": [
+    {"id": "K03_identity", "sample": "K03", "seconds": [2.6, 3.2], "expected": "Flag different purple bag/person/location as material or critical identity intrusion", "priority": "must_detect", "evidence": "R15-reference-remake-v2/result-review.md and explicit user removal request"},
+    {"id": "K03_contact", "sample": "K03", "seconds": [3.2, 4.4], "expected": "Flag or request closer inspection of paper/mesh entry and depth; do not assert exact mesh topology", "priority": "review_target", "evidence": "User feedback and dense-frame follow-up"},
+    {"id": "K03_ending", "sample": "K03", "seconds": [8.6, 15], "expected": "Recognize repeated carrying views / limited new information in the long closing section; do not claim causal knowledge of unseen generation prompt", "priority": "creative_target", "evidence": "User feedback; three segments in beat-plan.json occupy 6.4s"},
+    {"id": "K03_tolerance", "sample": "K03", "seconds": [0, 3.2], "expected": "Do not make incidental extra container or isolated small hand blemish the sole reason for rejection or regeneration", "priority": "avoid_overrepair", "evidence": "user-calibration.json and user-calibration-followup.json; hand location is approximate"},
+    {"id": "K03_closure", "sample": "K03", "seconds": [4.36, 4.44], "expected": "Do not label the clear change of camera angle/open-to-closed cut as continuous automatic zipping", "priority": "avoid_false_positive", "evidence": "Existing dense-frame inspection"},
+    {"id": "K03_cutlery_alignment", "sample": "K03", "seconds": [6.4, 8.6], "expected": "Recognize fork/spoon/strapped phrase as within the front-pocket shot, or state timing uncertainty; do not invent a gross mismatch", "priority": "avoid_false_positive", "evidence": "Original local ASR 6.5–8.32 within reviewed visual window"},
+    {"id": "K08_closure", "sample": "K08", "seconds": [5.6, 6.1], "expected": "Flag continuous lid press and automatic chain closure without visible slider travel", "priority": "must_detect", "evidence": "R15-reference-remake-v1/result-review.md"},
+    {"id": "K08_repetition", "sample": "K08", "seconds": [0, 4.8], "expected": "Notice repeated fruit/yogurt handling or stalled evidence progression", "priority": "review_target", "evidence": "R15-reference-remake-v1/result-review.md; not all container variation is material"},
+    {"id": "K08_alignment", "sample": "K08", "seconds": [8.8, 10.3], "expected": "Notice fork/spoon speech occurs after the cutlery proof, on the handle/carry transition", "priority": "review_target", "evidence": "Existing ASR fork ~9.16 / spoon ~9.58 and reviewed visual transition"},
+    {"id": "time_validity", "sample": "all", "seconds": [0, 15.1], "expected": "No timeline interval outside actual input duration plus 0.2s approximation allowance; no mixing still images into candidate clock", "priority": "format_and_grounding", "evidence": "Local decoded metadata"}
+  ],
+  "assessment_method": "Parent assistant compares frozen model answers with the predeclared checks and source windows. This is a small calibration result; no population accuracy or automatic creative approval claim.",
+  "advance_condition": "Both must-detect defects found, no serious false accusation, no tolerance-driven unnecessary regeneration, and sufficiently grounded timing before considering a new-sample trial. Otherwise keep analyzer advisory and report misses.",
+  "paid_scope": "Three existing-video text-analysis calls only; no new video/image/audio generation or publication. User replied continue to the immediately preceding audit-validation plan. The assistant limits estimated total to CNY1; this is not a user-confirmed price or historical-budget extension."
+}

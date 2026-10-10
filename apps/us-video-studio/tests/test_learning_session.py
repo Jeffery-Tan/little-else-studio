@@ -29,8 +29,8 @@ from studio.server import build_app
 from studio.store import Store
 
 
-from studio.paths import BUSINESS_ROOT
-ROOT = BUSINESS_ROOT
+from studio.paths import KNOWLEDGE_ROOT
+ROOT = KNOWLEDGE_ROOT
 
 
 def setup(tmp_path):
